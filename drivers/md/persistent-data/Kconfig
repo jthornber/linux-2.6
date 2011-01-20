@@ -1,0 +1,32 @@
+menuconfig DM_PERSISTENT_DATA
+       tristate "Persistent data library"
+       depends on BLK_DEV_DM
+       ---help---
+         Library of code for metadata support for dm targets.  The
+         term persistent isn't referring to the fact that the data is
+         written to disk (which of course it is).  But that these data
+         structures are immutable.
+
+config DM_BLOCK_MANAGER_TEST
+       tristate "block manager tests"
+       depends on DM_PERSISTENT_DATA
+       ---help---
+         Block manager tests
+
+config DM_SPACE_MAP_TEST
+       tristate "space map tests"
+       depends on DM_PERSISTENT_DATA
+       ---help---
+         Space map tests
+
+config DM_TRANSACTION_MANAGER_TEST
+       tristate "transaction manager tests"
+       depends on DM_PERSISTENT_DATA
+       ---help---
+         Transaction manager tests
+
+config DM_BTREE_TEST
+       tristate "btree tests"
+       depends on DM_PERSISTENT_DATA
+       ---help---
+         B+ Tree tests
