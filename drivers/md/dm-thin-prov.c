@@ -595,8 +595,7 @@ static int thinp_status(struct dm_target *ti, status_type_t type,
 	switch (type) {
 	case STATUSTYPE_INFO:
 		/*   <low mark> <chunks free> <chunks used> */
-		DMEMIT("%llu %llu %llu",
-		       (LLU) low_water_mark,
+		DMEMIT("%llu %llu",
 		       (LLU) data_size - provisioned,
 		       (LLU) provisioned);
 		break;
