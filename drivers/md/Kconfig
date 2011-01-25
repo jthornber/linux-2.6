@@ -241,12 +241,6 @@ config DM_THINP
        ---help---
          Thin provisioning target for volume managers.
 
-config DM_THINP_METADATA_TEST
-       tristate "thinp metadata tests"
-       depends on DM_THINP
-       ---help---
-         Thinp-metadata unit tests
-
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM

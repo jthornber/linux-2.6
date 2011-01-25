@@ -39,7 +39,6 @@ obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THINP)		+= dm-thin-prov.o thinp-metadata.o
-obj-$(CONFIG_DM_THINP_METADATA_TEST) += thinp-metadata-test.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o
