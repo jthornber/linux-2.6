@@ -425,7 +425,7 @@ static int thinp_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	tc->block_size = block_size;
 	tc->block_shift = ffs(block_size) - 1;
 	tc->low_water_mark = low_water_mark;
-	// tc_set_congested_fn(tc);
+	tc_set_congested_fn(tc);
 
 	spin_lock_init(&tc->lock);
 	bio_list_init(&tc->in);
