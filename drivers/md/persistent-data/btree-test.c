@@ -11,7 +11,7 @@
 
 #define NR_BLOCKS 1024
 #define BM_BLOCK_SIZE 4096
-#define CACHE_SIZE 16
+#define CACHE_SIZE 16		/* small enough that there will be a lot of contention */
 
 typedef int (*test_fn)(struct transaction_manager *);
 
@@ -26,6 +26,15 @@ static int begin(struct transaction_manager *tm, struct block **superblock)
 	int r;
 
 	r = tm_new_block(tm, superblock);
+	if (r < 0)
+		return r;
+
+	return tm_begin(tm);
+}
+
+static int begin_again(struct transaction_manager *tm, block_t sb, struct block **superblock)
+{
+	int r = bm_write_lock(tm_get_bm(tm), sb, superblock);
 	if (r < 0)
 		return r;
 
@@ -86,14 +95,12 @@ static int check_insert_commit_every(struct transaction_manager *tm,
 			return r;
 		}
 
-		if (i + 1 % commit_interval) {
+		if ((i + 1 % commit_interval) == 0) {
 			block_t b = block_location(superblock);
 			commit(tm, superblock);
-			r = bm_write_lock(tm_get_bm(tm), b, &superblock);
-			if (r < 0) {
-				printk(KERN_ALERT "bm_write_lock failed");
+			r = begin_again(tm, b, &superblock);
+			if (r < 0)
 				return r;
-			}
 			committed = 1;
 		}
 	}
@@ -171,6 +178,126 @@ static int check_lookup_empty(struct transaction_manager *tm)
 	return 0;
 }
 
+static int check_insert_h(struct transaction_manager *tm)
+{
+	typedef uint64_t table_entry[5];
+	static table_entry table[] = {
+		{ 1, 1, 1, 1, 100 },
+		{ 1, 1, 1, 2, 101 },
+		{ 1, 1, 1, 3, 102 },
+
+		{ 1, 1, 2, 1, 200 },
+		{ 1, 1, 2, 2, 201 },
+		{ 1, 1, 2, 3, 202 },
+
+		{ 2, 1, 1, 1, 301 },
+		{ 2, 1, 1, 2, 302 },
+		{ 2, 1, 1, 3, 303 }
+	};
+
+	static table_entry overwrites[] = {
+		{ 1, 1, 1, 1, 1000 }
+	};
+
+	uint64_t value;
+	block_t root = 0, sb;
+	int i, r;
+	struct btree_info info;
+	struct block *superblock;
+
+	info.tm = tm;
+	info.levels = 4;
+	info.value_size = sizeof(uint64_t);
+	info.adjust = value_is_meaningless;
+	info.eq = NULL;
+
+	r = begin(tm, &superblock);
+	if (r < 0)
+		return r;
+	sb = block_location(superblock);
+
+	r = btree_empty(&info, &root);
+	if (r < 0) {
+		printk(KERN_ALERT "btree_empty() failed");
+		return r;
+	}
+
+	for (i = 0; i < sizeof(table) / sizeof(*table); i++) {
+		r = btree_insert(&info, root, table[i], &table[i][4], &root);
+		if (r < 0) {
+			printk(KERN_ALERT "btree_insert failed");
+			return r;
+		}
+	}
+	commit(tm, superblock);
+
+	for (i = 0; i < sizeof(table) / sizeof(*table); i++) {
+		r = btree_lookup_equal(&info, root, table[i], &value);
+		if (r < 0) {
+			printk(KERN_ALERT "btree_lookup_equal failed");
+			return r;
+		}
+
+		if (value != table[i][4]) {
+			printk(KERN_ALERT "bad lookup");
+			return -1;
+		}
+	}
+
+	/* check multiple transactions are ok */
+	{
+		uint64_t keys[4] = { 1, 1, 1, 4 }, value, v = 2112;
+
+		r = begin_again(tm, sb, &superblock);
+		if (r < 0)
+			return r;
+
+		r = btree_insert(&info, root, keys, &v, &root);
+		if (r < 0) {
+			printk(KERN_ALERT "btree_insert failed");
+			return r;
+		}
+
+		commit(tm, superblock);
+
+		r = btree_lookup_equal(&info, root, keys, &value);
+		if (r < 0) {
+			printk(KERN_ALERT "btree_lookup_equal failed");
+			return r;
+		}
+
+		if (value != 2112) {
+			printk(KERN_ALERT "unexpected lookup");
+			return -1;
+		}
+	}
+
+	/* check overwrites */
+	begin_again(tm, sb, &superblock);
+	for (i = 0; i < sizeof(overwrites) / sizeof(*overwrites); i++) {
+		r = btree_insert(&info, root, overwrites[i], &overwrites[i][4], &root);
+		if (r < 0) {
+			printk(KERN_ALERT "btree_insert failed");
+			return r;
+		}
+	}
+	commit(tm, superblock);
+
+	for (i = 0; i < sizeof(overwrites) / sizeof(*overwrites); i++) {
+		r = btree_lookup_equal(&info, root, overwrites[i], &value);
+		if (r < 0) {
+			printk(KERN_ALERT "btree_lookup_equal failed");
+			return r;
+		}
+
+		if (value != overwrites[i][4]) {
+			printk(KERN_ALERT "bad lookup");
+			return -1;
+		}
+	}
+	return 0;
+}
+
 /*----------------------------------------------------------------*/
 
 static int run_test(const char *name, test_fn fn)
@@ -212,7 +339,8 @@ static int btree_test_init(void)
 	} table_[] = {
 		{"lookup in an empty btree", check_lookup_empty},
 		{"check insert", check_insert},
-		{"check insert, commit every 100", check_multiple_commits}
+		{"check insert, commit every 100", check_multiple_commits},
+		{"check hierarchical insert", check_insert_h}
 	};
 
 	int i;
