@@ -275,10 +275,37 @@ btree_lookup_ge(struct btree_info *info,
 EXPORT_SYMBOL_GPL(btree_lookup_ge);
 
 /*
- * Splits a full node.  Has knowledge of the shadow_spine structure.
+ * Splits a node by creating a sibling node and shifting half the nodes
+ * contents across.  Assumes there is a parent node, and it has room for
+ * another child.
+ *
+ * Before:
+ *        +--------+
+ *        | Parent |
+ *        +--------+
+ *	     |
+ *           v
+ *      +----------+
+ *	| A ++++++ |
+ *	+----------+
+ *
+ *
+ * After:
+ *              +--------+
+ *       	| Parent |
+ *	        +--------+
+ *       	  |    	|
+ *	          v     +------+
+ *          +---------+	       |
+ *          | A* +++  |	       v
+ *          +---------+	  +-------+
+ *		          | B +++ |
+ *		          +-------+
+ *
+ * Where A* is a shadow of A.
  */
-static int btree_split(struct shadow_spine *s, block_t root, count_adjust_fn fn,
-		       unsigned parent_index, uint64_t key)
+static int btree_split_sibling(struct shadow_spine *s, block_t root,
+			       unsigned parent_index, uint64_t key)
 {
 	int ret;
 	size_t size;
@@ -312,42 +339,16 @@ static int btree_split(struct shadow_spine *s, block_t root, count_adjust_fn fn,
 
 	/* Patch up the parent */
 	parent = shadow_parent(s);
-	if (parent) {
+	BUG_ON(!parent);
+	{
 		struct node *p = to_node(parent);
 		__le64 location = __cpu_to_le64(block_location(left));
-		memcpy(value_ptr(p, parent_index, sizeof(uint64_t)),
-		       &location, sizeof(uint64_t));
+		memcpy(value_ptr(p, parent_index, sizeof(__le64)),
+		       &location, sizeof(__le64));
 
 		location = __cpu_to_le64(block_location(right));
 		insert_at(sizeof(__le64), p, parent_index + 1, __le64_to_cpu(r->keys[0]), &location);
 
-	} else {
-		/* we need to create a new parent */
-		struct node *nn;
-		__le64 location;
-		ret = bn_new_block(s->info, &parent);
-		if (ret < 0)
-			return ret;
-
-		nn = (struct node *) block_data(parent);
-		nn->header.flags = __cpu_to_le32(INTERNAL_NODE);
-		nn->header.nr_entries = __cpu_to_le32(0);
-		nn->header.max_entries = __cpu_to_le32(
-			calc_max_entries(
-				sizeof(uint64_t),
-				bm_block_size(tm_get_bm(s->info->tm))));
-		nn->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
-
-		location = __cpu_to_le64(block_location(left));
-		insert_at(sizeof(uint64_t), nn, 0, __le64_to_cpu(l->keys[0]), &location);
-		location = __cpu_to_le64(block_location(right));
-		insert_at(sizeof(uint64_t), nn, 1, __le64_to_cpu(r->keys[0]), &location);
-
-		/* rejig the spine */
-		s->nodes[1] = left;
-		s->nodes[0] = parent;
-		s->count++;
-		s->root = block_location(parent);
 	}
 
 	if (key < __le64_to_cpu(r->keys[0])) {
@@ -361,11 +362,107 @@ static int btree_split(struct shadow_spine *s, block_t root, count_adjust_fn fn,
 	return 0;
 }
 
+/*
+ * Splits a node by creating two new children beneath the given node.
+ *
+ * Before:
+ *	  +----------+
+ *        | A ++++++ |
+ *        +----------+
+ *
+ *
+ * After:
+ * 	+------------+
+ *	| A (shadow) |
+ *	+------------+
+ *          |   |
+ *   +------+   +----+
+ *   | 	   	     |
+ *   v	 	     v
+ * +-------+	 +-------+
+ * | B +++ |	 | C +++ |
+ * +-------+ 	 +-------+
+ */
+static int btree_split_beneath(struct shadow_spine *s, block_t root, uint64_t key)
+{
+	int ret;
+	size_t size;
+	unsigned nr_left, nr_right;
+	struct block *left, *right, *new_parent;
+	struct node *p, *l, *r;
+
+	new_parent = shadow_current(s);
+	BUG_ON(!new_parent);
+
+	ret = bn_new_block(s->info, &left);
+	if (ret < 0)
+		return ret;
+
+	ret = bn_new_block(s->info, &right);
+	if (ret < 0) {
+		/* FIXME: put left */
+		return ret;
+	}
+
+	p = to_node(new_parent);
+	l = (struct node *) block_data(left);
+	r = (struct node *) block_data(right);
+
+	nr_left = __le32_to_cpu(p->header.nr_entries) / 2;
+	nr_right = __le32_to_cpu(p->header.nr_entries) - nr_left;
+
+	l->header.flags = p->header.flags;
+	l->header.nr_entries = __cpu_to_le32(nr_left);
+	l->header.max_entries = p->header.max_entries;
+	l->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
+
+	r->header.flags = p->header.flags;
+	r->header.nr_entries = __cpu_to_le32(nr_right);
+	r->header.max_entries = p->header.max_entries;
+	r->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
+
+	memcpy(l->keys, p->keys, nr_left * sizeof(p->keys[0]));
+	memcpy(r->keys, p->keys + nr_left, nr_right * sizeof(p->keys[0]));
+
+	size = __le32_to_cpu(p->header.flags) & INTERNAL_NODE ? sizeof(__le64) : s->info->value_size;
+	memcpy(value_ptr(l, 0, size), value_ptr(p, 0, size), nr_left * size);
+	memcpy(value_ptr(r, 0, size), value_ptr(p, nr_left, size), nr_right * size);
+
+	/* new_parent should just point to l and r now */
+	p->header.flags = __cpu_to_le32(INTERNAL_NODE);
+	p->header.nr_entries = __cpu_to_le32(2);
+	{
+		__le64 val = __cpu_to_le64(block_location(left));
+		p->keys[0] = l->keys[0];
+		memcpy(value_ptr(p, 0, sizeof(__le64)), &val, sizeof(__le64));
+
+		val = __cpu_to_le64(block_location(right));
+		p->keys[1] = r->keys[0];
+		memcpy(value_ptr(p, 1, sizeof(__le64)), &val, sizeof(__le64));
+	}
+
+	/* rejig the spine.  This is ugly, since it knows too much about the spine */
+	if (s->nodes[0] != new_parent) {
+		bn_unlock(s->info, s->nodes[0]);
+		s->nodes[0] = new_parent;
+	}
+	if (key < __le64_to_cpu(r->keys[0])) {
+		bn_unlock(s->info, right);
+		s->nodes[1] = left;
+	} else {
+		bn_unlock(s->info, left);
+		s->nodes[1] = right;
+	}
+	s->count = 2;
+
+	return 0;
+}
+
 static int btree_insert_raw(struct shadow_spine *s,
 			    block_t root, count_adjust_fn fn, uint64_t key,
 			    unsigned *index)
 {
-        int r, i = -1, inc;
+        int r, i = *index, inc, top = 1;
 	struct node *node;
 
 	for (;;) {
@@ -378,17 +475,21 @@ static int btree_insert_raw(struct shadow_spine *s,
 		/* We have to patch up the parent node, ugly, but I don't
 		 * see a way to do this automatically as part of the spine
 		 * op. */
-		if (shadow_parent(s) && i >= 0) {
+		if (shadow_parent(s) && i >= 0) { /* FIXME: second clause unness. */
 			__le64 location = __cpu_to_le64(block_location(shadow_current(s)));
 			memcpy(value_ptr(to_node(shadow_parent(s)), i, sizeof(uint64_t)),
-			       &location, sizeof(uint64_t));
+			       &location, sizeof(__le64));
 		}
 
 		BUG_ON(!shadow_current(s));
 		node = to_node(shadow_current(s));
 
 		if (node->header.nr_entries == node->header.max_entries) {
-			r = btree_split(s, root, fn, i, key);
+			if (top)
+				r = btree_split_beneath(s, root, key);
+			else
+				r = btree_split_sibling(s, root, i, key);
+
 			if (r < 0) {
 				/* FIXME: back out allocations */
 				return r;
@@ -410,6 +511,7 @@ static int btree_insert_raw(struct shadow_spine *s,
 		}
 
 		root = value64(node, i);
+		top = 0;
         }
 
 	if (i < 0 || __le64_to_cpu(node->keys[i]) != key)
@@ -430,7 +532,7 @@ int btree_insert(struct btree_info *info, block_t root,
 		 block_t *new_root)
 {
 	int r, need_insert;
-	unsigned level, index, last_level = info->levels - 1;
+	unsigned level, index = -1, last_level = info->levels - 1;
 	block_t *block = &root;
 	struct shadow_spine spine;
 	struct node *n;
@@ -451,8 +553,6 @@ int btree_insert(struct btree_info *info, block_t root,
 		n = to_node(shadow_current(&spine));
 		need_insert = ((index >= __le32_to_cpu(n->header.nr_entries)) ||
 			       (__le64_to_cpu(n->keys[index]) != keys[level]));
-
-		*block = block_location(shadow_current(&spine));
 
 		if (level == last_level) {
 			if (need_insert)
