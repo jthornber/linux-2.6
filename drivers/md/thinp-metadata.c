@@ -221,7 +221,7 @@ thinp_metadata_open(struct block_device *bdev, sector_t bdev_size)
 
 	r = tm_open_with_sm(bm, THINP_SUPERBLOCK_LOCATION,
 			    (size_t) &((struct superblock *) NULL)->sm_root_start,
-			    24, // 16,	/* FIXME: magic number */
+			    32, // 16,	/* FIXME: sm should say how big its root is */
 			    &tm, &sm, &sb);
 	if (r < 0) {
 		printk(KERN_ALERT "tm_open_with_sm failed");
