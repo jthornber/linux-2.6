@@ -13,7 +13,6 @@
 #define CACHE_SIZE 16
 #define DATA_BLOCK_SIZE ((1024 * 1024 * 128) >> SECTOR_SHIFT)
 
-// FIXME: set this much higher
 #define DATA_DEV_SIZE 10000
 
 typedef int (*test_fn)(struct thinp_metadata *tpm);
@@ -34,24 +33,50 @@ static int check_insert_1_transaction(struct thinp_metadata *tpm)
 	for (tb = 0; tb < DATA_DEV_SIZE; tb++) {
 		block_t pb;
 
-		r = thinp_metadata_insert(tpm, tb, map + tb);
-		if (r < 0)
+		r = thinp_metadata_insert(tpm, 0, tb, map + tb);
+		if (r < 0) {
+			printk(KERN_ALERT "insert failed");
 			return r;
+		}
 
 		/* check we can lookup straight away */
-		r = thinp_metadata_lookup(tpm, tb, 1, &pb);
-		if (r < 0)
+		r = thinp_metadata_lookup(tpm, 0, tb, 1, &pb);
+		if (r < 0) {
+			printk(KERN_ALERT "first lookup failed (%u)", (unsigned) tb);
 			return r;
+		}
 
-		if (pb != map[tb])
+		if (pb != map[tb]) {
+			printk(KERN_ALERT "first comparison failed");
 			return -1;
+		}
 	}
 
 	r = thinp_metadata_commit(tpm);
-	if (r < 0)
+	if (r < 0) {
+		printk(KERN_ALERT "commit failed");
 		return r;
+	}
 	printk(KERN_ALERT "%u inserts in a single commit",
 	       DATA_DEV_SIZE);
+
+	/* check we can lookup after a commit */
+	for (tb = 0; tb < DATA_DEV_SIZE; tb++) {
+		block_t pb;
+
+		r = thinp_metadata_lookup(tpm, 0, tb, 1, &pb);
+		if (r < 0) {
+			printk(KERN_ALERT "thinp-metadata_lookup failed for block %u",
+			       (unsigned) tb);
+			return r;
+		}
+
+		if (pb != map[tb]) {
+			printk(KERN_ALERT "unexpected mapping");
+			return -1;
+		}
+	}
+
 
 	return 0;
 }
@@ -65,12 +90,12 @@ static int check_insert_multi_transaction(struct thinp_metadata *tpm)
 	for (tb = 0; tb < DATA_DEV_SIZE; tb++) {
 		block_t pb;
 
-		r = thinp_metadata_insert(tpm, tb, map + tb);
+		r = thinp_metadata_insert(tpm, 0, tb, map + tb);
 		if (r < 0)
 			return r;
 
 		/* check we can lookup straight away */
-		r = thinp_metadata_lookup(tpm, tb, 1, &pb);
+		r = thinp_metadata_lookup(tpm, 0, tb, 1, &pb);
 		if (r < 0)
 			return r;
 
@@ -80,6 +105,23 @@ static int check_insert_multi_transaction(struct thinp_metadata *tpm)
 		r = thinp_metadata_commit(tpm);
 		if (r < 0)
 			return r;
+	}
+
+	/* check we can lookup after a commit */
+	for (tb = 0; tb < DATA_DEV_SIZE; tb++) {
+		block_t pb;
+
+		r = thinp_metadata_lookup(tpm, 0, tb, 1, &pb);
+		if (r < 0) {
+			printk(KERN_ALERT "thinp-metadata_lookup failed for block %u",
+			       (unsigned) tb);
+			return r;
+		}
+
+		if (pb != map[tb]) {
+			printk(KERN_ALERT "unexpected mapping");
+			return -1;
+		}
 	}
 
 	printk(KERN_ALERT "%u insert/commit cycles",
@@ -94,7 +136,7 @@ static int check_accessors(struct thinp_metadata *tpm)
 	sector_t s;
 	block_t b;
 
-	r = thinp_metadata_get_data_block_size(tpm, &s);
+	r = thinp_metadata_get_data_block_size(tpm, 0, &s);
 	if (r < 0) {
 		printk(KERN_ALERT "get_data_block_size() failed");
 		return r;
@@ -105,7 +147,7 @@ static int check_accessors(struct thinp_metadata *tpm)
 		return -1;
 	}
 
-	r = thinp_metadata_get_data_dev_size(tpm, &b);
+	r = thinp_metadata_get_data_dev_size(tpm, 0, &b);
 	if (r < 0) {
 		printk(KERN_ALERT "get_data_dev_size failed");
 		return -1;
@@ -116,7 +158,7 @@ static int check_accessors(struct thinp_metadata *tpm)
 		return -1;
 	}
 
-	r = thinp_metadata_get_provisioned_blocks(tpm, &b);
+	r = thinp_metadata_get_provisioned_blocks(tpm, 0, &b);
 	if (r < 0) {
 		printk(KERN_ALERT "data_first_free() failed");
 		return -1;
@@ -127,13 +169,13 @@ static int check_accessors(struct thinp_metadata *tpm)
 		return -1;
 	}
 
-	r = thinp_metadata_resize_data_dev(tpm, 101);
+	r = thinp_metadata_resize_data_dev(tpm, 0, 101);
 	if (r < 0) {
 		printk(KERN_ALERT "resize_data_dev() failed");
 		return -1;
 	}
 
-	r = thinp_metadata_get_data_dev_size(tpm, &b);
+	r = thinp_metadata_get_data_dev_size(tpm, 0, &b);
 	if (r < 0) {
 		printk(KERN_ALERT "get_data_dev_size failed(2)");
 		return -1;
@@ -154,8 +196,8 @@ static int run_test(const char *name, test_fn fn)
 	int r;
 	struct thinp_metadata *tpm;
 	struct block_device *bdev;
-
-	bdev = open_bdev_exclusive("/dev/sdb", FMODE_READ | FMODE_WRITE, NULL);
+	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	bdev = blkdev_get_by_path("/dev/sdb", mode, &run_test);
 	if (IS_ERR(bdev))
 		return -1;
 
@@ -173,7 +215,7 @@ static int run_test(const char *name, test_fn fn)
 	printk(r == 0 ? KERN_ALERT "pass\n" : KERN_ALERT "fail\n");
 
 	thinp_metadata_close(tpm);
-	close_bdev_exclusive(bdev, FMODE_READ | FMODE_WRITE);
+	blkdev_put(bdev, mode);
 	return 0;
 }
 
