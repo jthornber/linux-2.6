@@ -10,10 +10,12 @@
 /* on disk data */
 struct sm_root {
 	__le64 nr_blocks;
+	__le64 nr_allocated;
 	__le64 bitmap_root;
 	__le64 ref_count_root;
 };
 
+/* FIXME: add a spinlock to protect the in core structure */
 struct sm_disk {
 	struct transaction_manager *tm;
 
@@ -23,6 +25,7 @@ struct sm_disk {
 	uint32_t block_size;
 	uint32_t entries_per_block;
 	block_t nr_blocks;
+	block_t nr_allocated;
 	block_t bitmap_root;
 	block_t ref_count_root;
 };
@@ -103,23 +106,7 @@ static inline block_t max_block(block_t b1, block_t b2)
 {
 	return (b1 >= b2) ? b1 : b2;
 }
-#if 0
-static void value_is_index_entry(struct transaction_manager *tm, void *value, int32_t delta)
-{
-	struct index_entry ie;
 
-	/* copying because I'm paranoid about alignment issues */
-	memcpy(&ie, value, sizeof(ie));
-	value_is_block(tm, &ie.b, delta);
-}
-
-static int eq_index_entry(void *value1, void *value2)
-{
-	struct index_entry *ie1 = (struct index_entry *) value1;
-	struct index_entry *ie2 = (struct index_entry *) value2;
-	return ie1->b == ie2->b;
-}
-#endif
 static struct sm_disk *alloc_smd(struct transaction_manager *tm)
 {
 	return kmalloc(sizeof(struct sm_disk), GFP_KERNEL);
@@ -132,13 +119,15 @@ static int io_init(struct sm_disk *io,
 	io->bitmap_info.tm = tm;
 	io->bitmap_info.levels = 1;
 	io->bitmap_info.value_size = sizeof(struct index_entry);
-#if 0
-	io->bitmap_info.adjust = value_is_index_entry;
-	io->bitmap_info.eq = eq_index_entry;
-#else
+
+	/*
+	 * Because the new bitmap blocks are created via a shadow
+	 * operation, the old entry has already had it's reference count
+	 * decremented.  So we don't need the btree to do any book
+	 * keeping.
+	 */
 	io->bitmap_info.adjust = value_is_meaningless;
 	io->bitmap_info.eq = NULL;
-#endif
 
 	io->ref_count_info.tm = tm;
 	io->ref_count_info.levels = 1;
@@ -171,6 +160,7 @@ static int io_new(struct sm_disk *io, struct transaction_manager *tm, block_t nr
 		return r;
 
 	io->nr_blocks = nr_blocks;
+	io->nr_allocated = 0;
 	r = btree_empty(&io->bitmap_info, &io->bitmap_root);
 	if (r < 0)
 		return r;
@@ -226,6 +216,7 @@ static int io_open(struct sm_disk *io,
 		return r;
 
 	io->nr_blocks = __le64_to_cpu(smr->nr_blocks);
+	io->nr_allocated = __le64_to_cpu(smr->nr_allocated);
 	io->bitmap_root = __le64_to_cpu(smr->bitmap_root);
 	io->ref_count_root = __le64_to_cpu(smr->ref_count_root);
 
@@ -310,6 +301,7 @@ io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 			if (r < 0)
 				return r;
 
+			BUG_ON(*result >= io->nr_blocks);
 			return 0;
 		}
 	}
@@ -372,11 +364,13 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 		return r;
 
 	if (ref_count && !old) {
+		io->nr_allocated++;
 		ie.nr_free = __cpu_to_le32(__le32_to_cpu(ie.nr_free) - 1);
 		if (__le32_to_cpu(ie.none_free_before) == b)
 			ie.none_free_before = __cpu_to_le32(b + 1);
 
 	} else if (old && !ref_count) {
+		io->nr_allocated--;
 		ie.nr_free = __cpu_to_le32(__le32_to_cpu(ie.nr_free) + 1);
 		ie.none_free_before = __cpu_to_le32(min_block(__le32_to_cpu(ie.none_free_before), b));
 	}
@@ -398,6 +392,8 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 static void destroy(void *context)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
+	printk(KERN_ALERT "sm_disk allocated %u blocks",
+	       (unsigned) smd->nr_allocated);
 	kfree(smd);
 }
 
@@ -481,6 +477,7 @@ static int copy_root(void *context, void *where, size_t max)
 	struct sm_root root;
 
 	root.nr_blocks = __cpu_to_le64(smd->nr_blocks);
+	root.nr_allocated = __cpu_to_le64(smd->nr_allocated);
 	root.bitmap_root = __cpu_to_le64(smd->bitmap_root);
 	root.ref_count_root = __cpu_to_le64(smd->ref_count_root);
 
