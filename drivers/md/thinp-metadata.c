@@ -10,113 +10,6 @@
 
 /*----------------------------------------------------------------*/
 
-#define CES_EMPTY 0
-#define CES_SET 1
-#define CES_UNMAPPED 2
-
-#if 0
-/* FIXME: hard coded size for now */
-#define CACHE_SIZE 1024
-#define MASK (CACHE_SIZE - 1)
-
-struct cache_entry {
-	int status;
-	block_t thinp_block;
-	block_t pool_block;
-};
-
-struct cache {
-	rwlock_t lock;
-	struct cache_entry hash[CACHE_SIZE];
-};
-
-static void cache_init(struct cache *c)
-{
-	int i;
-
-	rwlock_init(&c->lock);
-	for (i = 0; i < CACHE_SIZE; i++)
-		c->hash[i].status = CES_EMPTY;
-}
-
-static unsigned hash_block(block_t b)
-{
-	const uint64_t BIG_PRIME = -59;
-	return ((b * BIG_PRIME) >> 3) & MASK;
-}
-
-static int cache_lookup(struct cache *c, block_t thinp_block, block_t *pool_block)
-{
-	int r = CES_EMPTY;
-	unsigned bucket = hash_block(thinp_block);
-	struct cache_entry *ce;
-
-	read_lock(&c->lock);
-	ce = c->hash + bucket;
-	switch (ce->status) {
-	case CES_EMPTY:
-		break;
-
-	case CES_UNMAPPED:
-	case CES_SET:
-		if (ce->thinp_block == thinp_block) {
-			*pool_block = ce->pool_block;
-			r = ce->status;
-		}
-		break;
-	}
-	read_unlock(&c->lock);
-
-	return r;
-}
-
-static void cache_insert(struct cache *c, block_t thinp_block, block_t pool_block)
-{
-	unsigned bucket = hash_block(thinp_block);
-	struct cache_entry *ce;
-
-	write_lock(&c->lock);
-	ce = c->hash + bucket;
-	ce->status = CES_SET;
-	ce->thinp_block = thinp_block;
-	ce->pool_block = pool_block;
-	write_unlock(&c->lock);
-}
-
-static void cache_insert_unmapped(struct cache *c, block_t thinp_block)
-{
-	unsigned bucket = hash_block(thinp_block);
-	struct cache_entry *ce;
-
-	write_lock(&c->lock);
-	ce = c->hash + bucket;
-	ce->status = CES_UNMAPPED;
-	ce->thinp_block = thinp_block;
-	write_unlock(&c->lock);
-}
-#else
-struct cache {};
-
-static void cache_init(struct cache *c)
-{
-}
-
-static int cache_lookup(struct cache *c, block_t thinp_block, block_t *pool_block)
-{
-	return CES_EMPTY;
-}
-
-static void cache_insert(struct cache *c, block_t thinp_block, block_t pool_block)
-{
-}
-
-static void cache_insert_unmapped(struct cache *c, block_t thinp_block)
-{
-}
-#endif
-
-/*----------------------------------------------------------------*/
-
 #define THINP_SUPERBLOCK_MAGIC 12112007
 #define THINP_SUPERBLOCK_LOCATION 0
 #define THINP_VERSION 1
@@ -158,8 +51,6 @@ struct thinp_metadata {
 
 	int have_inserted;
 	block_t root;
-
-	struct cache cache;
 };
 
 static struct thinp_metadata *
@@ -227,7 +118,6 @@ alloc_(struct block_device *bdev, sector_t bdev_size)
 
 	tpm->have_inserted = 0;
 	tpm->root = 0;		/* not meaningful until in a transaction */
-	cache_init(&tpm->cache);
 
 	return tpm;
 
@@ -373,7 +263,6 @@ thinp_metadata_open(struct block_device *bdev, sector_t bdev_size)
 
 	tpm->have_inserted = 0;
 	tpm->root = __le64_to_cpu(s->btree_root);
-	cache_init(&tpm->cache);
 	return tpm;
 
 bad:
@@ -461,7 +350,6 @@ int thinp_metadata_insert(struct thinp_metadata *tpm,
 
 	*pool_block = b;
 	sb->first_free_block = __cpu_to_le64(b + 1);
-	cache_insert(&tpm->cache, thinp_block, *pool_block);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(thinp_metadata_insert);
@@ -474,38 +362,17 @@ thinp_metadata_lookup(struct thinp_metadata *tpm,
 {
 	int r;
 
-	r = cache_lookup(&tpm->cache, thinp_block, result);
-	switch (r) {
-	case CES_EMPTY:
-		if (!tpm->sblock) {
-			if (!can_block) {
-				r = -EWOULDBLOCK;
-				break;
-			}
+	if (!tpm->sblock) {
+		if (!can_block)
+			return -EWOULDBLOCK;
 
-			r = thinp_metadata_begin(tpm);
-			if (r < 0)
-				break;
-		}
-
-		r = btree_lookup_equal(can_block ? &tpm->info : &tpm->nb_info,
-				       tpm->root, &thinp_block, result);
-		if (r == 0)
-			cache_insert(&tpm->cache, thinp_block, *result);
-		else if (r == -ENODATA)
-			cache_insert_unmapped(&tpm->cache, thinp_block);
-		break;
-
-	case CES_SET:
-		r = 0;
-		break;
-
-	case CES_UNMAPPED:
-		r = -ENODATA;
-		break;
+		r = thinp_metadata_begin(tpm);
+		if (r < 0)
+			return r;
 	}
 
-	return r;
+	return btree_lookup_equal(can_block ? &tpm->info : &tpm->nb_info,
+				  tpm->root, &thinp_block, result);
 }
 
 EXPORT_SYMBOL_GPL(thinp_metadata_lookup);
