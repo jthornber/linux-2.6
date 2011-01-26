@@ -17,7 +17,7 @@ struct cache_entry {
 
 #define NR_BUCKETS 1024
 #define MASK (NR_BUCKETS - 1)
-#define PRIME 4294967291L
+#define PRIME 4294967291UL
 
 struct sm_staged {
 	struct kmem_cache *slab;

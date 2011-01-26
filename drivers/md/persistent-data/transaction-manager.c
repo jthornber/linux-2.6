@@ -30,7 +30,7 @@ struct transaction_manager {
 /* FIXME: similar code in block-manager */
 static unsigned hash_block(block_t b)
 {
-	const unsigned BIG_PRIME = 4294967291L;
+	const unsigned BIG_PRIME = 4294967291UL;
 	return (((unsigned) b) * BIG_PRIME) & HASH_MASK;
 }
 
