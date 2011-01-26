@@ -96,7 +96,7 @@ EXPORT_SYMBOL_GPL(block_data);
  *--------------------------------------------------------------*/
 static unsigned hash_block(struct block_manager *bm, block_t b)
 {
-	const unsigned BIG_PRIME = 4294967291L;
+	const unsigned BIG_PRIME = 4294967291UL;
 	return (((unsigned) b) * BIG_PRIME) & bm->hash_mask;
 }
 
@@ -567,7 +567,8 @@ block_manager_create(struct block_device *bdev,
 	bm->cache_size = cache_size;
 	bm->block_size = block_size;
 	bm->sectors_per_block = block_size / 512;
-	bm->nr_blocks = i_size_read(bdev->bd_inode) / block_size;
+	bm->nr_blocks = i_size_read(bdev->bd_inode);
+	do_div(bm->nr_blocks, block_size);
 	init_waitqueue_head(&bm->io_q);
 	spin_lock_init(&bm->lock);
 
