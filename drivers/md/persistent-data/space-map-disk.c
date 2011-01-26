@@ -42,7 +42,14 @@ struct index_entry {
 
 static uint64_t div_up(uint64_t v, uint64_t n)
 {
-	return (v / n) + (v % n > 0 ? 1 : 0);
+	uint64_t t = v;
+	uint64_t rem = do_div(t, n);
+	return t + (rem > 0 ? 1 : 0);
+}
+
+static uint64_t mod64(uint64_t n, uint64_t d)
+{
+	return do_div(n, d);
 }
 
 /*
@@ -226,8 +233,9 @@ static int io_open(struct sm_disk *io,
 static int io_lookup(struct sm_disk *io, block_t b, uint32_t *result)
 {
 	int r;
-	block_t index = b / io->entries_per_block;
+	block_t index = b;
 	struct index_entry ie;
+	do_div(index, io->entries_per_block);
 
 	r = btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
@@ -239,7 +247,7 @@ static int io_lookup(struct sm_disk *io, block_t b, uint32_t *result)
 		if (r < 0)
 			return r;
 
-		*result = lookup_bitmap_(block_data(blk), b % io->entries_per_block);
+		*result = lookup_bitmap_(block_data(blk), mod64(b, io->entries_per_block));
 		r = tm_unlock(io->tm, blk);
 		if (r < 0) {
 			return r;
@@ -264,11 +272,12 @@ static int
 io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 {
 	int r;
-	block_t index_begin = begin / io->entries_per_block;
+	block_t index_begin = begin;
 	block_t index_end = div_up(end, io->entries_per_block);
 	struct index_entry ie;
 	block_t i;
 
+	do_div(index_begin, io->entries_per_block);
 	for (i = index_begin; i < index_end; i++, begin = 0) {
 		r = btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &i, &ie);
 		if (r < 0)
@@ -280,7 +289,7 @@ io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 
 			uint32_t bit_end =
 				i == index_end - 1 ?
-				end % io->entries_per_block :
+				mod64(end, io->entries_per_block) :
 				io->entries_per_block;
 
 			r = tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
@@ -288,7 +297,7 @@ io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 				return r;
 
 			r = find_free_(block_data(blk),
-				       begin % io->entries_per_block,
+				       mod64(begin, io->entries_per_block),
 				       bit_end, &position);
 			if (r < 0) {
 				tm_unlock(io->tm, blk);
@@ -314,11 +323,12 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 	int r;
 	uint32_t bit, old;
 	struct block *nb;
-	block_t index = b / io->entries_per_block;
+	block_t index = b;
 	struct index_entry ie;
 	void *bm;
 	int inc;
 
+	do_div(index, io->entries_per_block);
 	r = btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
 		return r;
@@ -330,7 +340,7 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 	}
 
 	bm = block_data(nb);
-	bit = b % io->entries_per_block;
+	bit = mod64(b, io->entries_per_block);
 	old = lookup_bitmap_(bm, bit);
 
 	if (ref_count <= 2) {
