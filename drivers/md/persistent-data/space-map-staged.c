@@ -113,7 +113,7 @@ static struct sm_staged *sm_alloc(struct space_map *sm_wrapped)
 	sm->sm_wrapped = sm_wrapped;
 	sm->maybe_first_free = 0;
 
-	sm->slab = kmem_cache_create("space map cache entries",
+	sm->slab = kmem_cache_create("space_map_cache_entries",
 				     sizeof(struct cache_entry),
 				     0,
 				     SLAB_HWCACHE_ALIGN,
