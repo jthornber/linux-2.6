@@ -237,7 +237,7 @@ config DM_SNAPSHOT
 
 config DM_THINP
        tristate "Thin provisioning target (EXPERIMENTAL)"
-       depends on BLK_DEV_DM && EXPERIMENTAL
+       depends on BLK_DEV_DM && DM_PERSISTENT_DATA && EXPERIMENTAL
        ---help---
          Thin provisioning target for volume managers.
 
