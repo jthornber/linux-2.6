@@ -108,53 +108,134 @@ int btree_empty(struct btree_info *info, block_t *root)
 }
 EXPORT_SYMBOL_GPL(btree_empty);
 
-#if 0
+/*----------------------------------------------------------------*/
+
 /*
- * A simple recursive implementation of tree deletion, we'll need to use an
- * iterative walk before we move this into the kernel.
+ * Deletion uses a recursive algorithm, since we have limited stack space
+ * we explicitly manage our own stack on the heap.
  */
-int btree_del_(struct btree_info *info, block_t root, unsigned level)
-{
+#define MAX_SPINE_DEPTH 64
+struct frame {
+	struct block *b;
 	struct node *n;
-	uint32_t ref_count = tm_ref(info->tm, root);
+	unsigned level;
+	unsigned nr_children;
+	unsigned current_child;
+};
 
-	if (ref_count == 1) {
-		unsigned i;
+struct del_stack {
+	struct transaction_manager *tm;
+	int top;
+	struct frame spine[MAX_SPINE_DEPTH];
+};
 
+static void top_frame(struct del_stack *s, struct frame **f)
+{
+	BUG_ON(s->top < 0);
+	*f = s->spine + s->top;
+}
+
+static int unprocessed_frames(struct del_stack *s)
+{
+	return s->top >= 0;
+}
+
+static int push_frame(struct del_stack *s, block_t b, unsigned level)
+{
+	int r;
+	uint32_t ref_count;
+
+	BUG_ON(s->top >= MAX_SPINE_DEPTH);
+
+	r = tm_ref(s->tm, b, &ref_count);
+	if (r)
+		return r;
+
+	if (ref_count > 1) {
 		/*
-		 * We know this node isn't shared, so we can get away with
-		 * just a read lock.
+		 * This is a shared node, so we can just decrement it's
+		 * reference counter and leave the children.
 		 */
-		if (!tm_read_lock(info->tm, root, (void **) &n))
-			abort();
+		tm_dec(s->tm, b);
 
-		if (n->header.flags & INTERNAL_NODE) {
-			for (i = 0; i < n->header.nr_entries; i++)
-				if (!btree_del_(info, value64(n, i), level))
-					return 0;
+	} else {
+		struct frame *f = s->spine + ++s->top;
+		r = tm_read_lock(s->tm, b, &f->b);
+		if (!r) {
+			s->top--;
+			return r;
+		}
 
-		} else if (level < (info->levels - 1)) {
-			for (i = 0; i < n->header.nr_entries; i++)
-				if (!btree_del_(info, value64(n, i), level + 1))
-					return 0;
-
-		} else
-			for (i = 0; i < n->header.nr_entries; i++)
-				info->adjust(info->tm, value_ptr(n, i, info->value_size), -1);
-
-		if (!tm_read_unlock(info->tm, root))
-			abort();
+		f->n = to_node(f->b);
+		f->level = level;
+		f->nr_children = __le32_to_cpu(f->n->header.nr_entries);
+		f->current_child = 0;
 	}
 
-	tm_dec(info->tm, root);
-	return 1;
+	return 0;
+}
+
+static void pop_frame(struct del_stack *s)
+{
+	struct frame *f = s->spine + s->top--;
+	tm_dec(s->tm, block_location(f->b));
+	tm_unlock(s->tm, f->b);
 }
 
 int btree_del(struct btree_info *info, block_t root)
 {
-	return btree_del_(info, root, 0);
+	struct del_stack *s = kmalloc(sizeof(*s), GFP_KERNEL);
+
+	if (!s)
+		return -ENOMEM;
+
+	s->tm = info->tm;
+	s->top = -1;
+
+	push_frame(s, root, 1);
+	while (unprocessed_frames(s)) {
+		int r;
+		uint32_t flags;
+		struct frame *f;
+
+		top_frame(s, &f);
+
+		if (f->current_child >= f->nr_children)
+			pop_frame(s);
+
+		flags = __le32_to_cpu(f->n->header.flags);
+		if (flags & INTERNAL_NODE) {
+			block_t b = value64(f->n, f->current_child);
+			f->current_child++;
+			r = push_frame(s, b, f->level);
+			if (r)
+				goto bad;
+
+		} else if (f->level != info->levels) {
+			block_t b = value64(f->n, f->current_child);
+			f->current_child++;
+			r = push_frame(s, b, f->level + 1);
+			if (r)
+				goto bad;
+
+		} else {
+			unsigned i;
+			if (info->value_type.del)
+				for (i = 0; i < f->nr_children; i++)
+					info->value_type.del(info->value_type.context,
+							     value_ptr(f->n, i, info->value_type.size));
+			f->current_child = f->nr_children;
+		}
+	}
+
+	return 0;
+
+bad:
+	/* what happens if we've deleted half a tree? */
+	return -1;
 }
-#endif
+
+/*----------------------------------------------------------------*/
 
 static int
 btree_lookup_raw(struct ro_spine *s, block_t block, uint64_t key, int (*search_fn)(struct node *, uint64_t),
