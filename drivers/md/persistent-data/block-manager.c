@@ -447,7 +447,7 @@ static int recycle_block(struct block_manager *bm, block_t where, int need_read,
 			/* We could write more than 1 to make future recycles
 			 * quicker.  See separate speculative cleaning patch.
 			 */
-			write_dirty(bm, 1);
+			write_dirty(bm, bm->cache_size);
 			unplug(bm);
 		}
 		spin_lock_irqsave(&bm->lock, flags);
@@ -650,7 +650,9 @@ retry:
 	if (b) {
 		switch (how) {
 		case READ:
-			if (b->write_lock_pending || (b->state != BS_CLEAN && b->state != BS_DIRTY && b->state != BS_READ_LOCKED)) {
+			if (b->write_lock_pending || (b->state != BS_CLEAN &&
+						      b->state != BS_DIRTY &&
+						      b->state != BS_READ_LOCKED)) {
 				if (!can_block) {
 					spin_unlock_irqrestore(&bm->lock, flags);
 					return -EWOULDBLOCK;

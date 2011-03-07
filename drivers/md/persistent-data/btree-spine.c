@@ -7,14 +7,14 @@ int bn_read_lock(struct btree_info *info, block_t b, struct block **result)
 	return tm_read_lock(info->tm, b, result);
 }
 
-int bn_shadow(struct btree_info *info, block_t orig, count_adjust_fn fn,
+int bn_shadow(struct btree_info *info, block_t orig, struct btree_value_type *vt,
 	      struct block **result, int *inc)
 {
 	int r;
 
 	r = tm_shadow_block(info->tm, orig, result, inc);
 	if (r == 0 && *inc)
-		inc_children(info, to_node(*result), fn);
+		inc_children(info->tm, to_node(*result), vt);
 
 	return r;
 }
@@ -100,7 +100,7 @@ int exit_shadow_spine(struct shadow_spine *s)
 	return r;
 }
 
-int shadow_step(struct shadow_spine *s, block_t b, count_adjust_fn fn, int *inc)
+int shadow_step(struct shadow_spine *s, block_t b, struct btree_value_type *vt, int *inc)
 {
 	int r;
 
@@ -112,7 +112,7 @@ int shadow_step(struct shadow_spine *s, block_t b, count_adjust_fn fn, int *inc)
 		s->count--;
 	}
 
-	r = bn_shadow(s->info, b, fn, s->nodes + s->count, inc);
+	r = bn_shadow(s->info, b, vt, s->nodes + s->count, inc);
 	if (r == 0) {
 		if (s->count == 0)
 			s->root = block_location(s->nodes[0]);

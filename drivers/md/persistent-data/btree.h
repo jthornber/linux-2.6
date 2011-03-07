@@ -6,36 +6,70 @@
 /*----------------------------------------------------------------*/
 
 /*
- * Manipulates hierarchical B+ trees with 64bit keys and 64bit values.  No
- * assumptions about the meanings of the keys or values are made.
+ * Manipulates hierarchical B+ trees with 64bit keys and arbitrary sized
+ * values.
  */
-
 
 /*
- * The btree has no idea what the values stored actually are.  This leads
- * to problems with reference counts when sharing is occuring.  So we have
- * to pass in a function to adjust reference counts to many of the btree
- * functions.  Often the leaves are simply block ids, so here's a standard
- * function for that case.
+ * The btree needs some knowledge about the values stored within it.  This
+ * is provided by a |btree_value_type| structure.
  */
-typedef void (*count_adjust_fn)(struct transaction_manager *tm, void *value, int32_t count_delta);
-void value_is_block(struct transaction_manager *tm, void *value, int32_t delta);
-void value_is_meaningless(struct transaction_manager *tm, void *value, int32_t delta);
+struct btree_value_type {
+	void *context;
 
-typedef int (*equal_fn)(void *value1, void *value2);
+	/*
+	 * The size in bytes of each value.
+	 */
+	uint32_t size;
 
+	/*
+	 * Any of these methods can be safely set to NULL if you do not
+	 * need this feature.
+	 */
+
+	/*
+	 * The btree is making a duplicate of the value, for instance
+	 * because previously shared btree nodes have now diverged.  The
+	 * |value| argument is the new copy, the copy function may modify
+	 * it.  Probably it just wants to increment a reference count
+	 * somewhere.  This method is _not_ called for insertion of a new
+	 * value.
+	 */
+	void (*copy)(void *context, void *value);
+
+	/*
+	 * This value is being deleted.  The btree takes care of freeing
+	 * the memory pointed to by |value|.  Often the |del| function just
+	 * needs to decrement a reference count somewhere.
+	 */
+	void (*del)(void *context, void *value);
+
+	/*
+	 * An test for equality between two values.  When a value is
+	 * overwritten with a new one the old one has the |del| method
+	 * called, _unless_ the new and old value are deemed equal.
+	 */
+	int (*equal)(void *context, void *value1, void *value2);
+};
+
+/*
+ * The |btree_info| structure describes the shape and contents of a btree.
+ */
 struct btree_info {
 	struct transaction_manager *tm;
-	unsigned levels;	/* number of nested btrees */
-	uint32_t value_size;
-	count_adjust_fn adjust;
-	equal_fn eq;
+
+	/* number of nested btrees (not the depth of a single tree). */
+	unsigned levels;
+	struct btree_value_type value_type;
 };
 
 /* Set up an empty tree.  O(1). */
 int btree_empty(struct btree_info *info, block_t *root);
 
-/* Delete a tree.  O(n) - this is the slow one! */
+/*
+ * Delete a tree.  O(n) - this is the slow one!  It can also block, so
+ * please don't call it on an io path.
+ */
 int btree_del(struct btree_info *info, block_t root);
 
 /*
@@ -43,7 +77,7 @@ int btree_del(struct btree_info *info, block_t root);
  */
 
 /* Tries to find a key that matches exactly.  O(ln(n)) */
-/* FIXME: rename this to plain btree_looup */
+/* FIXME: rename this to plain btree_lookup */
 int
 btree_lookup_equal(struct btree_info *info,
 		   block_t root, uint64_t *keys,

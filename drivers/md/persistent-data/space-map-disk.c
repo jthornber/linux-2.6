@@ -125,7 +125,6 @@ static int io_init(struct sm_disk *io,
 	io->tm = tm;
 	io->bitmap_info.tm = tm;
 	io->bitmap_info.levels = 1;
-	io->bitmap_info.value_size = sizeof(struct index_entry);
 
 	/*
 	 * Because the new bitmap blocks are created via a shadow
@@ -133,14 +132,17 @@ static int io_init(struct sm_disk *io,
 	 * decremented.  So we don't need the btree to do any book
 	 * keeping.
 	 */
-	io->bitmap_info.adjust = value_is_meaningless;
-	io->bitmap_info.eq = NULL;
+	io->bitmap_info.value_type.size = sizeof(struct index_entry);
+	io->bitmap_info.value_type.copy = NULL;
+	io->bitmap_info.value_type.del = NULL;
+	io->bitmap_info.value_type.equal = NULL;
 
 	io->ref_count_info.tm = tm;
 	io->ref_count_info.levels = 1;
-	io->ref_count_info.value_size = sizeof(uint32_t);
-	io->ref_count_info.adjust = value_is_meaningless;
-	io->ref_count_info.eq = NULL;
+	io->ref_count_info.value_type.size = sizeof(uint32_t);
+	io->ref_count_info.value_type.copy = NULL;
+	io->ref_count_info.value_type.del = NULL;
+	io->ref_count_info.value_type.equal = NULL;
 
 	io->block_size = bm_block_size(tm_get_bm(tm));
 
