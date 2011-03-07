@@ -84,8 +84,7 @@ int multisnap_metadata_map(struct ms_device *msd,
 			   int can_block,
 			   block_t *result);
 
-/*
- * FIXME: work out the concurrency guarantees of the rest. */
+/* FIXME: work out the concurrency guarantees of the rest. */
 int multisnap_metadata_get_data_block_size(struct ms_device *msd, sector_t *result);
 int multisnap_metadata_get_data_dev_size(struct ms_device *msd, block_t *result);
 int multisnap_metadata_get_provisioned_blocks(struct ms_device *msd, block_t *result);

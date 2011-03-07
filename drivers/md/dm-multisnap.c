@@ -42,7 +42,60 @@ static const char version[] = "1.0";
 #define	DM_MSG_PREFIX	"dm-thin-prov"
 #define	DAEMON		DM_MSG_PREFIX	"d"
 
-#if 0
+/*----------------------------------------------------------------*/
+
+/* A little global cache of multisnap metadata devs */
+struct multisnap_metadata;
+
+/* FIXME: add a spin lock round the table */
+#define MMD_TABLE_SIZE 1024
+static struct hlist_head mmd_table_[MMD_TABLE_SIZE];
+
+static void
+mmd_table_init(void)
+{
+	unsigned i;
+	for (i = 0; i < MMD_TABLE_SIZE; i++)
+		INIT_HLIST_HEAD(mmd_table_ + i);
+}
+
+static unsigned
+hash_bdev(struct block_device *bdev)
+{
+	/* FIXME: finish */
+	/* bdev -> dev_t -> unsigned */
+	return 0;
+}
+
+static void
+mmd_table_insert(struct multisnap_metadata *mmd)
+{
+	unsigned bucket = hash_bdev(mmd->bdev);
+	hlist_add_head(&mmd->hash, mmd_table_ + bucket);
+}
+
+static void
+mmd_table_remove(struct multisnap_metadata *mmd)
+{
+	hlist_del(&mmd->hash);
+}
+
+static struct multisnap_metadata *
+mmd_table_lookup(struct block_device *bdev)
+{
+	unsigned bucket = hash_bdev(bdev);
+	struct multisnap_metadata *mmd;
+	struct hlist_node *n;
+
+	hlist_for_each_entry (mmd, n, mmd_table_ + bucket, hash)
+		if (mmd->bdev == bdev)
+			return mmd;
+
+	return NULL;
+}
+
+/*----------------------------------------------------------------*/
+
 /* Minimum data device block size in sectors. */
 #define	DATA_DEV_BLOCK_SIZE_MIN	8
 #define	LLU	long long unsigned
@@ -50,11 +103,8 @@ static const char version[] = "1.0";
 /* Thin provisioning context. */
 struct multisnap_c {
 	struct dm_target *ti;
-	struct multisnap_metadata *mmd;
-
-	multisnap_dev_t thinp_id;
-	struct dm_dev *data_dev;
-	struct dm_dev *meta_dev;
+	struct dm_dev *pool_dev;
+	struct ms_device *msd;
 
 	sector_t block_size;
 	sector_t offset_mask;	/* mask to give the offset of a sector within a block */
@@ -67,8 +117,6 @@ struct multisnap_c {
 	struct bio_list no_space; /* Bios w/o data space. */
 
 	struct work_struct ws;		/* IO work. */
-
-	block_t low_water_mark;
 
 	spinlock_t provisioned_lock; /* protects next 4 fields */
 	block_t data_size;	/* Size of data device in blocks. */
@@ -88,7 +136,7 @@ static sector_t get_dev_size(struct dm_dev *dev)
 static sector_t data_dev_block_size(struct multisnap_c *tc)
 {
 	sector_t size;
-	return multisnap_metadata_get_data_block_size(tc->mmd, tc->thinp_id, &size) ? 0 : size;
+	return multisnap_metadata_get_data_block_size(tc->msd, &size) ? 0 : size;
 }
 
 /* Derive offset within block from b */
@@ -97,15 +145,15 @@ static sector_t _sector_to_block(struct multisnap_c *tc, sector_t sector)
 	return sector >> tc->block_shift;
 }
 
-static void wake_do_thinp(struct multisnap_c *tc)
+static void wake_worker(struct multisnap_c *tc)
 {
 	if (!work_pending(&tc->ws))
-		queue_work(multisnap_metadata_get_workqueue(tc->mmd), &tc->ws);
+		queue_work(multisnap_metadata_get_workqueue(tc->msd), &tc->ws);
 }
 
 static struct block_device *_remap_dev(struct multisnap_c *tc)
 {
-       return tc->data_dev->bdev;
+       return tc->pool_dev->bdev;
 }
 
 static sector_t _remap_sector(struct multisnap_c *tc, sector_t sector, block_t block)
@@ -151,13 +199,8 @@ static int tc_congested(void *congested_data, int bdi_bits)
 	spin_unlock(&tc->no_space_lock);
 
 	if (!r) {
-		struct request_queue *q = bdev_get_queue(tc->data_dev->bdev);
-
+		struct request_queue *q = bdev_get_queue(tc->pool_dev->bdev);
 		r = bdi_congested(&q->backing_dev_info, bdi_bits);
-		if (!r) {
-			q = bdev_get_queue(tc->meta_dev->bdev);
-			r = bdi_congested(&q->backing_dev_info, bdi_bits);
-		}
 	}
 
 	return r;
@@ -210,7 +253,9 @@ static void do_bios(struct multisnap_c *tc, struct bio_list *bios)
 
 	while ((bio = bio_list_pop(bios))) {
 		thinp_block = _sector_to_block(tc, bio->bi_sector);
-		r = multisnap_metadata_lookup(tc->mmd, tc->thinp_id, thinp_block, 1, &pool_block);
+		r = multisnap_metadata_map(tc->msd, thinp_block,
+					   bio->bi_rw | WRITE ? WRITE : READ,
+					   1, &pool_block);
 		if (r == -ENODATA) {
 			/* don't create a new mapping for a read */
 			if (bio_data_dir(bio) == READ) {
@@ -259,7 +304,7 @@ static void do_bios(struct multisnap_c *tc, struct bio_list *bios)
 	}
 }
 
-static void do_thinp(struct work_struct *ws)
+static void do_work(struct work_struct *ws)
 {
 	int bounce_mode;
 	struct multisnap_c *tc = container_of(ws, struct multisnap_c, ws);
@@ -280,7 +325,7 @@ static void do_thinp(struct work_struct *ws)
 		do_bios(tc, &bios);
 }
 
-static void multisnap_flush(struct dm_target *ti)
+static void thin_flush(struct dm_target *ti)
 {
 	struct multisnap_c *tc = ti->private;
 
@@ -297,7 +342,7 @@ static void multisnap_flush(struct dm_target *ti)
 }
 
 /* Destroy a thinp device mapping. */
-static void multisnap_dtr(struct dm_target *ti)
+static void thin_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *tc = ti->private;
 
@@ -408,7 +453,8 @@ static int create_mmd(struct multisnap_c *tc)
  * low_water_mark: low water mark to throw a dm event for uspace to resize
  *
  */
-static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static int
+thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	sector_t block_size = 0, data_sectors;
@@ -444,7 +490,7 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	data_sectors = get_dev_size(tc->data_dev);
 	tc->data_size = _sector_to_block(tc, data_sectors);
-	INIT_WORK(&tc->ws, do_thinp);
+	INIT_WORK(&tc->ws, do_work);
 	ti->split_io = tc->block_size;
 
 	/* Set masks/shift for fast bio -> block mapping. */
@@ -464,8 +510,9 @@ err:
 }
 
 /* Map a thin provisioned device  */
-static int multisnap_map(struct dm_target *ti, struct bio *bio,
-		     union map_info *map_context)
+static int
+thin_map(struct dm_target *ti, struct bio *bio,
+	 union map_info *map_context)
 {
 	int r;
 	struct multisnap_c *tc = ti->private;
@@ -497,11 +544,12 @@ static int multisnap_map(struct dm_target *ti, struct bio *bio,
 	bio_list_add(&tc->in, bio);
 	spin_unlock(&tc->lock);
 
-	wake_do_thinp(tc);
+	wake_worker(tc);
 	return DM_MAPIO_SUBMITTED;
 }
 
-static void multisnap_presuspend(struct dm_target *ti)
+static void
+thin_presuspend(struct dm_target *ti)
 {
 	struct multisnap_c *tc = ti->private;
 
@@ -513,7 +561,8 @@ static void multisnap_presuspend(struct dm_target *ti)
 	requeue_all_bios(tc);
 }
 
-static void multisnap_postsuspend(struct dm_target *ti)
+static void
+thin_postsuspend(struct dm_target *ti)
 {
 	struct multisnap_c *tc = ti->private;
 
@@ -532,7 +581,8 @@ static void multisnap_postsuspend(struct dm_target *ti)
  * calling the resume method individually after userpace has
  * grown the data device in reaction to a table event.
  */
-static int multisnap_preresume(struct dm_target *ti)
+static int
+thin_preresume(struct dm_target *ti)
 {
 	int r;
 	block_t data_size, sb_data_size;
@@ -572,7 +622,7 @@ static int multisnap_preresume(struct dm_target *ti)
 			tc->data_size = data_size;
 			tc->triggered = 0;
 			spin_unlock(&tc->provisioned_lock);
-			wake_do_thinp(tc);
+			wake_worker(tc);
 		}
 	}
 
@@ -580,8 +630,9 @@ static int multisnap_preresume(struct dm_target *ti)
 }
 
 /* Thinp device status output method. */
-static int multisnap_status(struct dm_target *ti, status_type_t type,
-			char *result, unsigned maxlen)
+static int
+thin_status(struct dm_target *ti, status_type_t type,
+	    char *result, unsigned maxlen)
 {
 	int r;
 	ssize_t sz = 0;
@@ -622,9 +673,10 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 }
 
 /* bvec merge method. */
-static int multisnap_bvec_merge(struct dm_target *ti,
-			    struct bvec_merge_data *bvm,
-			    struct bio_vec *biovec, int max_size)
+static int
+thin_bvec_merge(struct dm_target *ti,
+		struct bvec_merge_data *bvm,
+		struct bio_vec *biovec, int max_size)
 {
 	struct multisnap_c *tc = ti->private;
 	struct request_queue *q = bdev_get_queue(_remap_dev(tc));
@@ -645,7 +697,7 @@ static int multisnap_bvec_merge(struct dm_target *ti,
 
 /* Provide io hints. */
 static void
-multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
+thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct multisnap_c *tc = ti->private;
 
@@ -655,33 +707,23 @@ multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 /* Thinp device target interface. */
 static struct target_type thin_target = {
-	.name = "thin",
-	.version = {1, 0, 0},
-	.module = THIS_MODULE,
-	.ctr = multisnap_ctr,
-	.dtr = multisnap_dtr,
-	.flush = multisnap_flush,
-	.map = multisnap_map,
-	.presuspend = multisnap_presuspend,
-	.postsuspend = multisnap_postsuspend,
-	.preresume = multisnap_preresume,
-	.status = multisnap_status,
-	.merge = multisnap_bvec_merge,
-	.io_hints = multisnap_io_hints,
+	.name =        "multisnap-thin",
+	.version =     {1, 0, 0},
+	.module =      THIS_MODULE,
+	.ctr =	       thin_ctr,
+	.dtr =	       thin_dtr,
+	.flush =       thin_flush,
+	.map =	       thin_map,
+	.presuspend =  thin_presuspend,
+	.postsuspend = thin_postsuspend,
+	.preresume =   thin_preresume,
+	.status =      thin_status,
+	.merge =       thin_bvec_merge,
+	.io_hints =    thin_io_hints,
 };
-#endif
 
 /*----------------------------------------------------------------*/
 
-/*
- * The metadata abstractions (multisnap_metadata) are separate entities from
- * the thinp device, with different lifetimes.  We need to control these
- * somehow, for instance to create a new snapshot, delete a tp/snapshot.
- *
- * For now, we're doing this by sending messages to a dummy target, that
- * represents a particular metadata device.  This decision can change at a
- * later date - I'm just doing what's easiest for now.
- */
 struct pool_context {
 	struct dm_dev *metadata_dev;
 	struct dm_dev *data_dev;
@@ -858,12 +900,12 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 }
 
 static struct target_type pool_target = {
-	.name = "multisnap-pool",
+	.name =    "multisnap-pool",
 	.version = {1, 0, 0},
-	.module = THIS_MODULE,
-	.ctr = pool_ctr,
-	.dtr = pool_dtr,
-	.map = pool_map,
+	.module =  THIS_MODULE,
+	.ctr =	   pool_ctr,
+	.dtr =	   pool_dtr,
+	.map =	   pool_map,
 	.message = pool_message,
 };
 
@@ -871,30 +913,23 @@ static struct target_type pool_target = {
 
 static int __init dm_multisnap_init(void)
 {
-	int r;
-
-#if 0
 	int r = dm_register_target(&thin_target);
 	if (r)
 		return r;
-#endif
 
 	r = dm_register_target(&pool_target);
-#if 0
 	if (r)
 		dm_unregister_target(&thin_target);
-#endif
 
 	return r;
 }
 
 static void dm_multisnap_exit(void)
 {
-//	dm_unregister_target(&thin_target);
+	dm_unregister_target(&thin_target);
 	dm_unregister_target(&pool_target);
 }
 
-/* Module hooks */
 module_init(dm_multisnap_init);
 module_exit(dm_multisnap_exit);
 
