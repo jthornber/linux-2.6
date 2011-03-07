@@ -538,14 +538,16 @@ open_device_(struct multisnap_metadata *mmd,
 	(*msd)->dev_size = __le64_to_cpu(details.dev_size);
 	(*msd)->mapped_blocks = __le64_to_cpu(details.mapped_blocks);
 	(*msd)->snapshotted_time = __le64_to_cpu(details.snapshotted_time);
-	(*msd)->dev_size = 0;	list_add(&(*msd)->list, &mmd->ms_devices);
+
+	list_add(&(*msd)->list, &mmd->ms_devices);
 
 	return 0;
 }
 
 static int
 multisnap_metadata_create_thin_(struct multisnap_metadata *mmd,
-				multisnap_dev_t dev)
+				multisnap_dev_t dev,
+				block_t dev_size)
 {
 	int r;
 	block_t dev_root;
@@ -565,13 +567,20 @@ multisnap_metadata_create_thin_(struct multisnap_metadata *mmd,
 	/* insert it into the main mapping tree */
 	value = __cpu_to_le64(dev_root);
 	r = btree_insert(&mmd->tl_info, mmd->root, &key, &value, &mmd->root);
-	if (r)
+	if (r) {
 		btree_del(&mmd->bl_info, dev_root);
+		return r;
+	}
 
 	r = open_device_(mmd, dev, 1, &msd);
 	if (r) {
-		// FIXME: finish
+#if 0
+		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+#endif
+		btree_del(&mmd->bl_info, dev_root);
+		return r;
 	}
+	msd->dev_size = dev_size;
 
 	return r;
 }
@@ -582,16 +591,17 @@ int multisnap_metadata_create_thin(struct multisnap_metadata *mmd,
 {
 	int r;
 	down_write(&mmd->root_lock);
-	r = multisnap_metadata_create_thin_(mmd, dev);
+	r = multisnap_metadata_create_thin_(mmd, dev, dev_size);
 	up_write(&mmd->root_lock);
 	return r;
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_create_thin);
 
 static int
-set_snapshotted_time_(struct multisnap_metadata *mmd,
-		      multisnap_dev_t origin,
-		      uint32_t t)
+snapshot_details_(struct multisnap_metadata *mmd,
+		  struct ms_device *snap,
+		  multisnap_dev_t origin,
+		  uint32_t t)
 {
 	int r;
 	struct ms_device *msd;
@@ -602,6 +612,10 @@ set_snapshotted_time_(struct multisnap_metadata *mmd,
 
 	msd->changed = 1;
 	msd->snapshotted_time = t;
+
+	snap->dev_size = msd->dev_size;
+	snap->mapped_blocks = msd->mapped_blocks;
+	snap->snapshotted_time = t;
 
 	return 0;
 }
@@ -647,7 +661,7 @@ multisnap_metadata_create_snap_(struct multisnap_metadata *mmd,
 #endif
 	}
 
-	r = set_snapshotted_time_(mmd, origin, mmd->time);
+	r = snapshot_details_(mmd, msd, origin, mmd->time);
 	if (r) {
 #if 0
 		btree_remove(&mmd->tl_info, mmd->root, key, &mmd->root);
@@ -814,8 +828,8 @@ map_read_(struct ms_device *msd,
  * a write lock.
  *
  * If we can't promote then we should drop the lock, take write, check the
- * mapping is the same then insert or restart.  I suspect this will still
- * be a big speedup.
+ * mapping is the same then insert or restart.  This will still be a big
+ * speedup.
  */
 static int
 map_write_(struct ms_device *msd,
@@ -836,9 +850,6 @@ map_write_(struct ms_device *msd,
 	keys[0] = msd->id;
 	keys[1] = block;
 
-	/* FIXME: it's going to kill performance always taking the write
-	 * lock
-	 */
 	down_write(&mmd->root_lock);
 	r = btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
 	if (r != 0 && r != -ENODATA)
@@ -850,7 +861,11 @@ map_write_(struct ms_device *msd,
 		*result = exception_block;
 	}
 
-	if (r == -ENODATA || snapshotted_since_(msd, exception_time))
+	if (r == -ENODATA) {
+		r = insert_(msd, block, result);
+		msd->mapped_blocks++;
+
+	} else if (snapshotted_since_(msd, exception_time))
 		r = insert_(msd, block, result);
 
 out:
@@ -878,13 +893,6 @@ multisnap_metadata_map(struct ms_device *msd,
 }
 
 EXPORT_SYMBOL_GPL(multisnap_metadata_map);
-
-struct workqueue_struct *
-multisnap_metadata_get_workqueue(struct ms_device *msd)
-{
-	return msd->mmd->wq;
-}
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_workqueue);
 
 static int
 write_changed_details_(struct multisnap_metadata *mmd)
@@ -973,219 +981,78 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_commit);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*----------------------------------------------------------------*/
-#if 0
-/*
- * Utilities for managing the device details list.  The |root_lock| needs
- * to be held around all of these functions.
- */
-static struct device_detail *find_dd(struct multisnap_metadata *tpm,
-				     multisnap_dev_t dev)
-{
-	struct device_detail *dd;
-
-	list_for_each_entry (dd, &tpm->device_details, list)
-		if (dd->dev == dev)
-			return dd;
-
-	return NULL;
-}
-
-static int insert_dd(struct multisnap_metadata *tpm,
-		     multisnap_dev_t dev,
-		     uint32_t provisioned_count)
-{
-	/* FIXME: use a mempool?  since this is on the io path, alternative is to
-	   allocate space for the details when the individual device targets are
-	   created (where we may block). */
-	struct device_detail *dd = kmalloc(sizeof(*dd), GFP_KERNEL);
-	if (!dd)
-		return -ENOMEM;
-
-	dd->dev = dev;
-	dd->changed = 1;
-	dd->provisioned_count = provisioned_count;
-	list_add(&dd->list, &tpm->device_details);
-	return 0;
-}
-
-static int add_dd(struct multisnap_metadata *tpm,
-		  multisnap_dev_t dev)
-{
-	int r;
-	uint64_t key = dev;
-	__le64 count;
-	struct device_detail *dd = find_dd(tpm, dev);
-	if (dd)
-		/* already present */
-		return 0;
-
-	printk(KERN_ALERT "using devices_root = %u", (unsigned) tpm->devices_root);
-	r = btree_lookup_equal(&tpm->devices_info, tpm->devices_root, &key, &count);
-	printk(KERN_ALERT "btree_lookup completed");
-	switch (r) {
-	case 0:
-		return insert_dd(tpm, dev, __le64_to_cpu(count));
-
-	case -ENODATA:
-		return insert_dd(tpm, dev, 0);
-
-	default:
-		return r;
-	}
-}
-
-static void del_dd(struct multisnap_metadata *tpm,
-		   multisnap_dev_t dev)
-{
-	struct device_detail *dd = find_dd(tpm, dev);
-	if (dd) {
-		list_del(&dd->list);
-		kfree(dd);
-	}
-}
-
-static int get_provisioned_count(struct multisnap_metadata *tpm,
-				 multisnap_dev_t dev,
-				 uint64_t *result)
-{
-	struct device_detail *dd = find_dd(tpm, dev);
-	if (dd) {
-		*result = dd->provisioned_count;
-		return 0;
-	}
-
-	return -ENOMEM;
-}
-
-static int inc_provisioned_count(struct multisnap_metadata *tpm,
-				 multisnap_dev_t dev)
-{
-	struct device_detail *dd = find_dd(tpm, dev);
-	if (dd) {
-		dd->changed = 1;
-		dd->provisioned_count++;
-		return 0;
-	}
-
-	return -ENOMEM;
-}
-
 int
-multisnap_metadata_get_data_block_size(struct multisnap_metadata *tpm,
-				       multisnap_dev_t dev,
-				       sector_t *result)
-{
-	down_read(&tpm->root_lock);
-	{
-		struct superblock *sb = (struct superblock *) block_data(tpm->sblock);
-		*result = __le64_to_cpu(sb->data_block_size);
-	}
-	up_read(&tpm->root_lock);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_block_size);
-
-int
-multisnap_metadata_get_provisioned_blocks(struct multisnap_metadata *tpm,
-					  multisnap_dev_t dev,
-					  block_t *result)
+multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, block_t *result)
 {
 	int r;
 
-	down_read(&tpm->root_lock);
-	r = get_provisioned_count(tpm, dev, result);
-	up_read(&tpm->root_lock);
-	return r;
-}
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_provisioned_blocks);
+	down_read(&mmd->root_lock);
+	/* FIXME: this is the total number of blocks, not the free count.
+	 * We need to extend the space map abstraction to provide this.
+	 */
+	r = sm_get_nr_blocks(mmd->data_sm, result);
+	up_read(&mmd->root_lock);
 
-int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *tpm, block_t *result)
-{
-	int r;
-	struct superblock *s;
-	block_t nr_free;
-
-	down_read(&tpm->root_lock);
-	BUG_ON(!tpm->sblock);
-	s = (struct superblock *) block_data(tpm->sblock);
-	r = sm_get_free(tpm->data_sm, &nr_free);
-	if (!r)
-		*result = nr_free;
-	up_read(&tpm->root_lock);
 	return r;
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_get_unprovisioned_blocks);
 
 int
-multisnap_metadata_get_data_dev_size(struct multisnap_metadata *tpm,
-				     multisnap_dev_t dev,
+multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd,
+				       sector_t *result)
+{
+	struct superblock *sb;
+
+	down_read(&mmd->root_lock);
+	sb = (struct superblock *) block_data(mmd->sblock);
+	*result = __le64_to_cpu(sb->data_block_size);
+	up_read(&mmd->root_lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_block_size);
+
+int
+multisnap_metadata_get_data_dev_size(struct ms_device *msd,
 				     block_t *result)
 {
-	struct device_detail *dd;
-
-	down_read(&tpm->root_lock);
-	dd = find_dd(tpm, dev);
-	if (dd)
-		*result = dd->dev_size;
-	up_read(&tpm->root_lock);
-	return dd ? 0 : -ENOMEM;
+	struct multisnap_metadata *mmd = msd->mmd;
+	down_read(&mmd->root_lock);
+	*result = msd->dev_size;
+	up_read(&mmd->root_lock);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_dev_size);
 
 int
-multisnap_metadata_resize_data_dev(struct multisnap_metadata *tpm,
-				   multisnap_dev_t dev,
-				   block_t new_size)
+multisnap_metadata_get_mapped_count(struct ms_device *msd, block_t *result)
 {
-#if 0
-	block_t b;
-	down_write(&tpm->root_lock);
-	{
-		struct superblock *sb = (struct superblock *) block_data(tpm->sblock);
+	struct multisnap_metadata *mmd = msd->mmd;
+	down_read(&mmd->root_lock);
+	*result = msd->mapped_blocks;
+	up_read(&mmd->root_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(multisnap_metadata_get_mapped_count);
 
-		b = __le64_to_cpu(sb->first_free_block);
-		if (b > new_size) {
-			/* this would truncate mapped blocks */
-			up_write(&tpm->root_lock);
-			return -ENOSPC;
-		}
-
-		sb->data_nr_blocks = __cpu_to_le64(new_size);
-	}
-	up_write(&tpm->root_lock);
-#endif
+int
+multisnap_metadata_resize_data_dev(struct ms_device *msd, block_t new_size)
+{
+	struct multisnap_metadata *mmd = msd->mmd;
+	down_write(&mmd->root_lock);
+	msd->dev_size = new_size;
+	msd->changed = 1;
+	up_write(&mmd->root_lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_resize_data_dev);
-#endif
 
+struct workqueue_struct *
+multisnap_metadata_get_workqueue(struct ms_device *msd)
+{
+	return msd->mmd->wq;
+}
+EXPORT_SYMBOL_GPL(multisnap_metadata_get_workqueue);
 
 static int multisnap_metadata_init(void)
 {
