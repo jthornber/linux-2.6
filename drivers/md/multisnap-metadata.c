@@ -770,24 +770,20 @@ snapshotted_since_(struct ms_device *msd,
 	return msd->snapshotted_time > time;
 }
 
-int
-multisnap_metadata_map(struct ms_device *msd,
-		       block_t block,
-		       int io_direction,
-		       int can_block,
-		       block_t *result)
+static int
+map_read_(struct ms_device *msd,
+	  block_t block,
+	  int can_block,
+	  block_t *result)
 {
 	int r;
 	uint64_t keys[2], block_time = 0;
-	__le64 value, value2;
+	__le64 value;
 	struct multisnap_metadata *mmd = msd->mmd;
-	block_t exception_block;
-	uint32_t exception_time;
 
 	keys[0] = msd->id;
 	keys[1] = block;
 
-restart:
 	if (can_block) {
 		down_read(&mmd->root_lock);
 		r = btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
@@ -804,38 +800,83 @@ restart:
 	} else
 		return -EWOULDBLOCK;
 
-	if (r && r != -ENODATA)
-		return r;
-
-	unpack_block_time(block_time, &exception_block, &exception_time);
-	*result = exception_block;
-
-	if (io_direction == WRITE && (r == -ENODATA || snapshotted_since_(msd, exception_time))) {
-		if (!can_block)
-			return -EWOULDBLOCK;
-
-		down_write(&mmd->root_lock);
-
-#if 0
-		/*
-		 * FIXME: really we should upgrade the read lock to a write
-		 * lock here to avoid the duplicate lookup.
-		 */
-		r = btree_lookup_equal(&mmd->info, mmd->root, keys, &value2);
-		if (!r && value2 != value) {
-			/* something's changed, start again */
-			up_write(&mmd->root_lock);
-			printk(KERN_ALERT "hit by race!");
-			goto restart;
-		}
-#endif
-
-		r = insert_(msd, block, result);
-		up_write(&mmd->root_lock);
+	if (!r) {
+		block_t exception_block;
+		uint32_t exception_time;
+		unpack_block_time(block_time, &exception_block, &exception_time);
+		*result = exception_block;
 	}
 
 	return r;
 }
+
+/* FIXME: Performance would be a lot better if we promote the read lock to
+ * a write lock.
+ *
+ * If we can't promote then we should drop the lock, take write, check the
+ * mapping is the same then insert or restart.  I suspect this will still
+ * be a big speedup.
+ */
+static int
+map_write_(struct ms_device *msd,
+	   block_t block,
+	   int can_block,
+	   block_t *result)
+{
+	int r;
+	uint64_t keys[2], block_time = 0;
+	__le64 value;
+	struct multisnap_metadata *mmd = msd->mmd;
+	block_t exception_block;
+	uint32_t exception_time;
+
+	if (!can_block)
+		return -EWOULDBLOCK;
+
+	keys[0] = msd->id;
+	keys[1] = block;
+
+	/* FIXME: it's going to kill performance always taking the write
+	 * lock
+	 */
+	down_write(&mmd->root_lock);
+	r = btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
+	if (r != 0 && r != -ENODATA)
+		goto out;
+
+	if (!r) {
+		block_time = __le64_to_cpu(value);
+		unpack_block_time(block_time, &exception_block, &exception_time);
+		*result = exception_block;
+	}
+
+	if (r == -ENODATA || snapshotted_since_(msd, exception_time))
+		r = insert_(msd, block, result);
+
+out:
+	up_write(&mmd->root_lock);
+	return r;
+}
+
+int
+multisnap_metadata_map(struct ms_device *msd,
+		       block_t block,
+		       int io_direction,
+		       int can_block,
+		       block_t *result)
+{
+	switch (io_direction) {
+	case READ:
+		return map_read_(msd, block, can_block, result);
+
+	case WRITE:
+		return map_write_(msd, block, can_block, result);
+
+	default:
+		return -EINVAL;
+	}
+}
+
 EXPORT_SYMBOL_GPL(multisnap_metadata_map);
 
 struct workqueue_struct *
