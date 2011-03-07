@@ -120,7 +120,7 @@ int tm_create_with_sm(struct block_manager *bm,
 int tm_open_with_sm(struct block_manager *bm,
 		    block_t superblock,
 		    size_t root_offset,
-		    size_t root_len,
+		    size_t root_max_len,
 		    struct transaction_manager **tm,
 		    struct space_map **sm,
 		    struct block **sb);

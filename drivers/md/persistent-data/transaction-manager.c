@@ -378,7 +378,7 @@ EXPORT_SYMBOL_GPL(tm_create_with_sm);
 int tm_open_with_sm(struct block_manager *bm,
 		    block_t superblock,
 		    size_t root_offset,
-		    size_t root_len,
+		    size_t root_max_len,
 		    struct transaction_manager **tm,
 		    struct space_map **sm,
 		    struct block **sb)
@@ -422,7 +422,7 @@ int tm_open_with_sm(struct block_manager *bm,
 		return r;
 	}
 
-	disk = sm_disk_open(*tm, block_data(*sb) + root_offset, root_len);
+	disk = sm_disk_open(*tm, block_data(*sb) + root_offset, root_max_len);
 	if (!disk) {
 		printk(KERN_ALERT "couldn't create disk space map");
 		bm_unlock(*sb);
