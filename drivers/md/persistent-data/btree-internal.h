@@ -39,8 +39,7 @@ struct node {
 
 /* FIXME: enable close packing for on disk structures */
 
-
-void inc_children(struct btree_info *info, struct node *n, count_adjust_fn fn);
+void inc_children(struct transaction_manager *tm, struct node *n, struct btree_value_type *vt);
 
 static inline struct node *to_node(struct block *b)
 {
@@ -52,7 +51,7 @@ static inline struct node *to_node(struct block *b)
 
 // FIXME: I don't like the bn_ prefix for these, refers to an old struct block_node
 int bn_read_lock(struct btree_info *info, block_t b, struct block **result);
-int bn_shadow(struct btree_info *info, block_t orig, count_adjust_fn fn,
+int bn_shadow(struct btree_info *info, block_t orig, struct btree_value_type *vt,
 	      struct block **result, int *inc);
 int bn_new_block(struct btree_info *info, struct block **result);
 int bn_unlock(struct btree_info *info, struct block *b);
@@ -86,7 +85,7 @@ struct shadow_spine {
 
 void init_shadow_spine(struct shadow_spine *s, struct btree_info *info);
 int exit_shadow_spine(struct shadow_spine *s);
-int shadow_step(struct shadow_spine *s, block_t b, count_adjust_fn fn, int *inc);
+int shadow_step(struct shadow_spine *s, block_t b, struct btree_value_type *vt, int *inc);
 struct block *shadow_current(struct shadow_spine *s);
 struct block *shadow_parent(struct shadow_spine *s);
 int shadow_root(struct shadow_spine *s);
