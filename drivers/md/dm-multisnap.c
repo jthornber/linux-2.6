@@ -43,7 +43,7 @@ static const char version[] = "1.0";
 #define	DAEMON		DM_MSG_PREFIX	"d"
 
 /*----------------------------------------------------------------*/
-
+#if 0
 /* A little global cache of multisnap metadata devs */
 struct multisnap_metadata;
 
@@ -93,7 +93,7 @@ mmd_table_lookup(struct block_device *bdev)
 
 	return NULL;
 }
-
+#endif
 /*----------------------------------------------------------------*/
 
 /* Minimum data device block size in sectors. */
@@ -104,6 +104,7 @@ mmd_table_lookup(struct block_device *bdev)
 struct multisnap_c {
 	struct dm_target *ti;
 	struct dm_dev *pool_dev;
+	struct multisnap_metadata *mmd;
 	struct ms_device *msd;
 
 	sector_t block_size;

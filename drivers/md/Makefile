@@ -38,7 +38,7 @@ obj-$(CONFIG_DM_MIRROR)		+= dm-mirror.o dm-log.o dm-region-hash.o
 obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
-obj-$(CONFIG_DM_MULTISNAP)	+= dm-multisnap.o multisnap-metadata.o
+obj-$(CONFIG_DM_MULTISNAP)	+= multisnap-metadata.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o
