@@ -650,7 +650,9 @@ retry:
 	if (b) {
 		switch (how) {
 		case READ:
-			if (b->write_lock_pending || (b->state != BS_CLEAN && b->state != BS_DIRTY && b->state != BS_READ_LOCKED)) {
+			if (b->write_lock_pending || (b->state != BS_CLEAN &&
+						      b->state != BS_DIRTY &&
+						      b->state != BS_READ_LOCKED)) {
 				if (!can_block) {
 					spin_unlock_irqrestore(&bm->lock, flags);
 					return -EWOULDBLOCK;
