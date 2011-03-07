@@ -1069,6 +1069,7 @@ module_exit(multisnap_metadata_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Joe Thornber");
-MODULE_DESCRIPTION("Metadata manager for thin provisioning dm target");
+MODULE_DESCRIPTION("Metadata manager for shared snapshots "
+		   "and thin provisioning dm targets");
 
 /*----------------------------------------------------------------*/
