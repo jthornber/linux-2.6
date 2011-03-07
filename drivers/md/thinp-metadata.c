@@ -109,9 +109,10 @@ alloc_(struct block_device *bdev, sector_t bdev_size)
 
 	tpm->info.tm = tm;
 	tpm->info.levels = 1;
-	tpm->info.value_size = sizeof(block_t);
-	tpm->info.adjust = value_is_meaningless; /* because the blocks are held in a separate device */
-	tpm->info.eq = NULL;
+	tpm->info.value_type.size = sizeof(block_t);
+	tpm->info.value_type.copy = NULL;
+	tpm->info.value_type.del = NULL;
+	tpm->info.value_type.equal = NULL;
 
 	memcpy(&tpm->nb_info, &tpm->info, sizeof(tpm->nb_info));
 	tpm->nb_info.tm = tpm->nb_tm;
@@ -254,9 +255,10 @@ thinp_metadata_open(struct block_device *bdev, sector_t bdev_size)
 
 	tpm->info.tm = tm;
 	tpm->info.levels = 1;
-	tpm->info.value_size = sizeof(block_t);
-	tpm->info.adjust = value_is_meaningless; /* because the blocks are held in a separate device */
-	tpm->info.eq = NULL;
+	tpm->info.value_type.size = sizeof(block_t);
+	tpm->info.value_type.copy = NULL;
+	tpm->info.value_type.del = NULL;
+	tpm->info.value_type.equal = NULL;
 
 	memcpy(&tpm->nb_info, &tpm->info, sizeof(tpm->nb_info));
 	tpm->nb_info.tm = tpm->nb_tm;
