@@ -439,8 +439,11 @@ static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
 
-	if (mc->msd)
+	if (mc->msd) {
 		multisnap_metadata_close_device(mc->msd);
+		printk(KERN_ALERT "msd closed");
+	}
+
 	if (mc->pool_dev)
 		dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
@@ -496,6 +499,7 @@ multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	r = multisnap_metadata_open_device(mc->mmd, dev_id, &mc->msd);
+	printk(KERN_ALERT "opened msd");
 	if (r) {
 		ti->error = "Couldn't open multisnap internal device";
 		multisnap_dtr(ti);
@@ -577,15 +581,6 @@ multisnap_presuspend(struct dm_target *ti)
 
 	multisnap_flush(ti);
 	requeue_all_bios(mc);
-}
-
-static void
-multisnap_postsuspend(struct dm_target *ti)
-{
-	struct multisnap_c *mc = ti->private;
-
-	multisnap_metadata_close(mc->mmd);
-	mc->mmd = NULL;
 }
 
 /*
@@ -695,7 +690,6 @@ static struct target_type multisnap_target = {
 	.flush =       multisnap_flush,
 	.map =	       multisnap_map,
 	.presuspend =  multisnap_presuspend,
-	.postsuspend = multisnap_postsuspend,
 	.preresume =   multisnap_preresume,
 	.status =      multisnap_status,
 	.merge =       multisnap_bvec_merge,
