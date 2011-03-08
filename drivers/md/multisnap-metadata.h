@@ -15,10 +15,7 @@ struct multisnap_metadata;
 typedef uint64_t multisnap_dev_t;
 
 /*
- * Creates a new, empty metadata.
- *
- * bdev - device that the metadata is stored on
- * bdev_size - amount of the device, in sectors, to use for metadata.
+ * Reopens or creates a new, empty metadata volume.
  */
 struct multisnap_metadata *multisnap_metadata_open(struct block_device *bdev,
 						   sector_t data_block_size,
@@ -70,11 +67,19 @@ int multisnap_metadata_close_device(struct ms_device *msd);
 /*
  * |io_direction| must be one of READ or WRITE
  * returns:
+ *
  *   0 on success
  *   -EWOULDBLOCK if it would block.
  *   -ENOSPC if out of metadata or data space
  *   -ENODATA no mapping present (only occurs for READs)
  *   + other error codes
+ *
+ * The |can_block| parameter has become overloaded.  We should separate
+ * into two flags.  Currently it means:
+ *
+ *   0 - This call will return -EWOULDBLOCK if it was going to block, also
+ *       it wont modify the mapping.
+ *  !0 - Can block, can modify.
  *
  * May be called concurrently with insert, commit.
  */

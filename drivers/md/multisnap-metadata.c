@@ -55,7 +55,6 @@ struct device_details {
 } __attribute__ ((packed));
 
 struct multisnap_metadata {
-	atomic_t ref_count;
 	struct hlist_node hash;
 
 	struct block_device *bdev;
@@ -105,58 +104,6 @@ struct ms_device {
 	uint64_t mapped_blocks;
 	uint32_t snapshotted_time;
 };
-
-/*----------------------------------------------------------------*/
-
-/* A little global cache of multisnap metadata devs */
-struct multisnap_metadata;
-
-/* FIXME: add a spin lock round the table */
-#define MMD_TABLE_SIZE 1024
-static struct hlist_head mmd_table_[MMD_TABLE_SIZE];
-
-static void
-mmd_table_init(void)
-{
-	unsigned i;
-	for (i = 0; i < MMD_TABLE_SIZE; i++)
-		INIT_HLIST_HEAD(mmd_table_ + i);
-}
-
-static unsigned
-hash_bdev(struct block_device *bdev)
-{
-	/* FIXME: finish */
-	/* bdev -> dev_t -> unsigned */
-	return 0;
-}
-
-static void
-mmd_table_insert(struct multisnap_metadata *mmd)
-{
-	unsigned bucket = hash_bdev(mmd->bdev);
-	hlist_add_head(&mmd->hash, mmd_table_ + bucket);
-}
-
-static void
-mmd_table_remove(struct multisnap_metadata *mmd)
-{
-	hlist_del(&mmd->hash);
-}
-
-static struct multisnap_metadata *
-mmd_table_lookup(struct block_device *bdev)
-{
-	unsigned bucket = hash_bdev(bdev);
-	struct multisnap_metadata *mmd;
-	struct hlist_node *n;
-
-	hlist_for_each_entry (mmd, n, mmd_table_ + bucket, hash)
-		if (mmd->bdev == bdev)
-			return mmd;
-
-	return NULL;
-}
 
 /*----------------------------------------------------------------*/
 
@@ -347,10 +294,10 @@ multisnap_metadata_begin(struct multisnap_metadata *mmd)
 	return 0;
 }
 
-static struct multisnap_metadata *
-multisnap_metadata_open_(struct block_device *bdev,
-			 sector_t data_block_size,
-			 block_t data_dev_size)
+struct multisnap_metadata *
+multisnap_metadata_open(struct block_device *bdev,
+			sector_t data_block_size,
+			block_t data_dev_size)
 {
 	int r;
 	struct superblock *sb;
@@ -424,31 +371,6 @@ bad:
 	multisnap_metadata_close(mmd);
 	return NULL;
 }
-
-struct multisnap_metadata *
-multisnap_metadata_open(struct block_device *bdev,
-			sector_t data_block_size,
-			block_t data_dev_size)
-{
-	struct multisnap_metadata *mmd;
-
-	mmd = mmd_table_lookup(bdev);
-	if (mmd)
-		atomic_inc(&mmd->ref_count);
-	else {
-		mmd = multisnap_metadata_open_(bdev, data_block_size, data_dev_size);
-		if (!mmd) {
-			printk(KERN_ALERT "couldn't open new multisnap metadata device");
-			return NULL;
-		}
-
-		atomic_set(&mmd->ref_count, 1);
-		mmd_table_insert(mmd);
-	}
-
-	BUG_ON(!mmd->sblock);
-	return mmd;
-}
 EXPORT_SYMBOL_GPL(multisnap_metadata_open);
 
 int
@@ -474,23 +396,18 @@ multisnap_metadata_close(struct multisnap_metadata *mmd)
 		return -EBUSY;
 	}
 
-	if (atomic_dec_and_test(&mmd->ref_count)) {
-		printk(KERN_ALERT "destroying mmd");
-		mmd_table_remove(mmd);
+	if (mmd->sblock)
+		multisnap_metadata_commit(mmd);
 
-		if (mmd->sblock)
-			multisnap_metadata_commit(mmd);
+	tm_destroy(mmd->tm);
+	tm_destroy(mmd->nb_tm);
+	block_manager_destroy(mmd->bm);
+	sm_destroy(mmd->metadata_sm);
 
-		tm_destroy(mmd->tm);
-		tm_destroy(mmd->nb_tm);
-		block_manager_destroy(mmd->bm);
-		sm_destroy(mmd->metadata_sm);
+	if (mmd->wq)
+		destroy_workqueue(mmd->wq);
 
-		if (mmd->wq)
-			destroy_workqueue(mmd->wq);
-
-		kfree(mmd);
-	}
+	kfree(mmd);
 
 	return 0;
 }
@@ -1053,23 +970,5 @@ multisnap_metadata_get_workqueue(struct ms_device *msd)
 	return msd->mmd->wq;
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_get_workqueue);
-
-static int multisnap_metadata_init(void)
-{
-	mmd_table_init();
-	return 0;
-}
-
-static void multisnap_metadata_exit(void)
-{
-}
-
-module_init(multisnap_metadata_init);
-module_exit(multisnap_metadata_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Joe Thornber");
-MODULE_DESCRIPTION("Metadata manager for shared snapshots "
-		   "and thin provisioning dm targets");
 
 /*----------------------------------------------------------------*/
