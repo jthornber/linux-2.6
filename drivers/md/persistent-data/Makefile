@@ -8,4 +8,5 @@ persistent-data-objs := \
 	space-map-dummy.o \
 	transaction-manager.o \
 	btree.o \
+	btree-remove.o \
 	btree-spine.o
