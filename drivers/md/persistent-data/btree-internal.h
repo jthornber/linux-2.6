@@ -93,7 +93,7 @@ int shadow_root(struct shadow_spine *s);
 /*
  * Some inlines.
  */
-static inline uint64_t *key_ptr(struct node *n, uint32_t index)
+static inline __le64 *key_ptr(struct node *n, uint32_t index)
 {
 	return n->keys + index;
 }
@@ -114,6 +114,10 @@ static inline uint64_t value64(struct node *n, uint32_t index)
 	__le64 *values = value_base(n);
 	return __le64_to_cpu(values[index]);
 }
+
+/* searching for a key within a single node */
+int lower_bound(struct node *n, uint64_t key);
+int upper_bound(struct node *n, uint64_t key);
 
 /*
  * Exported for testing.

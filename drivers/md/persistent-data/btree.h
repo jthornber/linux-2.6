@@ -114,6 +114,7 @@ int btree_insert(struct btree_info *info,
  * subtrees represent a separate entity, like a snapshot map, so this is
  * correct behaviour.
  * O(ln(n)).
+ * Returns ENODATA if the key isn't present.
  */
 int btree_remove(struct btree_info *info,
 		 block_t root, uint64_t *keys,

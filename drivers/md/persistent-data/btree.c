@@ -36,12 +36,12 @@ static int bsearch(struct node *n, uint64_t key, int want_hi)
 	return want_hi ? hi : lo;
 }
 
-static int lower_bound(struct node *n, uint64_t key)
+int lower_bound(struct node *n, uint64_t key)
 {
 	return bsearch(n, key, 0);
 }
 
-static int upper_bound(struct node *n, uint64_t key)
+int upper_bound(struct node *n, uint64_t key)
 {
 	return bsearch(n, key, 1);
 }
@@ -75,17 +75,18 @@ void insert_at(size_t value_size,
 
 /*----------------------------------------------------------------*/
 
+/*
+ * We want 3n entries (for some n).  This works more nicely for repeated
+ * insert remove loops than (2n + 1).
+ */
 uint32_t calc_max_entries(size_t value_size, size_t block_size)
 {
-	uint32_t n;
+	uint32_t total, n;
 	size_t elt_size = sizeof(uint64_t) + value_size; /* key + value */
 	block_size -= sizeof(struct node_header);
-	n = block_size / elt_size;
-
-	/* we want an odd number of entries */
-	if (n % 2 == 0)
-		--n;
-	return n;
+	total = block_size / elt_size;
+	n = total / 3;		/* rounds down */
+	return 3 * n;
 }
 
 int btree_empty(struct btree_info *info, block_t *root)
@@ -593,7 +594,7 @@ static int btree_insert_raw(struct shadow_spine *s,
 	struct node *node;
 
 	for (;;) {
-		r = shadow_step(s, root, vt, &inc);
+		r = shadow_step(s, root, vt, &inc); /* FIXME: why is @inc never looked at? */
 		if (r < 0) {
 			/* FIXME: unpick any allocations */
 			return r;
@@ -610,6 +611,12 @@ static int btree_insert_raw(struct shadow_spine *s,
 
 		BUG_ON(!shadow_current(s));
 		node = to_node(shadow_current(s));
+
+#if 0
+		/* FIXME: put this in */
+		if (inc)
+			inc_children(info->tm, node, &info->value_type);
+#endif
 
 		if (node->header.nr_entries == node->header.max_entries) {
 			if (top)
