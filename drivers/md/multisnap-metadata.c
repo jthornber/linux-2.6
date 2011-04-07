@@ -752,7 +752,7 @@ static int
 map_write_(struct ms_device *msd,
 	   block_t block,
 	   int can_block,
-	   block_t *result)
+	   struct multisnap_map_result *result)
 {
 	int r;
 	uint64_t keys[2], block_time = 0;
@@ -775,15 +775,22 @@ map_write_(struct ms_device *msd,
 	if (!r) {
 		block_time = __le64_to_cpu(value);
 		unpack_block_time(block_time, &exception_block, &exception_time);
-		*result = exception_block;
 	}
 
 	if (r == -ENODATA) {
-		r = insert_(msd, block, result);
+		r = insert_(msd, block, &result->dest);
+		result->need_copy = 0;
 		msd->mapped_blocks++;
 
-	} else if (snapshotted_since_(msd, exception_time))
-		r = insert_(msd, block, result);
+	} else if (snapshotted_since_(msd, exception_time)) {
+		r = insert_(msd, block, &result->dest);
+		result->need_copy = 1;
+		result->clone = exception_block;
+
+	} else {
+		result->dest = exception_block;
+		result->need_copy = 0;
+	}
 
 out:
 	up_write(&mmd->root_lock);
@@ -795,11 +802,12 @@ multisnap_metadata_map(struct ms_device *msd,
 		       block_t block,
 		       int io_direction,
 		       int can_block,
-		       block_t *result)
+		       struct multisnap_map_result *result)
 {
 	switch (io_direction) {
 	case READ:
-		return map_read_(msd, block, can_block, result);
+		result->need_copy = 0;
+		return map_read_(msd, block, can_block, &result->dest);
 
 	case WRITE:
 		return map_write_(msd, block, can_block, result);

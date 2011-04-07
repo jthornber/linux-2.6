@@ -83,11 +83,25 @@ int multisnap_metadata_close_device(struct ms_device *msd);
  *
  * May be called concurrently with insert, commit.
  */
+struct multisnap_map_result {
+	block_t dest;		/* map to this block */
+
+	/*
+	 * If @need_copy is !0, then the block has not been initialised.  You
+	 * should ensure that you either:
+	 *
+	 * - write to the whole block
+	 * - overwrite the contents of @dest with @clone
+	 */
+	int need_copy;
+	block_t clone;
+};
+
 int multisnap_metadata_map(struct ms_device *msd,
 			   block_t block,
 			   int io_direction,
 			   int can_block,
-			   block_t *result);
+			   struct multisnap_map_result *result);
 
 int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, block_t *result);
 int multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd, sector_t *result);
