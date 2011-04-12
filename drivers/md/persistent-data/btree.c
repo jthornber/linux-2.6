@@ -240,6 +240,7 @@ bad:
 	/* what happens if we've deleted half a tree? */
 	return -1;
 }
+EXPORT_SYMBOL_GPL(btree_del);
 
 /*----------------------------------------------------------------*/
 
