@@ -741,12 +741,27 @@ map_read_(struct ms_device *msd,
 	return r;
 }
 
+/*
+ * This cannot fail, but may block.  Expects lock to be already held.
+ */
+static void lock_data_block_(struct ms_device *msd,
+			     block_t b)
+{
+	/*
+	 * We have a fixed sized pool of
+	 */
+	// FIXME: finish
+}
+
 /* FIXME: Performance would be a lot better if we promote the read lock to
  * a write lock.
  *
  * If we can't promote then we should drop the lock, take write, check the
  * mapping is the same then insert or restart.  This will still be a big
  * speedup.
+ *
+ * Also we can allow _one_ write to proceed concurrently with many readers.
+ * So we should invent a new lock type rather than use a straight rw lock.
  */
 static int
 map_write_(struct ms_device *msd,
@@ -785,7 +800,8 @@ map_write_(struct ms_device *msd,
 	} else if (snapshotted_since_(msd, exception_time)) {
 		r = insert_(msd, block, &result->dest);
 		result->need_copy = 1;
-		result->clone = exception_block;
+		result->origin = exception_block;
+		lock_data_block_(msd, exception_block);
 
 	} else {
 		result->dest = exception_block;
@@ -810,14 +826,21 @@ multisnap_metadata_map(struct ms_device *msd,
 		return map_read_(msd, block, can_block, &result->dest);
 
 	case WRITE:
-		return map_write_(msd, block, can_block, result);
+		map_write_(msd, block, can_block, result);
 
 	default:
 		return -EINVAL;
 	}
 }
-
 EXPORT_SYMBOL_GPL(multisnap_metadata_map);
+
+int multisnap_metadata_complete_copy(struct ms_device *msd,
+				     block_t origin)
+{
+	// FIXME: finish
+	return 0;
+}
+EXPORT_SYMBOL_GPL(multisnap_metadata_complete_copy);
 
 static int
 write_changed_details_(struct multisnap_metadata *mmd)
@@ -855,6 +878,8 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 {
 	int r;
 	size_t len;
+
+	/* FIXME: ensure no copying is in pending */
 
 	down_write(&mmd->root_lock);
 	r = write_changed_details_(mmd);

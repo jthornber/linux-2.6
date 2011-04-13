@@ -29,7 +29,12 @@ int multisnap_metadata_create_thin(struct multisnap_metadata *mmd,
 				   multisnap_dev_t dev,
 				   block_t dev_size);
 
-/* an internal snapshot */
+/*
+ * An internal snapshot.
+ *
+ * You can only snapshot a quiesced origin.  i.e. one that is either
+ * suspended or not instanced at all.
+ */
 int multisnap_metadata_create_snap(struct multisnap_metadata *mmd,
 				   multisnap_dev_t dev,
 				   multisnap_dev_t origin);
@@ -46,7 +51,8 @@ int multisnap_metadata_delete(struct multisnap_metadata *mmd,
  * Commits _all_ metadata changes: device creation, deletion, mapping
  * updates.
  *
- * May be called concurrently with lookup.
+ * This may block until pending block copying is complete (see comment for
+ * mm_map).
  */
 int multisnap_metadata_commit(struct multisnap_metadata *mmd);
 
@@ -63,6 +69,42 @@ int multisnap_metadata_open_device(struct multisnap_metadata *mmd,
 				   struct ms_device **msd);
 
 int multisnap_metadata_close_device(struct ms_device *msd);
+
+enum multisnap_map_code {
+	/* A simple mapping, on you go */
+	MS_MAPPED,
+
+	/* The client must perform the specified copy operation before
+	 * allowing the remapped io to continue.  Remember to tell the
+	 * multisnap metadata that the copy is complete *before* continuing
+	 * with the io.
+	 */
+	MS_NEED_COPY,
+
+	/* This io may not proceed at this time.  Generally because it
+	 * would change a block that is currently being copied.
+	 *
+	 * FIXME: How do we know when we can proceed?  Introduce a
+	 * deferred_io_set abstraction?  It needs some way of removing
+	 * items for quiescing.
+	 */
+	MS_DEFERRED
+};
+
+struct multisnap_map_result {
+	int need_copy;
+
+	block_t dest;		/* map to this block */
+
+	/*
+	 * If @need_copy is !0, then the block has not been initialised.  You
+	 * should ensure that you either:
+	 *
+	 * - write to the whole block
+	 * - overwrite the contents of @dest with @clone
+	 */
+	block_t origin;
+};
 
 /*
  * |io_direction| must be one of READ or WRITE
@@ -81,27 +123,22 @@ int multisnap_metadata_close_device(struct ms_device *msd);
  *       it wont modify the mapping.
  *  !0 - Can block, can modify.
  *
- * May be called concurrently with insert, commit.
+ * If a copy is needed, then any further WRITE that maps to the @origin or
+ * @dest will block until mm_complete_copy() is called.  READs will
+ * continue to be mapped to @origin, until after mm_complete_copy() which
+ * updates the metadata.
  */
-struct multisnap_map_result {
-	block_t dest;		/* map to this block */
-
-	/*
-	 * If @need_copy is !0, then the block has not been initialised.  You
-	 * should ensure that you either:
-	 *
-	 * - write to the whole block
-	 * - overwrite the contents of @dest with @clone
-	 */
-	int need_copy;
-	block_t clone;
-};
-
 int multisnap_metadata_map(struct ms_device *msd,
 			   block_t block,
 			   int io_direction,
 			   int can_block,
 			   struct multisnap_map_result *result);
+
+/*
+ * On disk metadata is not updated until this method is called.
+ */
+int multisnap_metadata_complete_copy(struct ms_device *msd,
+				     block_t origin);
 
 int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, block_t *result);
 int multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd, sector_t *result);

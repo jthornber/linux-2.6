@@ -342,17 +342,46 @@ static void set_congestion_fn(struct multisnap_c *mc)
 	bdi->congested_fn = is_congested;
 	bdi->congested_data = mc;
 }
+#if 0
+static int copy_complete(int err, void *context1, void *context2)
+{
+	/* FIXME: what do we do if there's an io error? */
+	
+}
 
+static int do_copy_on_write(struct multisnap_c *mc,
+			    struct multisnap_map_result *mapping,
+			    struct bio *remapped_bio)
+{
+	/*
+	 * There's two approaches to this:
+	 *
+	 * i) copy the parts of the block before and after the bio.  Hook
+	 * the bio, and tell the metadata that the copying is complete when
+	 * all three components have completed.
+	 *
+	 * ii) Copy the complete block, when this is done tell the metadata
+	 * that the copying is complete and submit the bio.
+	 *
+	 * (i) incurs less latency, but is more complicated to code, so
+	 * we're sticking with the simpler (ii) here.  Experiments with (i)
+	 * can be done later to show that the improvement is worth the
+	 * additional code complexity.
+	 */
+	copy_block(mapping->origin, mapping->dest, copy_complete, mc, remapped_bio);
+}
+#endif
 static void do_bios(struct multisnap_c *mc, struct bio_list *bios)
 {
 	int r;
 	struct bio *bio;
-	block_t block, pool_block;
+	block_t block;
+	struct multisnap_map_result mapping;
 
 	while ((bio = bio_list_pop(bios))) {
 		block = _sector_to_block(mc, bio->bi_sector);
 		r = multisnap_metadata_map(mc->msd, block, bio_data_dir(bio),
-					   1, &pool_block);
+					   1, &mapping);
 		if (r == -ENODATA) {
 			/* don't create a new mapping for a read */
 			if (bio_data_dir(bio) == READ) {
@@ -361,23 +390,36 @@ static void do_bios(struct multisnap_c *mc, struct bio_list *bios)
 				continue;
 			}
 
-			/* new mapping */
-			r = multisnap_metadata_map(mc->msd, block, WRITE, 1, &pool_block);
-			if (r == -ENOSPC) {
-				/*
-				 * No data space, so we postpone the bio
-				 * until more space added by userland.
-				 */
-				spin_lock(&mc->no_space_lock);
-				bio_list_add(&mc->no_space, bio);
-				spin_unlock(&mc->no_space_lock);
-				continue;
-			}
+			/* can't get here if it's a write */
+			BUG_ON(bio_data_dir(bio) == WRITE);
+
+		} else if (r == -ENOSPC) {
+			/*
+			 * No data space, so we postpone the bio
+			 * until more space added by userland.
+			 */
+			spin_lock(&mc->no_space_lock);
+			bio_list_add(&mc->no_space, bio);
+			spin_unlock(&mc->no_space_lock);
+			continue;
 		}
 
 		if (r)
 			bio_io_error(bio);
 		else {
+#if 0
+			/*
+			 * Copying io must be issued before commit.  The
+			 * commit will wait for it to complete.
+			 */
+			r = issue_copy_io(mc, &mapping, bio);
+			if (r < 0) {
+				/* FIXME: we need to unpick the mapping */
+				bio_io_error(bio);
+				continue;
+			}
+#endif
+
 			/*
 			 * REQ_FUA should only trigger a commit() if it's
 			 * to a block that is pending.  I'm not sure
@@ -392,7 +434,7 @@ static void do_bios(struct multisnap_c *mc, struct bio_list *bios)
 				}
 			}
 
-			remap_bio(mc, bio, pool_block);
+			remap_bio(mc, bio, mapping.dest);
 			generic_make_request(bio);
 		}
 	}
@@ -537,7 +579,8 @@ multisnap_map(struct dm_target *ti, struct bio *bio,
 {
 	int r;
 	struct multisnap_c *mc = ti->private;
-	block_t block, pool_block;
+	block_t block;
+	struct multisnap_map_result mapping;
 
 	/* Remap sector to target begin. */
 	bio->bi_sector -= ti->begin;
@@ -545,9 +588,13 @@ multisnap_map(struct dm_target *ti, struct bio *bio,
 	if (!(bio->bi_rw & (REQ_FLUSH | REQ_FUA))) {
 		block = _sector_to_block(mc, bio->bi_sector);
 		r = multisnap_metadata_map(mc->msd, block,
-					   bio_data_dir(bio), 0, &pool_block);
+					   bio_data_dir(bio), 0, &mapping);
 		if (r == 0) {
-			remap_bio(mc, bio, pool_block);
+			/*
+			 * Because the non-blocking flag wasn't set we know
+			 * no copying is necc.
+			 */
+			remap_bio(mc, bio, mapping.dest);
 			return DM_MAPIO_REMAPPED;
 		}
 
@@ -644,7 +691,8 @@ multisnap_bvec_merge(struct dm_target *ti,
 {
 	struct multisnap_c *mc = ti->private;
 	struct request_queue *q = bdev_get_queue(_remap_dev(mc));
-	block_t block, pool_block;
+	block_t block;
+	struct multisnap_map_result mapping;
 
 	if (!q->merge_bvec_fn)
 		return max_size;
@@ -658,10 +706,10 @@ multisnap_bvec_merge(struct dm_target *ti,
 	 * new mapping.  Because we've selected non-blocking we know no
 	 * mapping will be inserted.
 	 */
-	if (multisnap_metadata_map(mc->msd, block, WRITE, 0, &pool_block) < 0)
+	if (multisnap_metadata_map(mc->msd, block, WRITE, 0, &mapping) < 0)
 		return 0;
 
-	bvm->bi_sector = _remap_sector(mc, bvm->bi_sector, pool_block);
+	bvm->bi_sector = _remap_sector(mc, bvm->bi_sector, mapping.dest);
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
