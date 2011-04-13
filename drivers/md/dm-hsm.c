@@ -960,14 +960,15 @@ static int hsm_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		/*   <low mark> <chunks free> <chunks used> */
+		/*   <chunks free> <chunks used> */
 		DMEMIT("%llu %llu",
-		       (LLU) data_blocks - provisioned, /* FIXME: wrong */
+		       (LLU) data_blocks - provisioned,
 		       (LLU) provisioned);
 		break;
 
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %llu %llu",
+		DMEMIT("%s %s %s %llu %llu",
+		       format_dev_t(buf1, hc->cached_dev->bdev->bd_dev),
 		       format_dev_t(buf1, hc->data_dev->bdev->bd_dev),
 		       format_dev_t(buf, hc->meta_dev->bdev->bd_dev),
 		       (LLU) hc->block_sectors,
