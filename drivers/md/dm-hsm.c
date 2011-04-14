@@ -949,7 +949,7 @@ static int hsm_status(struct dm_target *ti, status_type_t type,
 {
 	ssize_t sz = 0;
 	block_t provisioned, low_water_mark, data_blocks;
-	char buf[BDEVNAME_SIZE], buf1[BDEVNAME_SIZE];
+	char buf[BDEVNAME_SIZE], buf1[BDEVNAME_SIZE], buf2[BDEVNAME_SIZE];
 	struct hsm_c *hc = ti->private;
 
 	spin_lock(&hc->provisioned_lock);
@@ -968,9 +968,9 @@ static int hsm_status(struct dm_target *ti, status_type_t type,
 
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %s %llu %llu",
-		       format_dev_t(buf1, hc->cached_dev->bdev->bd_dev),
+		       format_dev_t(buf, hc->cached_dev->bdev->bd_dev),
 		       format_dev_t(buf1, hc->data_dev->bdev->bd_dev),
-		       format_dev_t(buf, hc->meta_dev->bdev->bd_dev),
+		       format_dev_t(buf2, hc->meta_dev->bdev->bd_dev),
 		       (LLU) hc->block_sectors,
 		       (LLU) low_water_mark);
 	}
