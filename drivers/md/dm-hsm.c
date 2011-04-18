@@ -26,7 +26,7 @@
  *
  */
 
-static const char version[] = "1.0";
+static const char version[] = "1.0.4";
 
 #include "dm.h"
 #include "hsm-metadata.h"
@@ -86,7 +86,7 @@ struct hsm_c {
 	spinlock_t no_space_lock;
 	struct bio_list no_space; /* Bios w/o metadata space. */
 
-	struct work_struct ws;		/* IO work. */
+	struct delayed_work dws;  /* IO work. */
 
 	block_t low_water_mark;
 
@@ -115,12 +115,12 @@ struct hsm_block {
 enum block_flags {
 	BLOCK_UPTODATE,
 	BLOCK_DIRTY,
-	BLOCK_FORCE_DIRTY,
 	/* Only max 4 persistent flags valid with hsm-metadata.c! */
 
-	/* non-persistent flags start here */
+	/* Non-persistent flags start here */
 	BLOCK_ACTIVE = 31,
 	BLOCK_ERROR = 32,
+	BLOCK_FORCE_DIRTY =33,
 };
 
 /*
@@ -186,10 +186,26 @@ static sector_t _sector_to_block(struct hsm_c *hc, sector_t sector)
 	return sector >> hc->block_shift;
 }
 
+static void wake_do_hsm_delayed(struct hsm_c *hc, unsigned long delay)
+{
+	if (delay) {
+		if (work_pending(&hc->dws.work)) {
+			unsigned long j = jiffies;
+
+			if (hc->dws.timer.expires - j > delay)
+				cancel_delayed_work(&hc->dws);
+		}
+	} else
+		cancel_delayed_work(&hc->dws);
+
+	if (!work_pending(&hc->dws.work))
+		queue_delayed_work(hsm_metadata_get_workqueue(hc->hmd),
+				   &hc->dws, delay);
+}
+
 static void wake_do_hsm(struct hsm_c *hc)
 {
-	if (!work_pending(&hc->ws))
-		queue_work(hsm_metadata_get_workqueue(hc->hmd), &hc->ws);
+	wake_do_hsm_delayed(hc, 0);
 }
 
 static struct block_device *_remap_dev(struct hsm_c *hc)
@@ -216,11 +232,9 @@ static void block_copy_endio(int read_err, unsigned long write_err,
 
 	if (read_err || write_err)
 		set_bit(BLOCK_ERROR, &b->flags);
-	else if (test_and_set_bit(BLOCK_UPTODATE, &b->flags))
-		clear_bit(BLOCK_DIRTY, &b->flags);
 
 	spin_lock(&b->hc->endio_lock);
-	list_move(&b->flush_endio, &b->hc->endio_blocks);
+	list_add(&b->flush_endio, &b->hc->endio_blocks);
 	spin_unlock(&b->hc->endio_lock);
 
 	wake_do_hsm(b->hc);
@@ -362,22 +376,54 @@ static int commit(struct hsm_c *hc)
 	return r;
 }
 
+static void schedule_block_flush(struct hsm_c *hc, unsigned long j)
+{
+	if (!list_empty(&hc->flush_blocks)) {
+		unsigned long timeout =
+			list_entry(&hc->flush_blocks, struct hsm_block,
+				   flush_endio)->timeout;
+		wake_do_hsm_delayed(hc, j < timeout ? timeout - j : 0);
+	}
+}
+
 /* Insert into flash list sorted by timeout. */
 static void flush_add_sorted(struct hsm_block *b)
 {
-	if (list_empty(&b->flush_endio)) {
-		struct hsm_block *b_cur;
+	BUG_ON(!test_bit(BLOCK_DIRTY, &b->flags));
 
-		BUG_ON(!test_bit(BLOCK_DIRTY, &b->flags));
-
-		list_for_each_entry(b_cur, &b->hc->flush_blocks, flush_endio) {
-			if (b->timeout < b_cur->timeout)
-				break;
-		}
-
+	if (!test_bit(BLOCK_ACTIVE, &b->flags) &&
+	    list_empty(&b->flush_endio)) {
 		b->timeout = jiffies + 3 * HZ;
-		list_add(&b->flush_endio, &b_cur->flush_endio);
+		list_add_tail(&b->flush_endio, &b->hc->flush_blocks);
+DMINFO("Added cache_block=%llu pool_block=%llu to flush", (LLU) b->cache_block, (LLU) b->pool_block);
 	}
+}
+
+static int _process_write(struct hsm_block *b, struct bio *bio)
+{
+	if (bio_data_dir(bio) == WRITE) {
+		if (test_and_set_bit(BLOCK_DIRTY, &b->flags)) {
+			if (test_bit(BLOCK_ACTIVE, &b->flags) ||
+			    (b->timeout != ~0 &&
+			     b->timeout >= jiffies))
+				set_bit(BLOCK_FORCE_DIRTY,
+					&b->flags);
+		} else {
+			int r = hsm_metadata_update(b->hc->hmd, 1,
+						    b->cache_block, b->flags);
+DMINFO("%s Updating", __func__);
+			if (r) { /* Fatal. */
+				bio_io_error(bio);
+				return -EIO;
+			} else {
+DMINFO("%s Adding", __func__);
+				flush_add_sorted(b);
+				inc_update(b->hc);
+			}
+		}
+	}
+
+	return 0;
 }
 
 /* Remap and submit a bio. */
@@ -390,54 +436,62 @@ static void _generic_make_request(struct hsm_block *b, struct bio *bio)
 /* Process all endios on blocks. */
 static void do_endios(struct hsm_c *hc)
 {
-	int err, r = 0;
+	int err = 0, r = 0;
 	struct hsm_block *b, *tmp;
 	LIST_HEAD(endios);
 
-	spin_lock(&hc->endio_lock);
+	spin_lock_irq(&hc->endio_lock);
 	list_splice(&hc->endio_blocks, &endios);
 	INIT_LIST_HEAD(&hc->endio_blocks);
-	spin_unlock(&hc->endio_lock);
+	spin_unlock_irq(&hc->endio_lock);
 
 	list_for_each_entry_safe(b, tmp, &endios, flush_endio) {
 		struct bio *bio;
-		struct bio_list endios;
+		struct bio_list bios;
+
+		list_del_init(&b->flush_endio);
+		clear_bit(BLOCK_ACTIVE, &b->flags);
+
+		if (!test_bit(BLOCK_ERROR, &b->flags) &&
+		    test_and_set_bit(BLOCK_UPTODATE, &b->flags))
+			clear_bit(BLOCK_DIRTY, &b->flags);
 
 		BUG_ON(!test_bit(BLOCK_UPTODATE, &b->flags) &&
-		       !test_bit(BLOCK_ERROR, &b->flags));
+		       test_bit(BLOCK_DIRTY, &b->flags));
 
 		/* Reforce write, because we've been written to again. */
-		if (test_and_clear_bit(BLOCK_FORCE_DIRTY, &b->flags))
+		if (test_and_clear_bit(BLOCK_FORCE_DIRTY, &b->flags)) {
 			set_bit(BLOCK_DIRTY, &b->flags);
-
-		r = hsm_metadata_update(hc->hmd, 1, b->cache_block, b->flags);
-		if (r)
-			err = -EIO;
-		else {
-			err = 0;
-			inc_update(hc);
+			flush_add_sorted(b);
+			r = hsm_metadata_update(hc->hmd, 1, b->cache_block,
+						b->flags);
+			if (r)
+				err = -EIO;
+			else {
+				err = test_bit(BLOCK_ERROR, &b->flags) ?
+				      -EIO : 0;
+				inc_update(hc);
+			}
 		}
 
-		bio_list_init(&endios);
-		list_del_init(&b->flush_endio);
+		bio_list_init(&bios);
 
 		spin_lock_irq(&b->endio_lock);
-		bio_list_merge(&endios, &b->endio);
+		bio_list_merge(&bios, &b->endio);
 		bio_list_init(&b->endio);
 		spin_unlock_irq(&b->endio_lock);
 
-		while ((bio = bio_list_pop(&endios)))
+		while ((bio = bio_list_pop(&bios)))
 			bio_endio(bio, err);
 
 		/* Submit any bios waiting for io on this block. */
-		while ((bio = bio_list_pop(&b->io)))
-			_generic_make_request(b, bio);
+		while ((bio = bio_list_pop(&b->io))) {
+// DMINFO("%s %s sector=%llu", __func__, bio_data_dir(bio) == WRITE ? "writing" : "reading", (LLU) bio->bi_sector);
+			r = _process_write(b, bio);
+			if (!r)
+				_generic_make_request(b, bio);
+		}
 
-		/* Reforce write, because we've been written to again. */
-		if (test_bit(BLOCK_DIRTY, &b->flags))
-			flush_add_sorted(b);
-
-		clear_bit(BLOCK_ACTIVE, &b->flags);
 		put_block(b); /* Release reference for block_copy(); */
 	}
 }
@@ -481,7 +535,10 @@ nospace:
 			continue;
 		}
 
-		/* Set the rest of the block object members only on creation. */
+		/*
+		 * Set the rest of the block object members only on creation.
+		 * This can only be true, when the block has been inactive.
+		 */
 		if (atomic_read(&b->ref) == 1) {
 			b->pool_block = pool_block;
 			b->flags = flags;
@@ -489,8 +546,9 @@ nospace:
 
 		/*
 		 * Squirrel the active block io object
-		 * reference to the end io function
-		 * (bio->bi_destructor got preserved in the map function).
+		 * reference to the end io function.
+		 * bio->bi_destructor got preserved in the map function
+		 * and will be restored at the end of the end_io function.
 		 */
 		bio->bi_destructor = (void*) b;
 
@@ -518,41 +576,35 @@ nospace:
 				 * bio until it got read into the cache.
 				 */
 				bio_list_add(&b->io, bio);
-if (!test_bit(BLOCK_ACTIVE, &b->flags))
-DMINFO("reading logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 				BUG_ON(block_copy(READ, b));
 				continue;
 			}
 
-			if (rw == WRITE) {
-				set_bit(test_bit(BLOCK_DIRTY, &b->flags) ? BLOCK_FORCE_DIRTY : BLOCK_DIRTY, &b->flags);
-				r = hsm_metadata_update(hc->hmd, 1, cache_block,
-							b->flags);
-				if (r) { /* Fatal. */
-					bio_io_error(bio);
-					continue;
-				} else if (list_empty(&b->flush_endio)) {
-					flush_add_sorted(b);
-					inc_update(hc);
-				}
-			}
+			/* Block uptodate, conditionally handle write case. */
+			r = _process_write(b, bio);
+			if (r)
+				continue;
 
+// DMINFO("%s %s sector=%llu", __func__, rw == WRITE ? "writing" : "reading", (LLU) bio->bi_sector);
+			/* Remap+submit processable io on uptodate blocks. */
 			_generic_make_request(b, bio);
 		}
 	}
 }
 
 /* Process any delayed block writes. */
-static void do_block_copies(struct hsm_c *hc)
+static void do_block_flushs(struct hsm_c *hc)
 {
 	struct hsm_block *b, *tmp;
+	unsigned long j = jiffies;
 
-	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, list) {
-		if (jiffies > b->timeout) {
+	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, flush_endio) {
+		if (j >= b->timeout) {
 			list_del_init(&b->flush_endio);
 			b->timeout = ~0;
+DMINFO("Flushing cache_block=%llu pool_block=%llu to flush", (LLU) b->cache_block, (LLU) b->pool_block);
 if (!test_bit(BLOCK_ACTIVE, &b->flags))
-DMINFO("writing logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
+DMINFO("writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 			BUG_ON(block_copy(WRITE, b));
 		} else
 			break; /* Bail out, flush list is sorted by timeout. */
@@ -632,7 +684,7 @@ static void _commit(struct hsm_c *hc)
 static void do_hsm(struct work_struct *ws)
 {
 	int bounce_mode;
-	struct hsm_c *hc = container_of(ws, struct hsm_c, ws);
+	struct hsm_c *hc = container_of(ws, struct hsm_c, dws.work);
 	struct bio_list bios;
 
 	bio_list_init(&bios);
@@ -653,9 +705,10 @@ static void do_hsm(struct work_struct *ws)
 	} else
 		do_bios(hc, &bios);
 
-	do_block_copies(hc);
+	do_block_flushs(hc);
 	do_block_free(hc);
 	_commit(hc);
+	schedule_block_flush(hc, jiffies);
 }
 
 static void hsm_flush(struct dm_target *ti)
@@ -827,7 +880,7 @@ static int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	hc->data_sectors = get_dev_size(hc->data_dev);
 	hc->data_blocks = _sector_to_block(hc, hc->data_sectors);
 	hc->cached_sectors = get_dev_size(hc->cached_dev);
-	INIT_WORK(&hc->ws, do_hsm);
+	INIT_DELAYED_WORK(&hc->dws, do_hsm);
 	ti->split_io = hc->block_sectors;
 
 	/* Set masks/shift for fast bio -> block mapping. */
@@ -1059,6 +1112,8 @@ static struct target_type hsm_target = {
 
 static int __init dm_hsm_init(void)
 {
+	int r;
+
 	block_cache = KMEM_CACHE(hsm_block, 0);
         if (!block_cache) {
                 DMERR("Couldn't create block cache.");
@@ -1066,7 +1121,14 @@ static int __init dm_hsm_init(void)
         }
 
 	srandom32(jiffies);
-	return dm_register_target(&hsm_target);
+	r = dm_register_target(&hsm_target);
+	if (r) {
+		DMERR("Failed to register %s %s", DM_MSG_PREFIX, version);
+		kmem_cache_destroy(block_cache);
+	} else
+		DMINFO("Registered %s %s", DM_MSG_PREFIX, version);
+
+	return r;
 }
 
 static void dm_hsm_exit(void)
