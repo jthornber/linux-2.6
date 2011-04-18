@@ -492,7 +492,7 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 		return -ENOSPC;
 	}
 
-	/* Block may no be interfearing with flags in the high bits. */
+	/* Block may not be interfearing with flags in the high bits. */
 	split_result(b, &dummy, flags);
 	BUG_ON(*flags);
 
@@ -585,6 +585,7 @@ int hsm_metadata_update(struct hsm_metadata *hsm,
 
 	/* Mapping has to exists on update. */
 	r = hsm_metadata_lookup(hsm, dev, hsm_block, 1, &pool_block, &dummy);
+BUG_ON(r < 0);
 	if (r < 0)
 		return r;
 

@@ -101,14 +101,15 @@ struct hsm_c {
 };
 
 struct hsm_block {
+	atomic_t ref;
 	struct hsm_c *hc;
 	struct list_head list, flush_endio;
-	struct bio_list delay;
-	spinlock_t delay_lock;
+	struct bio_list io;
+	struct bio_list endio;
+	spinlock_t endio_lock;
 	block_t cache_block, pool_block;
-	unsigned long flags, error, timeout;
-	void *bio_private;
-	atomic_t ref;
+	unsigned long flags, timeout;
+	void *bio_destructor;
 };
 
 enum block_flags {
@@ -122,6 +123,9 @@ enum block_flags {
 	BLOCK_ERROR = 32,
 };
 
+/*
+ * Create/get a reference on an active block io housekeeping object.
+ */
 static void _get_block(struct hsm_block *b)
 {
 	atomic_inc(&b->ref);
@@ -142,12 +146,13 @@ static struct hsm_block *get_block(struct hsm_c *hc, block_t cache_block)
 	b = mempool_alloc(hc->block_pool, GFP_NOIO);
 	if (b) {
 		memset(b, 0, sizeof(*b));
+		atomic_set(&b->ref, 1);
 		b->hc = hc;
 		INIT_LIST_HEAD(&b->flush_endio);
-		bio_list_init(&b->delay);
-		spin_lock_init(&b->delay_lock);
+		bio_list_init(&b->io);
+		bio_list_init(&b->endio);
+		spin_lock_init(&b->endio_lock);
 		b->cache_block = cache_block;
-		atomic_set(&b->ref, 1);
 		list_add(&b->list, &hc->hsm_blocks);
 	}
 out:
@@ -242,6 +247,7 @@ static int block_copy(int rw, struct hsm_block *b)
 	/* Set source and destination. */
 	rw == READ ? (from = &orig,  to = &cache) :
 		     (from = &cache, to = &orig);
+	_get_block(b);
 	return dm_kcopyd_copy(b->hc->kcopyd_client, from, 1, to, 0,
 			      block_copy_endio, b);
 }
@@ -291,7 +297,7 @@ static int hc_congested(void *congested_data, int bdi_bits)
 	r = !bio_list_empty(&hc->no_space);
 	spin_unlock(&hc->no_space_lock);
 
-	if (!r) {
+	if (r) {
 		r = _congested(hc->cached_dev, bdi_bits);
 		if (!r) {
 			r = _congested(hc->meta_dev, bdi_bits);
@@ -359,23 +365,32 @@ static int commit(struct hsm_c *hc)
 /* Insert into flash list sorted by timeout. */
 static void flush_add_sorted(struct hsm_block *b)
 {
-	struct hsm_block *b_cur;
-
-	list_for_each_entry(b_cur, &b->hc->flush_blocks, flush_endio) {
-		if (b->timeout < b_cur->timeout)
-			break;
-	}
-
 	if (list_empty(&b->flush_endio)) {
-		_get_block(b);
+		struct hsm_block *b_cur;
+
+		BUG_ON(!test_bit(BLOCK_DIRTY, &b->flags));
+
+		list_for_each_entry(b_cur, &b->hc->flush_blocks, flush_endio) {
+			if (b->timeout < b_cur->timeout)
+				break;
+		}
+
+		b->timeout = jiffies + 3 * HZ;
 		list_add(&b->flush_endio, &b_cur->flush_endio);
 	}
+}
+
+/* Remap and submit a bio. */
+static void _generic_make_request(struct hsm_block *b, struct bio *bio)
+{
+	remap_bio(b->hc, bio, b->pool_block);
+	generic_make_request(bio);
 }
 
 /* Process all endios on blocks. */
 static void do_endios(struct hsm_c *hc)
 {
-	int err, r;
+	int err, r = 0;
 	struct hsm_block *b, *tmp;
 	LIST_HEAD(endios);
 
@@ -384,44 +399,43 @@ static void do_endios(struct hsm_c *hc)
 	INIT_LIST_HEAD(&hc->endio_blocks);
 	spin_unlock(&hc->endio_lock);
 
-	list_for_each_entry(b, &endios, flush_endio) {
-		BUG_ON(!test_bit(BLOCK_UPTODATE, &b->flags));
-
-		/* Reforce write, because we've been written to again. */
-		if (test_and_clear_bit(BLOCK_FORCE_DIRTY, &b->flags)) {
-			set_bit(BLOCK_DIRTY, &b->flags);
-			r = hsm_metadata_update(hc->hmd, 1, b->cache_block,
-						b->flags);
-			if (!r)
-				inc_update(hc);
-		}
-	}
-
-	/* If the commit fails, error all delayed bios below. */
-	err = commit(hc) ? -EIO : 0;
-
 	list_for_each_entry_safe(b, tmp, &endios, flush_endio) {
 		struct bio *bio;
-		struct bio_list bios;
+		struct bio_list endios;
 
-		bio_list_init(&bios);
-		list_del_init(&b->flush_endio);
-
-		spin_lock(&b->delay_lock);
-		bio_list_merge(&bios, &b->delay);
-		bio_list_init(&b->delay);
-		spin_unlock(&b->delay_lock);
+		BUG_ON(!test_bit(BLOCK_UPTODATE, &b->flags) &&
+		       !test_bit(BLOCK_ERROR, &b->flags));
 
 		/* Reforce write, because we've been written to again. */
-		if (test_bit(BLOCK_DIRTY, &b->flags)) {
-			b->timeout = jiffies + 3 * HZ;
-			flush_add_sorted(b);
+		if (test_and_clear_bit(BLOCK_FORCE_DIRTY, &b->flags))
+			set_bit(BLOCK_DIRTY, &b->flags);
+
+		r = hsm_metadata_update(hc->hmd, 1, b->cache_block, b->flags);
+		if (r)
+			err = -EIO;
+		else {
+			err = 0;
+			inc_update(hc);
 		}
 
-		while ((bio = bio_list_pop(&bios))) {
+		bio_list_init(&endios);
+		list_del_init(&b->flush_endio);
+
+		spin_lock_irq(&b->endio_lock);
+		bio_list_merge(&endios, &b->endio);
+		bio_list_init(&b->endio);
+		spin_unlock_irq(&b->endio_lock);
+
+		while ((bio = bio_list_pop(&endios)))
 			bio_endio(bio, err);
-			put_block(b);
-		}
+
+		/* Submit any bios waiting for io on this block. */
+		while ((bio = bio_list_pop(&b->io)))
+			_generic_make_request(b, bio);
+
+		/* Reforce write, because we've been written to again. */
+		if (test_bit(BLOCK_DIRTY, &b->flags))
+			flush_add_sorted(b);
 
 		clear_bit(BLOCK_ACTIVE, &b->flags);
 		put_block(b); /* Release reference for block_copy(); */
@@ -443,33 +457,46 @@ static void do_bios(struct hsm_c *hc, struct bio_list *bios)
 		r = hsm_metadata_lookup(hc->hmd, 1, cache_block, 1,
 					&pool_block, &flags);
 		if (r == -ENODATA) {
-			/* Don't create a new mapping for a read */
-			if (rw == READ) {
-				zero_fill_bio(bio);
-				bio_endio(bio, 0);
-				continue;
-			}
-
 			/* New mapping */
 			r = hsm_metadata_insert(hc->hmd, 1, cache_block,
 					        &pool_block, &flags);
 			if (!r)
 				inc_update(hc);
-			else if (r == -ENOSPC) {
+
+			else if (r == -ENOSPC)
 				/*
 				 * No data space, so we postpone the bio
 				 * until more space added by userland.
 				 */
-nospace:
-				spin_lock(&hc->no_space_lock);
-				bio_list_add(&hc->no_space, bio);
-				spin_unlock(&hc->no_space_lock);
-				continue;
-			}
+				goto nospace;
 		}
+
+		/* Get the block housekeeping object for the io. */
+		b = get_block(hc, cache_block);
+		if (!b) {
+nospace:
+			spin_lock(&hc->no_space_lock);
+			bio_list_add(&hc->no_space, bio);
+			spin_unlock(&hc->no_space_lock);
+			continue;
+		}
+
+		/* Set the rest of the block object members only on creation. */
+		if (atomic_read(&b->ref) == 1) {
+			b->pool_block = pool_block;
+			b->flags = flags;
+		}
+
+		/*
+		 * Squirrel the active block io object
+		 * reference to the end io function
+		 * (bio->bi_destructor got preserved in the map function).
+		 */
+		bio->bi_destructor = (void*) b;
 
 		if (r)
 			bio_io_error(bio);
+
 		else {
 			/*
 			 * REQ_FUA should only trigger a commit() if it's
@@ -485,24 +512,14 @@ nospace:
 				}
 			}
 
-			/* Get the block housekeeping object for the io. */
-			b = get_block(hc, cache_block);
-			if (!b)
-				goto nospace;
-
-			if (atomic_read(&b->ref) == 1) {
-				b->pool_block = pool_block;
-				b->flags = flags;
-				b->bio_private = bio->bi_private;
-			} else
-				BUG_ON(b->bio_private != bio->bi_private);
-
 			if (!test_bit(BLOCK_UPTODATE, &b->flags)) {
 				/*
 				 * Block isn't uptodate, so we postpone the
 				 * bio until it got read into the cache.
 				 */
-				bio_list_add(&b->delay, bio);
+				bio_list_add(&b->io, bio);
+if (!test_bit(BLOCK_ACTIVE, &b->flags))
+DMINFO("reading logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 				BUG_ON(block_copy(READ, b));
 				continue;
 			}
@@ -512,18 +529,15 @@ nospace:
 				r = hsm_metadata_update(hc->hmd, 1, cache_block,
 							b->flags);
 				if (r) { /* Fatal. */
-					put_block(b);
 					bio_io_error(bio);
 					continue;
 				} else if (list_empty(&b->flush_endio)) {
-					b->timeout = jiffies + 3 * HZ;
 					flush_add_sorted(b);
+					inc_update(hc);
 				}
 			}
 
-			bio->bi_private = b;
-			remap_bio(hc, bio, b->pool_block);
-			generic_make_request(bio);
+			_generic_make_request(b, bio);
 		}
 	}
 }
@@ -535,9 +549,10 @@ static void do_block_copies(struct hsm_c *hc)
 
 	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, list) {
 		if (jiffies > b->timeout) {
-			b->timeout = ~0;
 			list_del_init(&b->flush_endio);
-			/* flush_add_sorted took out a reference already. */
+			b->timeout = ~0;
+if (!test_bit(BLOCK_ACTIVE, &b->flags))
+DMINFO("writing logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 			BUG_ON(block_copy(WRITE, b));
 		} else
 			break; /* Bail out, flush list is sorted by timeout. */
@@ -557,8 +572,12 @@ static int block_inactive(struct hsm_c *hc,
 		return r;
 
 	b = get_block(hc, *cache_block);
-	r = atomic_read(&b->ref);
-	put_block(b);
+	if (b) {
+		r = atomic_read(&b->ref);
+		put_block(b);
+	} else
+		r = 1;
+
 	return r == 1;
 }
 
@@ -589,10 +608,23 @@ static void do_block_free(struct hsm_c *hc)
 			if (r) {
 				r = hsm_metadata_remove(hc->hmd, 1,
 							cache_block);
+				if (!r)
+					inc_update(hc);
+
 				break;
 			} else
 				blocks_active++;
 		}
+	}
+}
+
+/* If commit fails, log an error and throw an event. */
+static void _commit(struct hsm_c *hc)
+{
+	if (commit(hc) < 0) {
+		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
+		printk(KERN_ALERT "hsm metadata write failed.");
+		dm_table_event(hc->ti->table);
 	}
 }
 
@@ -623,6 +655,7 @@ static void do_hsm(struct work_struct *ws)
 
 	do_block_copies(hc);
 	do_block_free(hc);
+	_commit(hc);
 }
 
 static void hsm_flush(struct dm_target *ti)
@@ -631,11 +664,7 @@ static void hsm_flush(struct dm_target *ti)
 
 	/* Wait until all io has been processed. */
 	flush_workqueue(hsm_metadata_get_workqueue(hc->hmd));
-
-	if (commit(hc) < 0) {
-		printk(KERN_ALERT "hsm metadata write failed.");
-		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
-	}
+	_commit(hc);
 }
 
 /* Destroy a hsm device mapping. */
@@ -828,6 +857,7 @@ static int hsm_map(struct dm_target *ti, struct bio *bio,
 
 	/* Remap sector to target begin. */
 	bio->bi_sector -= ti->begin;
+	map_context->ptr = (void*) bio->bi_destructor;
 
 	spin_lock(&hc->lock);
 	bio_list_add(&hc->in, bio);
@@ -841,24 +871,21 @@ static int hsm_map(struct dm_target *ti, struct bio *bio,
 static int hsm_end_io(struct dm_target *ti, struct bio *bio,
 		      int error, union map_info *map_context)
 {
-	struct hsm_block *b = bio->bi_private;
+	struct hsm_block *b = (void*) bio->bi_destructor;
 
 	/*
 	 * Check for eventually delaying endio, because
 	 * the metadata isn't written yet unless error.
 	 */
-	BUG_ON(!b);
-	BUG_ON(!b->bio_private);
-	bio->bi_private = b->bio_private;
-
 	if (!error && test_bit(BLOCK_ACTIVE, &b->flags)) {
-		spin_lock(&b->delay_lock);
-		bio_list_add(&b->delay, bio);
-		spin_unlock(&b->delay_lock);
+		spin_lock(&b->endio_lock);
+		bio_list_add(&b->endio, bio);
+		spin_unlock(&b->endio_lock);
 		return DM_ENDIO_INCOMPLETE;
-	} else
-		put_block(b);
+	}
 
+	bio->bi_destructor = map_context->ptr;
+	put_block(b);
 	return error;
 }
 
