@@ -1,10 +1,10 @@
 /*
- * Copyright (C) 2010 Red Hat UK.  All rights reserved.
+ * Copyright (C) 2011 Red Hat UK.  All rights reserved.
  *
  * This file is released under the GPL.
  */
 
-static const char version[] = "1.0";
+// static const char version[] = "0.1";
 
 #include "dm.h"
 #include "multisnap-metadata.h"
@@ -12,6 +12,7 @@ static const char version[] = "1.0";
 
 #include <linux/blkdev.h>
 #include <linux/dm-io.h>
+#include <linux/dm-kcopyd.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -21,24 +22,610 @@ static const char version[] = "1.0";
 /*----------------------------------------------------------------*/
 
 /*
+ * Sometimes we can't deal with a bio straight away.  We put them in prison
+ * where they can't cause any mischief.  Bios are put in a cell identified
+ * by a key, multiple bios can be in the same cell.  When the cell is
+ * subsequently unlocked the bios become available.
+ */
+struct bio_prison;
+
+struct cell_key {
+	int virtual;
+	multisnap_dev_t dev;
+	block_t block;
+};
+
+struct cell {
+	struct hlist_node list;
+	struct bio_prison *prison;
+	struct cell_key key;
+	unsigned count;
+	struct bio_list bios;
+};
+
+struct bio_prison {
+	spinlock_t lock;
+	mempool_t *cell_pool;
+
+	unsigned nr_buckets;
+	unsigned hash_mask;
+	struct hlist_head cells[0];
+};
+
+static uint32_t calc_nr_buckets(unsigned nr_cells)
+{
+	uint32_t n = 128;
+	nr_cells /= 4;
+	while (n < nr_cells && n < 8192)
+		n <<= 1;
+
+	return n;
+}
+
+/*
+ * @nr_cells should be the number of cells you want in use _concurrently_.
+ * Don't confuse it with the number of distinct keys.
+ */
+static struct bio_prison *
+prison_create(unsigned nr_cells)
+{
+	int i;
+	uint32_t nr_buckets = calc_nr_buckets(nr_cells);
+	size_t len = sizeof(struct bio_prison) +
+		(sizeof(struct hlist_head) * nr_buckets);
+	struct bio_prison *prison = kmalloc(len, GFP_KERNEL);
+	if (!prison)
+		return NULL;
+
+	spin_lock_init(&prison->lock);
+	prison->cell_pool = mempool_create_kmalloc_pool(nr_cells,
+						      sizeof(struct cell));
+	prison->nr_buckets = nr_buckets;
+	prison->hash_mask = nr_buckets - 1;
+	for (i = 0; i < nr_buckets; i++)
+		INIT_HLIST_HEAD(prison->cells + i);
+
+	return prison;
+}
+
+static void prison_destroy(struct bio_prison *prison)
+{
+	mempool_destroy(prison->cell_pool);
+	kfree(prison);
+}
+
+static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
+{
+	const unsigned BIG_PRIME = 4294967291UL;
+	uint64_t hash = key->block * BIG_PRIME;
+	return (uint32_t) (hash & prison->hash_mask);
+}
+
+/*
+ * This may block if a new cell needs allocating.  You must ensure that
+ * cells will be unlocked even if the calling thread is blocked.
+ *
+ * returns the number of entries in the cell prior to the new addition. or
+ * < 0 on failure.
+ */
+static int bio_detain(struct bio_prison *prison,
+		      struct cell_key key,
+		      struct bio *inmate,
+		      struct cell **ref)
+{
+	int r, found = 0;
+	unsigned long flags;
+	uint32_t hash = hash_key(prison, &key);
+	struct cell *cell;
+	struct hlist_node *tmp;
+
+	spin_lock_irqsave(&prison->lock, flags);
+	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
+		if (!memcmp(&cell->key, &key, sizeof(key))) {
+			found = 1;
+			break;
+		}
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	if (!found) {
+		/* allocate a new cell */
+		cell = mempool_alloc(prison->cell_pool, GFP_NOIO);
+		memcpy(&cell->key, &key, sizeof(key));
+		cell->count = 0;
+		bio_list_init(&cell->bios);
+		hlist_add_head(&cell->list, prison->cells + hash);
+	}
+
+	spin_lock_irqsave(&prison->lock, flags);
+	r = cell->count++;
+	bio_list_add(&cell->bios, inmate);
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	*ref = cell;
+	return r;
+}
+
+/* @inmates must have been initialised prior to this call */
+static void cell_release_(struct cell *cell,
+			 struct bio_list *inmates)
+{
+	struct bio_prison *prison = cell->prison;
+	bio_list_merge(inmates, &cell->bios);
+	mempool_free(cell, prison->cell_pool);
+}
+
+static void cell_release(struct cell *cell, struct bio_list *bios)
+{
+	unsigned long flags;
+	struct bio_prison *prison = cell->prison;
+
+	spin_lock_irqsave(&prison->lock, flags);
+	cell_release_(cell, bios);
+	spin_unlock_irqrestore(&prison->lock, flags);
+}
+
+static void cell_error(struct cell *cell)
+{
+	struct bio_prison *prison = cell->prison;
+	struct bio_list bios;
+	struct bio *bio;
+	unsigned long flags;
+
+	bio_list_init(&bios);
+
+	spin_lock_irqsave(&prison->lock, flags);
+	cell_release_(cell, &bios);
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	while ((bio = bio_list_pop(&bios)))
+		bio_io_error(bio);
+}
+
+/*----------------------------------------------------------------*/
+
+/*
+ * Key building.
+ */
+static struct cell_key data_key(block_t b)
+{
+	struct cell_key r;
+	r.virtual = 0;
+	r.dev = 0;
+	r.block = b;
+	return r;
+}
+
+static struct cell_key virtual_key(struct ms_device *msd, block_t b)
+{
+	struct cell_key r;
+	r.virtual = 1;
+	r.dev = multisnap_device_dev(msd);
+	r.block = b;
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
+/*
  * A pool device ties together a metadata device and a data device.  It
  * also provides the interface for creating and destroying internal
  * devices.
  */
+struct pool_c;
+
+struct new_mapping {
+	struct list_head list;
+
+	struct pool_c *pool;
+	struct ms_device *msd;
+	block_t virt_block;
+	block_t data_block;
+	struct cell *cell;
+};
+
 struct pool_c {
+	struct dm_target *ti;
 	struct dm_dev *metadata_dev;
 	struct dm_dev *data_dev;
 	struct multisnap_metadata *mmd;
+
+	uint32_t sectors_per_block;
+	unsigned block_shift;
+	block_t offset_mask;
+
+	struct bio_prison *prison;
+	struct dm_kcopyd_client *copier;
+
+	struct workqueue_struct *wq;
+	struct work_struct ws;
+
+	spinlock_t lock;
+	struct bio_list deferred_bios;
+	struct list_head prepared_mappings;
+
+	mempool_t *mapping_pool;
 };
 
 /*----------------------------------------------------------------*/
 
 /*
- * Sadly we need a global table mapping bdevs to pool objects.
+ * We need to maintain an association between a bio and an ms_device.  To
+ * save lookups in an auxillary table, or wrapping bios in objects from a
+ * mempool we hide this value in the bio->bi_bdev field, which we know is
+ * not used while the bio is being processed.
  */
-struct multisnap_metadata *mmd_;
+static void set_msd(struct bio *bio, struct ms_device *msd)
+{
+	bio->bi_bdev = (struct block_device *) msd;
+}
+
+static struct ms_device *get_msd(struct bio *bio)
+{
+	return (struct ms_device *) bio->bi_bdev;
+}
 
 /*----------------------------------------------------------------*/
+
+static block_t get_bio_block(struct pool_c *pool,
+			     struct bio *bio)
+{
+	return bio->bi_sector >> pool->block_shift;
+}
+
+static void remap(struct pool_c *pool,
+		  struct bio *bio,
+		  block_t block)
+{
+	bio->bi_bdev = pool->data_dev->bdev;
+	bio->bi_sector = (block << pool->block_shift) +
+		(bio->bi_sector & pool->offset_mask);
+}
+
+static void remap_and_issue(struct pool_c *pool,
+			    struct bio *bio,
+			    block_t block)
+{
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+		int r = multisnap_metadata_commit(pool->mmd);
+		if (r) {
+			bio_io_error(bio);
+			return;
+		}
+	}
+
+	remap(pool, bio, block);
+	generic_make_request(bio);
+}
+
+static void wake_worker(struct pool_c *pool)
+{
+	queue_work(pool->wq, &pool->ws);
+}
+
+static void copy_complete(int read_err,
+			  unsigned long write_err,
+			  void *context)
+{
+	unsigned long flags;
+	struct new_mapping *m = (struct new_mapping *) context;
+
+	spin_lock_irqsave(&m->pool->lock, flags);
+	list_add(&m->list, &m->pool->prepared_mappings);
+	spin_unlock_irqrestore(&m->pool->lock, flags);
+
+	wake_worker(m->pool);
+}
+
+static void schedule_copy(struct pool_c *pool,
+			  struct ms_device *msd,
+			  block_t virt_block,
+			  block_t data_origin,
+			  block_t data_dest,
+			  struct cell *cell)
+{
+	int r;
+	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
+	if (m) {
+		/* can this even happen ? */
+		cell_error(cell);
+		return;
+	}
+
+	m->pool = pool;
+	m->msd = msd;
+	m->virt_block = virt_block;
+	m->data_block = data_dest;
+	m->cell = cell;
+
+	{
+		struct dm_io_region from, to;
+
+		from.bdev = pool->data_dev->bdev;
+		from.sector = data_origin * pool->sectors_per_block;
+		from.count = pool->sectors_per_block;
+
+		to.bdev = pool->data_dev->bdev;
+		to.sector = data_dest * pool->sectors_per_block;
+		to.count = pool->sectors_per_block;
+
+		r = dm_kcopyd_copy(pool->copier, &from, 1, &to, 0, copy_complete, m);
+		if (r < 0) {
+			mempool_free(m, pool->mapping_pool);
+			cell_error(cell);
+		}
+	}
+}
+
+static void schedule_zero(struct pool_c *pool,
+			  struct ms_device *msd,
+			  block_t virt_block,
+			  block_t data_block,
+			  struct cell *cell)
+{
+	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
+	if (m) {
+		cell_error(cell);
+		return;
+	}
+
+	m->pool = pool;
+	m->msd = msd;
+	m->virt_block = virt_block;
+	m->data_block = data_block;
+	m->cell = cell;
+
+	/* FIXME: zeroing not implemented yet */
+
+	copy_complete(0, 0, m);
+}
+
+static void cell_remap_and_issue(struct pool_c *pool,
+				 struct cell *cell,
+				 block_t data_block)
+{
+	struct bio_list bios;
+	struct bio *bio;
+	bio_list_init(&bios);
+	cell_release(cell, &bios);
+
+	while ((bio = bio_list_pop(&bios)))
+		remap_and_issue(pool, bio, data_block);
+}
+
+static void process_bio(struct pool_c *pool,
+			struct ms_device *msd,
+			struct bio *bio)
+{
+	int r, count;
+	block_t block = get_bio_block(pool, bio), data_block;
+	struct multisnap_lookup_result lookup_result;
+	struct bio_list bios;
+	struct cell *cell;
+
+	/*
+	 * First we detain the bio against the cell for the virtual cell.
+	 * We can then check whether it's been provisioned.
+	 */
+	count = bio_detain(pool->prison, virtual_key(msd, block), bio, &cell);
+	if (count > 0)
+		/* Someone's already handling this, leave it to them. */
+		return;
+
+	r = multisnap_metadata_lookup(msd, block, 1, &lookup_result);
+	switch (r) {
+	case 0:
+		/*
+		 * A virtual block will only ever be locked once, during
+		 * provisioning.  We know this has been provisioned, so
+		 * it's safe to release the bio.
+		 */
+		bio_list_init(&bios);
+		cell_release(cell, &bios);
+
+		if (bio_data_dir(bio) == WRITE) {
+			/*
+			 * Given it's a WRITE io, we may need to break
+			 * sharing on a data block.
+			 */
+			count = bio_detain(pool->prison, data_key(block), bio, &cell);
+			if (count > 0)
+				return; /* already underway */
+
+			if (lookup_result.shared) {
+				r = multisnap_metadata_alloc_data_block(msd, &data_block);
+				if (r)
+					cell_error(cell);
+				else
+					schedule_copy(pool, msd,
+						      block,
+						      lookup_result.block,
+						      data_block, cell);
+			} else
+				cell_remap_and_issue(pool, cell, lookup_result.block);
+		} else
+			remap_and_issue(pool, bio, lookup_result.block);
+		break;
+
+	case -ENODATA:
+		/* prepare a new block */
+		r = multisnap_metadata_alloc_data_block(msd, &data_block);
+		if (r)
+			cell_error(cell);
+		else
+			schedule_zero(pool, msd, block, data_block, cell);
+
+	default:
+		bio_io_error(bio);
+	}
+}
+
+static void process_bios(struct pool_c *pool)
+{
+	unsigned long flags;
+	struct bio *bio;
+	struct bio_list bios;
+	bio_list_init(&bios);
+
+	spin_lock_irqsave(&pool->lock, flags);
+	bio_list_merge(&bios, &pool->deferred_bios);
+	bio_list_init(&pool->deferred_bios);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	while ((bio = bio_list_pop(&bios))) {
+		struct ms_device *msd = get_msd(bio);
+		process_bio(pool, msd, bio);
+	}
+}
+
+static void process_prepared_mappings(struct pool_c *pool)
+{
+	int r;
+	unsigned long flags;
+	struct list_head maps;
+	struct new_mapping *m, *tmp;
+
+	INIT_LIST_HEAD(&maps);
+	spin_lock_irqsave(&pool->lock, flags);
+	list_splice_init(&pool->prepared_mappings, &maps);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	list_for_each_entry_safe (m, tmp, &maps, list) {
+		r = multisnap_metadata_insert(m->msd, m->virt_block, m->data_block);
+		if (r)
+			cell_error(m->cell);
+		else
+			cell_remap_and_issue(pool, m->cell, m->data_block);
+
+		list_del(&m->list);
+		mempool_free(m, pool->mapping_pool);
+	}
+}
+
+static void do_work(struct work_struct *ws)
+{
+	struct pool_c *pool = container_of(ws, struct pool_c, ws);
+
+	process_bios(pool);
+	process_prepared_mappings(pool);
+}
+
+static void defer_bio(struct pool_c *pool, struct bio *bio)
+{
+	spin_lock(&pool->lock);
+	bio_list_add(&pool->deferred_bios, bio);
+	spin_unlock(&pool->lock);
+
+	wake_worker(pool);
+}
+
+/*
+ * Non-blocking function designed to be called from the targets map
+ * function.
+ */
+int bio_map(struct pool_c *pool,
+	    struct ms_device *msd,
+	    struct bio *bio)
+{
+	int r;
+	block_t block = get_bio_block(pool, bio);
+	struct multisnap_lookup_result result;
+
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+		defer_bio(pool, bio);
+		return DM_MAPIO_SUBMITTED;
+	}
+
+	r = multisnap_metadata_lookup(msd, block, 0, &result);
+	switch (r) {
+	case 0:
+		if (bio_data_dir(bio) == WRITE && result.shared) {
+			/*
+			 * We have a race condition here between the
+			 * result.shared value returned by the lookup and
+			 * snapshot creation, which may cause new
+			 * sharing.
+			 *
+			 * To avoid this always quiesce _all_ the ancestors
+			 * of a new snapshot, before taking the snap.
+			 * Multisnap metadata doesn't track ancestors, it's
+			 * up to userland tools.
+			 *
+			 * For the direct ancestor, you need to quiesce the
+			 * fs or other application.  For more remote
+			 * ancestors it's enough to quiesce the io.
+			 */
+			defer_bio(pool, bio);
+			r = DM_MAPIO_SUBMITTED;
+		} else {
+			remap(pool, bio, result.block);
+			r = DM_MAPIO_REMAPPED;
+		}
+		break;
+
+	case -ENODATA:
+	case -EWOULDBLOCK:
+		defer_bio(pool, bio);
+		r = DM_MAPIO_SUBMITTED;
+		break;
+	}
+
+	return r;
+}
+
+static int is_congested(void *congested_data, int bdi_bits)
+{
+	int r;
+	struct pool_c *pool = congested_data;
+
+#if 0
+	spin_lock(&pool->no_space_lock);
+	r = !bio_list_empty(&mc->no_space);
+	spin_unlock(&pool->no_space_lock);
+
+	if (!r) {
+#endif
+		struct request_queue *q = bdev_get_queue(pool->data_dev->bdev);
+		r = bdi_congested(&q->backing_dev_info, bdi_bits);
+#if 0
+	}
+#endif
+
+	return r;
+}
+
+static void set_congestion_fn(struct pool_c *pool)
+{
+	struct mapped_device *md = dm_table_get_md(pool->ti->table);
+	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
+
+	/* Set congested function and data. */
+	bdi->congested_fn = is_congested;
+	bdi->congested_data = pool;
+}
+
+/*----------------------------------------------------------------*/
+
+// FIXME: global pool for now
+struct pool_c *global_pool_;
+
+/*----------------------------------------------------------------*/
+
+static void pool_dtr(struct dm_target *ti)
+{
+	struct pool_c *pool = ti->private;
+
+	dm_put_device(ti, pool->metadata_dev);
+	dm_put_device(ti, pool->data_dev);
+	multisnap_metadata_close(pool->mmd);
+
+	prison_destroy(pool->prison);
+	dm_kcopyd_client_destroy(pool->copier);
+	if (pool->wq)
+		destroy_workqueue(pool->wq);
+
+	mempool_destroy(pool->mapping_pool);
+	kfree(pool);
+}
 
 /*
  * multisnap-pool <metadata dev>
@@ -47,12 +634,13 @@ struct multisnap_metadata *mmd_;
  *                <data dev size in blocks>
  * FIXME: add low water mark
  */
+#define KCOPYD_NR_PAGES 128
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	long long unsigned block_size;
 	block_t data_size;
-	struct pool_c *md;
+	struct pool_c *pool;
 	struct multisnap_metadata *mmd;
 	struct dm_dev *metadata_dev, *data_dev;
 
@@ -96,31 +684,49 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -ENOMEM;
 	}
 
-	md = kmalloc(sizeof(*md), GFP_KERNEL);
-	if (!md) {
+	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
+	if (!pool) {
 		ti->error = "Error allocating memory";
 		multisnap_metadata_close(mmd);
 		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -ENOMEM;
 	}
-	md->metadata_dev = metadata_dev;
-	md->data_dev = data_dev;
-	md->mmd = mmd;
-	mmd_ = mmd;		/* FIXME: remove */
+	pool->metadata_dev = metadata_dev;
+	pool->data_dev = data_dev;
+	pool->mmd = mmd;
+	pool->sectors_per_block = block_size;
+	pool->block_shift = ffs(block_size) - 1;
+	pool->offset_mask = block_size - 1;
+	pool->prison = prison_create(1024); /* FIXME: magic number */
+	if (!pool->prison) {
+		/* FIXME: finish */
+	}
 
-	ti->private = md;
+	r = dm_kcopyd_client_create(KCOPYD_NR_PAGES, &pool->copier); /* FIXME: magic numbers */
+	if (r) {
+		/* FIXME: finish */
+	}
+
+	/* Create singlethreaded workqueue that will service all devices
+	 * that use this metadata.
+	 */
+	pool->wq = alloc_ordered_workqueue(DM_MSG_PREFIX, WQ_MEM_RECLAIM);
+	if (!pool->wq) {
+		printk(KERN_ALERT "couldn't create workqueue for metadata object");
+		/* FIXME: finish */
+	}
+
+	INIT_WORK(&pool->ws, do_work);
+	spin_lock_init(&pool->lock);
+	bio_list_init(&pool->deferred_bios);
+	INIT_LIST_HEAD(&pool->prepared_mappings);
+	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers */
+	global_pool_ = pool;
+	set_congestion_fn(pool);
+	ti->private = pool;
+
 	return 0;
-}
-
-static void pool_dtr(struct dm_target *ti)
-{
-	struct pool_c *md = ti->private;
-
-	multisnap_metadata_close(md->mmd);
-	dm_put_device(ti, md->metadata_dev);
-	dm_put_device(ti, md->data_dev);
-	kfree(md);
 }
 
 static int pool_map(struct dm_target *ti, struct bio *bio,
@@ -220,81 +826,262 @@ static struct target_type pool_target = {
 
 /*----------------------------------------------------------------*/
 
-/* Somehow we need to get from a pool device to the mmd for the pool. */
-static struct multisnap_metadata *pool_to_mmd(struct block_device *bdev)
+struct multisnap_c {
+	struct pool_c *pool;
+	struct ms_device *msd;
+};
+
+static void multisnap_dtr(struct dm_target *ti)
 {
-	return mmd_;
+	struct multisnap_c *mc = ti->private;
+
+	if (mc->msd) {
+		multisnap_metadata_close_device(mc->msd);
+		printk(KERN_ALERT "msd closed");
+	}
+
+	kfree(mc);
 }
+
+/*
+ * Construct a multisnap device:
+ *
+ * <start> <length> multisnap <dev id>
+ *
+ * dev id: the internal device identifier
+ */
+static int
+multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
+{
+	int r;
+	unsigned long dev_id;
+	struct multisnap_c *mc;
+
+	if (argc != 2) {
+		ti->error = "Invalid argument count";
+		return -EINVAL;
+	}
+
+	mc = ti->private = kzalloc(sizeof(*mc), GFP_KERNEL);
+	if (!mc) {
+		ti->error = "Out of memory";
+		return -ENOMEM;
+	}
+
+	if (sscanf(argv[0], "%lu", &dev_id) != 1) {
+		ti->error = "Invalid device id";
+		multisnap_dtr(ti);
+		return -EINVAL;
+	}
+
+	mc->pool = global_pool_;
+
+	r = multisnap_metadata_open_device(mc->pool->mmd, dev_id, &mc->msd);
+	printk(KERN_ALERT "opened msd");
+	if (r) {
+		ti->error = "Couldn't open multisnap internal device";
+		multisnap_dtr(ti);
+		return r;
+	}
+
+	return 0;
+}
+
+static int
+multisnap_map(struct dm_target *ti, struct bio *bio,
+	      union map_info *map_context)
+{
+	struct multisnap_c *mc = ti->private;
+
+	bio->bi_sector -= ti->begin;
+	set_msd(bio, mc->msd);
+	return bio_map(mc->pool, mc->msd, bio);
+}
+#if 0
+static void
+multisnap_presuspend(struct dm_target *ti)
+{
+	struct multisnap_c *mc = ti->private;
+
+	spin_lock(&mc->lock);
+	mc->bounce_mode = 1;
+	spin_unlock(&mc->lock);
+
+	multisnap_flush(ti);
+	requeue_all_bios(mc);
+}
+
+/*
+ * Retrieves the number of blocks of the data device from
+ * the superblock and compares it to the actual device size,
+ * thus resizing the data device in case it has grown.
+ *
+ * This both copes with opening preallocated data devices in the ctr
+ * being followed by a resume
+ * -and-
+ * calling the resume method individually after userpace has
+ * grown the data device in reaction to a table event.
+ */
+static int
+multisnap_preresume(struct dm_target *ti)
+{
+	struct multisnap_c *mc = ti->private;
+
+	spin_lock(&mc->lock);
+	mc->bounce_mode = 0;
+	spin_unlock(&mc->lock);
+
+	return 0;
+}
+#endif
+static int
+multisnap_status(struct dm_target *ti, status_type_t type,
+		 char *result, unsigned maxlen)
+{
+#if 0
+	int r;
+	ssize_t sz = 0;
+	block_t mapped;
+	char buf[BDEVNAME_SIZE];
+	struct multisnap_c *mc = ti->private;
+	unsigned long dev_id;
+
+	r = multisnap_metadata_get_mapped_count(mc->msd, &mapped);
+	if (r)
+		return r;
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%llu", mapped);
+		break;
+
+	case STATUSTYPE_TABLE:
+		dev_id = mc->dev_id;
+		DMEMIT("%s %lu",
+		       format_dev_t(buf, mc->pool_dev->bdev->bd_dev),
+		       dev_id);
+	}
+
+	return 0;
+#else
+	return -1;
+#endif
+}
+
+#if 0
+/* bvec merge method. */
+static int
+multisnap_bvec_merge(struct dm_target *ti,
+		     struct bvec_merge_data *bvm,
+		     struct bio_vec *biovec, int max_size)
+{
+	struct multisnap_c *mc = ti->private;
+	struct request_queue *q = bdev_get_queue(_remap_dev(mc));
+	block_t block;
+	struct multisnap_map_result mapping;
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = _remap_dev(mc);
+	bvm->bi_sector -= ti->begin;
+	block = _sector_to_block(mc, bvm->bi_sector);
+
+	/*
+	 * We look this up as a WRITE in case the bio is going to cause a
+	 * new mapping.  Because we've selected non-blocking we know no
+	 * mapping will be inserted.
+	 */
+	if (multisnap_metadata_map(mc->msd, block, WRITE, 0, &mapping) < 0)
+		return 0;
+
+	bvm->bi_sector = _remap_sector(mc, bvm->bi_sector, mapping.dest);
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
+/* Provide io hints. */
+static void
+multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	int r;
+	sector_t block_size;
+	struct multisnap_c *mc = ti->private;
+
+	blk_limits_io_min(limits, 0);
+
+	r = multisnap_metadata_get_data_block_size(mc->mmd, &block_size);
+	if (r)
+		printk(KERN_ALERT "mmd_get_data_block_size() failed");
+	blk_limits_io_opt(limits, r ? 0 : block_size);
+}
+#endif
+static struct target_type multisnap_target = {
+	.name =        "multisnap",
+	.version =     {1, 0, 0},
+	.module =      THIS_MODULE,
+	.ctr =	       multisnap_ctr,
+	.dtr =	       multisnap_dtr,
+//	.flush =       multisnap_flush,
+	.map =	       multisnap_map,
+//	.presuspend =  multisnap_presuspend,
+//	.preresume =   multisnap_preresume,
+	.status =      multisnap_status,
+//	.merge =       multisnap_bvec_merge,
+//	.io_hints =    multisnap_io_hints,
+};
 
 /*----------------------------------------------------------------*/
 
-struct multisnap_c {
-	struct dm_target *ti;
-	struct dm_dev *pool_dev;
-	struct multisnap_metadata *mmd;
-	struct ms_device *msd;
-	multisnap_dev_t dev_id;
-
-	/* Data block size. */
-	sector_t block_size;
-
-	/* Quick sector -> block mapping. */
-	unsigned int block_shift;
-
-	/* Mask to give the offset of a sector within a block. */
-	sector_t offset_mask;
-
-	/*
-	 * All blocking operations are deferred to a worker, eg. inserting
-	 * a new mapping, looking up a mapping that isn't in the block
-	 * manager cache.  Bios are passed via the |in| list.
-	 */
-	spinlock_t lock;
-	struct bio_list work;
-	struct work_struct ws;
-
-	/*
-	 * If the pool is out of space, then we must wait until it is
-	 * extended.  The |no_space| list holds these deferred bios
-	 */
-	spinlock_t no_space_lock;
-	struct bio_list no_space; /* Bios w/o data space. */
-
-	/*
-	 * If bounce mode is in effect all incoming bios are errored with
-	 * DM_ENDIO_REQUEUE.
-	 */
-	int bounce_mode;
-};
-
-/* Derive offset within block from b */
-static sector_t _sector_to_block(struct multisnap_c *mc, sector_t sector)
+static int __init dm_multisnap_init(void)
 {
-	return sector >> mc->block_shift;
+	int r = dm_register_target(&multisnap_target);
+	if (r)
+		return r;
+
+	r = dm_register_target(&pool_target);
+	if (r)
+		dm_unregister_target(&multisnap_target);
+
+	return r;
 }
 
-static void wake_worker(struct multisnap_c *mc)
+static void dm_multisnap_exit(void)
 {
-	if (!work_pending(&mc->ws))
-		queue_work(multisnap_metadata_get_workqueue(mc->msd), &mc->ws);
+	dm_unregister_target(&multisnap_target);
+	dm_unregister_target(&pool_target);
 }
 
-static struct block_device *_remap_dev(struct multisnap_c *mc)
-{
-       return mc->pool_dev->bdev;
-}
+module_init(dm_multisnap_init);
+module_exit(dm_multisnap_exit);
 
-static sector_t _remap_sector(struct multisnap_c *mc, sector_t sector, block_t block)
-{
-	return (block << mc->block_shift) + (sector & mc->offset_mask);
-}
+MODULE_DESCRIPTION(DM_NAME "device-mapper multisnap target");
+MODULE_AUTHOR("Joe Thornber <thornber@redhat.com>");
+MODULE_LICENSE("GPL");
 
-static void remap_bio(struct multisnap_c *mc, struct bio *bio, block_t block)
-{
-	bio->bi_sector = _remap_sector(mc, bio->bi_sector, block);
-	bio->bi_bdev = _remap_dev(mc);
-}
+/*----------------------------------------------------------------*/
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#if 0
 static void requeue_bios(struct multisnap_c *mc, struct bio_list *bl, spinlock_t *lock)
 {
 	struct bio *bio;
@@ -316,61 +1103,6 @@ static void requeue_all_bios(struct multisnap_c *mc)
 	requeue_bios(mc, &mc->no_space, &mc->no_space_lock);
 }
 
-static int is_congested(void *congested_data, int bdi_bits)
-{
-	int r;
-	struct multisnap_c *mc = congested_data;
-
-	spin_lock(&mc->no_space_lock);
-	r = !bio_list_empty(&mc->no_space);
-	spin_unlock(&mc->no_space_lock);
-
-	if (!r) {
-		struct request_queue *q = bdev_get_queue(mc->pool_dev->bdev);
-		r = bdi_congested(&q->backing_dev_info, bdi_bits);
-	}
-
-	return r;
-}
-
-static void set_congestion_fn(struct multisnap_c *mc)
-{
-	struct mapped_device *md = dm_table_get_md(mc->ti->table);
-	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
-
-	/* Set congested function and data. */
-	bdi->congested_fn = is_congested;
-	bdi->congested_data = mc;
-}
-#if 0
-static int copy_complete(int err, void *context1, void *context2)
-{
-	/* FIXME: what do we do if there's an io error? */
-	
-}
-
-static int do_copy_on_write(struct multisnap_c *mc,
-			    struct multisnap_map_result *mapping,
-			    struct bio *remapped_bio)
-{
-	/*
-	 * There's two approaches to this:
-	 *
-	 * i) copy the parts of the block before and after the bio.  Hook
-	 * the bio, and tell the metadata that the copying is complete when
-	 * all three components have completed.
-	 *
-	 * ii) Copy the complete block, when this is done tell the metadata
-	 * that the copying is complete and submit the bio.
-	 *
-	 * (i) incurs less latency, but is more complicated to code, so
-	 * we're sticking with the simpler (ii) here.  Experiments with (i)
-	 * can be done later to show that the improvement is worth the
-	 * additional code complexity.
-	 */
-	copy_block(mapping->origin, mapping->dest, copy_complete, mc, remapped_bio);
-}
-#endif
 static void do_bios(struct multisnap_c *mc, struct bio_list *bios)
 {
 	int r;
@@ -477,302 +1209,22 @@ static void multisnap_flush(struct dm_target *ti)
 	}
 }
 
-static void multisnap_dtr(struct dm_target *ti)
-{
-	struct multisnap_c *mc = ti->private;
+#endif
 
-	if (mc->msd) {
-		multisnap_metadata_close_device(mc->msd);
-		printk(KERN_ALERT "msd closed");
-	}
 
-	if (mc->pool_dev)
-		dm_put_device(ti, mc->pool_dev);
-	kfree(mc);
-}
 
-/*
- * Construct a multisnap device:
- *
- * <start> <length> multisnap <dev id> <pool_dev>
- *
- * dev_id: the internal device identifier
- * pool_dev: The multisnap-pool device
- *
- */
-static int
-multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
-{
-	int r;
-	unsigned long dev_id;
-	struct multisnap_c *mc;
 
-	if (argc != 2) {
-		ti->error = "Invalid argument count";
-		return -EINVAL;
-	}
 
-	mc = ti->private = kzalloc(sizeof(*mc), GFP_KERNEL);
-	if (!mc) {
-		ti->error = "Out of memory";
-		return -ENOMEM;
-	}
 
-	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &mc->pool_dev);
-	if (r) {
-		ti->error = "Error getting pool device";
-		multisnap_dtr(ti);
-		return r;
-	}
 
-	if (sscanf(argv[1], "%lu", &dev_id) != 1) {
-		ti->error = "Invalid device id";
-		multisnap_dtr(ti);
-		return -EINVAL;
-	}
-	mc->dev_id = dev_id;
 
-	mc->ti = ti;
-	mc->mmd = pool_to_mmd(mc->pool_dev->bdev);
-	if (!mc->mmd) {
-		ti->error = "Couldn't get metadata object from pool device";
-		multisnap_dtr(ti);
-		return -EINVAL;
-	}
 
-	r = multisnap_metadata_open_device(mc->mmd, dev_id, &mc->msd);
-	printk(KERN_ALERT "opened msd");
-	if (r) {
-		ti->error = "Couldn't open multisnap internal device";
-		multisnap_dtr(ti);
-		return r;
-	}
 
-	r = multisnap_metadata_get_data_block_size(mc->mmd, &mc->block_size);
-	if (r) {
-		ti->error = "Couldn't get data block size";
-		multisnap_dtr(ti);
-		return r;
-	}
 
-	ti->split_io = mc->block_size;
-	mc->offset_mask = ti->split_io - 1;
-	mc->block_shift = ffs(mc->block_size) - 1;
 
-	spin_lock_init(&mc->lock);
-	bio_list_init(&mc->work);
-	INIT_WORK(&mc->ws, do_work);
 
-	spin_lock_init(&mc->no_space_lock);
-	bio_list_init(&mc->no_space);
 
-	mc->bounce_mode = 0;
-	set_congestion_fn(mc);
 
-	smp_wmb();
-	return 0;
-}
-
-static int
-multisnap_map(struct dm_target *ti, struct bio *bio,
-	      union map_info *map_context)
-{
-	int r;
-	struct multisnap_c *mc = ti->private;
-	block_t block;
-	struct multisnap_map_result mapping;
-
-	/* Remap sector to target begin. */
-	bio->bi_sector -= ti->begin;
-
-	if (!(bio->bi_rw & (REQ_FLUSH | REQ_FUA))) {
-		block = _sector_to_block(mc, bio->bi_sector);
-		r = multisnap_metadata_map(mc->msd, block,
-					   bio_data_dir(bio), 0, &mapping);
-		if (r == 0) {
-			/*
-			 * Because the non-blocking flag wasn't set we know
-			 * no copying is necc.
-			 */
-			remap_bio(mc, bio, mapping.dest);
-			return DM_MAPIO_REMAPPED;
-		}
-
-		if (bio_data_dir(bio) == READ && r != -EWOULDBLOCK) {
-			zero_fill_bio(bio);
-			bio_endio(bio, 0);
-			return DM_MAPIO_SUBMITTED;
-		}
-	}
-
-	/* Don't bother the worker thread with read ahead io */
-	if (bio_rw(bio) == READA)
-		return -EIO;
-
-	spin_lock(&mc->lock);
-	bio_list_add(&mc->work, bio);
-	spin_unlock(&mc->lock);
-
-	wake_worker(mc);
-	return DM_MAPIO_SUBMITTED;
-}
-
-static void
-multisnap_presuspend(struct dm_target *ti)
-{
-	struct multisnap_c *mc = ti->private;
-
-	spin_lock(&mc->lock);
-	mc->bounce_mode = 1;
-	spin_unlock(&mc->lock);
-
-	multisnap_flush(ti);
-	requeue_all_bios(mc);
-}
-
-/*
- * Retrieves the number of blocks of the data device from
- * the superblock and compares it to the actual device size,
- * thus resizing the data device in case it has grown.
- *
- * This both copes with opening preallocated data devices in the ctr
- * being followed by a resume
- * -and-
- * calling the resume method individually after userpace has
- * grown the data device in reaction to a table event.
- */
-static int
-multisnap_preresume(struct dm_target *ti)
-{
-	struct multisnap_c *mc = ti->private;
-
-	spin_lock(&mc->lock);
-	mc->bounce_mode = 0;
-	spin_unlock(&mc->lock);
-
-	return 0;
-}
-
-static int
-multisnap_status(struct dm_target *ti, status_type_t type,
-		 char *result, unsigned maxlen)
-{
-	int r;
-	ssize_t sz = 0;
-	block_t mapped;
-	char buf[BDEVNAME_SIZE];
-	struct multisnap_c *mc = ti->private;
-	unsigned long dev_id;
-
-	r = multisnap_metadata_get_mapped_count(mc->msd, &mapped);
-	if (r)
-		return r;
-
-	switch (type) {
-	case STATUSTYPE_INFO:
-		DMEMIT("%llu", mapped);
-		break;
-
-	case STATUSTYPE_TABLE:
-		dev_id = mc->dev_id;
-		DMEMIT("%s %lu",
-		       format_dev_t(buf, mc->pool_dev->bdev->bd_dev),
-		       dev_id);
-	}
-
-	return 0;
-}
-
-/* bvec merge method. */
-static int
-multisnap_bvec_merge(struct dm_target *ti,
-		     struct bvec_merge_data *bvm,
-		     struct bio_vec *biovec, int max_size)
-{
-	struct multisnap_c *mc = ti->private;
-	struct request_queue *q = bdev_get_queue(_remap_dev(mc));
-	block_t block;
-	struct multisnap_map_result mapping;
-
-	if (!q->merge_bvec_fn)
-		return max_size;
-
-	bvm->bi_bdev = _remap_dev(mc);
-	bvm->bi_sector -= ti->begin;
-	block = _sector_to_block(mc, bvm->bi_sector);
-
-	/*
-	 * We look this up as a WRITE in case the bio is going to cause a
-	 * new mapping.  Because we've selected non-blocking we know no
-	 * mapping will be inserted.
-	 */
-	if (multisnap_metadata_map(mc->msd, block, WRITE, 0, &mapping) < 0)
-		return 0;
-
-	bvm->bi_sector = _remap_sector(mc, bvm->bi_sector, mapping.dest);
-	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
-}
-
-/* Provide io hints. */
-static void
-multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
-{
-	int r;
-	sector_t block_size;
-	struct multisnap_c *mc = ti->private;
-
-	blk_limits_io_min(limits, 0);
-
-	r = multisnap_metadata_get_data_block_size(mc->mmd, &block_size);
-	if (r)
-		printk(KERN_ALERT "mmd_get_data_block_size() failed");
-	blk_limits_io_opt(limits, r ? 0 : block_size);
-}
-
-static struct target_type multisnap_target = {
-	.name =        "multisnap",
-	.version =     {1, 0, 0},
-	.module =      THIS_MODULE,
-	.ctr =	       multisnap_ctr,
-	.dtr =	       multisnap_dtr,
-	.flush =       multisnap_flush,
-	.map =	       multisnap_map,
-	.presuspend =  multisnap_presuspend,
-	.preresume =   multisnap_preresume,
-	.status =      multisnap_status,
-	.merge =       multisnap_bvec_merge,
-	.io_hints =    multisnap_io_hints,
-};
-
-/*----------------------------------------------------------------*/
-
-static int __init dm_multisnap_init(void)
-{
-	int r = dm_register_target(&multisnap_target);
-	if (r)
-		return r;
-
-	r = dm_register_target(&pool_target);
-	if (r)
-		dm_unregister_target(&multisnap_target);
-
-	return r;
-}
-
-static void dm_multisnap_exit(void)
-{
-	dm_unregister_target(&multisnap_target);
-	dm_unregister_target(&pool_target);
-}
-
-module_init(dm_multisnap_init);
-module_exit(dm_multisnap_exit);
-
-MODULE_DESCRIPTION(DM_NAME "device-mapper multisnap target");
-MODULE_AUTHOR("Joe Thornber <thornber@redhat.com>");
-MODULE_LICENSE("GPL");
-
-/*----------------------------------------------------------------*/
 
 
 

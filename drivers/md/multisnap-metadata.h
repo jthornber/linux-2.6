@@ -17,9 +17,11 @@ typedef uint64_t multisnap_dev_t;
 /*
  * Reopens or creates a new, empty metadata volume.
  */
-struct multisnap_metadata *multisnap_metadata_open(struct block_device *bdev,
-						   sector_t data_block_size,
-						   block_t data_dev_size);
+struct multisnap_metadata *
+multisnap_metadata_open(struct block_device *bdev,
+			sector_t data_block_size,
+			block_t data_dev_size);
+
 int multisnap_metadata_close(struct multisnap_metadata *mmd);
 
 /*
@@ -50,9 +52,6 @@ int multisnap_metadata_delete(struct multisnap_metadata *mmd,
 /*
  * Commits _all_ metadata changes: device creation, deletion, mapping
  * updates.
- *
- * This may block until pending block copying is complete (see comment for
- * mm_map).
  */
 int multisnap_metadata_commit(struct multisnap_metadata *mmd);
 
@@ -70,75 +69,33 @@ int multisnap_metadata_open_device(struct multisnap_metadata *mmd,
 
 int multisnap_metadata_close_device(struct ms_device *msd);
 
-enum multisnap_map_code {
-	/* A simple mapping, on you go */
-	MS_MAPPED,
+multisnap_dev_t multisnap_device_dev(struct ms_device *msd);
 
-	/* The client must perform the specified copy operation before
-	 * allowing the remapped io to continue.  Remember to tell the
-	 * multisnap metadata that the copy is complete *before* continuing
-	 * with the io.
-	 */
-	MS_NEED_COPY,
-
-	/* This io may not proceed at this time.  Generally because it
-	 * would change a block that is currently being copied.
-	 *
-	 * FIXME: How do we know when we can proceed?  Introduce a
-	 * deferred_io_set abstraction?  It needs some way of removing
-	 * items for quiescing.
-	 */
-	MS_DEFERRED
-};
-
-struct multisnap_map_result {
-	int need_copy;
-
-	block_t dest;		/* map to this block */
-
-	/*
-	 * If @need_copy is !0, then the block has not been initialised.  You
-	 * should ensure that you either:
-	 *
-	 * - write to the whole block
-	 * - overwrite the contents of @dest with @clone
-	 */
-	block_t origin;
+struct multisnap_lookup_result {
+	block_t block;
+	int shared;
 };
 
 /*
- * |io_direction| must be one of READ or WRITE
- * returns:
- *
- *   0 on success
- *   -EWOULDBLOCK if it would block.
- *   -ENOSPC if out of metadata or data space
- *   -ENODATA no mapping present (only occurs for READs)
- *   + other error codes
- *
- * The |can_block| parameter has become overloaded.  We should separate
- * into two flags.  Currently it means:
- *
- *   0 - This call will return -EWOULDBLOCK if it was going to block, also
- *       it wont modify the mapping.
- *  !0 - Can block, can modify.
- *
- * If a copy is needed, then any further WRITE that maps to the @origin or
- * @dest will block until mm_complete_copy() is called.  READs will
- * continue to be mapped to @origin, until after mm_complete_copy() which
- * updates the metadata.
+ * Returns:
+ *   -EWOULDBLOCK iff @can_block is set and would block.
+ *   -ENODATA iff that mapping is not present.
+ *   0 success
  */
-int multisnap_metadata_map(struct ms_device *msd,
-			   block_t block,
-			   int io_direction,
-			   int can_block,
-			   struct multisnap_map_result *result);
+int multisnap_metadata_lookup(struct ms_device *msd,
+			      block_t block,
+			      int can_block,
+			      struct multisnap_lookup_result *result);
 
-/*
- * On disk metadata is not updated until this method is called.
- */
-int multisnap_metadata_complete_copy(struct ms_device *msd,
-				     block_t origin);
+/* Inserts a new mapping */
+int multisnap_metadata_insert(struct ms_device *msd,
+			      block_t block,
+			      block_t data_block);
+
+int multisnap_metadata_alloc_data_block(struct ms_device *msd,
+					block_t *result);
+int multisnap_metadata_free_data_block(struct ms_device *msd,
+				       block_t result);
 
 int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, block_t *result);
 int multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd, sector_t *result);
@@ -150,13 +107,6 @@ int multisnap_metadata_get_mapped_count(struct ms_device *msd, block_t *result);
  * blocks would be lost.
  */
 int multisnap_metadata_resize_data_dev(struct ms_device *msd, block_t new_size);
-
-/*
- * All thinp devices should use this work queue to perform blocking
- * operations.
- */
-struct workqueue_struct *
-multisnap_metadata_get_workqueue(struct ms_device *msd);
 
 /*----------------------------------------------------------------*/
 

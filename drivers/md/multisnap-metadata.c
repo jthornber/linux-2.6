@@ -14,8 +14,7 @@
 
 /*----------------------------------------------------------------*/
 
-/* FIXME: what's this file got to do with dm ? */
-#define	DAEMON "dm-multisnap-provd"
+#define	DAEMON "multisnap-metadata"
 
 #define MULTISNAP_SUPERBLOCK_MAGIC 27022010
 #define MULTISNAP_SUPERBLOCK_LOCATION 0
@@ -89,8 +88,6 @@ struct multisnap_metadata {
 	block_t root;
 	block_t details_root;
 	struct list_head ms_devices;
-
-	struct workqueue_struct *wq;	/* Work queue. */
 };
 
 struct ms_device {
@@ -258,15 +255,6 @@ alloc_(struct block_manager *bm, block_t nr_blocks, int create)
 	mmd->details_root = 0;
 	INIT_LIST_HEAD(&mmd->ms_devices);
 
-	/* Create singlethreaded workqueue that will service all devices
-	 * that use this metadata.
-	 */
-	mmd->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
-	if (!mmd->wq) {
-		printk(KERN_ALERT "couldn't create workqueue for metadata object");
-		goto bad;
-	}
-
 	return mmd;
 
 bad:
@@ -403,10 +391,6 @@ multisnap_metadata_close(struct multisnap_metadata *mmd)
 	tm_destroy(mmd->nb_tm);
 	block_manager_destroy(mmd->bm);
 	sm_destroy(mmd->metadata_sm);
-
-	if (mmd->wq)
-		destroy_workqueue(mmd->wq);
-
 	kfree(mmd);
 
 	return 0;
@@ -491,9 +475,7 @@ multisnap_metadata_create_thin_(struct multisnap_metadata *mmd,
 
 	r = open_device_(mmd, dev, 1, &msd);
 	if (r) {
-#if 0
 		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-#endif
 		btree_del(&mmd->bl_info, dev_root);
 		return r;
 	}
@@ -572,18 +554,14 @@ multisnap_metadata_create_snap_(struct multisnap_metadata *mmd,
 
 	r = open_device_(mmd, dev, 1, &msd);
 	if (r) {
-#if 0
-		btree_remove(&mmd->tl_info, mmd->root, key, &mmd->root);
+		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 		btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
-#endif
 	}
 
 	r = snapshot_details_(mmd, msd, origin, mmd->time);
 	if (r) {
-#if 0
-		btree_remove(&mmd->tl_info, mmd->root, key, &mmd->root);
+		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 		btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
-#endif
 	}
 
 	return r;
@@ -605,12 +583,8 @@ static int
 multisnap_metadata_delete_(struct multisnap_metadata *mmd,
 			   multisnap_dev_t dev)
 {
-#if 0
 	uint64_t key = dev;
 	return btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-#else
-	return 0;
-#endif
 }
 
 int
@@ -654,6 +628,12 @@ multisnap_metadata_close_device(struct ms_device *msd)
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_close_device);
 
+multisnap_dev_t multisnap_device_dev(struct ms_device *msd)
+{
+	return msd->id;
+}
+
+
 static uint64_t pack_block_time(block_t b, uint32_t t)
 {
 	return ((b << 24) | t);
@@ -666,46 +646,17 @@ static void unpack_block_time(uint64_t v, block_t *b, uint32_t *t)
 }
 
 static int
-insert_(struct ms_device *msd,
-	block_t block,
-	block_t *pool_block)
-{
-	int r;
-	block_t keys[2];
-	__le64 value;
-	struct multisnap_metadata *mmd = msd->mmd;
-
-	keys[0] = msd->id;
-	keys[1] = block;
-
-	mmd->have_inserted = 1;
-	r = sm_new_block(mmd->data_sm, pool_block);
-	if (r)
-		return r;
-
-	/* FIXME: check the thinp version of this, I think it omits the endian conversion */
-	value = __cpu_to_le64(pack_block_time(*pool_block, mmd->time));
-	r = btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
-	if (r) {
-		sm_dec_block(mmd->data_sm, *pool_block);
-		return r;
-	}
-
-	return 0;
-}
-
-static int
 snapshotted_since_(struct ms_device *msd,
 		      uint32_t time)
 {
 	return msd->snapshotted_time > time;
 }
 
-static int
-map_read_(struct ms_device *msd,
-	  block_t block,
-	  int can_block,
-	  block_t *result)
+int
+multisnap_metadata_lookup(struct ms_device *msd,
+			  block_t block,
+			  int can_block,
+			  struct multisnap_lookup_result *result)
 {
 	int r;
 	uint64_t keys[2], block_time = 0;
@@ -735,112 +686,65 @@ map_read_(struct ms_device *msd,
 		block_t exception_block;
 		uint32_t exception_time;
 		unpack_block_time(block_time, &exception_block, &exception_time);
-		*result = exception_block;
+		result->block = exception_block;
+		result->shared = snapshotted_since_(msd, exception_time);
 	}
 
 	return r;
 }
+EXPORT_SYMBOL_GPL(multisnap_metadata_lookup);
 
-/*
- * This cannot fail, but may block.  Expects lock to be already held.
- */
-static void lock_data_block_(struct ms_device *msd,
-			     block_t b)
+int multisnap_metadata_insert(struct ms_device *msd,
+			      block_t block,
+			      block_t data_block)
 {
-	/*
-	 * We have a fixed sized pool of
-	 */
-	// FIXME: finish
-}
-
-/* FIXME: Performance would be a lot better if we promote the read lock to
- * a write lock.
- *
- * If we can't promote then we should drop the lock, take write, check the
- * mapping is the same then insert or restart.  This will still be a big
- * speedup.
- *
- * Also we can allow _one_ write to proceed concurrently with many readers.
- * So we should invent a new lock type rather than use a straight rw lock.
- */
-static int
-map_write_(struct ms_device *msd,
-	   block_t block,
-	   int can_block,
-	   struct multisnap_map_result *result)
-{
-	int r;
-	uint64_t keys[2], block_time = 0;
+	/* FIXME: remove @data_block from the allocated tracking data structure */
+	block_t keys[2];
 	__le64 value;
 	struct multisnap_metadata *mmd = msd->mmd;
-	block_t exception_block;
-	uint32_t exception_time;
-
-	if (!can_block)
-		return -EWOULDBLOCK;
 
 	keys[0] = msd->id;
 	keys[1] = block;
 
-	down_write(&mmd->root_lock);
-	r = btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
-	if (r != 0 && r != -ENODATA)
-		goto out;
-
-	if (!r) {
-		block_time = __le64_to_cpu(value);
-		unpack_block_time(block_time, &exception_block, &exception_time);
-	}
-
-	if (r == -ENODATA) {
-		r = insert_(msd, block, &result->dest);
-		result->need_copy = 0;
-		msd->mapped_blocks++;
-
-	} else if (snapshotted_since_(msd, exception_time)) {
-		r = insert_(msd, block, &result->dest);
-		result->need_copy = 1;
-		result->origin = exception_block;
-		lock_data_block_(msd, exception_block);
-
-	} else {
-		result->dest = exception_block;
-		result->need_copy = 0;
-	}
-
-out:
-	up_write(&mmd->root_lock);
-	return r;
+	mmd->have_inserted = 1;
+	value = __cpu_to_le64(pack_block_time(data_block, mmd->time));
+	return btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
 }
+EXPORT_SYMBOL_GPL(multisnap_metadata_insert);
 
 int
-multisnap_metadata_map(struct ms_device *msd,
-		       block_t block,
-		       int io_direction,
-		       int can_block,
-		       struct multisnap_map_result *result)
+multisnap_metadata_alloc_data_block(struct ms_device *msd,
+				    block_t *result)
 {
-	switch (io_direction) {
-	case READ:
-		result->need_copy = 0;
-		return map_read_(msd, block, can_block, &result->dest);
+	int r;
+	struct multisnap_metadata *mmd = msd->mmd;
 
-	case WRITE:
-		map_write_(msd, block, can_block, result);
+	/*
+	 * FIXME: we need to persist allocations that haven't yet been
+	 * inserted.
+	 */
+	down_write(&mmd->root_lock);
+	r = sm_new_block(msd->mmd->data_sm, result);
+	up_write(&mmd->root_lock);
 
-	default:
-		return -EINVAL;
-	}
+	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_map);
+EXPORT_SYMBOL_GPL(multisnap_metadata_alloc_data_block);
 
-int multisnap_metadata_complete_copy(struct ms_device *msd,
-				     block_t origin)
+int
+multisnap_metadata_free_data_block(struct ms_device *msd,
+				   block_t result)
 {
-	// FIXME: finish
-	return 0;
+	int r;
+	struct multisnap_metadata *mmd = msd->mmd;
+
+	down_write(&mmd->root_lock);
+	r = sm_dec_block(msd->mmd->data_sm, result);
+	up_write(&mmd->root_lock);
+
+	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_complete_copy);
+EXPORT_SYMBOL_GPL(multisnap_metadata_free_data_block);
 
 static int
 write_changed_details_(struct multisnap_metadata *mmd)
@@ -878,8 +782,6 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 {
 	int r;
 	size_t len;
-
-	/* FIXME: ensure no copying is in pending */
 
 	down_write(&mmd->root_lock);
 	r = write_changed_details_(mmd);
@@ -997,11 +899,5 @@ multisnap_metadata_resize_data_dev(struct ms_device *msd, block_t new_size)
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_resize_data_dev);
 
-struct workqueue_struct *
-multisnap_metadata_get_workqueue(struct ms_device *msd)
-{
-	return msd->mmd->wq;
-}
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_workqueue);
-
 /*----------------------------------------------------------------*/
+
