@@ -243,8 +243,9 @@ alloc_(struct block_manager *bm, int create)
 
 	init_rwsem(&hsm->root_lock);
 
-	/* Create singlethreaded workqueue that will service all devices
-	 * that use this metadata.
+	/*
+	 * Create singlethreaded workqueue that will
+	 * service all devices that use this metadata.
 	 */
 	hsm->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
 	if (!hsm->wq) {
@@ -468,7 +469,7 @@ void split_result(block_t result, block_t *b, unsigned long *flags)
 
 int hsm_metadata_insert(struct hsm_metadata *hsm,
 			hsm_dev_t dev,
-			block_t hsm_block,
+			block_t cache_block,
 			block_t *pool_block,
 		        unsigned long *flags)
 {
@@ -477,7 +478,7 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 	block_t b, dummy, nr_blocks, keys[2];
 
 	keys[0] = dev;
-	keys[1] = hsm_block;
+	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
 	hsm->have_inserted = 1;
@@ -486,97 +487,127 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 	b = __le64_to_cpu(sb->first_free_block);
 
 	if (b >= nr_blocks) {
-		/* we've run out of space, client should extend and then retry */
-		printk(KERN_ALERT "out of thinp data space");
 		up_write(&hsm->root_lock);
+		/* we've run out of space, client should extend and then retry*/
+		printk(KERN_ALERT "out of thinp data space");
 		return -ENOSPC;
 	}
 
 	/* Block may not be interfearing with flags in the high bits. */
 	split_result(b, &dummy, flags);
-	BUG_ON(*flags);
+	if (*flags)
+		return -EPERM;
 
 	r = btree_insert(&hsm->info, hsm->root, keys, &b, &hsm->root);
 	if (!r) {
+		keys[0] = dev;
 		keys[1] = b;
 		r = btree_insert(&hsm->info, hsm->reverse_root,
-				 keys, &hsm_block, &hsm->reverse_root);
+				 keys, &cache_block, &hsm->reverse_root);
 	}
 
+	sb->first_free_block = __cpu_to_le64(b + 1);
 	up_write(&hsm->root_lock);
 
-	*pool_block = b;
-	*flags = 0;
-
-	sb->first_free_block = __cpu_to_le64(b + 1);
 	if (r < 0)
 		return r;
 
+	*pool_block = b;
+	*flags = 0;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(hsm_metadata_insert);
 
 int hsm_metadata_remove(struct hsm_metadata *hsm,
 			hsm_dev_t dev,
-			block_t hsm_block)
+			block_t cache_block)
 {
 	int r;
 	unsigned long dummy;
 	block_t keys[2], pool_block;
 
 	/* Mapping has to exists on update. */
-	r = hsm_metadata_lookup(hsm, dev, hsm_block, 1, &pool_block, &dummy);
+	r = hsm_metadata_lookup(hsm, dev, cache_block, 1, &pool_block, &dummy);
 	if (r < 0)
 		return r;
 
 	keys[0] = dev;
-	keys[1] = hsm_block;
+	keys[1] = cache_block;
+
+	split_result(pool_block, &pool_block, &dummy);
 
 	down_write(&hsm->root_lock);
-	btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
-	keys[1] = pool_block;
-	btree_remove(&hsm->info, hsm->reverse_root, keys,
-		     &hsm->reverse_root);
+	r = btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
+	if (!r) {
+		keys[1] = pool_block;
+		r = btree_remove(&hsm->info, hsm->reverse_root,
+				 keys, &hsm->reverse_root);
+	}
+
 	up_write(&hsm->root_lock);
-	return 0;
+	return r;
 }
 EXPORT_SYMBOL_GPL(hsm_metadata_remove);
 
 int
-hsm_metadata_lookup(struct hsm_metadata *hsm,
-		    hsm_dev_t dev,
-		    block_t hsm_block,
-		    int can_block,
-		    block_t *pool_block, unsigned long *flags)
+_hsm_metadata_lookup(struct hsm_metadata *hsm,
+		     hsm_dev_t dev, block_t block_in, int can_block,
+		     block_t *block_out, unsigned long *flags,
+		     block_t btree_root)
 {
 	int r;
-	block_t keys[2], result;
-
-	keys[0] = dev;
-	keys[1] = hsm_block;
+	block_t keys[] = { dev, block_in }, result;
 
 	if (can_block) {
 		down_read(&hsm->root_lock);
-		r = btree_lookup_equal(&hsm->info, hsm->root, keys, &result);
+DMINFO("%s 1", __func__);
+		r = btree_lookup_equal(&hsm->info, btree_root, keys, &result);
+DMINFO("%s 2", __func__);
 		up_read(&hsm->root_lock);
 
 	} else if (down_read_trylock(&hsm->root_lock)) {
-		r = btree_lookup_equal(&hsm->nb_info, hsm->root, keys, &result);
+		r = btree_lookup_equal(&hsm->nb_info, btree_root,
+				       keys, &result);
 		up_read(&hsm->root_lock);
 
 	} else
 		r = -EWOULDBLOCK;
 
-	if (!r)
-		split_result(result, pool_block, flags);
+	if (!r) {
+		if (btree_root == hsm->root)
+			split_result(result, block_out, flags);
+		else
+			*block_out = result;
+	}
 
 	return r;
 }
+
+int
+hsm_metadata_lookup(struct hsm_metadata *hsm,
+		    hsm_dev_t dev, block_t cache_block, int can_block,
+		    block_t *pool_block, unsigned long *flags)
+{
+	return _hsm_metadata_lookup(hsm, dev, cache_block, can_block,
+				    pool_block, flags, hsm->root);
+}
 EXPORT_SYMBOL_GPL(hsm_metadata_lookup);
 
+int
+hsm_metadata_lookup_reverse(struct hsm_metadata *hsm,
+			    hsm_dev_t dev, block_t pool_block, int can_block,
+			    block_t *cache_block)
+{
+	unsigned long dummy;
+	return _hsm_metadata_lookup(hsm, dev, pool_block, can_block,
+				    cache_block, &dummy, hsm->reverse_root);
+}
+EXPORT_SYMBOL_GPL(hsm_metadata_lookup_reverse);
+
+#define	LLU	long long unsigned
 int hsm_metadata_update(struct hsm_metadata *hsm,
 			hsm_dev_t dev,
-			block_t hsm_block,
+			block_t cache_block,
 		        unsigned long flags)
 {
 	int r;
@@ -584,17 +615,20 @@ int hsm_metadata_update(struct hsm_metadata *hsm,
 	block_t keys[2], pool_block;
 
 	/* Mapping has to exists on update. */
-	r = hsm_metadata_lookup(hsm, dev, hsm_block, 1, &pool_block, &dummy);
-BUG_ON(r < 0);
+	r = hsm_metadata_lookup(hsm, dev, cache_block, 1, &pool_block, &dummy);
 	if (r < 0)
 		return r;
 
+DMINFO("%s 1. flags=%lu pool_block=%llu", __func__, flags, (LLU) pool_block);
+	split_result(pool_block, &pool_block, &dummy);
+	pool_block |= (flags << 60);
+DMINFO("%s 2. flags=%lu pool_block=%llu", __func__, flags, (LLU) pool_block);
+
 	keys[0] = dev;
-	keys[1] = hsm_block;
+	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
 	hsm->have_inserted = 1;
-	pool_block |= (flags << 60);
 	r = btree_insert(&hsm->info, hsm->root, keys, &pool_block, &hsm->root);
 	up_write(&hsm->root_lock);
 
@@ -603,37 +637,7 @@ BUG_ON(r < 0);
 EXPORT_SYMBOL_GPL(hsm_metadata_update);
 
 int
-hsm_metadata_lookup_reverse(struct hsm_metadata *hsm,
-			    hsm_dev_t dev,
-			    block_t pool_block,
-			    int can_block,
-			    block_t *result)
-{
-	int r;
-	block_t keys[2];
-
-	keys[0] = dev;
-	keys[1] = pool_block;
-
-	if (can_block) {
-		down_read(&hsm->root_lock);
-		r = btree_lookup_equal(&hsm->info, hsm->reverse_root, keys, result);
-		up_read(&hsm->root_lock);
-
-	} else if (down_read_trylock(&hsm->root_lock)) {
-		r = btree_lookup_equal(&hsm->nb_info, hsm->reverse_root, keys, result);
-		up_read(&hsm->root_lock);
-
-	} else
-		r = -EWOULDBLOCK;
-
-	return r;
-}
-EXPORT_SYMBOL_GPL(hsm_metadata_lookup_reverse);
-
-int
-hsm_metadata_delete(struct hsm_metadata *hsm,
-		      hsm_dev_t dev)
+hsm_metadata_delete(struct hsm_metadata *hsm, hsm_dev_t dev)
 {
 	printk(KERN_ALERT "requested deletion of %u", (unsigned) dev);
 	down_write(&hsm->root_lock);
@@ -649,10 +653,7 @@ hsm_metadata_get_data_block_size(struct hsm_metadata *hsm,
 				   sector_t *result)
 {
 	down_read(&hsm->root_lock);
-	{
-		struct superblock *sb = (struct superblock *) block_data(hsm->sblock);
-		*result = __le64_to_cpu(sb->data_block_size);
-	}
+	*result = __le64_to_cpu(((struct superblock *) block_data(hsm->sblock))->data_block_size);
 	up_read(&hsm->root_lock);
 	return 0;
 }
@@ -660,14 +661,10 @@ EXPORT_SYMBOL_GPL(hsm_metadata_get_data_block_size);
 
 int
 hsm_metadata_get_data_dev_size(struct hsm_metadata *hsm,
-				 hsm_dev_t dev,
-				 block_t *result)
+			       hsm_dev_t dev, block_t *result)
 {
 	down_read(&hsm->root_lock);
-	{
-		struct superblock *sb = (struct superblock *) block_data(hsm->sblock);
-		*result = __le64_to_cpu(sb->data_nr_blocks);
-	}
+	*result = __le64_to_cpu(((struct superblock *) block_data(hsm->sblock))->data_nr_blocks);
 	up_read(&hsm->root_lock);
 	return 0;
 }
@@ -679,10 +676,7 @@ hsm_metadata_get_provisioned_blocks(struct hsm_metadata *hsm,
 				      block_t *result)
 {
 	down_read(&hsm->root_lock);
-	{
-		struct superblock *sb = (struct superblock *) block_data(hsm->sblock);
-		*result = __le64_to_cpu(sb->first_free_block);
-	}
+	*result = __le64_to_cpu(((struct superblock *) block_data(hsm->sblock))->first_free_block);
 	up_read(&hsm->root_lock);
 	return 0;
 }
