@@ -49,16 +49,18 @@ struct bio_prison {
 
 	unsigned nr_buckets;
 	unsigned hash_mask;
-	struct hlist_head cells[0];
+	struct hlist_head *cells;
 };
 
 static uint32_t calc_nr_buckets(unsigned nr_cells)
 {
 	uint32_t n = 128;
 	nr_cells /= 4;
-	while (n < nr_cells && n < 8192)
+	nr_cells = min(nr_cells, 8192u);
+	while (n < nr_cells)
 		n <<= 1;
 
+	printk(KERN_ALERT "nr_buckets = %u", (unsigned) n);
 	return n;
 }
 
@@ -82,6 +84,7 @@ prison_create(unsigned nr_cells)
 						      sizeof(struct cell));
 	prison->nr_buckets = nr_buckets;
 	prison->hash_mask = nr_buckets - 1;
+	prison->cells = (struct hlist_head *) (prison + 1);
 	for (i = 0; i < nr_buckets; i++)
 		INIT_HLIST_HEAD(prison->cells + i);
 
@@ -119,10 +122,11 @@ static int bio_detain(struct bio_prison *prison,
 	struct cell *cell;
 	struct hlist_node *tmp;
 
+	BUG_ON(hash > prison->nr_buckets);
+
 	spin_lock_irqsave(&prison->lock, flags);
 	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
 		if (!memcmp(&cell->key, &key, sizeof(key))) {
-			printk(KERN_ALERT "found cell");
 			found = 1;
 			break;
 		}
@@ -152,6 +156,7 @@ static void cell_release_(struct cell *cell,
 			 struct bio_list *inmates)
 {
 	struct bio_prison *prison = cell->prison;
+	hlist_del(&cell->list);
 	bio_list_merge(inmates, &cell->bios);
 	mempool_free(cell, prison->cell_pool);
 }
@@ -650,7 +655,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error getting metadata device";
 		return r;
 	}
-	printk(KERN_ALERT "pool_ctr 1");
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -658,7 +662,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, metadata_dev);
 		return r;
 	}
-	printk(KERN_ALERT "pool_ctr 2");
 
 	if (sscanf(argv[2], "%llu", &block_size) != 1) {
 		ti->error = "Invalid block size";
@@ -666,7 +669,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
-	printk(KERN_ALERT "pool_ctr 3");
 
 	if (sscanf(argv[3], "%llu", &data_size) != 1) {
 		ti->error = "Invalid data size";
@@ -674,7 +676,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
-	printk(KERN_ALERT "pool_ctr 4");
 
 	mmd = multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
@@ -683,7 +684,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -ENOMEM;
 	}
-	printk(KERN_ALERT "pool_ctr 5");
 
 	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
 	if (!pool) {
@@ -704,13 +704,11 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (!pool->prison) {
 		/* FIXME: finish */
 	}
-	printk(KERN_ALERT "pool_ctr 6");
 
 	r = dm_kcopyd_client_create(KCOPYD_NR_PAGES, &pool->copier); /* FIXME: magic numbers */
 	if (r) {
 		/* FIXME: finish */
 	}
-	printk(KERN_ALERT "pool_ctr 7");
 
 	/* Create singlethreaded workqueue that will service all devices
 	 * that use this metadata.
@@ -720,7 +718,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		printk(KERN_ALERT "couldn't create workqueue for metadata object");
 		/* FIXME: finish */
 	}
-	printk(KERN_ALERT "pool_ctr 8");
 
 	INIT_WORK(&pool->ws, do_work);
 	spin_lock_init(&pool->lock);
@@ -731,7 +728,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool->ti = ti;
 	set_congestion_fn(pool);
 	ti->private = pool;
-	printk(KERN_ALERT "pool_ctr 9");
 
 	return 0;
 }
@@ -847,6 +843,8 @@ static void multisnap_dtr(struct dm_target *ti)
 		multisnap_metadata_close_device(mc->msd);
 		printk(KERN_ALERT "msd closed");
 	}
+
+	dm_put_device(ti, mc->pool_dev);
 
 	kfree(mc);
 }
