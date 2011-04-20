@@ -122,6 +122,7 @@ static int bio_detain(struct bio_prison *prison,
 	spin_lock_irqsave(&prison->lock, flags);
 	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
 		if (!memcmp(&cell->key, &key, sizeof(key))) {
+			printk(KERN_ALERT "found cell");
 			found = 1;
 			break;
 		}
@@ -130,6 +131,7 @@ static int bio_detain(struct bio_prison *prison,
 	if (!found) {
 		/* allocate a new cell */
 		cell = mempool_alloc(prison->cell_pool, GFP_NOIO);
+		cell->prison = prison;
 		memcpy(&cell->key, &key, sizeof(key));
 		cell->count = 0;
 		bio_list_init(&cell->bios);
@@ -225,6 +227,7 @@ struct new_mapping {
 
 struct pool_c {
 	struct dm_target *ti;
+	struct block_device *pool_dev;
 	struct dm_dev *metadata_dev;
 	struct dm_dev *data_dev;
 	struct multisnap_metadata *mmd;
@@ -276,7 +279,7 @@ static void remap(struct pool_c *pool,
 		  struct bio *bio,
 		  block_t block)
 {
-	bio->bi_bdev = pool->data_dev->bdev;
+	bio->bi_bdev = pool->pool_dev;
 	bio->bi_sector = (block << pool->block_shift) +
 		(bio->bi_sector & pool->offset_mask);
 }
@@ -325,11 +328,6 @@ static void schedule_copy(struct pool_c *pool,
 {
 	int r;
 	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
-	if (m) {
-		/* can this even happen ? */
-		cell_error(cell);
-		return;
-	}
 
 	m->pool = pool;
 	m->msd = msd;
@@ -363,10 +361,6 @@ static void schedule_zero(struct pool_c *pool,
 			  struct cell *cell)
 {
 	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
-	if (m) {
-		cell_error(cell);
-		return;
-	}
 
 	m->pool = pool;
 	m->msd = msd;
@@ -453,6 +447,7 @@ static void process_bio(struct pool_c *pool,
 			cell_error(cell);
 		else
 			schedule_zero(pool, msd, block, data_block, cell);
+		break;
 
 	default:
 		bio_io_error(bio);
@@ -509,8 +504,10 @@ static void do_work(struct work_struct *ws)
 	process_prepared_mappings(pool);
 }
 
-static void defer_bio(struct pool_c *pool, struct bio *bio)
+static void defer_bio(struct pool_c *pool, struct ms_device *msd, struct bio *bio)
 {
+	set_msd(bio, msd);
+
 	spin_lock(&pool->lock);
 	bio_list_add(&pool->deferred_bios, bio);
 	spin_unlock(&pool->lock);
@@ -531,7 +528,7 @@ int bio_map(struct pool_c *pool,
 	struct multisnap_lookup_result result;
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
-		defer_bio(pool, bio);
+		defer_bio(pool, msd, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
@@ -545,16 +542,15 @@ int bio_map(struct pool_c *pool,
 			 * snapshot creation, which may cause new
 			 * sharing.
 			 *
-			 * To avoid this always quiesce _all_ the ancestors
-			 * of a new snapshot, before taking the snap.
-			 * Multisnap metadata doesn't track ancestors, it's
-			 * up to userland tools.
+			 * To avoid this always quiesce the origin before
+			 * taking the snap.  You want to do this anyway to
+			 * ensure a consistent application view
+			 * (i.e. lockfs).
 			 *
-			 * For the direct ancestor, you need to quiesce the
-			 * fs or other application.  For more remote
-			 * ancestors it's enough to quiesce the io.
+			 * More distant ancestors are irrelevant, the
+			 * shared flag will be set in their case.
 			 */
-			defer_bio(pool, bio);
+			defer_bio(pool, msd, bio);
 			r = DM_MAPIO_SUBMITTED;
 		} else {
 			remap(pool, bio, result.block);
@@ -564,7 +560,7 @@ int bio_map(struct pool_c *pool,
 
 	case -ENODATA:
 	case -EWOULDBLOCK:
-		defer_bio(pool, bio);
+		defer_bio(pool, msd, bio);
 		r = DM_MAPIO_SUBMITTED;
 		break;
 	}
@@ -614,9 +610,9 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pool = ti->private;
 
+	multisnap_metadata_close(pool->mmd);
 	dm_put_device(ti, pool->metadata_dev);
 	dm_put_device(ti, pool->data_dev);
-	multisnap_metadata_close(pool->mmd);
 
 	prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
@@ -654,6 +650,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error getting metadata device";
 		return r;
 	}
+	printk(KERN_ALERT "pool_ctr 1");
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -661,6 +658,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, metadata_dev);
 		return r;
 	}
+	printk(KERN_ALERT "pool_ctr 2");
 
 	if (sscanf(argv[2], "%llu", &block_size) != 1) {
 		ti->error = "Invalid block size";
@@ -668,6 +666,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
+	printk(KERN_ALERT "pool_ctr 3");
 
 	if (sscanf(argv[3], "%llu", &data_size) != 1) {
 		ti->error = "Invalid data size";
@@ -675,6 +674,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
+	printk(KERN_ALERT "pool_ctr 4");
 
 	mmd = multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
@@ -683,6 +683,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -ENOMEM;
 	}
+	printk(KERN_ALERT "pool_ctr 5");
 
 	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
 	if (!pool) {
@@ -692,6 +693,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		dm_put_device(ti, data_dev);
 		return -ENOMEM;
 	}
+	pool->pool_dev = dm_bdev(dm_table_get_md(pool->ti->table));
 	pool->metadata_dev = metadata_dev;
 	pool->data_dev = data_dev;
 	pool->mmd = mmd;
@@ -702,11 +704,13 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (!pool->prison) {
 		/* FIXME: finish */
 	}
+	printk(KERN_ALERT "pool_ctr 6");
 
 	r = dm_kcopyd_client_create(KCOPYD_NR_PAGES, &pool->copier); /* FIXME: magic numbers */
 	if (r) {
 		/* FIXME: finish */
 	}
+	printk(KERN_ALERT "pool_ctr 7");
 
 	/* Create singlethreaded workqueue that will service all devices
 	 * that use this metadata.
@@ -716,6 +720,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		printk(KERN_ALERT "couldn't create workqueue for metadata object");
 		/* FIXME: finish */
 	}
+	printk(KERN_ALERT "pool_ctr 8");
 
 	INIT_WORK(&pool->ws, do_work);
 	spin_lock_init(&pool->lock);
@@ -723,8 +728,10 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&pool->prepared_mappings);
 	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers */
 	global_pool_ = pool;
+	pool->ti = ti;
 	set_congestion_fn(pool);
 	ti->private = pool;
+	printk(KERN_ALERT "pool_ctr 9");
 
 	return 0;
 }
@@ -732,8 +739,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 static int pool_map(struct dm_target *ti, struct bio *bio,
 		    union map_info *map_context)
 {
-	struct pool_c *md = ti->private;
-	bio->bi_bdev = md->data_dev->bdev;
+	struct pool_c *pool = ti->private;
+	bio->bi_bdev = pool->data_dev->bdev;
 	return DM_MAPIO_REMAPPED;
 }
 
@@ -828,6 +835,7 @@ static struct target_type pool_target = {
 
 struct multisnap_c {
 	struct pool_c *pool;
+	struct dm_dev *pool_dev;
 	struct ms_device *msd;
 };
 
@@ -846,8 +854,9 @@ static void multisnap_dtr(struct dm_target *ti)
 /*
  * Construct a multisnap device:
  *
- * <start> <length> multisnap <dev id>
+ * <start> <length> multisnap <pool dev> <dev id>
  *
+ * pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  * dev id: the internal device identifier
  */
 static int
@@ -856,6 +865,7 @@ multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	unsigned long dev_id;
 	struct multisnap_c *mc;
+	struct dm_dev *pool_dev;
 
 	if (argc != 2) {
 		ti->error = "Invalid argument count";
@@ -868,13 +878,21 @@ multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -ENOMEM;
 	}
 
-	if (sscanf(argv[0], "%lu", &dev_id) != 1) {
+	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &pool_dev);
+	if (r) {
+		ti->error = "Error opening pool device";
+		kfree(mc);
+	}
+	mc->pool_dev = pool_dev;
+
+	if (sscanf(argv[1], "%lu", &dev_id) != 1) {
 		ti->error = "Invalid device id";
 		multisnap_dtr(ti);
 		return -EINVAL;
 	}
 
 	mc->pool = global_pool_;
+	mc->pool->pool_dev = pool_dev->bdev; /* FIXME: hack */
 
 	r = multisnap_metadata_open_device(mc->pool->mmd, dev_id, &mc->msd);
 	printk(KERN_ALERT "opened msd");
@@ -894,7 +912,6 @@ multisnap_map(struct dm_target *ti, struct bio *bio,
 	struct multisnap_c *mc = ti->private;
 
 	bio->bi_sector -= ti->begin;
-	set_msd(bio, mc->msd);
 	return bio_map(mc->pool, mc->msd, bio);
 }
 #if 0

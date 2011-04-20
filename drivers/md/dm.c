@@ -2206,6 +2206,12 @@ const char *dm_device_name(struct mapped_device *md)
 }
 EXPORT_SYMBOL_GPL(dm_device_name);
 
+struct block_device *dm_bdev(struct mapped_device *md)
+{
+	return md->bdev;
+}
+EXPORT_SYMBOL_GPL(dm_bdev);
+
 static void __dm_destroy(struct mapped_device *md, bool wait)
 {
 	struct dm_table *map;

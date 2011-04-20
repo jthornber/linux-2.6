@@ -245,6 +245,7 @@ void dm_uevent_add(struct mapped_device *md, struct list_head *elist);
  * Info functions.
  */
 const char *dm_device_name(struct mapped_device *md);
+struct block_device *dm_bdev(struct mapped_device *md);
 int dm_copy_name_and_uuid(struct mapped_device *md, char *name, char *uuid);
 struct gendisk *dm_disk(struct mapped_device *md);
 int dm_suspended(struct dm_target *ti);
