@@ -404,8 +404,6 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 static void destroy(void *context)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
-	printk(KERN_ALERT "sm_disk allocated %u blocks",
-	       (unsigned) smd->nr_allocated);
 	kfree(smd);
 }
 

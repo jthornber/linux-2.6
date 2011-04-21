@@ -609,8 +609,6 @@ void block_manager_destroy(struct block_manager *bm)
 	struct block *b, *btmp;
 	struct hlist_node *n, *tmp;
 
-	printk(KERN_ALERT "shared read count %u", bm->shared_read_count);
-
 	dm_io_client_destroy(bm->io);
 
 	for (i = 0; i < bm->hash_size; i++)

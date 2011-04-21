@@ -60,7 +60,6 @@ static uint32_t calc_nr_buckets(unsigned nr_cells)
 	while (n < nr_cells)
 		n <<= 1;
 
-	printk(KERN_ALERT "nr_buckets = %u", (unsigned) n);
 	return n;
 }
 
@@ -184,7 +183,6 @@ static void cell_error(struct cell *cell)
 	cell_release_(cell, &bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
-	printk(KERN_ALERT "in cell_error");
 	while ((bio = bio_list_pop(&bios)))
 		bio_io_error(bio);
 }
@@ -419,7 +417,8 @@ static void schedule_zero(struct pool_c *pool,
 			  struct ms_device *msd,
 			  block_t virt_block,
 			  block_t data_block,
-			  struct cell *cell)
+			  struct cell *cell,
+			  struct bio *bio)
 {
 	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
 
@@ -431,9 +430,20 @@ static void schedule_zero(struct pool_c *pool,
 	m->err = 0;
 	m->bio = NULL;
 
-	/* FIXME: zeroing not implemented yet */
+	if (io_covers_block(pool, bio)) {
+		/* no copy needed, since all data is going to change */
+		m->bio = bio;
+		m->bi_end_io = bio->bi_end_io;
+		m->bi_private = bio->bi_private;
+		bio->bi_end_io = bio_complete;
+		bio->bi_private = m;
+		remap_and_issue(pool, bio, data_block);
 
-	copy_complete(0, 0, m);
+	} else {
+		/* FIXME: zeroing not implemented yet */
+
+		copy_complete(0, 0, m);
+	}
 }
 
 static void cell_remap_and_issue(struct pool_c *pool,
@@ -526,7 +536,7 @@ static void process_bio(struct pool_c *pool,
 			printk(KERN_ALERT "multisnap_metadata_alloc_data_block() failed");
 			cell_error(cell);
 		} else
-			schedule_zero(pool, msd, block, data_block, cell);
+			schedule_zero(pool, msd, block, data_block, cell, bio);
 		break;
 
 	default:
@@ -831,7 +841,7 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 
 /*
  * Messages supported:
- *   new-thin <dev id> <dev size>
+ *   new-thin <dev id> <dev size in sectors>
  *   new-snap <dev id> <origin id>
  *   del      <dev id>
  */
@@ -841,7 +851,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	char *invalid_args = "Incorrect number of arguments";
 
 	int r;
-	struct pool_c *md = ti->private;
+	struct pool_c *pool = ti->private;
 	multisnap_dev_t dev_id;
 
 	if (argc < 2) {
@@ -867,7 +877,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = multisnap_metadata_create_thin(md->mmd, dev_id, dev_size);
+		r = multisnap_metadata_create_thin(pool->mmd, dev_id, dev_size >> pool->block_shift);
 		if (r) {
 			ti->error = "Creation of thin provisioned device failed";
 			return r;
@@ -886,7 +896,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = multisnap_metadata_create_snap(md->mmd, dev_id, origin_id);
+		r = multisnap_metadata_create_snap(pool->mmd, dev_id, origin_id);
 		if (r) {
 			ti->error = "Creation of snapshot failed";
 			return r;
@@ -898,7 +908,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = multisnap_metadata_delete(md->mmd, dev_id);
+		r = multisnap_metadata_delete(pool->mmd, dev_id);
 
 	} else
 		return -EINVAL;
@@ -932,7 +942,6 @@ pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pool = ti->private;
 
-	printk(KERN_ALERT "pool io_hints called");
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
 }
@@ -1011,7 +1020,6 @@ multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	mc->pool->pool_dev = pool_dev->bdev; /* FIXME: hack */
 
 	r = multisnap_metadata_open_device(mc->pool->mmd, dev_id, &mc->msd);
-	printk(KERN_ALERT "opened msd");
 	if (r) {
 		ti->error = "Couldn't open multisnap internal device";
 		multisnap_dtr(ti);

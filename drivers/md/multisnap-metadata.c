@@ -20,7 +20,7 @@
 #define MULTISNAP_SUPERBLOCK_LOCATION 0
 #define MULTISNAP_VERSION 1
 #define MULTISNAP_METADATA_BLOCK_SIZE 4096
-#define MULTISNAP_METADATA_CACHE_SIZE 128
+#define MULTISNAP_METADATA_CACHE_SIZE 512
 #define SECTOR_TO_BLOCK_SHIFT 3
 
 /* This should be plenty */
@@ -145,8 +145,6 @@ alloc_(struct block_manager *bm, block_t nr_blocks, int create)
 			return NULL;
 		}
 
-		printk(KERN_ALERT "creating data space map with %u blocks",
-		       (unsigned) nr_blocks);
 		data_sm = sm_disk_create(tm, nr_blocks);
 		if (!data_sm) {
 			printk(KERN_ALERT "sm_disk_create");
@@ -309,11 +307,6 @@ multisnap_metadata_open(struct block_device *bdev,
 		block_manager_destroy(bm);
 		return NULL;
 	}
-
-	if (create)
-		printk(KERN_ALERT "superblock has been zeroed, creating new mmd");
-	else
-		printk(KERN_ALERT "superblock not zeroes, reopening mmd");
 
 	mmd = alloc_(bm, data_dev_size, create);
 	if (!mmd)
