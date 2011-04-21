@@ -36,6 +36,7 @@ struct superblock {
 	__le64 first_free_block;
 
 	__le64 btree_root;
+	__le64 btree_reverse_root;
 
 	/*
 	 * Space map fields.
@@ -275,13 +276,13 @@ static int hsm_metadata_begin(struct hsm_metadata *hsm)
 
 	s = (struct superblock *) block_data(hsm->sblock);
 	hsm->root = __le64_to_cpu(s->btree_root);
+	hsm->reverse_root = __le64_to_cpu(s->btree_reverse_root);
 	return 0;
 }
 
 static struct hsm_metadata *
 hsm_metadata_open_(struct block_device *bdev,
-		     sector_t data_block_size,
-		     block_t data_dev_size)
+		   sector_t data_block_size, block_t data_dev_size)
 {
 	int r;
 	struct superblock *sb;
@@ -354,8 +355,7 @@ bad:
 
 struct hsm_metadata *
 hsm_metadata_open(struct block_device *bdev,
-		     sector_t data_block_size,
-		     block_t data_dev_size)
+		  sector_t data_block_size, block_t data_dev_size)
 {
 	struct hsm_metadata *hsm;
 
@@ -384,6 +384,7 @@ static void print_sblock(struct superblock *sb)
 	printk(KERN_ALERT "data nr blocks = %u", (unsigned) __le64_to_cpu(sb->data_nr_blocks));
 	printk(KERN_ALERT "first free = %u", (unsigned) __le64_to_cpu(sb->first_free_block));
 	printk(KERN_ALERT "btree root = %u", (unsigned) __le64_to_cpu(sb->btree_root));
+	printk(KERN_ALERT "btree reverse_root = %u", (unsigned) __le64_to_cpu(sb->btree_reverse_root));
 	printk(KERN_ALERT "sm nr blocks = %u", (unsigned) __le64_to_cpu(sb->sm_root_start));
 	printk(KERN_ALERT "bitmap root = %u", (unsigned) __le64_to_cpu(
 		       *(((__le64 *) &sb->sm_root_start) + 1)
@@ -441,6 +442,7 @@ int hsm_metadata_commit(struct hsm_metadata *hsm)
 	{
 		struct superblock *sb = block_data(hsm->sblock);
 		sb->btree_root = __cpu_to_le64(hsm->root);
+		sb->btree_reverse_root = __cpu_to_le64(hsm->reverse_root);
 		r = sm_copy_root(hsm->sm, &sb->sm_root_start, len);
 		if (r < 0) {
 			up_write(&hsm->root_lock);
@@ -474,8 +476,9 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 		        unsigned long *flags)
 {
 	int r;
+	unsigned long f;
+	block_t b, b_le64, dummy, nr_blocks, keys[2];
 	struct superblock *sb;
-	block_t b, dummy, nr_blocks, keys[2];
 
 	keys[0] = dev;
 	keys[1] = cache_block;
@@ -494,14 +497,15 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 	}
 
 	/* Block may not be interfearing with flags in the high bits. */
-	split_result(b, &dummy, flags);
-	if (*flags)
+	split_result(b, &dummy, &f);
+	if (f)
 		return -EPERM;
 
-	r = btree_insert(&hsm->info, hsm->root, keys, &b, &hsm->root);
+	b_le64 = __cpu_to_le64(b);
+	r = btree_insert(&hsm->info, hsm->root, keys, &b_le64, &hsm->root);
 	if (!r) {
-		keys[0] = dev;
 		keys[1] = b;
+		cache_block = __cpu_to_le64(cache_block);
 		r = btree_insert(&hsm->info, hsm->reverse_root,
 				 keys, &cache_block, &hsm->reverse_root);
 	}
@@ -531,10 +535,11 @@ int hsm_metadata_remove(struct hsm_metadata *hsm,
 	if (r < 0)
 		return r;
 
+	pool_block = __le64_to_cpu(pool_block);
+	split_result(pool_block, &pool_block, &dummy);
+
 	keys[0] = dev;
 	keys[1] = cache_block;
-
-	split_result(pool_block, &pool_block, &dummy);
 
 	down_write(&hsm->root_lock);
 	r = btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
@@ -556,13 +561,14 @@ _hsm_metadata_lookup(struct hsm_metadata *hsm,
 		     block_t btree_root)
 {
 	int r;
-	block_t keys[] = { dev, block_in }, result;
+	block_t keys[2], result;
+
+	keys[0] = dev;
+	keys[1] = block_in;
 
 	if (can_block) {
 		down_read(&hsm->root_lock);
-DMINFO("%s 1", __func__);
 		r = btree_lookup_equal(&hsm->info, btree_root, keys, &result);
-DMINFO("%s 2", __func__);
 		up_read(&hsm->root_lock);
 
 	} else if (down_read_trylock(&hsm->root_lock)) {
@@ -574,9 +580,11 @@ DMINFO("%s 2", __func__);
 		r = -EWOULDBLOCK;
 
 	if (!r) {
-		if (btree_root == hsm->root)
+		result = __le64_to_cpu(result);
+
+		if (btree_root == hsm->root) {
 			split_result(result, block_out, flags);
-		else
+		} else
 			*block_out = result;
 	}
 
@@ -619,10 +627,9 @@ int hsm_metadata_update(struct hsm_metadata *hsm,
 	if (r < 0)
 		return r;
 
-DMINFO("%s 1. flags=%lu pool_block=%llu", __func__, flags, (LLU) pool_block);
-	split_result(pool_block, &pool_block, &dummy);
+DMINFO("%s pool_block=%llu flags=%lu", __func__, (LLU) pool_block, flags);
 	pool_block |= (flags << 60);
-DMINFO("%s 2. flags=%lu pool_block=%llu", __func__, flags, (LLU) pool_block);
+	pool_block = __cpu_to_le64(pool_block);
 
 	keys[0] = dev;
 	keys[1] = cache_block;

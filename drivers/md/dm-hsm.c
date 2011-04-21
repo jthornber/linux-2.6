@@ -23,7 +23,7 @@
  *
  */
 
-static const char version[] = "1.0.22";
+static const char version[] = "1.0.27";
 
 #include "dm.h"
 #include "hsm-metadata.h"
@@ -93,8 +93,6 @@ struct hsm_c {
 	struct bio_list no_space; /* Bios w/o metadata space. */
 
 	struct delayed_work dws;  /* IO work. */
-
-	block_t low_water_mark;
 
 	spinlock_t provisioned_lock; /* protects next 4 fields */
 	sector_t data_sectors;	/* Size of data device in sectors. */
@@ -206,10 +204,16 @@ static sector_t data_dev_block_sectors(struct hsm_c *hc)
 	       0 : size;
 }
 
-/* Derive offset within block from b */
-static sector_t _sector_to_block(struct hsm_c *hc, sector_t sector)
+/* Convert sector to block. */
+static block_t _sector_to_block(struct hsm_c *hc, sector_t sector)
 {
 	return sector >> hc->block_shift;
+}
+
+/* Convert block to sector. */
+static sector_t _block_to_sector(struct hsm_c *hc, block_t block)
+{
+	return block << hc->block_shift;
 }
 
 static void wake_do_hsm_delayed(struct hsm_c *hc, unsigned long delay)
@@ -243,13 +247,15 @@ static struct block_device *_remap_dev(struct hsm_c *hc)
 
 static sector_t _remap_sector(struct hsm_c *hc, sector_t sector, block_t block)
 {
-	return (block << hc->block_shift) + (sector & hc->offset_mask);
+	return _block_to_sector(hc, block) + (sector & hc->offset_mask);
 }
 
 static void remap_bio(struct hsm_c *hc, struct bio *bio, block_t block)
 {
 	bio->bi_sector = _remap_sector(hc, bio->bi_sector, block);
 	bio->bi_bdev = _remap_dev(hc);
+
+	BUG_ON(bio->bi_sector >= hc->data_sectors);
 }
 
 /* Block copy callback (dm-kcopyd). */
@@ -273,14 +279,16 @@ static int block_copy(int rw, struct hsm_block *b)
 {
 	struct dm_io_region cache = {
 		.bdev = b->hc->data_dev->bdev,
-		.sector = _remap_sector(b->hc, 0, b->cache_block),
+		.sector = _remap_sector(b->hc, 0, b->pool_block),
 	}, orig = {
 		.bdev = b->hc->cached_dev->bdev,
-		.sector = _remap_sector(b->hc, 0, b->pool_block),
+		.sector = _remap_sector(b->hc, 0, b->cache_block),
 	}, *from, *to;
 
 	if (test_and_set_bit(BLOCK_ACTIVE, (unsigned long*) &b->flags))
 		return 0;
+
+	BUG_ON(cache.sector >= b->hc->data_sectors);
 
 	/* Check for partial extent at origin device end. */
 	cache.count = orig.count =
@@ -363,19 +371,9 @@ static void hc_set_congested_fn(struct hsm_c *hc)
 
 static void inc_update(struct hsm_c *hc)
 {
-	int do_event = 0;
-
 	spin_lock(&hc->provisioned_lock);
 	hc->updates_since_last_commit++;
-	if (!test_and_set_bit(HC_LOW_WATER_EVENT, &hc->flags)) {
-		if (hc->data_blocks - allocated_count(hc) <= hc->low_water_mark)
-			do_event = 1;
-	}
-
 	spin_unlock(&hc->provisioned_lock);
-
-	if (do_event)
-		dm_table_event(hc->ti->table);
 }
 
 /* If commit fails, log an error and throw an event. */
@@ -455,7 +453,7 @@ static int _process_write(struct hsm_block *b, struct bio *bio)
 				inc_update(b->hc);
 			}
 
-_try_lookup(b->hc, b->cache_block);
+// _try_lookup(b->hc, b->cache_block);
 		}
 	}
 
@@ -479,19 +477,16 @@ static void do_leftover_dirty_blocks(struct hsm_c *hc)
 
 	for (pool_block = 0; pool_block < hc->data_blocks; pool_block++) {
 		/* Reverse lookup cache block by pool block. */
-DMINFO("%s 1", __func__);
 		r = hsm_metadata_lookup_reverse(hc->hmd, hc->dev, pool_block,
 						1, &cache_block);
 		if (r)
 			continue;
 
-DMINFO("%s 2", __func__);
 		/* Now look up persistent flags. */
 		r = hsm_metadata_lookup(hc->hmd, hc->dev, cache_block, 1,
 					&pool_block1, &flags);
 		if (r)
 			continue;
-DMINFO("Direct cache_block=%llu pool_block=%llu flags=%lu", (LLU) cache_block, (LLU) pool_block, flags);
 
 		BUG_ON(pool_block != pool_block1);
 
@@ -502,14 +497,16 @@ DMINFO("Direct cache_block=%llu pool_block=%llu flags=%lu", (LLU) cache_block, (
 			break;
 		}
 
+		b->pool_block = pool_block;
+		b->flags = flags;
+
 		/* Schedule any dirty blocks for io. */
 		if (test_bit(BLOCK_DIRTY, &flags)) {
-DMINFO("Adding pool_block=%llu to flush list", (LLU) pool_block);
+DMINFO("Adding pool_block=%llu flags=%lu to flush list", (LLU) pool_block, flags);
 			flush_add_sorted(b);
 			put_block(b);
 		}
 	}
-DMINFO("%s Leaving", __func__);
 }
 
 /* Process all endios on blocks. */
@@ -631,8 +628,6 @@ static void do_bios(struct hsm_c *hc, struct bio_list *bios)
 				 */
 				goto nospace;
 		}
-else
-DMINFO("%s cache_block=%llu flags=%lu", __func__, (LLU) cache_block, flags);
 
 		/* Get the block housekeeping object for this bio. */
 		b = get_block(hc, cache_block);
@@ -709,11 +704,12 @@ static void do_block_flushs(struct hsm_c *hc)
 
 	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, flush_endio) {
 		if (j >= b->timeout) {
-			list_del_init(&b->flush_endio);
-			b->timeout = ~0;
-if (!test_bit(BLOCK_ACTIVE, &b->flags))
+			if (!test_bit(BLOCK_ACTIVE, &b->flags)) {
+				list_del_init(&b->flush_endio);
+				b->timeout = ~0;
 DMINFO("writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
-			BUG_ON(block_copy(WRITE, b));
+				BUG_ON(block_copy(WRITE, b));
+			}
 		} else
 			break; /* Bail out, flush list is sorted by timeout. */
 	}
@@ -765,6 +761,7 @@ static void do_block_free(struct hsm_c *hc)
 			r = block_inactive(hc, pool_block, &cache_block);
 			BUG_ON(r < 0);
 			if (r) {
+DMINFO("Freeing pool_block=%llu", (LLU) pool_block);
 				r = hsm_metadata_remove(hc->hmd, hc->dev,
 							cache_block);
 				if (!r)
@@ -811,6 +808,9 @@ static void do_hsm(struct work_struct *ws)
 		do_block_free(hc);
 		do_schedule_block_flush(hc, jiffies);
 		commit(hc);	/* FIXME: error handling. */
+blk_unplug(bdev_get_queue(hc->cached_dev->bdev));
+blk_unplug(bdev_get_queue(hc->data_dev->bdev));
+blk_unplug(bdev_get_queue(hc->meta_dev->bdev));
 	}
 }
 
@@ -857,11 +857,11 @@ static void hsm_dtr(struct dm_target *ti)
 
 /* Parse constructor arguments. */
 static int _parse_args(struct dm_target *ti, unsigned argc, char **argv,
-		       sector_t *block_sectors, block_t *low_water_mark)
+		       sector_t *block_sectors)
 {
 	unsigned long long tmp;
 
-	if (argc != 5) {
+	if (argc != 4) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -874,13 +874,6 @@ static int _parse_args(struct dm_target *ti, unsigned argc, char **argv,
 	}
 
 	*block_sectors = tmp;
-
-	if (sscanf(argv[4], "%llu", &tmp) != 1) {
-		ti->error = "Invalid low water mark argument";
-		return -EINVAL;
-	}
-
-	*low_water_mark = tmp;
 	return 0;
 }
 
@@ -925,26 +918,21 @@ static int create_hsd(struct hsm_c *hc)
 /*
  * Construct a hierarchical storage device mapping:
  *
- * <start> <length> hsm <cached_dev> <data_dev> <meta_dev> \
- * 			<data_block_size> <low_water_mark>
- *
+ * <start> <length> hsm <cached_dev> <data_dev> <meta_dev>  <data_block_size>
  * cached_dev: slow cached device holding original data blocks;
  * 	       can be any preexisting slow device to be cached
  * data_dev: fast device holding cached data blocks
  * meta_dev: fast device keeping track of provisioned cached blocks
  * data_block_size: cache unit size in sectors
- * low_water_mark: low water mark to throw a dm event for uspace
- * 		   to decide to resize the (meta)data device
  *
  */
 static int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	sector_t block_sectors = 0;
-	block_t low_water_mark = 0;
 	struct hsm_c *hc;
 
-	r = _parse_args(ti, argc, argv, &block_sectors, &low_water_mark);
+	r = _parse_args(ti, argc, argv, &block_sectors);
 	if (r)
 		return r;
 
@@ -961,7 +949,6 @@ static int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&hc->endio_blocks);
 	hc->block_sectors = block_sectors;
 	hc->block_shift = ffs(block_sectors) - 1;
-	hc->low_water_mark = low_water_mark;
 	hc_set_congested_fn(hc);
 
 	spin_lock_init(&hc->lock);
@@ -985,6 +972,12 @@ static int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	hc->data_sectors = get_dev_size(hc->data_dev);
 	hc->data_blocks = _sector_to_block(hc, hc->data_sectors);
 	hc->cached_sectors = get_dev_size(hc->cached_dev);
+
+	if (ti->len > hc->cached_sectors) {
+		ti->error = "Device size larger than cached device";
+		goto err;
+	}
+
 	INIT_DELAYED_WORK(&hc->dws, do_hsm);
 	ti->split_io = hc->block_sectors;
 
@@ -1062,8 +1055,6 @@ static void hsm_postsuspend(struct dm_target *ti)
 	struct hsm_c *hc = ti->private;
 
 	clear_bit(HC_RESUMED, &hc->flags);
-	hsm_flush(ti);
-	requeue_all_bios(hc);
 	hsm_metadata_close(hc->hmd);
 	hc->hmd = NULL;
 }
@@ -1138,13 +1129,12 @@ static int hsm_status(struct dm_target *ti, status_type_t type,
 			char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
-	block_t provisioned, low_water_mark, data_blocks;
+	block_t provisioned, data_blocks;
 	char buf[BDEVNAME_SIZE];
 	struct hsm_c *hc = ti->private;
 
 	spin_lock(&hc->provisioned_lock);
 	provisioned = allocated_count(hc);
-	low_water_mark = hc->low_water_mark;
 	data_blocks = hc->data_blocks;
 	spin_unlock(&hc->provisioned_lock);
 
@@ -1157,13 +1147,12 @@ static int hsm_status(struct dm_target *ti, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		format_dev_t(buf, hc->cached_dev->bdev->bd_dev),
+		format_dev_t(buf, hc->cached_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, hc->data_dev->bdev->bd_dev),
+		format_dev_t(buf, hc->data_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, hc->meta_dev->bdev->bd_dev),
-		DMEMIT("%s %llu %llu",
-		       buf, (LLU) hc->block_sectors, (LLU) low_water_mark);
+		format_dev_t(buf, hc->meta_dev->bdev->bd_dev);
+		DMEMIT("%s %llu", buf, (LLU) hc->block_sectors);
 	}
 
 	return 0;
