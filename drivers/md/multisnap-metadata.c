@@ -145,6 +145,8 @@ alloc_(struct block_manager *bm, block_t nr_blocks, int create)
 			return NULL;
 		}
 
+		printk(KERN_ALERT "creating data space map with %u blocks",
+		       (unsigned) nr_blocks);
 		data_sm = sm_disk_create(tm, nr_blocks);
 		if (!data_sm) {
 			printk(KERN_ALERT "sm_disk_create");

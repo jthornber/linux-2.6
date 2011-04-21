@@ -184,6 +184,7 @@ static void cell_error(struct cell *cell)
 	cell_release_(cell, &bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
+	printk(KERN_ALERT "in cell_error");
 	while ((bio = bio_list_pop(&bios)))
 		bio_io_error(bio);
 }
@@ -296,6 +297,7 @@ static void remap_and_issue(struct pool_c *pool,
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		int r = multisnap_metadata_commit(pool->mmd);
 		if (r) {
+			printk(KERN_ALERT "multisnap_metadata_commit failed");
 			bio_io_error(bio);
 			return;
 		}
@@ -354,6 +356,7 @@ static void schedule_copy(struct pool_c *pool,
 		r = dm_kcopyd_copy(pool->copier, &from, 1, &to, 0, copy_complete, m);
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
+			printk(KERN_ALERT "dm_kcopyd_copy() failed");
 			cell_error(cell);
 		}
 	}
@@ -432,9 +435,10 @@ static void process_bio(struct pool_c *pool,
 
 			if (lookup_result.shared) {
 				r = multisnap_metadata_alloc_data_block(msd, &data_block);
-				if (r)
+				if (r) {
+					printk(KERN_ALERT "multisnap_metadata_alloc_data_block() failed");
 					cell_error(cell);
-				else
+				} else
 					schedule_copy(pool, msd,
 						      block,
 						      lookup_result.block,
@@ -448,13 +452,15 @@ static void process_bio(struct pool_c *pool,
 	case -ENODATA:
 		/* prepare a new block */
 		r = multisnap_metadata_alloc_data_block(msd, &data_block);
-		if (r)
+		if (r) {
+			printk(KERN_ALERT "multisnap_metadata_alloc_data_block() failed");
 			cell_error(cell);
-		else
+		} else
 			schedule_zero(pool, msd, block, data_block, cell);
 		break;
 
 	default:
+		printk(KERN_ALERT "error returned from multisnap_metadata_lookup (%d)", r);
 		bio_io_error(bio);
 	}
 }
@@ -491,9 +497,10 @@ static void process_prepared_mappings(struct pool_c *pool)
 
 	list_for_each_entry_safe (m, tmp, &maps, list) {
 		r = multisnap_metadata_insert(m->msd, m->virt_block, m->data_block);
-		if (r)
+		if (r) {
+			printk(KERN_ALERT "multisnap_metadata_insert() failed");
 			cell_error(m->cell);
-		else
+		} else
 			cell_remap_and_issue(pool, m->cell, m->data_block);
 
 		list_del(&m->list);
@@ -632,10 +639,9 @@ static void pool_dtr(struct dm_target *ti)
  * multisnap-pool <metadata dev>
  *                <data dev>
  *                <data block size in sectors>
- *                <data dev size in blocks>
  * FIXME: add low water mark
  */
-#define KCOPYD_NR_PAGES 128
+#define KCOPYD_NR_PAGES 1024
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
@@ -645,7 +651,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct multisnap_metadata *mmd;
 	struct dm_dev *metadata_dev, *data_dev;
 
-	if (argc != 4) {
+	if (argc != 3) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -670,13 +676,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	if (sscanf(argv[3], "%llu", &data_size) != 1) {
-		ti->error = "Invalid data size";
-		dm_put_device(ti, metadata_dev);
-		dm_put_device(ti, data_dev);
-		return -EINVAL;
-	}
-
+	data_size = (i_size_read(data_dev->bdev->bd_inode) >> SECTOR_SHIFT) / block_size;
 	mmd = multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
 		ti->error = "Error opening metadata device";
@@ -838,14 +838,9 @@ struct multisnap_c {
 static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
-
-	if (mc->msd) {
+	if (mc->msd)
 		multisnap_metadata_close_device(mc->msd);
-		printk(KERN_ALERT "msd closed");
-	}
-
 	dm_put_device(ti, mc->pool_dev);
-
 	kfree(mc);
 }
 
