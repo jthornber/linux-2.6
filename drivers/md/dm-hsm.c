@@ -23,7 +23,7 @@
  *
  */
 
-static const char version[] = "1.0.27";
+static const char version[] = "1.0.32";
 
 #include "dm.h"
 #include "hsm-metadata.h"
@@ -101,6 +101,7 @@ struct hsm_c {
 	block_t provisioned_count;
 	block_t updates_since_last_commit;
 	unsigned long flags;
+	atomic_t block_writes;
 };
 
 struct hsm_block {
@@ -196,14 +197,6 @@ static sector_t get_dev_size(struct dm_dev *dev)
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
 }
 
-/* Return data device block size in sectors. */
-static sector_t data_dev_block_sectors(struct hsm_c *hc)
-{
-	sector_t size;
-	return hsm_metadata_get_data_block_size(hc->hmd, hc->dev, &size) ?
-	       0 : size;
-}
-
 /* Convert sector to block. */
 static block_t _sector_to_block(struct hsm_c *hc, sector_t sector)
 {
@@ -295,8 +288,13 @@ static int block_copy(int rw, struct hsm_block *b)
 		min(b->hc->block_sectors, b->hc->data_sectors - orig.sector);
 
 	/* Set source and destination. */
-	rw == READ ? (from = &orig,  to = &cache) :
-		     (from = &cache, to = &orig);
+	if (rw == READ) {
+		from = &orig,  to = &cache;
+	} else {
+		atomic_inc(&b->hc->block_writes);
+		from = &cache, to = &orig;
+	}
+
 	return dm_kcopyd_copy(b->hc->kcopyd_client, from, 1, to, 0,
 			      block_copy_endio, b);
 }
@@ -438,8 +436,7 @@ static int _process_write(struct hsm_block *b, struct bio *bio)
 	if (bio_data_dir(bio) == WRITE) {
 		if (test_and_set_bit(BLOCK_DIRTY, &b->flags)) {
 			if (test_bit(BLOCK_ACTIVE, &b->flags) ||
-			    (b->timeout != ~0 &&
-			     b->timeout >= jiffies))
+			    b->timeout != ~0)
 				set_bit(BLOCK_FORCE_DIRTY,
 					&b->flags);
 		} else {
@@ -528,6 +525,9 @@ static void do_endios(struct hsm_c *hc)
 	 */
 	list_for_each_entry(b, &endios, flush_endio) {
 		BUG_ON(!test_and_clear_bit(BLOCK_ACTIVE, &b->flags));
+
+		if (test_bit(BLOCK_UPTODATE, &b->flags))
+			atomic_dec(&hc->block_writes);
 
 		if (!test_bit(BLOCK_ERROR, &b->flags)) {
 			int update = 0;
@@ -684,6 +684,8 @@ nospace:
 			 */
 			bio_list_add(&b->io, bio);
 			_get_block(b);
+if (!test_bit(BLOCK_ACTIVE, &b->flags))
+DMINFO("Reading block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 			BUG_ON(block_copy(READ, b));
 			continue;
 		}
@@ -703,11 +705,14 @@ static void do_block_flushs(struct hsm_c *hc)
 	unsigned long j = jiffies;
 
 	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, flush_endio) {
+		if (atomic_read(&hc->block_writes) > 2)
+			break;
+
 		if (j >= b->timeout) {
 			if (!test_bit(BLOCK_ACTIVE, &b->flags)) {
 				list_del_init(&b->flush_endio);
 				b->timeout = ~0;
-DMINFO("writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
+DMINFO("Writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 				BUG_ON(block_copy(WRITE, b));
 			}
 		} else
@@ -808,9 +813,6 @@ static void do_hsm(struct work_struct *ws)
 		do_block_free(hc);
 		do_schedule_block_flush(hc, jiffies);
 		commit(hc);	/* FIXME: error handling. */
-blk_unplug(bdev_get_queue(hc->cached_dev->bdev));
-blk_unplug(bdev_get_queue(hc->data_dev->bdev));
-blk_unplug(bdev_get_queue(hc->meta_dev->bdev));
 	}
 }
 
@@ -956,6 +958,7 @@ static int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	bio_list_init(&hc->in);
 	spin_lock_init(&hc->no_space_lock);
 	bio_list_init(&hc->no_space);
+	atomic_set(&hc->block_writes, 0);
 
 	r = _get_devices(hc, argv);
 	if (r)
@@ -1046,7 +1049,10 @@ static void hsm_presuspend(struct dm_target *ti)
 	set_bit(HC_BOUNCE_MODE, &hc->flags);
 	spin_unlock(&hc->lock);
 
+	clear_bit(HC_RESUMED, &hc->flags);
+	cancel_delayed_work(&hc->dws);
 	hsm_flush(ti);
+	cancel_delayed_work(&hc->dws);
 	requeue_all_bios(hc);
 }
 
@@ -1054,7 +1060,6 @@ static void hsm_postsuspend(struct dm_target *ti)
 {
 	struct hsm_c *hc = ti->private;
 
-	clear_bit(HC_RESUMED, &hc->flags);
 	hsm_metadata_close(hc->hmd);
 	hc->hmd = NULL;
 }
@@ -1191,7 +1196,16 @@ hsm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	struct hsm_c *hc = ti->private;
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, data_dev_block_sectors(hc));
+	blk_limits_io_opt(limits, hc->data_sectors);
+}
+
+static int hsm_iterate_devices(struct dm_target *ti,
+			       iterate_devices_callout_fn fn, void *data)
+{
+	struct hsm_c *hc = ti->private;
+
+	return fn(ti, hc->cached_dev, 0, ti->len, data) ||
+	       fn(ti, hc->data_dev,   0, hc->data_sectors, data);
 }
 
 /* Thinp device target interface. */
@@ -1210,6 +1224,7 @@ static struct target_type hsm_target = {
 	.status = hsm_status,
 	.merge = hsm_bvec_merge,
 	.io_hints = hsm_io_hints,
+	.iterate_devices = hsm_iterate_devices,
 };
 
 static int __init dm_hsm_init(void)
