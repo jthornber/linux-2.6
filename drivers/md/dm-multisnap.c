@@ -229,6 +229,17 @@ struct new_mapping {
 	block_t virt_block;
 	block_t data_block;
 	struct cell *cell;
+	int err;
+
+	/*
+	 * If the bio covers the whole area of a block then we can avoid
+	 * zeroing or copying.  Instead this bio is hooked.  The bio will
+	 * still be in the cell, so care has to be taken to avoid issuing
+	 * the bio twice.
+	 */
+	struct bio *bio;
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
 };
 
 struct pool_c {
@@ -238,6 +249,7 @@ struct pool_c {
 	struct dm_dev *data_dev;
 	struct multisnap_metadata *mmd;
 
+	sector_t data_size;
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	block_t offset_mask;
@@ -319,6 +331,8 @@ static void copy_complete(int read_err,
 	unsigned long flags;
 	struct new_mapping *m = (struct new_mapping *) context;
 
+	m->err = read_err || write_err ? -EIO : 0;
+
 	spin_lock_irqsave(&m->pool->lock, flags);
 	list_add(&m->list, &m->pool->prepared_mappings);
 	spin_unlock_irqrestore(&m->pool->lock, flags);
@@ -326,12 +340,39 @@ static void copy_complete(int read_err,
 	wake_worker(m->pool);
 }
 
+static void bio_complete(struct bio *bio, int err)
+{
+	unsigned long flags;
+	struct new_mapping *m = (struct new_mapping *) bio->bi_private;
+
+	/*
+	 * We can't call the proper endio function here, because the
+	 * mapping hasn't been inserted yet.  Shame, the context switch to
+	 * the worker is going to cause latency.
+	 */
+	m->err = err;
+
+	spin_lock_irqsave(&m->pool->lock, flags);
+	list_add(&m->list, &m->pool->prepared_mappings);
+	spin_unlock_irqrestore(&m->pool->lock, flags);
+
+	wake_worker(m->pool);
+}
+
+static int io_covers_block(struct pool_c *pool,
+			   struct bio *bio)
+{
+	return ((bio->bi_sector & pool->offset_mask) == 0) &&
+		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
+}
+
 static void schedule_copy(struct pool_c *pool,
 			  struct ms_device *msd,
 			  block_t virt_block,
 			  block_t data_origin,
 			  block_t data_dest,
-			  struct cell *cell)
+			  struct cell *cell,
+			  struct bio *bio)
 {
 	int r;
 	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
@@ -341,8 +382,20 @@ static void schedule_copy(struct pool_c *pool,
 	m->virt_block = virt_block;
 	m->data_block = data_dest;
 	m->cell = cell;
+	m->err = 0;
+	m->bio = NULL;
 
-	{
+	if (io_covers_block(pool, bio)) {
+		/* no copy needed, since all data is going to change */
+		m->bio = bio;
+		m->bi_end_io = bio->bi_end_io;
+		m->bi_private = bio->bi_private;
+		bio->bi_end_io = bio_complete;
+		bio->bi_private = m;
+		remap_and_issue(pool, bio, data_dest);
+
+	} else {
+		/* use kcopyd */
 		struct dm_io_region from, to;
 
 		from.bdev = pool->data_dev->bdev;
@@ -375,6 +428,8 @@ static void schedule_zero(struct pool_c *pool,
 	m->virt_block = virt_block;
 	m->data_block = data_block;
 	m->cell = cell;
+	m->err = 0;
+	m->bio = NULL;
 
 	/* FIXME: zeroing not implemented yet */
 
@@ -392,6 +447,21 @@ static void cell_remap_and_issue(struct pool_c *pool,
 
 	while ((bio = bio_list_pop(&bios)))
 		remap_and_issue(pool, bio, data_block);
+}
+
+static void cell_remap_and_issue_except(struct pool_c *pool,
+					struct cell *cell,
+					block_t data_block,
+					struct bio *exception)
+{
+	struct bio_list bios;
+	struct bio *bio;
+	bio_list_init(&bios);
+	cell_release(cell, &bios);
+
+	while ((bio = bio_list_pop(&bios)))
+		if (bio != exception)
+			remap_and_issue(pool, bio, data_block);
 }
 
 static void process_bio(struct pool_c *pool,
@@ -442,7 +512,7 @@ static void process_bio(struct pool_c *pool,
 					schedule_copy(pool, msd,
 						      block,
 						      lookup_result.block,
-						      data_block, cell);
+						      data_block, cell, bio);
 			} else
 				cell_remap_and_issue(pool, cell, lookup_result.block);
 		} else
@@ -489,6 +559,7 @@ static void process_prepared_mappings(struct pool_c *pool)
 	unsigned long flags;
 	struct list_head maps;
 	struct new_mapping *m, *tmp;
+	struct bio *bio;
 
 	INIT_LIST_HEAD(&maps);
 	spin_lock_irqsave(&pool->lock, flags);
@@ -496,15 +567,32 @@ static void process_prepared_mappings(struct pool_c *pool)
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	list_for_each_entry_safe (m, tmp, &maps, list) {
-		r = multisnap_metadata_insert(m->msd, m->virt_block, m->data_block);
-		if (r) {
-			printk(KERN_ALERT "multisnap_metadata_insert() failed");
-			cell_error(m->cell);
-		} else
-			cell_remap_and_issue(pool, m->cell, m->data_block);
+		bio = m->bio;
 
-		list_del(&m->list);
-		mempool_free(m, pool->mapping_pool);
+		if (bio) {
+			bio->bi_end_io = m->bi_end_io;
+			bio->bi_private = m->bi_private;
+		}
+
+		if (m->err)
+			cell_error(m->cell);
+
+		else {
+			r = multisnap_metadata_insert(m->msd, m->virt_block, m->data_block);
+			if (r) {
+				printk(KERN_ALERT "multisnap_metadata_insert() failed");
+				cell_error(m->cell);
+			} else {
+				if (m->bio) {
+					bio_endio(bio, 0);
+					cell_remap_and_issue_except(pool, m->cell, m->data_block, bio);
+				} else
+					cell_remap_and_issue(pool, m->cell, m->data_block);
+
+				list_del(&m->list);
+				mempool_free(m, pool->mapping_pool);
+			}
+		}
 	}
 }
 
@@ -646,10 +734,10 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	long long unsigned block_size;
-	block_t data_size;
 	struct pool_c *pool;
 	struct multisnap_metadata *mmd;
 	struct dm_dev *metadata_dev, *data_dev;
+	block_t data_size;
 
 	if (argc != 3) {
 		ti->error = "Invalid argument count";
@@ -697,6 +785,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool->metadata_dev = metadata_dev;
 	pool->data_dev = data_dev;
 	pool->mmd = mmd;
+	pool->data_size = data_size;
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
@@ -817,6 +906,37 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 }
 
+static int pool_iterate_devices(struct dm_target *ti,
+				     iterate_devices_callout_fn fn,
+				     void *data)
+{
+	struct pool_c *pool = ti->private;
+	return fn(ti, pool->data_dev, 0, pool->data_size * pool->sectors_per_block, data);
+}
+
+static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+		      struct bio_vec *biovec, int max_size)
+{
+	struct pool_c *pool = ti->private;
+	struct request_queue *q = bdev_get_queue(pool->data_dev->bdev);
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = pool->data_dev->bdev;
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
+static void
+pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	struct pool_c *pool = ti->private;
+
+	printk(KERN_ALERT "pool io_hints called");
+	blk_limits_io_min(limits, 0);
+	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+}
+
 static struct target_type pool_target = {
 	.name =    "multisnap-pool",
 	.version = {1, 0, 0},
@@ -825,6 +945,9 @@ static struct target_type pool_target = {
 	.dtr =	   pool_dtr,
 	.map =	   pool_map,
 	.message = pool_message,
+	.merge =   pool_merge,
+	.iterate_devices = pool_iterate_devices,
+	.io_hints = pool_io_hints,
 };
 
 /*----------------------------------------------------------------*/
@@ -894,6 +1017,7 @@ multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		multisnap_dtr(ti);
 		return r;
 	}
+	ti->split_io = mc->pool->sectors_per_block;
 
 	return 0;
 }
@@ -978,7 +1102,6 @@ multisnap_status(struct dm_target *ti, status_type_t type,
 #endif
 }
 
-#if 0
 /* bvec merge method. */
 static int
 multisnap_bvec_merge(struct dm_target *ti,
@@ -986,6 +1109,9 @@ multisnap_bvec_merge(struct dm_target *ti,
 		     struct bio_vec *biovec, int max_size)
 {
 	struct multisnap_c *mc = ti->private;
+	struct pool_c * pool = mc->pool;
+
+#if 0
 	struct request_queue *q = bdev_get_queue(_remap_dev(mc));
 	block_t block;
 	struct multisnap_map_result mapping;
@@ -1007,24 +1133,35 @@ multisnap_bvec_merge(struct dm_target *ti,
 
 	bvm->bi_sector = _remap_sector(mc, bvm->bi_sector, mapping.dest);
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+#else
+	/*
+	 * We fib here, because the space may not have been provisioned yet
+	 * we can't give a good answer.  It's better to return the block
+	 * size, and incur extra splitting in a few cases than always
+	 * return the smallest, page sized, chunk.
+	 */
+	return pool->sectors_per_block << SECTOR_SHIFT;
+#endif
 }
 
-/* Provide io hints. */
+static int multisnap_iterate_devices(struct dm_target *ti,
+				     iterate_devices_callout_fn fn,
+				     void *data)
+{
+	struct multisnap_c *mc = ti->private;
+	return fn(ti, mc->pool_dev, 0, mc->pool->sectors_per_block, data);
+}
+
 static void
 multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
-	int r;
-	sector_t block_size;
 	struct multisnap_c *mc = ti->private;
+	struct pool_c *pool = mc->pool;
 
 	blk_limits_io_min(limits, 0);
-
-	r = multisnap_metadata_get_data_block_size(mc->mmd, &block_size);
-	if (r)
-		printk(KERN_ALERT "mmd_get_data_block_size() failed");
-	blk_limits_io_opt(limits, r ? 0 : block_size);
+	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
 }
-#endif
+
 static struct target_type multisnap_target = {
 	.name =        "multisnap",
 	.version =     {1, 0, 0},
@@ -1036,8 +1173,9 @@ static struct target_type multisnap_target = {
 //	.presuspend =  multisnap_presuspend,
 //	.preresume =   multisnap_preresume,
 	.status =      multisnap_status,
-//	.merge =       multisnap_bvec_merge,
-//	.io_hints =    multisnap_io_hints,
+	.merge =       multisnap_bvec_merge,
+	.iterate_devices = multisnap_iterate_devices,
+	.io_hints =    multisnap_io_hints,
 };
 
 /*----------------------------------------------------------------*/
