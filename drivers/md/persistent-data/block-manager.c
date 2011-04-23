@@ -60,6 +60,7 @@ struct block_manager {
 	struct list_head clean_list; /* unlocked and clean */
 	struct list_head dirty_list; /* unlocked and dirty */
 	struct list_head error_list;
+	unsigned available_count;
 	unsigned reading_count;
 	unsigned writing_count;
 	struct dm_io_client *io;
@@ -147,6 +148,9 @@ static void transition_(struct block *b, enum block_state new_state)
 		b->write_lock_pending = 0;
 		b->read_lock_count = 0;
 		b->io_flags = 0;
+
+		if (b->state == BS_ERROR)
+			bm->available_count++;
 		break;
 
 	case BS_CLEAN:
@@ -172,6 +176,7 @@ static void transition_(struct block *b, enum block_state new_state)
 			break;
 		}
 		list_add_tail(&b->list, &bm->clean_list);
+		bm->available_count++;
 		break;
 
 	case BS_READING:
@@ -180,6 +185,7 @@ static void transition_(struct block *b, enum block_state new_state)
 		/* FIXME: insert into the hash */
 		insert_block_(bm, b);
 		list_del(&b->list);
+		bm->available_count--;
 		bm->reading_count++;
 		break;
 
@@ -194,6 +200,7 @@ static void transition_(struct block *b, enum block_state new_state)
 		/* DOT: clean -> read_locked */
 		BUG_ON(!(b->state == BS_CLEAN));
 		list_del(&b->list);
+		bm->available_count--;
 		break;
 
 	case BS_READ_LOCKED_DIRTY:
@@ -208,6 +215,9 @@ static void transition_(struct block *b, enum block_state new_state)
 		BUG_ON(!((b->state == BS_DIRTY) ||
 			 (b->state == BS_CLEAN)));
 		list_del(&b->list);
+
+		if (b->state == BS_CLEAN)
+			bm->available_count--;
 		break;
 
 	case BS_DIRTY:
@@ -427,11 +437,26 @@ static int recycle_block(struct block_manager *bm, block_t where, int need_read,
 {
 	int ret = 0;
 	struct block *b;
-	unsigned long flags;
+	unsigned long flags, available;
 
 	/* wait for a block to appear on the empty or clean lists */
 	spin_lock_irqsave(&bm->lock, flags);
 	while (1) {
+		/*
+		 * Once we can lock and do io concurrently then we should
+		 * probably flush at bm->cache_size / 2 and write _all_
+		 * dirty blocks.
+		 */
+		available = bm->available_count + bm->writing_count;
+		if (available < bm->cache_size / 4) {
+			spin_unlock_irqrestore(&bm->lock, flags);
+			{
+				write_dirty(bm, bm->cache_size / 4);
+				unplug(bm);
+			}
+			spin_lock_irqsave(&bm->lock, flags);
+		}
+
 		if (!list_empty(&bm->empty_list)) {
 			b = list_first_entry(&bm->empty_list, struct block, list);
 			break;
@@ -442,15 +467,6 @@ static int recycle_block(struct block_manager *bm, block_t where, int need_read,
 			break;
 		}
 
-		spin_unlock_irqrestore(&bm->lock, flags);
-		{
-			/* We could write more than 1 to make future recycles
-			 * quicker.  See separate speculative cleaning patch.
-			 */
-			write_dirty(bm, bm->cache_size);
-			unplug(bm);
-		}
-		spin_lock_irqsave(&bm->lock, flags);
 		wait_clean_(bm, &flags);
 	}
 
@@ -536,6 +552,7 @@ static int populate_bm(struct block_manager *bm, unsigned count)
 	}
 
 	list_replace(&bs, &bm->empty_list);
+	bm->available_count = count;
 	return 0;
 }
 
@@ -564,7 +581,7 @@ block_manager_create(struct block_device *bdev,
 		return NULL;
 
 	bm->bdev = bdev;
-	bm->cache_size = cache_size;
+	bm->cache_size = max(16u, cache_size);
 	bm->block_size = block_size;
 	bm->sectors_per_block = block_size / 512;
 	bm->nr_blocks = i_size_read(bdev->bd_inode);
@@ -576,6 +593,7 @@ block_manager_create(struct block_device *bdev,
 	INIT_LIST_HEAD(&bm->clean_list);
 	INIT_LIST_HEAD(&bm->dirty_list);
 	INIT_LIST_HEAD(&bm->error_list);
+	bm->available_count = 0;
 	bm->reading_count = 0;
 	bm->writing_count = 0;
 
