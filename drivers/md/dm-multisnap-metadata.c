@@ -356,7 +356,6 @@ bad:
 	multisnap_metadata_close(mmd);
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_open);
 
 int
 multisnap_metadata_close(struct multisnap_metadata *mmd)
@@ -392,7 +391,6 @@ multisnap_metadata_close(struct multisnap_metadata *mmd)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_close);
 
 static int
 open_device_(struct multisnap_metadata *mmd,
@@ -491,7 +489,6 @@ int multisnap_metadata_create_thin(struct multisnap_metadata *mmd,
 	up_write(&mmd->root_lock);
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_create_thin);
 
 static int
 snapshot_details_(struct multisnap_metadata *mmd,
@@ -574,7 +571,6 @@ int multisnap_metadata_create_snap(struct multisnap_metadata *mmd,
 	up_write(&mmd->root_lock);
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_create_snap);
 
 static int
 multisnap_metadata_delete_(struct multisnap_metadata *mmd,
@@ -594,7 +590,6 @@ multisnap_metadata_delete(struct multisnap_metadata *mmd,
 	up_write(&mmd->root_lock);
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_delete);
 
 int
 multisnap_metadata_open_device(struct multisnap_metadata *mmd,
@@ -613,7 +608,6 @@ multisnap_metadata_open_device(struct multisnap_metadata *mmd,
 	up_write(&mmd->root_lock);
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_open_device);
 
 int
 multisnap_metadata_close_device(struct ms_device *msd)
@@ -623,7 +617,6 @@ multisnap_metadata_close_device(struct ms_device *msd)
 	up_write(&msd->mmd->root_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_close_device);
 
 multisnap_dev_t multisnap_device_dev(struct ms_device *msd)
 {
@@ -689,7 +682,6 @@ multisnap_metadata_lookup(struct ms_device *msd,
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_lookup);
 
 int multisnap_metadata_insert(struct ms_device *msd,
 			      dm_block_t block,
@@ -707,7 +699,6 @@ int multisnap_metadata_insert(struct ms_device *msd,
 	value = __cpu_to_le64(pack_dm_block_time(data_block, mmd->time));
 	return btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_insert);
 
 int
 multisnap_metadata_alloc_data_block(struct ms_device *msd,
@@ -726,7 +717,6 @@ multisnap_metadata_alloc_data_block(struct ms_device *msd,
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_alloc_data_block);
 
 int
 multisnap_metadata_free_data_block(struct ms_device *msd,
@@ -741,7 +731,6 @@ multisnap_metadata_free_data_block(struct ms_device *msd,
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_free_data_block);
 
 static int
 write_changed_details_(struct multisnap_metadata *mmd)
@@ -835,7 +824,6 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_commit);
 
 int
 multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, dm_block_t *result)
@@ -851,7 +839,6 @@ multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, dm_b
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_unprovisioned_blocks);
 
 int
 multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd,
@@ -866,7 +853,6 @@ multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_block_size);
 
 int
 multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd,
@@ -880,7 +866,6 @@ multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd,
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_dev_size);
 
 int
 multisnap_metadata_get_mapped_count(struct ms_device *msd, dm_block_t *result)
@@ -891,7 +876,6 @@ multisnap_metadata_get_mapped_count(struct ms_device *msd, dm_block_t *result)
 	up_read(&mmd->root_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_get_mapped_count);
 
 int
 multisnap_metadata_resize_virt_dev(struct ms_device *msd, dm_block_t new_size)
@@ -902,7 +886,6 @@ multisnap_metadata_resize_virt_dev(struct ms_device *msd, dm_block_t new_size)
 	up_write(&msd->mmd->root_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_resize_virt_dev);
 
 int
 multisnap_metadata_resize_data_dev(struct multisnap_metadata *mmd,
@@ -914,7 +897,6 @@ multisnap_metadata_resize_data_dev(struct multisnap_metadata *mmd,
 	up_write(&mmd->root_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(multisnap_metadata_resize_data_dev);
 
 /*----------------------------------------------------------------*/
 
