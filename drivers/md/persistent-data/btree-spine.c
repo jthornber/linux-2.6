@@ -2,13 +2,18 @@
 
 /*----------------------------------------------------------------*/
 
-int bn_read_lock(struct btree_info *info, block_t b, struct block **result)
+int bn_read_lock(struct btree_info *info,
+		 dm_block_t b,
+		 struct dm_block **result)
 {
 	return tm_read_lock(info->tm, b, result);
 }
 
-int bn_shadow(struct btree_info *info, block_t orig, struct btree_value_type *vt,
-	      struct block **result, int *inc)
+int bn_shadow(struct btree_info *info,
+	      dm_block_t orig,
+	      struct btree_value_type *vt,
+	      struct dm_block **result,
+	      int *inc)
 {
 	int r;
 
@@ -19,12 +24,12 @@ int bn_shadow(struct btree_info *info, block_t orig, struct btree_value_type *vt
 	return r;
 }
 
-int bn_new_block(struct btree_info *info, struct block **result)
+int bn_new_block(struct btree_info *info, struct dm_block **result)
 {
 	return tm_new_block(info->tm, result);
 }
 
-int bn_unlock(struct btree_info *info, struct block *b)
+int bn_unlock(struct btree_info *info, struct dm_block *b)
 {
 	return tm_unlock(info->tm, b);
 }
@@ -52,7 +57,7 @@ int exit_ro_spine(struct ro_spine *s)
 	return r;
 }
 
-int ro_step(struct ro_spine *s, block_t new_child)
+int ro_step(struct ro_spine *s, dm_block_t new_child)
 {
 	int r;
 
@@ -73,7 +78,7 @@ int ro_step(struct ro_spine *s, block_t new_child)
 
 struct node *ro_node(struct ro_spine *s)
 {
-	struct block *n;
+	struct dm_block *n;
 	BUG_ON(!s->count);
 	n = s->nodes[s->count - 1];
 	return to_node(n);
@@ -100,7 +105,7 @@ int exit_shadow_spine(struct shadow_spine *s)
 	return r;
 }
 
-int shadow_step(struct shadow_spine *s, block_t b, struct btree_value_type *vt, int *inc)
+int shadow_step(struct shadow_spine *s, dm_block_t b, struct btree_value_type *vt, int *inc)
 {
 	int r;
 
@@ -115,7 +120,7 @@ int shadow_step(struct shadow_spine *s, block_t b, struct btree_value_type *vt, 
 	r = bn_shadow(s->info, b, vt, s->nodes + s->count, inc);
 	if (r == 0) {
 		if (s->count == 0)
-			s->root = block_location(s->nodes[0]);
+			s->root = dm_block_location(s->nodes[0]);
 
 		s->count++;
 	}
@@ -123,12 +128,12 @@ int shadow_step(struct shadow_spine *s, block_t b, struct btree_value_type *vt, 
 	return r;
 }
 
-struct block *shadow_current(struct shadow_spine *s)
+struct dm_block *shadow_current(struct shadow_spine *s)
 {
 	return s->nodes[s->count - 1];
 }
 
-struct block *shadow_parent(struct shadow_spine *s)
+struct dm_block *shadow_parent(struct shadow_spine *s)
 {
 	return s->count == 2 ? s->nodes[0] : NULL;
 }

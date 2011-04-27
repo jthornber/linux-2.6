@@ -24,7 +24,7 @@ int sm_staged_set_wrappee(struct space_map *sm,
  * A dummy space map only for use before the first staged commit.
  * (ie. while you set up a disk sm).
  */
-struct space_map *sm_dummy_create(block_t nr_blocks);
+struct space_map *sm_dummy_create(dm_block_t nr_blocks);
 
 /*----------------------------------------------------------------*/
 

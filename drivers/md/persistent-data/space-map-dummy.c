@@ -3,7 +3,7 @@
 /*----------------------------------------------------------------*/
 
 struct sm_dummy {
-	block_t nr_blocks;
+	dm_block_t nr_blocks;
 };
 
 static void destroy(void *context)
@@ -11,31 +11,34 @@ static void destroy(void *context)
 	kfree(context);
 }
 
-static int get_nr_blocks(void *context, block_t *count)
+static int get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_dummy *sm = (struct sm_dummy *) context;
 	*count = sm->nr_blocks;
 	return 0;
 }
 
-static int get_count(void *context, block_t b, uint32_t *result)
+static int get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	*result = 0;
 	return 0;
 }
 
-static int set_count(void *context, block_t b, uint32_t count)
+static int set_count(void *context, dm_block_t b, uint32_t count)
 {
 	BUG_ON(1);
 	return -1;
 }
 
-static int get_free_in_range(void *context, block_t low, block_t high, block_t *b)
+static int get_free_in_range(void *context,
+			     dm_block_t low,
+			     dm_block_t high,
+			     dm_block_t *b)
 {
 	*b = low;
 	return 0;
 }
-static int get_free(void *context, block_t *b)
+static int get_free(void *context, dm_block_t *b)
 {
 	BUG_ON(1);
 	return -1;
@@ -72,7 +75,7 @@ static struct space_map_ops ops_ = {
 	.commit = commit,
 };
 
-struct space_map *sm_dummy_create(block_t nr_blocks)
+struct space_map *sm_dummy_create(dm_block_t nr_blocks)
 {
 	struct space_map *sm = NULL;
 	struct sm_dummy *smc = kmalloc(sizeof(*smc), GFP_KERNEL);

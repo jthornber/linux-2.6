@@ -24,10 +24,10 @@ struct sm_disk {
 
 	uint32_t block_size;
 	uint32_t entries_per_block;
-	block_t nr_blocks;
-	block_t nr_allocated;
-	block_t bitmap_root;
-	block_t ref_count_root;
+	dm_block_t nr_blocks;
+	dm_block_t nr_allocated;
+	dm_block_t bitmap_root;
+	dm_block_t ref_count_root;
 };
 
 struct index_entry {
@@ -60,7 +60,7 @@ static uint64_t mod64(uint64_t n, uint64_t d)
  * for blocks that are over 2.
  */
 #define ENTRIES_PER_WORD 32
-static unsigned lookup_bitmap_(void *addr, block_t b)
+static unsigned lookup_bitmap_(void *addr, dm_block_t b)
 {
 	unsigned val = 0;
 	__le64 *words = (__le64 *) addr;
@@ -73,7 +73,7 @@ static unsigned lookup_bitmap_(void *addr, block_t b)
 	return val;
 }
 
-static void set_bitmap_(void *addr, block_t b, unsigned val)
+static void set_bitmap_(void *addr, dm_block_t b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
 	__le64 *w = words + (b / ENTRIES_PER_WORD);
@@ -104,12 +104,12 @@ static int find_free_(void *addr, unsigned begin, unsigned end, unsigned *positi
 	return -ENOSPC;
 }
 
-static inline block_t min_block(block_t b1, block_t b2)
+static inline dm_block_t min_block(dm_block_t b1, dm_block_t b2)
 {
 	return (b1 <= b2) ? b1 : b2;
 }
 
-static inline block_t max_block(block_t b1, block_t b2)
+static inline dm_block_t max_block(dm_block_t b1, dm_block_t b2)
 {
 	return (b1 >= b2) ? b1 : b2;
 }
@@ -144,7 +144,7 @@ static int io_init(struct sm_disk *io,
 	io->ref_count_info.value_type.del = NULL;
 	io->ref_count_info.value_type.equal = NULL;
 
-	io->block_size = bm_block_size(tm_get_bm(tm));
+	io->block_size = dm_bm_block_size(tm_get_bm(tm));
 
 	if (io->block_size > (1 << 30)) {
 		printk(KERN_ALERT "block size too big to hold bitmaps");
@@ -158,10 +158,10 @@ static int io_init(struct sm_disk *io,
 	return 0;
 }
 
-static int io_new(struct sm_disk *io, struct transaction_manager *tm, block_t nr_blocks)
+static int io_new(struct sm_disk *io, struct transaction_manager *tm, dm_block_t nr_blocks)
 {
 	int r;
-	block_t i;
+	dm_block_t i;
 	unsigned blocks;
 
 	r = io_init(io, tm);
@@ -176,13 +176,13 @@ static int io_new(struct sm_disk *io, struct transaction_manager *tm, block_t nr
 
 	blocks = div_up(nr_blocks, io->entries_per_block);
 	for (i = 0; i < blocks; i++) {
-		struct block *b;
+		struct dm_block *b;
 		struct index_entry idx;
 
 		r = tm_new_block(tm, &b);
 		if (r < 0)
 			return r;
-		idx.b = __cpu_to_le64(block_location(b));
+		idx.b = __cpu_to_le64(dm_block_location(b));
 
 		r = tm_unlock(tm, b);
 		if (r < 0)
@@ -232,10 +232,10 @@ static int io_open(struct sm_disk *io,
 	return 0;
 }
 
-static int io_lookup(struct sm_disk *io, block_t b, uint32_t *result)
+static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 {
 	int r;
-	block_t index = b;
+	dm_block_t index = b;
 	struct index_entry ie;
 	do_div(index, io->entries_per_block);
 
@@ -244,12 +244,13 @@ static int io_lookup(struct sm_disk *io, block_t b, uint32_t *result)
 		return r;
 
 	{
-		struct block *blk;
+		struct dm_block *blk;
 		r = tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
 		if (r < 0)
 			return r;
 
-		*result = lookup_bitmap_(block_data(blk), mod64(b, io->entries_per_block));
+		*result = lookup_bitmap_(dm_block_data(blk),
+					 mod64(b, io->entries_per_block));
 		r = tm_unlock(io->tm, blk);
 		if (r < 0) {
 			return r;
@@ -271,13 +272,13 @@ static int io_lookup(struct sm_disk *io, block_t b, uint32_t *result)
 }
 
 static int
-io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
+io_find_unused(struct sm_disk *io, dm_block_t begin, dm_block_t end, dm_block_t *result)
 {
 	int r;
-	block_t index_begin = begin;
-	block_t index_end = div_up(end, io->entries_per_block);
+	dm_block_t index_begin = begin;
+	dm_block_t index_end = div_up(end, io->entries_per_block);
 	struct index_entry ie;
-	block_t i;
+	dm_block_t i;
 
 	do_div(index_begin, io->entries_per_block);
 	for (i = index_begin; i < index_end; i++, begin = 0) {
@@ -286,7 +287,7 @@ io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 			return r;
 
 		if (__le32_to_cpu(ie.nr_free) > 0) {
-			struct block *blk;
+			struct dm_block *blk;
 			unsigned position;
 
 			uint32_t bit_end =
@@ -298,7 +299,7 @@ io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 			if (r < 0)
 				return r;
 
-			r = find_free_(block_data(blk),
+			r = find_free_(dm_block_data(blk),
 				       mod64(begin, io->entries_per_block),
 				       bit_end, &position);
 			if (r < 0) {
@@ -320,12 +321,12 @@ io_find_unused(struct sm_disk *io, block_t begin, block_t end, block_t *result)
 	return -ENOSPC;
 }
 
-static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
+static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 {
 	int r;
 	uint32_t bit, old;
-	struct block *nb;
-	block_t index = b;
+	struct dm_block *nb;
+	dm_block_t index = b;
 	struct index_entry ie;
 	void *bm;
 	int inc;
@@ -341,7 +342,7 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 		return r;
 	}
 
-	bm = block_data(nb);
+	bm = dm_block_data(nb);
 	bit = mod64(b, io->entries_per_block);
 	old = lookup_bitmap_(bm, bit);
 
@@ -391,7 +392,7 @@ static int io_insert(struct sm_disk *io, block_t b, uint32_t ref_count)
 	 * FIXME: we have a race here, since another thread may have
 	 * altered |ie| in the meantime.  Not important yet.
 	 */
-	ie.b = __cpu_to_le64(block_location(nb));
+	ie.b = __cpu_to_le64(dm_block_location(nb));
 	r = btree_insert(&io->bitmap_info, io->bitmap_root, &index, &ie, &io->bitmap_root);
 	if (r < 0)
 		return r;
@@ -407,36 +408,36 @@ static void destroy(void *context)
 	kfree(smd);
 }
 
-static int get_nr_blocks(void *context, block_t *count)
+static int get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	*count = smd->nr_blocks;
 	return 0;
 }
 
-static int get_count(void *context, block_t b, uint32_t *result)
+static int get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return io_lookup(smd, b, result);
 }
 
-static int set_count_(void *context, block_t b, uint32_t count)
+static int set_count_(void *context, dm_block_t b, uint32_t count)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return io_insert(smd, b, count);
 }
 
-static int set_count(void *context, block_t b, uint32_t count)
+static int set_count(void *context, dm_block_t b, uint32_t count)
 {
 	int r;
 	struct sm_disk *smd = (struct sm_disk *) context;
-	unsigned held = bm_locks_held(tm_get_bm(smd->tm));
+	unsigned held = dm_bm_locks_held(tm_get_bm(smd->tm));
 	r = set_count_(context, b, count);
-	BUG_ON(bm_locks_held(tm_get_bm(smd->tm)) != held);
+	BUG_ON(dm_bm_locks_held(tm_get_bm(smd->tm)) != held);
 	return r;
 }
 
-static int get_free_(void *context, block_t low, block_t high, block_t *b)
+static int get_free_(void *context, dm_block_t low, dm_block_t high, dm_block_t *b)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	int r;
@@ -455,13 +456,13 @@ static int get_free_(void *context, block_t low, block_t high, block_t *b)
 	return 0;
 }
 
-static int get_free(void *context, block_t *b)
+static int get_free(void *context, dm_block_t *b)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return get_free_(context, 0, smd->nr_blocks, b);
 }
 
-static int get_free_in_range(void *context, block_t low, block_t high, block_t *b)
+static int get_free_in_range(void *context, dm_block_t low, dm_block_t high, dm_block_t *b)
 {
 	return get_free_(context, low, high, b);
 }
@@ -513,7 +514,7 @@ static struct space_map_ops ops_ = {
 };
 
 struct space_map *sm_disk_create(struct transaction_manager *tm,
-				 block_t nr_blocks)
+				 dm_block_t nr_blocks)
 {
 	struct space_map *sm = NULL;
 	struct sm_disk *smd = alloc_smd(tm);

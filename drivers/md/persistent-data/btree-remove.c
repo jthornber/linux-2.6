@@ -125,7 +125,7 @@ static unsigned merge_threshold(struct node *n)
 
 struct child {
 	unsigned index;
-	struct block *block;
+	struct dm_block *block;
 	struct node *n;
 };
 
@@ -140,7 +140,7 @@ static struct btree_value_type internal_type_ = {
 static int init_child(struct btree_info *info, struct node *parent, unsigned index, struct child *result)
 {
 	int r, inc;
-	block_t root;
+	dm_block_t root;
 
 	result->index = index;
 	root = value64(parent, index);
@@ -194,23 +194,23 @@ static void rebalance2_(struct btree_info *info,
 		left->header.nr_entries = __cpu_to_le32(nr_left + nr_right);
 
 		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(l->block));
+			__cpu_to_le64(dm_block_location(l->block));
 		delete_at(parent, r->index, sizeof(__le64));
 
 		/*
 		 * We need to decrement the right block, but not it's
 		 * children, since they're still referenced by @left
 		 */
-		tm_dec(info->tm, block_location(r->block));
+		tm_dec(info->tm, dm_block_location(r->block));
 
 	} else {
 		/* rebalance */
 		unsigned target_left = (nr_left + nr_right) / 2;
 		shift(left, right, nr_left - target_left);
 		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(l->block));
+			__cpu_to_le64(dm_block_location(l->block));
 		*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(r->block));
+			__cpu_to_le64(dm_block_location(r->block));
 		*key_ptr(parent, r->index) = right->keys[0];
 	}
 }
@@ -286,15 +286,15 @@ static void rebalance3_(struct btree_info *info,
 		}
 
 		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(l->block));
+			__cpu_to_le64(dm_block_location(l->block));
 		*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(r->block));
+			__cpu_to_le64(dm_block_location(r->block));
 		*key_ptr(parent, r->index) = right->keys[0];
 
 		delete_at(parent, c->index, sizeof(__le64));
 		r->index--;
 
-		tm_dec(info->tm, block_location(c->block));
+		tm_dec(info->tm, dm_block_location(c->block));
 		rebalance2_(info, parent, l, r);
 
 	} else {
@@ -309,11 +309,11 @@ static void rebalance3_(struct btree_info *info,
 		shift(center, right, target - nr_right);
 
 		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(l->block));
+			__cpu_to_le64(dm_block_location(l->block));
 		*((__le64 *) value_ptr(parent, c->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(c->block));
+			__cpu_to_le64(dm_block_location(c->block));
 		*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-			__cpu_to_le64(block_location(r->block));
+			__cpu_to_le64(dm_block_location(r->block));
 
 		*key_ptr(parent, c->index) = center->keys[0];
 		*key_ptr(parent, r->index) = right->keys[0];
@@ -369,11 +369,11 @@ static int rebalance3(struct shadow_spine *s,
 }
 
 static int get_nr_entries(struct transaction_manager *tm,
-			  block_t b,
+			  dm_block_t b,
 			  uint32_t *result)
 {
 	int r;
-	struct block *block;
+	struct dm_block *block;
 	struct node *c;
 
 	r = tm_read_lock(tm, b, &block);
@@ -396,16 +396,17 @@ static int rebalance_children(struct shadow_spine *s,
 	n = to_node(shadow_current(s));
 
 	if (__le32_to_cpu(n->header.nr_entries) == 1) {
-		block_t b = value64(n, 0);
-		struct block *child;
+		dm_block_t b = value64(n, 0);
+		struct dm_block *child;
 
 		r = tm_read_lock(info->tm, b, &child);
 		if (r)
 			return r;
 
-		memcpy(n, block_data(child), bm_block_size(tm_get_bm(info->tm)));
+		memcpy(n, dm_block_data(child),
+		       dm_bm_block_size(tm_get_bm(info->tm)));
 		r = tm_unlock(info->tm, child);
-		tm_dec(info->tm, block_location(child));
+		tm_dec(info->tm, dm_block_location(child));
 
 	} else {
 		i = lower_bound(n, key);
@@ -456,7 +457,7 @@ static int do_leaf(struct node *n, uint64_t key, unsigned *index)
 static int btree_remove_raw(struct shadow_spine *s,
 			    struct btree_info *info,
 			    struct btree_value_type *vt,
-			    block_t root,
+			    dm_block_t root,
 			    uint64_t key,
 			    unsigned *index)
 {
@@ -472,7 +473,7 @@ static int btree_remove_raw(struct shadow_spine *s,
 		 * see a way to do this automatically as part of the spine
 		 * op. */
 		if (shadow_parent(s)) {
-			__le64 location = __cpu_to_le64(block_location(shadow_current(s)));
+			__le64 location = __cpu_to_le64(dm_block_location(shadow_current(s)));
 			memcpy(value_ptr(to_node(shadow_parent(s)), i, sizeof(uint64_t)),
 			       &location, sizeof(__le64));
 		}
@@ -507,8 +508,8 @@ static int btree_remove_raw(struct shadow_spine *s,
 }
 
 int btree_remove(struct btree_info *info,
-		 block_t root, uint64_t *keys,
-		 block_t *new_root)
+		 dm_block_t root, uint64_t *keys,
+		 dm_block_t *new_root)
 {
 	unsigned level, last_level = info->levels - 1;
 	int index = 0, r = 0;

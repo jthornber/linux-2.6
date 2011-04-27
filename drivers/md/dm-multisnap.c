@@ -49,7 +49,7 @@ struct bio_prison;
 struct cell_key {
 	int virtual;
 	multisnap_dev_t dev;
-	block_t block;
+	dm_block_t block;
 };
 
 struct cell {
@@ -209,14 +209,18 @@ static void cell_error(struct cell *cell)
 /*
  * Key building.
  */
-static void build_data_key(block_t b, struct cell_key *key)
+static void
+build_data_key(dm_block_t b, struct cell_key *key)
 {
 	key->virtual = 0;
 	key->dev = 0;
 	key->block = b;
 }
 
-static void build_virtual_key(struct ms_device *msd, block_t b, struct cell_key *key)
+static void
+build_virtual_key(struct ms_device *msd,
+		  dm_block_t b,
+		  struct cell_key *key)
 {
 	key->virtual = 1;
 	key->dev = multisnap_device_dev(msd);
@@ -237,8 +241,8 @@ struct new_mapping {
 
 	struct pool_c *pool;
 	struct ms_device *msd;
-	block_t virt_block;
-	block_t data_block;
+	dm_block_t virt_block;
+	dm_block_t data_block;
 	struct cell *cell;
 	int err;
 
@@ -265,7 +269,7 @@ struct pool_c {
 	sector_t data_size;
 	uint32_t sectors_per_block;
 	unsigned block_shift;
-	block_t offset_mask;
+	dm_block_t offset_mask;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -383,15 +387,15 @@ static struct dm_target *get_ti(struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
-static block_t get_bio_block(struct pool_c *pool,
-			     struct bio *bio)
+static dm_block_t get_bio_block(struct pool_c *pool,
+				struct bio *bio)
 {
 	return bio->bi_sector >> pool->block_shift;
 }
 
 static void remap(struct pool_c *pool,
 		  struct bio *bio,
-		  block_t block)
+		  dm_block_t block)
 {
 	bio->bi_bdev = pool->pool_dev;
 	bio->bi_sector = (block << pool->block_shift) +
@@ -400,7 +404,7 @@ static void remap(struct pool_c *pool,
 
 static void remap_and_issue(struct pool_c *pool,
 			    struct bio *bio,
-			    block_t block)
+			    dm_block_t block)
 {
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		int r = multisnap_metadata_commit(pool->mmd);
@@ -464,9 +468,9 @@ static int io_covers_block(struct pool_c *pool,
 
 static void schedule_copy(struct pool_c *pool,
 			  struct ms_device *msd,
-			  block_t virt_block,
-			  block_t data_origin,
-			  block_t data_dest,
+			  dm_block_t virt_block,
+			  dm_block_t data_origin,
+			  dm_block_t data_dest,
 			  struct cell *cell,
 			  struct bio *bio)
 {
@@ -513,8 +517,8 @@ static void schedule_copy(struct pool_c *pool,
 
 static void schedule_zero(struct pool_c *pool,
 			  struct ms_device *msd,
-			  block_t virt_block,
-			  block_t data_block,
+			  dm_block_t virt_block,
+			  dm_block_t data_block,
 			  struct cell *cell,
 			  struct bio *bio)
 {
@@ -546,7 +550,7 @@ static void schedule_zero(struct pool_c *pool,
 
 static void cell_remap_and_issue(struct pool_c *pool,
 				 struct cell *cell,
-				 block_t data_block)
+				 dm_block_t data_block)
 {
 	struct bio_list bios;
 	struct bio *bio;
@@ -559,7 +563,7 @@ static void cell_remap_and_issue(struct pool_c *pool,
 
 static void cell_remap_and_issue_except(struct pool_c *pool,
 					struct cell *cell,
-					block_t data_block,
+					dm_block_t data_block,
 					struct bio *exception)
 {
 	struct bio_list bios;
@@ -593,7 +597,7 @@ static void process_bio(struct pool_c *pool,
 			struct bio *bio)
 {
 	int r, count;
-	block_t block = get_bio_block(pool, bio), data_block;
+	dm_block_t block = get_bio_block(pool, bio), data_block;
 	struct multisnap_lookup_result lookup_result;
 	struct bio_list bios;
 	struct cell *cell;
@@ -770,7 +774,7 @@ int bio_map(struct pool_c *pool,
 	    struct bio *bio)
 {
 	int r;
-	block_t block = get_bio_block(pool, bio);
+	dm_block_t block = get_bio_block(pool, bio);
 	struct multisnap_c *mc = ti->private;
 	struct ms_device *msd = mc->msd;
 	struct multisnap_lookup_result result;
@@ -904,7 +908,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct pool_c *pool;
 	struct multisnap_metadata *mmd;
 	struct dm_dev *metadata_dev, *data_dev;
-	block_t data_size;
+	dm_block_t data_size;
 
 	if (argc != 3) {
 		ti->error = "Invalid argument count";
@@ -1044,7 +1048,7 @@ pool_preresume(struct dm_target *ti)
 {
 	int r;
 	struct pool_c *pool = ti->private;
-	block_t data_size, sb_data_size;
+	dm_block_t data_size, sb_data_size;
 
 	spin_lock(&pool->lock);
 	pool->bouncing = 0;
@@ -1104,7 +1108,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	if (!strcmp(argv[0], "new-thin")) {
-		block_t dev_size;
+		dm_block_t dev_size;
 
 		if (argc != 3) {
 			ti->error = invalid_args;
@@ -1299,7 +1303,7 @@ multisnap_status(struct dm_target *ti, status_type_t type,
 {
 	int r;
 	ssize_t sz = 0;
-	block_t mapped;
+	dm_block_t mapped;
 	char buf[BDEVNAME_SIZE];
 	struct multisnap_c *mc = ti->private;
 	unsigned long dev_id;

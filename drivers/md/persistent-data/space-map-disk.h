@@ -10,7 +10,7 @@
  * On disk format for a space map.
  */
 struct space_map *sm_disk_create(struct transaction_manager *tm,
-				 block_t nr_blocks);
+				 dm_block_t nr_blocks);
 
 /* Open from a previously recorded root */
 struct space_map *sm_disk_open(struct transaction_manager *tm,

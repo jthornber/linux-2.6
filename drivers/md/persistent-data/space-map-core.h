@@ -8,7 +8,7 @@
 /*
  * The in core space map is only used for test code.
  */
-struct space_map *sm_core_create(block_t dev_size);
+struct space_map *sm_core_create(dm_block_t dev_size);
 
 /*----------------------------------------------------------------*/
 

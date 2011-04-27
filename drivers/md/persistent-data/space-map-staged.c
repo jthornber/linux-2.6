@@ -9,7 +9,7 @@ struct cache_entry {
 	struct list_head lru;
 	struct hlist_node hash;
 
-	block_t block;
+	dm_block_t block;
 	uint32_t ref_count;	/* Ref count from last transaction */
 	int32_t delta;		/* how this has changed within the current transaction */
 	int32_t unwritten;      /* what still needs to be written to the current transaction */
@@ -26,18 +26,18 @@ struct sm_staged {
 	struct hlist_head buckets[NR_BUCKETS];
 
 	struct space_map *sm_wrapped;
-	block_t maybe_first_free;
+	dm_block_t maybe_first_free;
 };
 
 /*----------------------------------------------------------------*/
 
 /* FIXME: we're hashing blocks elsewhere, factor out the hash fn */
-static unsigned hash_block(block_t b)
+static unsigned hash_block(dm_block_t b)
 {
 	return (b * PRIME) & MASK;
 }
 
-static struct cache_entry *find_entry(struct sm_staged *sm, block_t b)
+static struct cache_entry *find_entry(struct sm_staged *sm, dm_block_t b)
 {
 	struct hlist_node *l;
 	struct cache_entry *ce;
@@ -53,7 +53,7 @@ static struct cache_entry *find_entry(struct sm_staged *sm, block_t b)
 /*
  * Only call this if you know the entry is _not_ already present.
  */
-static struct cache_entry *add_entry(struct sm_staged *sm, block_t b, uint32_t ref_count)
+static struct cache_entry *add_entry(struct sm_staged *sm, dm_block_t b, uint32_t ref_count)
 {
 	struct cache_entry *ce = mempool_alloc(sm->pool, GFP_NOIO);
 
@@ -69,7 +69,7 @@ static struct cache_entry *add_entry(struct sm_staged *sm, block_t b, uint32_t r
 	return ce;
 }
 
-static int add_delta(struct sm_staged *sm, block_t b, int32_t delta)
+static int add_delta(struct sm_staged *sm, dm_block_t b, int32_t delta)
 {
 	int r;
 	struct cache_entry *ce = find_entry(sm, b);
@@ -144,10 +144,10 @@ static void inc_entry(struct sm_staged *sm, struct cache_entry *ce)
 	ce->unwritten++;
 }
 
-static int get_free_in_range_(struct sm_staged *sm, block_t low, block_t high, struct cache_entry **ce)
+static int get_free_in_range_(struct sm_staged *sm, dm_block_t low, dm_block_t high, struct cache_entry **ce)
 {
 	int r;
-	block_t b, nr_blocks;
+	dm_block_t b, nr_blocks;
 
 	r = sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
 	if (r < 0)
@@ -239,13 +239,13 @@ static void destroy(void *context)
 	kfree(sm);
 }
 
-static int get_nr_blocks(void *context, block_t *count)
+static int get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return sm_get_nr_blocks(sm->sm_wrapped, count);
 }
 
-static int get_count(void *context, block_t b, uint32_t *result)
+static int get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	struct cache_entry *ce = find_entry(sm, b);
@@ -258,7 +258,7 @@ static int get_count(void *context, block_t b, uint32_t *result)
 	return sm_get_count(sm->sm_wrapped, b, result);
 }
 
-static int set_count(void *context, block_t b, uint32_t count)
+static int set_count(void *context, dm_block_t b, uint32_t count)
 {
 	/* FIXME: inefficient */
 	int r;
@@ -278,7 +278,7 @@ static int set_count(void *context, block_t b, uint32_t count)
 	return add_delta(sm, b, delta);
 }
 
-static int get_free_in_range(void *context, block_t low, block_t high, block_t *b)
+static int get_free_in_range(void *context, dm_block_t low, dm_block_t high, dm_block_t *b)
 {
 	int r;
 	struct sm_staged *sm = (struct sm_staged *) context;
@@ -291,10 +291,10 @@ static int get_free_in_range(void *context, block_t low, block_t high, block_t *
 	*b = ce->block;
 	return r;
 }
-static int get_free(void *context, block_t *b)
+static int get_free(void *context, dm_block_t *b)
 {
 	int r;
-	block_t nr_blocks;
+	dm_block_t nr_blocks;
 	struct sm_staged *sm = (struct sm_staged *) context;
 	r = sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
 	if (r < 0)
@@ -303,22 +303,22 @@ static int get_free(void *context, block_t *b)
 	return get_free_in_range(context, 0, nr_blocks, b);
 }
 
-static int inc_block(void *context, block_t b)
+static int inc_block(void *context, dm_block_t b)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return add_delta(sm, b, 1);
 }
 
-static int dec_block(void *context, block_t b)
+static int dec_block(void *context, dm_block_t b)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return add_delta(sm, b, -1);
 }
 
-static int new_block(void *context, block_t *b)
+static int new_block(void *context, dm_block_t *b)
 {
 	int r;
-	block_t nr_blocks;
+	dm_block_t nr_blocks;
 	struct sm_staged *sm = (struct sm_staged *) context;
 	struct cache_entry *ce;
 

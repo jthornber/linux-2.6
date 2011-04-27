@@ -7,7 +7,7 @@
 
 /*----------------------------------------------------------------*/
 
-enum block_state {
+enum dm_block_state {
 	BS_EMPTY,
 	BS_CLEAN,
 	BS_READING,
@@ -19,13 +19,13 @@ enum block_state {
 	BS_ERROR
 };
 
-struct block {
+struct dm_block {
 	struct list_head list;
 	struct hlist_node hlist;
 
-	block_t where;
+	dm_block_t where;
 	void *data;
-	enum block_state state;
+	enum dm_block_state state;
 	wait_queue_head_t io_q;
 	unsigned read_lock_count;
 	unsigned write_lock_pending;
@@ -41,15 +41,15 @@ struct block {
 	 * Sadly we need an up pointer so we can get to the bm on io
 	 * completion.
 	 */
-	struct block_manager *bm;
+	struct dm_block_manager *bm;
 };
 
-struct block_manager {
+struct dm_block_manager {
 	struct block_device *bdev;
 	unsigned cache_size;
 	size_t block_size;
 	sector_t sectors_per_block;
-	block_t nr_blocks;
+	dm_block_t nr_blocks;
 
 	/* this will trigger everytime an io completes */
 	wait_queue_head_t io_q;
@@ -80,31 +80,35 @@ struct block_manager {
 	struct hlist_head buckets[0];
 };
 
-block_t block_location(struct block *b)
+dm_block_t
+dm_block_location(struct dm_block *b)
 {
 	return b->where;
 }
-EXPORT_SYMBOL_GPL(block_location);
+EXPORT_SYMBOL_GPL(dm_block_location);
 
-void *block_data(struct block *b)
+void *
+dm_block_data(struct dm_block *b)
 {
 	return b->data;
 }
-EXPORT_SYMBOL_GPL(block_data);
+EXPORT_SYMBOL_GPL(dm_block_data);
 
 /*----------------------------------------------------------------
  * Hash table
  *--------------------------------------------------------------*/
-static unsigned hash_block(struct block_manager *bm, block_t b)
+static unsigned
+hash_block(struct dm_block_manager *bm, dm_block_t b)
 {
 	const unsigned BIG_PRIME = 4294967291UL;
 	return (((unsigned) b) * BIG_PRIME) & bm->hash_mask;
 }
 
-static struct block *find_block_(struct block_manager *bm, block_t b)
+static struct dm_block *
+find_block_(struct dm_block_manager *bm, dm_block_t b)
 {
 	unsigned bucket = hash_block(bm, b);
-	struct block *blk;
+	struct dm_block *blk;
 	struct hlist_node *n;
 
 	hlist_for_each_entry (blk, n, bm->buckets + bucket, hlist)
@@ -114,7 +118,8 @@ static struct block *find_block_(struct block_manager *bm, block_t b)
 	return NULL;
 }
 
-static void insert_block_(struct block_manager *bm, struct block *b)
+static void
+insert_block_(struct dm_block_manager *bm, struct dm_block *b)
 {
 	unsigned bucket = hash_block(bm, b->where);
 	hlist_add_head(&b->hlist, bm->buckets + bucket);
@@ -132,10 +137,11 @@ static void insert_block_(struct block_manager *bm, struct block *b)
  *
  * Assumes bm->lock is held.
  *--------------------------------------------------------------*/
-static void transition_(struct block *b, enum block_state new_state)
+static void
+transition_(struct dm_block *b, enum dm_block_state new_state)
 {
 	/* DOT: digraph BlockStates { */
-	struct block_manager *bm = b->bm;
+	struct dm_block_manager *bm = b->bm;
 
 	switch (new_state) {
 	case BS_EMPTY:
@@ -244,14 +250,15 @@ static void transition_(struct block *b, enum block_state new_state)
 /*----------------------------------------------------------------
  * low level io
  *--------------------------------------------------------------*/
-typedef void (completion_fn)(unsigned long error, struct block *b);
+typedef void (completion_fn)(unsigned long error, struct dm_block *b);
 
-static void submit_io(struct block *b,
-		      int rw,
-		      completion_fn fn,
-		      completion_fn fail)
+static void
+submit_io(struct dm_block *b,
+	  int rw,
+	  completion_fn fn,
+	  completion_fn fail)
 {
-	struct block_manager *bm = b->bm;
+	struct dm_block_manager *bm = b->bm;
 	struct dm_io_request req;
 	struct dm_io_region region;
 
@@ -274,9 +281,10 @@ static void submit_io(struct block *b,
 /*----------------------------------------------------------------
  * High level io
  *--------------------------------------------------------------*/
-static void complete_io_(unsigned long error, struct block *b)
+static void
+complete_io_(unsigned long error, struct dm_block *b)
 {
-	struct block_manager *bm = b->bm;
+	struct dm_block_manager *bm = b->bm;
 
 	if (error) {
 		printk(KERN_ALERT "io error %u", (unsigned) b->where);
@@ -289,18 +297,20 @@ static void complete_io_(unsigned long error, struct block *b)
 	wake_up(&bm->io_q);
 }
 
-static void complete_io_irq(unsigned long error, struct block *b)
+static void
+complete_io_irq(unsigned long error, struct dm_block *b)
 {
-	struct block_manager *bm = b->bm;
+	struct dm_block_manager *bm = b->bm;
 
 	spin_lock(&bm->lock);
 	complete_io_(error, b);
 	spin_unlock(&bm->lock);
 }
 
-static void complete_io_fail(unsigned long error, struct block *b)
+static void
+complete_io_fail(unsigned long error, struct dm_block *b)
 {
-	struct block_manager *bm = b->bm;
+	struct dm_block_manager *bm = b->bm;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bm->lock, flags);
@@ -308,19 +318,22 @@ static void complete_io_fail(unsigned long error, struct block *b)
 	spin_unlock_irqrestore(&bm->lock, flags);
 }
 
-static void read_block(struct block *b)
+static void
+read_block(struct dm_block *b)
 {
 	submit_io(b, READ, complete_io_irq, complete_io_fail);
 }
 
-static void write_block(struct block *b)
+static void
+write_block(struct dm_block *b)
 {
 	submit_io(b, WRITE | b->io_flags, complete_io_irq, complete_io_fail);
 }
 
-static void write_dirty(struct block_manager *bm, unsigned count)
+static void
+write_dirty(struct dm_block_manager *bm, unsigned count)
 {
-	struct block *b, *tmp;
+	struct dm_block *b, *tmp;
 	struct list_head dirty;
 	unsigned long flags;
 
@@ -339,21 +352,24 @@ static void write_dirty(struct block_manager *bm, unsigned count)
 		write_block(b);
 }
 
-static void write_all_dirty(struct block_manager *bm)
+static void
+write_all_dirty(struct dm_block_manager *bm)
 {
 	write_dirty(bm, bm->cache_size);
 }
 
-static void clear_errors_(struct block_manager *bm)
+static void
+clear_errors_(struct dm_block_manager *bm)
 {
-	struct block *b, *tmp;
+	struct dm_block *b, *tmp;
 	list_for_each_entry_safe (b, tmp, &bm->error_list, list)
 		transition_(b, BS_EMPTY);
 }
 
-static void unplug(struct block_manager *bm)
+static void
+unplug(struct dm_block_manager *bm)
 {
-	/* I think this is unneccessary, and will stop us scaling */
+	/* This is unneccessary, and will stop us scaling */
 	//blk_unplug(bdev_get_queue(bm->bdev));
 }
 
@@ -393,21 +409,24 @@ do {   								\
 	return ret;   						\
 } while (0)
 
-static int wait_io_(struct block *b, unsigned long *flags)
+static int
+wait_io_(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, io_schedule,
 		     ((b->state != BS_READING) && (b->state != BS_WRITING)));
 }
 
-static int wait_unlocked_(struct block *b, unsigned long *flags)
+static int
+wait_unlocked_(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
 		     ((b->state == BS_CLEAN) || (b->state == BS_DIRTY)));
 }
 
-static int wait_read_lockable_(struct block *b, unsigned long *flags)
+static int
+wait_read_lockable_(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
@@ -416,13 +435,15 @@ static int wait_read_lockable_(struct block *b, unsigned long *flags)
 						 b->state == BS_READ_LOCKED)));
 }
 
-static int wait_all_writes_(struct block_manager *bm, unsigned long *flags)
+static int
+wait_all_writes_(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule, !bm->writing_count);
 }
 
-static int wait_clean_(struct block_manager *bm, unsigned long *flags)
+static int
+wait_clean_(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
@@ -433,10 +454,14 @@ static int wait_clean_(struct block_manager *bm, unsigned long *flags)
 /*----------------------------------------------------------------
  * Finding a free block to recycle
  *--------------------------------------------------------------*/
-static int recycle_block(struct block_manager *bm, block_t where, int need_read, struct block **result)
+static int
+recycle_block(struct dm_block_manager *bm,
+	      dm_block_t where,
+	      int need_read,
+	      struct dm_block **result)
 {
 	int ret = 0;
-	struct block *b;
+	struct dm_block *b;
 	unsigned long flags, available;
 
 	/* wait for a block to appear on the empty or clean lists */
@@ -458,11 +483,11 @@ static int recycle_block(struct block_manager *bm, block_t where, int need_read,
 		}
 
 		if (!list_empty(&bm->empty_list)) {
-			b = list_first_entry(&bm->empty_list, struct block, list);
+			b = list_first_entry(&bm->empty_list, struct dm_block, list);
 			break;
 
 		} else if (!list_empty(&bm->clean_list)) {
-			b = list_first_entry(&bm->clean_list, struct block, list);
+			b = list_first_entry(&bm->clean_list, struct dm_block, list);
 			transition_(b, BS_EMPTY);
 			break;
 		}
@@ -505,9 +530,10 @@ static int recycle_block(struct block_manager *bm, block_t where, int need_read,
 /*----------------------------------------------------------------
  * Low level block management
  *--------------------------------------------------------------*/
-static struct block *alloc_block(struct block_manager *bm)
+static struct dm_block *
+alloc_block(struct dm_block_manager *bm)
 {
-	struct block *b = kmalloc(sizeof(*b), GFP_KERNEL);
+	struct dm_block *b = kmalloc(sizeof(*b), GFP_KERNEL);
 	if (!b)
 		return NULL;
 
@@ -528,21 +554,23 @@ static struct block *alloc_block(struct block_manager *bm)
 	return b;
 }
 
-static void free_block(struct block *b)
+static void
+free_block(struct dm_block *b)
 {
 	kfree(b->data);
 	kfree(b);
 }
 
-static int populate_bm(struct block_manager *bm, unsigned count)
+static int
+populate_bm(struct dm_block_manager *bm, unsigned count)
 {
 	int i;
 	LIST_HEAD(bs);
 
 	for (i = 0; i < count; i++) {
-		struct block *b = alloc_block(bm);
+		struct dm_block *b = alloc_block(bm);
 		if (!b) {
-			struct block *tmp;
+			struct dm_block *tmp;
 			list_for_each_entry_safe (b, tmp, &bs, list)
 				free_block(b);
 			return -ENOMEM;
@@ -559,7 +587,8 @@ static int populate_bm(struct block_manager *bm, unsigned count)
 /*----------------------------------------------------------------
  * Public interface
  *--------------------------------------------------------------*/
-static unsigned calc_hash_size(unsigned cache_size)
+static unsigned
+calc_hash_size(unsigned cache_size)
 {
 	unsigned r = 32;	/* minimum size is 16 */
 	while (r < cache_size)
@@ -568,15 +597,15 @@ static unsigned calc_hash_size(unsigned cache_size)
 	return r >> 1;
 }
 
-struct block_manager *
-block_manager_create(struct block_device *bdev,
-		     unsigned block_size,
-		     unsigned cache_size)
+struct dm_block_manager *
+dm_block_manager_create(struct block_device *bdev,
+			unsigned block_size,
+			unsigned cache_size)
 {
 	unsigned i;
 	unsigned hash_size = calc_hash_size(cache_size);
-	size_t len = sizeof(struct block_manager) + sizeof(struct hlist_head) * hash_size;
-	struct block_manager *bm = kmalloc(len, GFP_KERNEL);
+	size_t len = sizeof(struct dm_block_manager) + sizeof(struct hlist_head) * hash_size;
+	struct dm_block_manager *bm = kmalloc(len, GFP_KERNEL);
 	if (!bm)
 		return NULL;
 
@@ -619,12 +648,13 @@ block_manager_create(struct block_device *bdev,
 #endif
 	return bm;
 }
-EXPORT_SYMBOL_GPL(block_manager_create);
+EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
-void block_manager_destroy(struct block_manager *bm)
+void
+dm_block_manager_destroy(struct dm_block_manager *bm)
 {
 	int i;
-	struct block *b, *btmp;
+	struct dm_block *b, *btmp;
 	struct hlist_node *n, *tmp;
 
 	dm_io_client_destroy(bm->io);
@@ -638,26 +668,32 @@ void block_manager_destroy(struct block_manager *bm)
 
 	kfree(bm);
 }
-EXPORT_SYMBOL_GPL(block_manager_destroy);
+EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
 
-size_t bm_block_size(struct block_manager *bm)
+size_t
+dm_bm_block_size(struct dm_block_manager *bm)
 {
 	return bm->block_size;
 }
-EXPORT_SYMBOL_GPL(bm_block_size);
+EXPORT_SYMBOL_GPL(dm_bm_block_size);
 
-block_t bm_nr_blocks(struct block_manager *bm)
+dm_block_t
+dm_bm_nr_blocks(struct dm_block_manager *bm)
 {
 	return bm->nr_blocks;
 }
-EXPORT_SYMBOL_GPL(bm_nr_blocks);
+EXPORT_SYMBOL_GPL(dm_bm_nr_blocks);
 
-static int bm_lock_internal(struct block_manager *bm, block_t block,
-			    int how, int need_read, int can_block,
-			    struct block **result)
+static int
+lock_internal(struct dm_block_manager *bm,
+	      dm_block_t block,
+	      int how,
+	      int need_read,
+	      int can_block,
+	      struct dm_block **result)
 {
 	int ret = 0;
-	struct block *b;
+	struct dm_block *b;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bm->lock, flags);
@@ -735,30 +771,44 @@ retry:
 	return ret;
 }
 
-int bm_read_lock(struct block_manager *bm, block_t b, struct block **result)
+int
+dm_bm_read_lock(struct dm_block_manager *bm,
+		dm_block_t b,
+		struct dm_block **result)
 {
-	return bm_lock_internal(bm, b, READ, 1, 1, result);
+	return lock_internal(bm, b, READ, 1, 1, result);
 }
-EXPORT_SYMBOL_GPL(bm_read_lock);
+EXPORT_SYMBOL_GPL(dm_bm_read_lock);
 
-int bm_write_lock(struct block_manager *bm, block_t b, struct block **result)
+int
+dm_bm_write_lock(struct dm_block_manager *bm,
+		 dm_block_t b,
+		 struct dm_block **result)
 {
-	return bm_lock_internal(bm, b, WRITE, 1, 1, result);
+	return lock_internal(bm, b, WRITE, 1, 1, result);
 }
-EXPORT_SYMBOL_GPL(bm_write_lock);
+EXPORT_SYMBOL_GPL(dm_bm_write_lock);
 
-int bm_read_try_lock(struct block_manager *bm, block_t b, struct block **result)
+int
+dm_bm_read_try_lock(struct dm_block_manager *bm,
+		    dm_block_t b,
+		    struct dm_block **result)
 {
-	return bm_lock_internal(bm, b, READ, 1, 0, result);
+	return lock_internal(bm, b, READ, 1, 0, result);
 }
+EXPORT_SYMBOL_GPL(dm_bm_read_try_lock);
 
-int bm_write_lock_zero(struct block_manager *bm, block_t b, struct block **result)
+int
+dm_bm_write_lock_zero(struct dm_block_manager *bm,
+		      dm_block_t b,
+		      struct dm_block **result)
 {
-	return bm_lock_internal(bm, b, WRITE, 0, 1, result);
+	return lock_internal(bm, b, WRITE, 0, 1, result);
 }
-EXPORT_SYMBOL_GPL(bm_write_lock_zero);
+EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
-int bm_unlock(struct block *b)
+int
+dm_bm_unlock(struct dm_block *b)
 {
 	int ret = 0;
 	unsigned long flags;
@@ -799,9 +849,10 @@ int bm_unlock(struct block *b)
 	spin_unlock_irqrestore(&b->bm->lock, flags);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(bm_unlock);
+EXPORT_SYMBOL_GPL(dm_bm_unlock);
 
-static int wait_flush_(struct block_manager *bm)
+static int
+wait_flush_(struct dm_block_manager *bm)
 {
 	int ret = 0;
 	unsigned long flags;
@@ -818,7 +869,8 @@ static int wait_flush_(struct block_manager *bm)
 	return ret;
 }
 
-int bm_flush(struct block_manager *bm, int block)
+int
+dm_bm_flush(struct dm_block_manager *bm, int block)
 {
 	write_all_dirty(bm);
 	if (!block)
@@ -830,9 +882,11 @@ int bm_flush(struct block_manager *bm, int block)
 
 	return wait_flush_(bm);
 }
-EXPORT_SYMBOL_GPL(bm_flush);
+EXPORT_SYMBOL_GPL(dm_bm_flush);
 
-int bm_flush_and_unlock(struct block_manager *bm, struct block *superblock)
+int
+dm_bm_flush_and_unlock(struct dm_block_manager *bm,
+		       struct dm_block *superblock)
 {
 	int r;
 	unsigned long flags;
@@ -846,15 +900,16 @@ int bm_flush_and_unlock(struct block_manager *bm, struct block *superblock)
 	superblock->io_flags = REQ_FUA | REQ_FLUSH;
 	spin_unlock_irqrestore(&bm->lock, flags);
 
-	bm_unlock(superblock);
+	dm_bm_unlock(superblock);
 	write_all_dirty(bm);
 
 	return wait_flush_(bm);
 }
-EXPORT_SYMBOL_GPL(bm_flush_and_unlock);
+EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
 
 #ifdef DEBUG
-unsigned bm_locks_held(struct block_manager *bm)
+unsigned
+dm_bm_locks_held(struct dm_block_manager *bm)
 {
 	unsigned r;
 	unsigned long flags;
@@ -865,7 +920,7 @@ unsigned bm_locks_held(struct block_manager *bm)
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(bm_locks_held);
+EXPORT_SYMBOL_GPL(dm_bm_locks_held);
 #endif
 
 /*----------------------------------------------------------------*/

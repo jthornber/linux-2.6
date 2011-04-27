@@ -14,7 +14,7 @@
  */
 struct transaction_manager;
 
-struct transaction_manager *tm_create(struct block_manager *bm,
+struct transaction_manager *tm_create(struct dm_block_manager *bm,
 				      struct space_map *sm);
 void tm_destroy(struct transaction_manager *tm);
 
@@ -33,7 +33,7 @@ struct transaction_manager *tm_create_non_blocking_clone(struct transaction_mana
  * superblocks).  Call this immediately after construction to reserve
  * blocks.
  */
-int tm_reserve_block(struct transaction_manager *tm, block_t b);
+int tm_reserve_block(struct transaction_manager *tm, dm_block_t b);
 
 int tm_begin(struct transaction_manager *tm);
 
@@ -51,7 +51,7 @@ int tm_begin(struct transaction_manager *tm);
  * and (ii).  The commit will drop the write lock.
  */
 int tm_pre_commit(struct transaction_manager *tm);
-int tm_commit(struct transaction_manager *tm, struct block *root);
+int tm_commit(struct transaction_manager *tm, struct dm_block *root);
 
 /*
  * These methods are the only way to get hold of a writeable block.
@@ -74,35 +74,38 @@ int tm_commit(struct transaction_manager *tm, struct block *root);
  * adjust reference counts for children (data in the block may refer to
  * other blocks).
  */
-int tm_alloc_block(struct transaction_manager *tm, block_t *new);
+int tm_alloc_block(struct transaction_manager *tm, dm_block_t *new);
 
 /* zeroes the new block at returns with write lock held */
-int tm_new_block(struct transaction_manager *tm, struct block **result);
+int tm_new_block(struct transaction_manager *tm, struct dm_block **result);
 
 /*
  * Shadowing implicitly drops a reference on |orig|, so you must not have
  * it locked when you call this.
  */
 int tm_shadow_block(struct transaction_manager *tm,
-		    block_t orig,
-		    struct block **result,
+		    dm_block_t orig,
+		    struct dm_block **result,
 		    int *inc_children);
 
 /*
  * Read access.  You can lock any block you want, if there's a write lock
  * on it outstanding then it'll block.
  */
-int tm_read_lock(struct transaction_manager *tm, block_t b, struct block **result);
-int tm_unlock(struct transaction_manager *tm, struct block *b);
+int tm_read_lock(struct transaction_manager *tm,
+		 dm_block_t b,
+		 struct dm_block **result);
+int tm_unlock(struct transaction_manager *tm,
+	      struct dm_block *b);
 
 /*
  * Functions for altering the reference count of a block directly.
  */
-void tm_inc(struct transaction_manager *tm, block_t b);
-void tm_dec(struct transaction_manager *tm, block_t b);
-int tm_ref(struct transaction_manager *tm, block_t b, uint32_t *result);
+void tm_inc(struct transaction_manager *tm, dm_block_t b);
+void tm_dec(struct transaction_manager *tm, dm_block_t b);
+int tm_ref(struct transaction_manager *tm, dm_block_t b, uint32_t *result);
 
-struct block_manager *tm_get_bm(struct transaction_manager *tm);
+struct dm_block_manager *tm_get_bm(struct transaction_manager *tm);
 
 /*
  * A little utility that ties the knot by producing a transaction manager
@@ -111,19 +114,19 @@ struct block_manager *tm_get_bm(struct transaction_manager *tm);
  * Returns a tm that has an open transaction to write the new disk sm.
  * Caller should store the new sm root and commit.
  */
-int tm_create_with_sm(struct block_manager *bm,
-		      block_t superblock,
+int tm_create_with_sm(struct dm_block_manager *bm,
+		      dm_block_t superblock,
 		      struct transaction_manager **tm,
 		      struct space_map **sm,
-		      struct block **sb);
+		      struct dm_block **sb);
 
-int tm_open_with_sm(struct block_manager *bm,
-		    block_t superblock,
+int tm_open_with_sm(struct dm_block_manager *bm,
+		    dm_block_t superblock,
 		    size_t root_offset,
 		    size_t root_max_len,
 		    struct transaction_manager **tm,
 		    struct space_map **sm,
-		    struct block **sb);
+		    struct dm_block **sb);
 
 /* useful for debugging performance */
 unsigned tm_shadow_count(struct transaction_manager *tm);

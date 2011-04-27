@@ -6,23 +6,24 @@
 
 /*----------------------------------------------------------------*/
 
-typedef uint64_t block_t;
+typedef uint64_t dm_block_t;
 
 /* An opaque handle to a block of data */
-struct block;
-block_t block_location(struct block *b);
-void *block_data(struct block *b);
+struct dm_block;
+dm_block_t dm_block_location(struct dm_block *b);
+void *dm_block_data(struct dm_block *b);
 
 /*----------------------------------------------------------------*/
 
-struct block_manager;
-struct block_manager *
-block_manager_create(struct block_device *bdev, unsigned block_size,
-		     unsigned cache_size);
-void block_manager_destroy(struct block_manager *bm);
+struct dm_block_manager;
+struct dm_block_manager *
+dm_block_manager_create(struct block_device *bdev,
+			unsigned block_size,
+			unsigned cache_size);
+void dm_block_manager_destroy(struct dm_block_manager *bm);
 
-size_t bm_block_size(struct block_manager *bm);
-block_t bm_nr_blocks(struct block_manager *bm);
+size_t dm_bm_block_size(struct dm_block_manager *bm);
+dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
 
 /*
  * You can have multiple concurrent readers, or a single writer holding a
@@ -30,33 +31,42 @@ block_t bm_nr_blocks(struct block_manager *bm);
  */
 
 /*
- * bm_lock() locks a block, and returns via |data| a pointer to memory that
+ * dm_bm_lock() locks a block, and returns via |data| a pointer to memory that
  * holds a copy of that block.  If you have write locked the block then any
  * changes you make to memory pointed to by |data| will be written back to
- * the disk sometime after bm_unlock is called.
+ * the disk sometime after dm_bm_unlock is called.
  */
-int bm_read_lock(struct block_manager *bm, block_t b, struct block **result);
-int bm_write_lock(struct block_manager *bm, block_t b, struct block **result);
+int dm_bm_read_lock(struct dm_block_manager *bm,
+		    dm_block_t b,
+		    struct dm_block **result);
+int dm_bm_write_lock(struct dm_block_manager *bm,
+		     dm_block_t b,
+		     struct dm_block **result);
 
 /*
  * The *_try_lock variants return -EWOULDBLOCK if the block isn't
  * immediately available.
  */
-int bm_read_try_lock(struct block_manager *bm, block_t b, struct block **result);
+int dm_bm_read_try_lock(struct dm_block_manager *bm,
+			dm_block_t b,
+			struct dm_block **result);
 
 /*
- * bm_write_lock_zero() is for use when you know you're going to completely
+ * dm_bm_write_lock_zero() is for use when you know you're going to completely
  * overwrite the block.  It saves a disk read.
  */
-int bm_write_lock_zero(struct block_manager *bm, block_t b, struct block **result);
-int bm_unlock(struct block *b);
+int dm_bm_write_lock_zero(struct dm_block_manager *bm,
+			  dm_block_t b,
+			  struct dm_block **result);
+int dm_bm_unlock(struct dm_block *b);
 
 /*
- * bm_flush() tells the block manager to write all changed data back to the
+ * dm_bm_flush() tells the block manager to write all changed data back to the
  * disk.  If |should_block| is set then it will block until all data has
  * hit the disk.
  */
-int bm_flush(struct block_manager *bm, int should_block);
+int dm_bm_flush(struct dm_block_manager *bm,
+		int should_block);
 
 /* It's a common idiom to have a superblock that should be committed last.
  *
@@ -66,12 +76,13 @@ int bm_flush(struct block_manager *bm, int should_block);
  *
  * This method always blocks.
  */
-int bm_flush_and_unlock(struct block_manager *bm, struct block *superblock);
+int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
+			   struct dm_block *superblock);
 
 /*
  * Debug routines.
  */
-unsigned bm_locks_held(struct block_manager *bm);
+unsigned dm_bm_locks_held(struct dm_block_manager *bm);
 
 /*----------------------------------------------------------------*/
 

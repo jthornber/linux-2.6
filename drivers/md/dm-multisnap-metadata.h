@@ -20,7 +20,7 @@ typedef uint64_t multisnap_dev_t;
 struct multisnap_metadata *
 multisnap_metadata_open(struct block_device *bdev,
 			sector_t data_block_size,
-			block_t data_dev_size);
+			dm_block_t data_dev_size);
 
 int multisnap_metadata_close(struct multisnap_metadata *mmd);
 
@@ -29,7 +29,7 @@ int multisnap_metadata_close(struct multisnap_metadata *mmd);
  */
 int multisnap_metadata_create_thin(struct multisnap_metadata *mmd,
 				   multisnap_dev_t dev,
-				   block_t dev_size);
+				   dm_block_t dev_size);
 
 /*
  * An internal snapshot.
@@ -72,7 +72,7 @@ int multisnap_metadata_close_device(struct ms_device *msd);
 multisnap_dev_t multisnap_device_dev(struct ms_device *msd);
 
 struct multisnap_lookup_result {
-	block_t block;
+	dm_block_t block;
 	int shared;
 };
 
@@ -83,31 +83,36 @@ struct multisnap_lookup_result {
  *   0 success
  */
 int multisnap_metadata_lookup(struct ms_device *msd,
-			      block_t block,
+			      dm_block_t block,
 			      int can_block,
 			      struct multisnap_lookup_result *result);
 
 /* Inserts a new mapping */
 int multisnap_metadata_insert(struct ms_device *msd,
-			      block_t block,
-			      block_t data_block);
+			      dm_block_t block,
+			      dm_block_t data_block);
 
 int multisnap_metadata_alloc_data_block(struct ms_device *msd,
-					block_t *result);
+					dm_block_t *result);
 int multisnap_metadata_free_data_block(struct ms_device *msd,
-				       block_t result);
+				       dm_block_t result);
 
-int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, block_t *result);
-int multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd, sector_t *result);
-int multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd, block_t *result);
+int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd,
+						dm_block_t *result);
+int multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd,
+					   sector_t *result);
+int multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd,
+					 dm_block_t *result);
 
-int multisnap_metadata_get_mapped_count(struct ms_device *msd, block_t *result);
+int multisnap_metadata_get_mapped_count(struct ms_device *msd,
+					dm_block_t *result);
 
 /*
  * Returns -ENOSPC if the new size is too small and already allocated
  * blocks would be lost.
  */
-int multisnap_metadata_resize_data_dev(struct multisnap_metadata *mmd, block_t new_size);
+int multisnap_metadata_resize_data_dev(struct multisnap_metadata *mmd,
+				       dm_block_t new_size);
 
 /*----------------------------------------------------------------*/
 

@@ -64,13 +64,13 @@ struct btree_info {
 };
 
 /* Set up an empty tree.  O(1). */
-int btree_empty(struct btree_info *info, block_t *root);
+int btree_empty(struct btree_info *info, dm_block_t *root);
 
 /*
  * Delete a tree.  O(n) - this is the slow one!  It can also block, so
  * please don't call it on an io path.
  */
-int btree_del(struct btree_info *info, block_t root);
+int btree_del(struct btree_info *info, dm_block_t root);
 
 /*
  * All the lookup functions return -ENODATA if the key cannot be found.
@@ -80,7 +80,7 @@ int btree_del(struct btree_info *info, block_t root);
 /* FIXME: rename this to plain btree_lookup */
 int
 btree_lookup_equal(struct btree_info *info,
-		   block_t root, uint64_t *keys,
+		   dm_block_t root, uint64_t *keys,
 		   void *value);
 
 /*
@@ -90,7 +90,7 @@ btree_lookup_equal(struct btree_info *info,
  */
 int
 btree_lookup_le(struct btree_info *info,
-		block_t root, uint64_t *keys,
+		dm_block_t root, uint64_t *keys,
 		uint64_t *rkey, void *value);
 
 /*
@@ -99,7 +99,7 @@ btree_lookup_le(struct btree_info *info,
  */
 int
 btree_lookup_ge(struct btree_info *info,
-		block_t root, uint64_t *keys,
+		dm_block_t root, uint64_t *keys,
 		uint64_t *rkey, void *value);
 
 /*
@@ -107,8 +107,8 @@ btree_lookup_ge(struct btree_info *info,
  * O(ln(n))
  */
 int btree_insert(struct btree_info *info,
-		 block_t root, uint64_t *keys, void *value,
-		 block_t *new_root);
+		 dm_block_t root, uint64_t *keys, void *value,
+		 dm_block_t *new_root);
 
 /* Remove a key if present.  This doesn't remove empty sub trees.  Normally
  * subtrees represent a separate entity, like a snapshot map, so this is
@@ -117,13 +117,13 @@ int btree_insert(struct btree_info *info,
  * Returns ENODATA if the key isn't present.
  */
 int btree_remove(struct btree_info *info,
-		 block_t root, uint64_t *keys,
-		 block_t *new_root);
+		 dm_block_t root, uint64_t *keys,
+		 dm_block_t *new_root);
 
 /* Clone a tree. O(1) */
 int btree_clone(struct btree_info *info,
-		block_t root,
-		block_t *clone);
+		dm_block_t root,
+		dm_block_t *clone);
 
 /*----------------------------------------------------------------*/
 
