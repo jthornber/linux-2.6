@@ -826,6 +826,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	global_pool_ = pool;
 	pool->ti = ti;
 	set_congestion_fn(pool);
+	ti->num_flush_requests = 1;
 	ti->private = pool;
 
 	return 0;
@@ -1026,6 +1027,7 @@ multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return r;
 	}
 	ti->split_io = mc->pool->sectors_per_block;
+	ti->num_flush_requests = 1;
 
 	return 0;
 }
