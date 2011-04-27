@@ -99,14 +99,15 @@ int multisnap_metadata_free_data_block(struct ms_device *msd,
 
 int multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, block_t *result);
 int multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd, sector_t *result);
-int multisnap_metadata_get_data_dev_size(struct ms_device *msd, block_t *result);
+int multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd, block_t *result);
+
 int multisnap_metadata_get_mapped_count(struct ms_device *msd, block_t *result);
 
 /*
  * Returns -ENOSPC if the new size is too small and already allocated
  * blocks would be lost.
  */
-int multisnap_metadata_resize_data_dev(struct ms_device *msd, block_t new_size);
+int multisnap_metadata_resize_data_dev(struct multisnap_metadata *mmd, block_t new_size);
 
 /*----------------------------------------------------------------*/
 

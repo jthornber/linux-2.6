@@ -778,6 +778,13 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 	int r;
 	size_t len;
 
+	down_read(&mmd->root_lock);
+	if (!mmd->have_inserted) {
+		up_read(&mmd->root_lock);
+		return 0;
+	}
+	up_read(&mmd->root_lock);
+
 	down_write(&mmd->root_lock);
 	r = write_changed_details_(mmd);
 	if (r < 0) {
@@ -860,14 +867,16 @@ multisnap_metadata_get_data_block_size(struct multisnap_metadata *mmd,
 EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_block_size);
 
 int
-multisnap_metadata_get_data_dev_size(struct ms_device *msd,
+multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd,
 				     block_t *result)
 {
-	struct multisnap_metadata *mmd = msd->mmd;
+	int r;
+
 	down_read(&mmd->root_lock);
-	*result = msd->dev_size;
+	r = sm_get_nr_blocks(mmd->data_sm, result);
 	up_read(&mmd->root_lock);
-	return 0;
+
+	return r;
 }
 EXPORT_SYMBOL_GPL(multisnap_metadata_get_data_dev_size);
 
@@ -883,12 +892,22 @@ multisnap_metadata_get_mapped_count(struct ms_device *msd, block_t *result)
 EXPORT_SYMBOL_GPL(multisnap_metadata_get_mapped_count);
 
 int
-multisnap_metadata_resize_data_dev(struct ms_device *msd, block_t new_size)
+multisnap_metadata_resize_virt_dev(struct ms_device *msd, block_t new_size)
 {
-	struct multisnap_metadata *mmd = msd->mmd;
-	down_write(&mmd->root_lock);
+	down_write(&msd->mmd->root_lock);
 	msd->dev_size = new_size;
 	msd->changed = 1;
+	up_write(&msd->mmd->root_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(multisnap_metadata_resize_virt_dev);
+
+int
+multisnap_metadata_resize_data_dev(struct multisnap_metadata *mmd, block_t new_size)
+{
+	down_write(&mmd->root_lock);
+	/* FIXME: finish */
+
 	up_write(&mmd->root_lock);
 	return 0;
 }
