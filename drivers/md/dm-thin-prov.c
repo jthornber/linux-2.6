@@ -451,6 +451,7 @@ static int thinp_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	ti->split_io = tc->block_size;
+	ti->num_flush_requests = 1;
 
 	/* Set masks/shift for fast bio -> block mapping. */
 	tc->offset_mask = ti->split_io - 1;
