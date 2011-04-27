@@ -935,7 +935,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	data_size = get_dev_size(data_dev) / block_size;
+	data_size = get_dev_size(data_dev);
+	do_div(data_size, block_size);
 	mmd = multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
 		ti->error = "Error opening metadata device";
