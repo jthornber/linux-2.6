@@ -128,21 +128,21 @@ static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
  * < 0 on failure.
  */
 static int bio_detain(struct bio_prison *prison,
-		      struct cell_key key,
+		      struct cell_key *key,
 		      struct bio *inmate,
 		      struct cell **ref)
 {
 	int r, found = 0;
 	unsigned long flags;
-	uint32_t hash = hash_key(prison, &key);
-	struct cell *cell;
+	uint32_t hash = hash_key(prison, key);
+	struct cell *uninitialized_var(cell);
 	struct hlist_node *tmp;
 
 	BUG_ON(hash > prison->nr_buckets);
 
 	spin_lock_irqsave(&prison->lock, flags);
 	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
-		if (!memcmp(&cell->key, &key, sizeof(key))) {
+		if (!memcmp(&cell->key, key, sizeof(cell->key))) {
 			found = 1;
 			break;
 		}
@@ -152,7 +152,7 @@ static int bio_detain(struct bio_prison *prison,
 		/* allocate a new cell */
 		cell = mempool_alloc(prison->cell_pool, GFP_NOIO);
 		cell->prison = prison;
-		memcpy(&cell->key, &key, sizeof(key));
+		memcpy(&cell->key, key, sizeof(cell->key));
 		cell->count = 0;
 		bio_list_init(&cell->bios);
 		hlist_add_head(&cell->list, prison->cells + hash);
@@ -209,22 +209,18 @@ static void cell_error(struct cell *cell)
 /*
  * Key building.
  */
-static struct cell_key data_key(block_t b)
+static void build_data_key(block_t b, struct cell_key *key)
 {
-	struct cell_key r;
-	r.virtual = 0;
-	r.dev = 0;
-	r.block = b;
-	return r;
+	key->virtual = 0;
+	key->dev = 0;
+	key->block = b;
 }
 
-static struct cell_key virtual_key(struct ms_device *msd, block_t b)
+static void build_virtual_key(struct ms_device *msd, block_t b, struct cell_key *key)
 {
-	struct cell_key r;
-	r.virtual = 1;
-	r.dev = multisnap_device_dev(msd);
-	r.block = b;
-	return r;
+	key->virtual = 1;
+	key->dev = multisnap_device_dev(msd);
+	key->block = b;
 }
 
 /*----------------------------------------------------------------*/
@@ -601,12 +597,14 @@ static void process_bio(struct pool_c *pool,
 	struct multisnap_lookup_result lookup_result;
 	struct bio_list bios;
 	struct cell *cell;
+	struct cell_key key;
 
 	/*
 	 * First we detain the bio against the cell for the virtual cell.
 	 * We can then check whether it's been provisioned.
 	 */
-	count = bio_detain(pool->prison, virtual_key(msd, block), bio, &cell);
+	build_virtual_key(msd, block, &key);
+	count = bio_detain(pool->prison, &key, bio, &cell);
 	if (count > 0)
 		/* Someone's already handling this, leave it to them. */
 		return;
@@ -627,7 +625,8 @@ static void process_bio(struct pool_c *pool,
 			 * Given it's a WRITE io, we may need to break
 			 * sharing on a data block.
 			 */
-			count = bio_detain(pool->prison, data_key(block), bio, &cell);
+			build_data_key(block, &key);
+			count = bio_detain(pool->prison, &key, bio, &cell);
 			if (count > 0)
 				return; /* already underway */
 
