@@ -4,7 +4,7 @@
  * This file is released under the GPL.
  */
 
-#include "multisnap-metadata.h"
+#include "dm-multisnap-metadata.h"
 #include "persistent-data/transaction-manager.h"
 #include "persistent-data/space-map-disk.h"
 

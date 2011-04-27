@@ -7,7 +7,7 @@
 // static const char version[] = "0.1";
 
 #include "dm.h"
-#include "multisnap-metadata.h"
+#include "dm-multisnap-metadata.h"
 #include "persistent-data/transaction-manager.h"
 
 #include <linux/blkdev.h>

@@ -10,7 +10,7 @@ dm-snapshot-y	+= dm-snap.o dm-exception-store.o dm-snap-transient.o \
 dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
-dm-multisnapshot-y	+= dm-multisnap.o multisnap-metadata.o
+dm-multisnapshot-y	+= dm-multisnap.o dm-multisnap-metadata.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
