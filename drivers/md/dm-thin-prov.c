@@ -641,7 +641,15 @@ thinp_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	struct thinp_c *tc = ti->private;
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, data_dev_block_size(tc));
+	blk_limits_io_opt(limits, tc->block_size << tc->block_shift);
+}
+
+static int thinp_iterate_devices(struct dm_target *ti,
+				 iterate_devices_callout_fn fn,
+				 void *data)
+{
+	struct thinp_c *tc = ti->private;
+	return fn(ti, tc->data_dev, 0, tc->data_size << tc->block_shift, data);
 }
 
 /* Thinp pool control target interface. */
@@ -659,6 +667,7 @@ static struct target_type thinp_target = {
 	.status = thinp_status,
 	.merge = thinp_bvec_merge,
 	.io_hints = thinp_io_hints,
+	.iterate_devices = thinp_iterate_devices,
 };
 
 static int __init dm_thinp_init(void)
