@@ -276,6 +276,7 @@ struct pool_c {
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	dm_block_t offset_mask;
+	dm_block_t low_water_mark;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -613,6 +614,34 @@ retry_later(struct bio *bio)
 	spin_unlock(&pool->lock);
 }
 
+static int
+alloc_data_block(struct pool_c *pool,
+		 struct dm_ms_device *msd,
+		 dm_block_t *result)
+{
+	int r;
+	dm_block_t free_blocks;
+
+	r = dm_multisnap_metadata_alloc_data_block(msd, result);
+	if (r)
+		return r;
+
+	r = dm_multisnap_metadata_get_free_blocks(pool->mmd, &free_blocks);
+	if (r) {
+		dm_multisnap_metadata_free_data_block(msd, *result);
+		return r;
+	}
+
+	if (free_blocks <= pool->low_water_mark) {
+		spin_lock(&pool->lock);
+		pool->triggered = 1;
+		spin_unlock(&pool->lock);
+		dm_table_event(pool->ti->table);
+	}
+
+	return 0;
+}
+
 static void
 process_bio(struct pool_c *pool,
 	    struct dm_ms_device *msd,
@@ -657,7 +686,7 @@ process_bio(struct pool_c *pool,
 				return; /* already underway */
 
 			if (lookup_result.shared) {
-				r = dm_multisnap_metadata_alloc_data_block(msd, &data_block);
+				r = alloc_data_block(pool, msd, &data_block);
 				switch (r) {
 				case 0:
 					schedule_copy(pool, msd,
@@ -683,7 +712,7 @@ process_bio(struct pool_c *pool,
 
 	case -ENODATA:
 		/* prepare a new block */
-		r = dm_multisnap_metadata_alloc_data_block(msd, &data_block);
+		r = alloc_data_block(pool, msd, &data_block);
 		switch (r) {
 		case 0:
 			schedule_zero(pool, msd, block, data_block, cell, bio);
@@ -939,11 +968,12 @@ pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	long long unsigned block_size;
 	struct pool_c *pool;
-	struct multisnap_metadata *mmd;
+	struct dm_multisnap_metadata *mmd;
 	struct dm_dev *metadata_dev, *data_dev;
 	dm_block_t data_size;
+	dm_block_t low_water;
 
-	if (argc != 3) {
+	if (argc != 4) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -963,6 +993,13 @@ pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	if (sscanf(argv[2], "%llu", &block_size) != 1) {
 		ti->error = "Invalid block size";
+		dm_put_device(ti, metadata_dev);
+		dm_put_device(ti, data_dev);
+		return -EINVAL;
+	}
+
+	if (sscanf(argv[3], "%llu", &low_water) != 1) {
+		ti->error = "Invalid low water mark";
 		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
@@ -994,6 +1031,7 @@ pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
+	pool->low_water_mark = low_water;
 	pool->prison = prison_create(1024); /* FIXME: magic number */
 	if (!pool->prison) {
 		/* FIXME: finish */
