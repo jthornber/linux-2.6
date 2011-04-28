@@ -7,7 +7,7 @@
 #ifndef DM_MULTISNAP_METADATA_H
 #define DM_MULTISNAP_METADATA_H
 
-#include "persistent-data/btree.h"
+#include "persistent-data/dm-btree.h"
 
 /*----------------------------------------------------------------*/
 

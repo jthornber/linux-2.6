@@ -8,7 +8,7 @@
 
 #include "dm.h"
 #include "dm-multisnap-metadata.h"
-#include "persistent-data/transaction-manager.h"
+#include "persistent-data/dm-transaction-manager.h"
 
 #include <linux/blkdev.h>
 #include <linux/dm-io.h>

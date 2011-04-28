@@ -2,8 +2,8 @@
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
 
-#include "space-map-disk.h"
-#include "btree-internal.h"
+#include "dm-space-map-disk.h"
+#include "dm-btree-internal.h"
 
 /*----------------------------------------------------------------*/
 

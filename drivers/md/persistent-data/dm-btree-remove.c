@@ -1,5 +1,5 @@
-#include "btree.h"
-#include "btree-internal.h"
+#include "dm-btree.h"
+#include "dm-btree-internal.h"
 
 /*
  * Removing an entry from a btree

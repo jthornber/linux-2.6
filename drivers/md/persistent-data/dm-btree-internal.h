@@ -1,7 +1,7 @@
 #ifndef SNAPSHOTS_BTREE_INTERNAL_H
 #define SNAPSHOTS_BTREE_INTERNAL_H
 
-#include "btree.h"
+#include "dm-btree.h"
 
 #include <linux/list.h>
 

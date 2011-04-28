@@ -1,7 +1,7 @@
 #ifndef SNAPSHOTS_SPACE_MAP_H
 #define SNAPSHOTS_SPACE_MAP_H
 
-#include "block-manager.h"
+#include "dm-block-manager.h"
 
 /*----------------------------------------------------------------*/
 

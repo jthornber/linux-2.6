@@ -1,7 +1,7 @@
 #ifndef SNAPSHOTS_SPACE_MAP_CORE_H
 #define SNAPSHOTS_SPACE_MAP_CORE_H
 
-#include "space-map.h"
+#include "dm-space-map.h"
 
 /*----------------------------------------------------------------*/
 

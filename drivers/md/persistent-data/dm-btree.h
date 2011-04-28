@@ -1,7 +1,7 @@
 #ifndef SNAPSHOTS_BTREE_H
 #define SNAPSHOTS_BTREE_H
 
-#include "transaction-manager.h"
+#include "dm-transaction-manager.h"
 
 /*----------------------------------------------------------------*/
 

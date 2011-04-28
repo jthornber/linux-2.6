@@ -1,5 +1,5 @@
-#include "btree-internal.h"
-#include "space-map.h"
+#include "dm-btree-internal.h"
+#include "dm-space-map.h"
 
 /*----------------------------------------------------------------
  * Array manipulation

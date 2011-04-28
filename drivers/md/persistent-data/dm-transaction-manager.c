@@ -1,6 +1,6 @@
-#include <linux/slab.h>
+#include "dm-transaction-manager.h"
 
-#include "transaction-manager.h"
+#include <linux/slab.h>
 
 /*----------------------------------------------------------------*/
 
@@ -349,8 +349,8 @@ EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 /*----------------------------------------------------------------*/
 
 // FIXME: does this belong here ?
-#include "space-map-staged.h"
-#include "space-map-disk.h"
+#include "dm-space-map-staged.h"
+#include "dm-space-map-disk.h"
 
 int
 dm_tm_create_with_sm(struct dm_block_manager *bm,

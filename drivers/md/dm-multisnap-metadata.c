@@ -5,8 +5,8 @@
  */
 
 #include "dm-multisnap-metadata.h"
-#include "persistent-data/transaction-manager.h"
-#include "persistent-data/space-map-disk.h"
+#include "persistent-data/dm-transaction-manager.h"
+#include "persistent-data/dm-space-map-disk.h"
 
 #include <linux/list.h>
 #include <linux/device-mapper.h>

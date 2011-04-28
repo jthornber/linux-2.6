@@ -1,8 +1,8 @@
 #ifndef SNAPSHOTS_SPACE_MAP_DISK_H
 #define SNAPSHOTS_SPACE_MAP_DISK_H
 
-#include "transaction-manager.h"
-#include "space-map.h"
+#include "dm-transaction-manager.h"
+#include "dm-space-map.h"
 
 /*----------------------------------------------------------------*/
 

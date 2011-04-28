@@ -1,5 +1,5 @@
-#include "btree.h"
-#include "space-map-staged.h"
+#include "dm-btree.h"
+#include "dm-space-map-staged.h"
 
 /* FIXME: this will vary depending on the transaction size */
 #define CACHE_MIN 10240
