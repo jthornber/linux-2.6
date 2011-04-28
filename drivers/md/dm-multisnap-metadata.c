@@ -834,16 +834,13 @@ dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 }
 
 int
-dm_multisnap_metadata_get_unprovisioned_blocks(struct dm_multisnap_metadata *mmd,
-					       dm_block_t *result)
+dm_multisnap_metadata_get_free_blocks(struct dm_multisnap_metadata *mmd,
+				      dm_block_t *result)
 {
 	int r;
 
 	down_read(&mmd->root_lock);
-	/* FIXME: this is the total number of blocks, not the free count.
-	 * We need to extend the space map abstraction to provide this.
-	 */
-	r = dm_sm_get_nr_blocks(mmd->data_sm, result);
+	r = dm_sm_get_nr_free(mmd->data_sm, result);
 	up_read(&mmd->root_lock);
 
 	return r;

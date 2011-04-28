@@ -111,8 +111,8 @@ dm_multisnap_metadata_free_data_block(struct dm_ms_device *msd,
 				      dm_block_t result);
 
 int
-dm_multisnap_metadata_get_unprovisioned_blocks(struct dm_multisnap_metadata *mmd,
-					       dm_block_t *result);
+dm_multisnap_metadata_get_free_blocks(struct dm_multisnap_metadata *mmd,
+				      dm_block_t *result);
 
 int
 dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
