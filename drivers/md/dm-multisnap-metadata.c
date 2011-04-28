@@ -67,19 +67,19 @@ struct multisnap_metadata {
 	 * Two level btree, first level is multisnap_dev_t, second level
 	 * mappings.
 	 */
-	struct btree_info info;
+	struct dm_btree_info info;
 
 	/* non-blocking version of the above */
-	struct btree_info nb_info;
+	struct dm_btree_info nb_info;
 
 	/* just the top level, for deleting whole devices */
-	struct btree_info tl_info;
+	struct dm_btree_info tl_info;
 
 	/* just the bottom level for creating new devices */
-	struct btree_info bl_info;
+	struct dm_btree_info bl_info;
 
 	/* Describes the device details btree */
-	struct btree_info details_info;
+	struct dm_btree_info details_info;
 
 	struct rw_semaphore root_lock;
 	uint32_t time;		/* FIXME: persist this */
@@ -331,11 +331,11 @@ multisnap_metadata_open(struct block_device *bdev,
 		sb->metadata_nr_blocks = __cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
 		sb->data_block_size = __cpu_to_le64(data_block_size);
 
-		r = btree_empty(&mmd->info, &mmd->root);
+		r = dm_btree_empty(&mmd->info, &mmd->root);
 		if (r < 0)
 			goto bad;
 
-		r = btree_empty(&mmd->details_info, &mmd->details_root);
+		r = dm_btree_empty(&mmd->details_info, &mmd->details_root);
 		if (r < 0) {
 			printk(KERN_ALERT "couldn't create devices root");
 			goto bad;
@@ -412,7 +412,7 @@ open_device_(struct multisnap_metadata *mmd,
 		}
 
 	/* check the device exists */
-	r = btree_lookup_equal(&mmd->details_info, mmd->details_root, &key, &details);
+	r = dm_btree_lookup_equal(&mmd->details_info, mmd->details_root, &key, &details);
 	if (r) {
 		if (r == -ENODATA && create) {
 			changed = 1;
@@ -452,27 +452,27 @@ multisnap_metadata_create_thin_(struct multisnap_metadata *mmd,
 	__le64 value;
 	struct ms_device *msd;
 
-	r = btree_lookup_equal(&mmd->details_info, mmd->details_root, &key, &value);
+	r = dm_btree_lookup_equal(&mmd->details_info, mmd->details_root, &key, &value);
 	if (!r)
 		return -EEXIST;
 
 	/* create an empty btree for the mappings */
-	r = btree_empty(&mmd->bl_info, &dev_root);
+	r = dm_btree_empty(&mmd->bl_info, &dev_root);
 	if (r)
 		return r;
 
 	/* insert it into the main mapping tree */
 	value = __cpu_to_le64(dev_root);
-	r = btree_insert(&mmd->tl_info, mmd->root, &key, &value, &mmd->root);
+	r = dm_btree_insert(&mmd->tl_info, mmd->root, &key, &value, &mmd->root);
 	if (r) {
-		btree_del(&mmd->bl_info, dev_root);
+		dm_btree_del(&mmd->bl_info, dev_root);
 		return r;
 	}
 
 	r = open_device_(mmd, dev, 1, &msd);
 	if (r) {
-		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-		btree_del(&mmd->bl_info, dev_root);
+		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+		dm_btree_del(&mmd->bl_info, dev_root);
 		return r;
 	}
 	msd->dev_size = dev_size;
@@ -526,22 +526,22 @@ multisnap_metadata_create_snap_(struct multisnap_metadata *mmd,
 	__le64 value;
 
 	/* find the mapping tree for the origin */
-	r = btree_lookup_equal(&mmd->tl_info, mmd->root, &key, &value);
+	r = dm_btree_lookup_equal(&mmd->tl_info, mmd->root, &key, &value);
 	if (r)
 		return r;
 	origin_root = __le64_to_cpu(value);
 
 	/* clone the origin */
-	r = btree_clone(&mmd->bl_info, origin_root, &snap_root);
+	r = dm_btree_clone(&mmd->bl_info, origin_root, &snap_root);
 	if (r)
 		return r;
 
 	/* insert into the main mapping tree */
 	value = __cpu_to_le64(snap_root);
 	key = dev;
-	r = btree_insert(&mmd->tl_info, mmd->root, &key, &value, &mmd->root);
+	r = dm_btree_insert(&mmd->tl_info, mmd->root, &key, &value, &mmd->root);
 	if (r) {
-		btree_del(&mmd->bl_info, snap_root);
+		dm_btree_del(&mmd->bl_info, snap_root);
 		return r;
 	}
 
@@ -549,14 +549,14 @@ multisnap_metadata_create_snap_(struct multisnap_metadata *mmd,
 
 	r = open_device_(mmd, dev, 1, &msd);
 	if (r) {
-		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-		btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
+		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+		dm_btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
 	}
 
 	r = snapshot_details_(mmd, msd, origin, mmd->time);
 	if (r) {
-		btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-		btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
+		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+		dm_btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
 	}
 
 	return r;
@@ -578,7 +578,7 @@ multisnap_metadata_delete_(struct multisnap_metadata *mmd,
 			   multisnap_dev_t dev)
 {
 	uint64_t key = dev;
-	return btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+	return dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 }
 
 int
@@ -659,13 +659,13 @@ multisnap_metadata_lookup(struct ms_device *msd,
 
 	if (can_block) {
 		down_read(&mmd->root_lock);
-		r = btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
+		r = dm_btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
 		if (!r)
 			dm_block_time = __le64_to_cpu(value);
 		up_read(&mmd->root_lock);
 
 	} else if (down_read_trylock(&mmd->root_lock)) {
-		r = btree_lookup_equal(&mmd->nb_info, mmd->root, keys, &value);
+		r = dm_btree_lookup_equal(&mmd->nb_info, mmd->root, keys, &value);
 		if (!r)
 			dm_block_time = __le64_to_cpu(value);
 		up_read(&mmd->root_lock);
@@ -698,7 +698,7 @@ int multisnap_metadata_insert(struct ms_device *msd,
 
 	mmd->have_inserted = 1;
 	value = __cpu_to_le64(pack_dm_block_time(data_block, mmd->time));
-	return btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
+	return dm_btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
 }
 
 int
@@ -748,8 +748,8 @@ write_changed_details_(struct multisnap_metadata *mmd)
 			dd.mapped_blocks = __cpu_to_le64(msd->mapped_blocks);
 			dd.snapshotted_time = __cpu_to_le32(msd->snapshotted_time);
 
-			r = btree_insert(&mmd->details_info, mmd->details_root,
-					 &key, &dd, &mmd->details_root);
+			r = dm_btree_insert(&mmd->details_info, mmd->details_root,
+					    &key, &dd, &mmd->details_root);
 			if (r)
 				return r;
 

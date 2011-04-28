@@ -19,8 +19,8 @@ struct sm_root {
 struct sm_disk {
 	struct dm_transaction_manager *tm;
 
-	struct btree_info bitmap_info;
-	struct btree_info ref_count_info;
+	struct dm_btree_info bitmap_info;
+	struct dm_btree_info ref_count_info;
 
 	uint32_t block_size;
 	uint32_t entries_per_block;
@@ -158,7 +158,9 @@ static int io_init(struct sm_disk *io,
 	return 0;
 }
 
-static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm, dm_block_t nr_blocks)
+static int io_new(struct sm_disk *io,
+		  struct dm_transaction_manager *tm,
+		  dm_block_t nr_blocks)
 {
 	int r;
 	dm_block_t i;
@@ -170,7 +172,7 @@ static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm, dm_bloc
 
 	io->nr_blocks = nr_blocks;
 	io->nr_allocated = 0;
-	r = btree_empty(&io->bitmap_info, &io->bitmap_root);
+	r = dm_btree_empty(&io->bitmap_info, &io->bitmap_root);
 	if (r < 0)
 		return r;
 
@@ -191,16 +193,15 @@ static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm, dm_bloc
 		idx.nr_free = __cpu_to_le32(io->entries_per_block);
 		idx.none_free_before = 0;
 
-		r = btree_insert(&io->bitmap_info, io->bitmap_root,
-				 &i, &idx, &io->bitmap_root);
+		r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
+				    &i, &idx, &io->bitmap_root);
 		if (r < 0)
 			return r;
 	}
 
-	r = btree_empty(&io->ref_count_info, &io->ref_count_root);
+	r = dm_btree_empty(&io->ref_count_info, &io->ref_count_root);
 	if (r < 0) {
-		/* FIXME: put back in when non-recursive del written */
-		// btree_del(&bitmap_info, bitmap_root);
+		dm_btree_del(&io->bitmap_info, io->bitmap_root);
 		return r;
 	}
 
@@ -239,7 +240,7 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 	struct index_entry ie;
 	do_div(index, io->entries_per_block);
 
-	r = btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
+	r = dm_btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
 		return r;
 
@@ -259,9 +260,9 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 
 	if (*result == 3) {
 		__le32 le_rc;
-		r = btree_lookup_equal(&io->ref_count_info,
-				       io->ref_count_root,
-				       &b, &le_rc);
+		r = dm_btree_lookup_equal(&io->ref_count_info,
+					  io->ref_count_root,
+					  &b, &le_rc);
 		if (r < 0)
 			return r;
 
@@ -282,7 +283,7 @@ io_find_unused(struct sm_disk *io, dm_block_t begin, dm_block_t end, dm_block_t 
 
 	do_div(index_begin, io->entries_per_block);
 	for (i = index_begin; i < index_end; i++, begin = 0) {
-		r = btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &i, &ie);
+		r = dm_btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &i, &ie);
 		if (r < 0)
 			return r;
 
@@ -332,7 +333,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	int inc;
 
 	do_div(index, io->entries_per_block);
-	r = btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
+	r = dm_btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
 		return r;
 
@@ -363,7 +364,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
 		set_bitmap_(bm, bit, 3);
-		r = btree_insert(&io->ref_count_info, io->ref_count_root, &b, &le_rc, &io->ref_count_root);
+		r = dm_btree_insert(&io->ref_count_info, io->ref_count_root, &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
 			dm_tm_unlock(io->tm, nb);
 			/* FIXME: release shadow? or assume the whole transaction will be ditched */
@@ -393,7 +394,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	 * altered |ie| in the meantime.  Not important yet.
 	 */
 	ie.b = __cpu_to_le64(dm_block_location(nb));
-	r = btree_insert(&io->bitmap_info, io->bitmap_root, &index, &ie, &io->bitmap_root);
+	r = dm_btree_insert(&io->bitmap_info, io->bitmap_root, &index, &ie, &io->bitmap_root);
 	if (r < 0)
 		return r;
 

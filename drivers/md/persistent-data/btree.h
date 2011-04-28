@@ -14,7 +14,7 @@
  * The btree needs some knowledge about the values stored within it.  This
  * is provided by a |btree_value_type| structure.
  */
-struct btree_value_type {
+struct dm_btree_value_type {
 	void *context;
 
 	/*
@@ -55,22 +55,26 @@ struct btree_value_type {
 /*
  * The |btree_info| structure describes the shape and contents of a btree.
  */
-struct btree_info {
+struct dm_btree_info {
 	struct dm_transaction_manager *tm;
 
 	/* number of nested btrees (not the depth of a single tree). */
 	unsigned levels;
-	struct btree_value_type value_type;
+	struct dm_btree_value_type value_type;
 };
 
 /* Set up an empty tree.  O(1). */
-int btree_empty(struct btree_info *info, dm_block_t *root);
+int
+dm_btree_empty(struct dm_btree_info *info,
+	       dm_block_t *root);
 
 /*
  * Delete a tree.  O(n) - this is the slow one!  It can also block, so
  * please don't call it on an io path.
  */
-int btree_del(struct btree_info *info, dm_block_t root);
+int
+dm_btree_del(struct dm_btree_info *info,
+	     dm_block_t root);
 
 /*
  * All the lookup functions return -ENODATA if the key cannot be found.
@@ -79,9 +83,10 @@ int btree_del(struct btree_info *info, dm_block_t root);
 /* Tries to find a key that matches exactly.  O(ln(n)) */
 /* FIXME: rename this to plain btree_lookup */
 int
-btree_lookup_equal(struct btree_info *info,
-		   dm_block_t root, uint64_t *keys,
-		   void *value);
+dm_btree_lookup_equal(struct dm_btree_info *info,
+		      dm_block_t root,
+		      uint64_t *keys,
+		      void *value);
 
 /*
  * Find the greatest key that is less than or equal to that requested.  A
@@ -89,26 +94,33 @@ btree_lookup_equal(struct btree_info *info,
  * zero) entries.  O(ln(n))
  */
 int
-btree_lookup_le(struct btree_info *info,
-		dm_block_t root, uint64_t *keys,
-		uint64_t *rkey, void *value);
+dm_btree_lookup_le(struct dm_btree_info *info,
+		   dm_block_t root,
+		   uint64_t *keys,
+		   uint64_t *rkey,
+		   void *value);
 
 /*
  * Find the least key that is greater than or equal to that requested.
  * ENODATA indicates all the keys are below.  O(ln(n))
  */
 int
-btree_lookup_ge(struct btree_info *info,
-		dm_block_t root, uint64_t *keys,
-		uint64_t *rkey, void *value);
+dm_btree_lookup_ge(struct dm_btree_info *info,
+		   dm_block_t root,
+		   uint64_t *keys,
+		   uint64_t *rkey,
+		   void *value);
 
 /*
  * Insertion (or overwrite an existing value).
  * O(ln(n))
  */
-int btree_insert(struct btree_info *info,
-		 dm_block_t root, uint64_t *keys, void *value,
-		 dm_block_t *new_root);
+int
+dm_btree_insert(struct dm_btree_info *info,
+		dm_block_t root,
+		uint64_t *keys,
+		void *value,
+		dm_block_t *new_root);
 
 /* Remove a key if present.  This doesn't remove empty sub trees.  Normally
  * subtrees represent a separate entity, like a snapshot map, so this is
@@ -116,14 +128,16 @@ int btree_insert(struct btree_info *info,
  * O(ln(n)).
  * Returns ENODATA if the key isn't present.
  */
-int btree_remove(struct btree_info *info,
-		 dm_block_t root, uint64_t *keys,
-		 dm_block_t *new_root);
+int
+dm_btree_remove(struct dm_btree_info *info,
+		dm_block_t root,
+		uint64_t *keys,
+		dm_block_t *new_root);
 
 /* Clone a tree. O(1) */
-int btree_clone(struct btree_info *info,
-		dm_block_t root,
-		dm_block_t *clone);
+int dm_btree_clone(struct dm_btree_info *info,
+		   dm_block_t root,
+		   dm_block_t *clone);
 
 /*----------------------------------------------------------------*/
 

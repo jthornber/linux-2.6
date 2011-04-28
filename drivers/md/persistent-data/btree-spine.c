@@ -2,16 +2,16 @@
 
 /*----------------------------------------------------------------*/
 
-int bn_read_lock(struct btree_info *info,
+int bn_read_lock(struct dm_btree_info *info,
 		 dm_block_t b,
 		 struct dm_block **result)
 {
 	return dm_tm_read_lock(info->tm, b, result);
 }
 
-int bn_shadow(struct btree_info *info,
+int bn_shadow(struct dm_btree_info *info,
 	      dm_block_t orig,
-	      struct btree_value_type *vt,
+	      struct dm_btree_value_type *vt,
 	      struct dm_block **result,
 	      int *inc)
 {
@@ -24,19 +24,22 @@ int bn_shadow(struct btree_info *info,
 	return r;
 }
 
-int bn_new_block(struct btree_info *info, struct dm_block **result)
+int bn_new_block(struct dm_btree_info *info,
+		 struct dm_block **result)
 {
 	return dm_tm_new_block(info->tm, result);
 }
 
-int bn_unlock(struct btree_info *info, struct dm_block *b)
+int bn_unlock(struct dm_btree_info *info,
+	      struct dm_block *b)
 {
 	return dm_tm_unlock(info->tm, b);
 }
 
 /*----------------------------------------------------------------*/
 
-void init_ro_spine(struct ro_spine *s, struct btree_info *info)
+void init_ro_spine(struct ro_spine *s,
+		   struct dm_btree_info *info)
 {
 	s->info = info;
 	s->count = 0;
@@ -86,7 +89,8 @@ struct node *ro_node(struct ro_spine *s)
 
 /*----------------------------------------------------------------*/
 
-void init_shadow_spine(struct shadow_spine *s, struct btree_info *info)
+void init_shadow_spine(struct shadow_spine *s,
+		       struct dm_btree_info *info)
 {
 	s->info = info;
 	s->count = 0;
@@ -105,7 +109,11 @@ int exit_shadow_spine(struct shadow_spine *s)
 	return r;
 }
 
-int shadow_step(struct shadow_spine *s, dm_block_t b, struct btree_value_type *vt, int *inc)
+int
+shadow_step(struct shadow_spine *s,
+	    dm_block_t b,
+	    struct dm_btree_value_type *vt,
+	    int *inc)
 {
 	int r;
 

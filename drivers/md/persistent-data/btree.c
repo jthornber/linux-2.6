@@ -46,7 +46,10 @@ int upper_bound(struct node *n, uint64_t key)
 	return bsearch(n, key, 1);
 }
 
-void inc_children(struct dm_transaction_manager *tm, struct node *n, struct btree_value_type *vt)
+void
+inc_children(struct dm_transaction_manager *tm,
+	     struct node *n,
+	     struct dm_btree_value_type *vt)
 {
 	unsigned i;
 	uint32_t nr_entries = __le32_to_cpu(n->header.nr_entries);
@@ -89,7 +92,9 @@ uint32_t calc_max_entries(size_t value_size, size_t block_size)
 	return 3 * n;
 }
 
-int btree_empty(struct btree_info *info, dm_block_t *root)
+int
+dm_btree_empty(struct dm_btree_info *info,
+	       dm_block_t *root)
 {
 	int r;
 	struct dm_block *b;
@@ -112,7 +117,7 @@ int btree_empty(struct btree_info *info, dm_block_t *root)
 	*root = dm_block_location(b);
 	return bn_unlock(info, b);
 }
-EXPORT_SYMBOL_GPL(btree_empty);
+EXPORT_SYMBOL_GPL(dm_btree_empty);
 
 /*----------------------------------------------------------------*/
 
@@ -188,7 +193,9 @@ static void pop_frame(struct del_stack *s)
 	dm_tm_unlock(s->tm, f->b);
 }
 
-int btree_del(struct btree_info *info, dm_block_t root)
+int
+dm_btree_del(struct dm_btree_info *info,
+	     dm_block_t root)
 {
 	struct del_stack *s = kmalloc(sizeof(*s), GFP_KERNEL);
 
@@ -240,7 +247,7 @@ bad:
 	/* what happens if we've deleted half a tree? */
 	return -1;
 }
-EXPORT_SYMBOL_GPL(btree_del);
+EXPORT_SYMBOL_GPL(dm_btree_del);
 
 /*----------------------------------------------------------------*/
 
@@ -274,9 +281,10 @@ btree_lookup_raw(struct ro_spine *s, dm_block_t block, uint64_t key, int (*searc
 }
 
 int
-btree_lookup_equal(struct btree_info *info,
-		   dm_block_t root, uint64_t *keys,
-		   void *value)
+dm_btree_lookup_equal(struct dm_btree_info *info,
+		      dm_block_t root,
+		      uint64_t *keys,
+		      void *value)
 {
 	unsigned level, last_level = info->levels - 1;
 	int r;
@@ -318,12 +326,14 @@ btree_lookup_equal(struct btree_info *info,
 	exit_ro_spine(&spine);
 	return r;
 }
-EXPORT_SYMBOL_GPL(btree_lookup_equal);
+EXPORT_SYMBOL_GPL(dm_btree_lookup_equal);
 
 int
-btree_lookup_le(struct btree_info *info,
-		dm_block_t root, uint64_t *keys,
-		uint64_t *key, void *value)
+dm_btree_lookup_le(struct dm_btree_info *info,
+		   dm_block_t root,
+		   uint64_t *keys,
+		   uint64_t *key,
+		   void *value)
 {
 	unsigned level, last_level = info->levels - 1;
 	int r;
@@ -360,12 +370,14 @@ btree_lookup_le(struct btree_info *info,
 	exit_ro_spine(&spine);
 	return r;
 }
-EXPORT_SYMBOL_GPL(btree_lookup_le);
+EXPORT_SYMBOL_GPL(dm_btree_lookup_le);
 
 int
-btree_lookup_ge(struct btree_info *info,
-		dm_block_t root, uint64_t *keys,
-		uint64_t *key, void *value)
+dm_btree_lookup_ge(struct dm_btree_info *info,
+		   dm_block_t root,
+		   uint64_t *keys,
+		   uint64_t *key,
+		   void *value)
 {
 	unsigned level, last_level = info->levels - 1;
 	int r;
@@ -401,7 +413,7 @@ btree_lookup_ge(struct btree_info *info,
 	exit_ro_spine(&spine);
 	return r;
 }
-EXPORT_SYMBOL_GPL(btree_lookup_ge);
+EXPORT_SYMBOL_GPL(dm_btree_lookup_ge);
 
 /*
  * Splits a node by creating a sibling node and shifting half the nodes
@@ -587,9 +599,12 @@ static int btree_split_beneath(struct shadow_spine *s, dm_block_t root, uint64_t
 	return 0;
 }
 
-static int btree_insert_raw(struct shadow_spine *s,
-			    dm_block_t root, struct btree_value_type *vt, uint64_t key,
-			    unsigned *index)
+static int
+btree_insert_raw(struct shadow_spine *s,
+		 dm_block_t root,
+		 struct dm_btree_value_type *vt,
+		 uint64_t key,
+		 unsigned *index)
 {
         int r, i = *index, inc, top = 1;
 	struct node *node;
@@ -663,16 +678,18 @@ static int btree_insert_raw(struct shadow_spine *s,
 	return 0;
 }
 
-int btree_insert(struct btree_info *info, dm_block_t root,
-		 uint64_t *keys, void *value,
-		 dm_block_t *new_root)
+int
+dm_btree_insert(struct dm_btree_info *info,
+		dm_block_t root,
+		uint64_t *keys, void *value,
+		dm_block_t *new_root)
 {
 	int r, need_insert;
 	unsigned level, index = -1, last_level = info->levels - 1;
 	dm_block_t *block = &root;
 	struct shadow_spine spine;
 	struct node *n;
-	struct btree_value_type internal_type;
+	struct dm_btree_value_type internal_type;
 
 	internal_type.context = NULL;
 	internal_type.size = sizeof(__le64);
@@ -715,7 +732,7 @@ int btree_insert(struct btree_info *info, dm_block_t root,
 		} else {
 			if (need_insert) {
 				dm_block_t new_tree;
-				r = btree_empty(info, &new_tree);
+				r = dm_btree_empty(info, &new_tree);
 				if (r < 0) {
 					/* FIXME: avoid block leaks */
 					exit_shadow_spine(&spine);
@@ -734,11 +751,14 @@ int btree_insert(struct btree_info *info, dm_block_t root,
 	exit_shadow_spine(&spine);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(btree_insert);
+EXPORT_SYMBOL_GPL(dm_btree_insert);
 
 /*----------------------------------------------------------------*/
 
-int btree_clone(struct btree_info *info, dm_block_t root, dm_block_t *clone)
+int
+dm_btree_clone(struct dm_btree_info *info,
+	       dm_block_t root,
+	       dm_block_t *clone)
 {
 	int r;
 	struct dm_block *b, *orig_b;
@@ -768,6 +788,6 @@ int btree_clone(struct btree_info *info, dm_block_t root, dm_block_t *clone)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(btree_clone);
+EXPORT_SYMBOL_GPL(dm_btree_clone);
 
 /*----------------------------------------------------------------*/
