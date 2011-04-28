@@ -416,6 +416,13 @@ static int get_nr_blocks(void *context, dm_block_t *count)
 	return 0;
 }
 
+static int get_nr_free(void *context, dm_block_t *count)
+{
+	struct sm_disk *smd = (struct sm_disk *) context;
+	*count = smd->nr_blocks - smd->nr_allocated;
+	return 0;
+}
+
 static int get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
@@ -505,6 +512,7 @@ static int copy_root(void *context, void *where, size_t max)
 static struct dm_space_map_ops ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
+	.get_nr_free = get_nr_free,
 	.get_count = get_count,
 	.set_count = set_count,
 	.get_free = get_free,

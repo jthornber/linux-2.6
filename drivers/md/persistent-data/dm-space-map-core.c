@@ -2,8 +2,11 @@
 
 /*----------------------------------------------------------------*/
 
+/* FIXME: is this actually used? */
+/* FIXME: some locking might be a good idea */
 struct sm_core {
 	dm_block_t nr;
+	dm_block_t nr_free;
 	dm_block_t maybe_first_free;
 	uint32_t counts[0];
 };
@@ -21,6 +24,13 @@ static int get_nr_blocks(void *context, dm_block_t *count)
 	return 0;
 }
 
+static int get_nr_free(void *context, dm_block_t *count)
+{
+	struct sm_core *sm = (struct sm_core *) context;
+	*count = sm->nr_free;
+	return 0;
+}
+
 static int get_free(void *context, dm_block_t *b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
@@ -29,6 +39,7 @@ static int get_free(void *context, dm_block_t *b)
 	for (i = sm->maybe_first_free; i < sm->nr; i++) {
 		if (sm->counts[i] == 0) {
 			*b = i;
+			sm->nr_free--;
 			return 0;
 		}
 	}
@@ -47,6 +58,7 @@ static int get_free_in_range(void *context, dm_block_t low, dm_block_t high, dm_
 	for (i = low; i < high; i++) {
 		if (sm->counts[i] == 0) {
 			*b = i;
+			sm->nr_free--;
 			return 0;
 		}
 	}
@@ -64,6 +76,7 @@ static int new_block(void *context, dm_block_t *b)
 			sm->counts[i] = 1;
 			*b = i;
 			sm->maybe_first_free = i + 1;
+			sm->nr_free--;
 			return 0;
 		}
 	}
@@ -77,7 +90,9 @@ static int inc_block(void *context, dm_block_t b)
 	if (b >= sm->nr)
 		return -EINVAL;
 
-	sm->counts[b]++;
+	if (!sm->counts[b]++)
+		sm->nr_free--;
+
 	return 0;
 }
 
@@ -90,8 +105,11 @@ static int dec_block(void *context, dm_block_t b)
 	BUG_ON(sm->counts[b] == 0);
 	sm->counts[b]--;
 
-	if (sm->counts[b] == 0 && sm->maybe_first_free > b)
-		sm->maybe_first_free = b;
+	if (sm->counts[b] == 0) {
+		sm->nr_free++;
+		if (sm->maybe_first_free > b)
+			sm->maybe_first_free = b;
+	}
 
 	return 0;
 }
@@ -112,8 +130,11 @@ static int set_count(void *context, dm_block_t b, uint32_t count)
 	if (b >= sm->nr)
 		return -EINVAL;
 
-	if (count == 0 && sm->maybe_first_free > b)
-		sm->maybe_first_free = b;
+	if (count == 0) {
+		sm->nr_free++;
+		if (sm->maybe_first_free > b)
+			sm->maybe_first_free = b;
+	}
 
 	sm->counts[b] = count;
 	return 0;
@@ -129,6 +150,7 @@ static int commit(void *context)
 static struct dm_space_map_ops ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
+	.get_nr_free = get_nr_free,
 	.get_free = get_free,
 	.get_free_in_range = get_free_in_range,
 	.inc_block = inc_block,
@@ -146,6 +168,7 @@ struct dm_space_map *dm_sm_core_create(dm_block_t nr_blocks)
 	struct sm_core *smc = kmalloc(sizeof(*smc) + array_size, GFP_KERNEL);
 	if (smc) {
 		smc->nr = nr_blocks;
+		smc->nr_free = nr_blocks;
 		smc->maybe_first_free = 0;
 		memset(smc->counts, 0, array_size);
 

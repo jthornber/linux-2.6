@@ -27,6 +27,7 @@ struct sm_staged {
 
 	struct dm_space_map *sm_wrapped;
 	dm_block_t maybe_first_free;
+	int64_t nr_allocated;
 };
 
 /*----------------------------------------------------------------*/
@@ -73,6 +74,7 @@ static int add_delta(struct sm_staged *sm, dm_block_t b, int32_t delta)
 {
 	int r;
 	struct cache_entry *ce = find_entry(sm, b);
+	uint32_t old_count, new_count;
 
 	if (!ce) {
 		uint32_t ref_count = 0;
@@ -84,6 +86,14 @@ static int add_delta(struct sm_staged *sm, dm_block_t b, int32_t delta)
 		if (!ce)
 			return -ENOMEM;
 	}
+
+	old_count = ce->ref_count + ce->delta;
+	new_count = old_count + delta;
+	if (old_count && !new_count)
+		sm->nr_allocated--;
+
+	else if (new_count && !old_count)
+		sm->nr_allocated++;
 
 	ce->delta += delta;
 	ce->unwritten += delta;
@@ -133,12 +143,16 @@ static struct sm_staged *sm_alloc(struct dm_space_map *sm_wrapped)
 	INIT_LIST_HEAD(&sm->deltas);
 	for (i = 0; i < NR_BUCKETS; i++)
 		INIT_HLIST_HEAD(sm->buckets + i);
+	sm->nr_allocated = 0;
 
 	return sm;
 }
 
 static void inc_entry(struct sm_staged *sm, struct cache_entry *ce)
 {
+	if (!(ce->ref_count + ce->delta))
+		sm->nr_allocated++;
+
 	list_move(&ce->lru, &sm->deltas);
 	ce->delta++;
 	ce->unwritten++;
@@ -243,6 +257,20 @@ static int get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return dm_sm_get_nr_blocks(sm->sm_wrapped, count);
+}
+
+static int
+get_nr_free(void *context, dm_block_t *count)
+{
+	int r;
+	struct sm_staged *sm = (struct sm_staged *) context;
+
+	r = dm_sm_get_nr_free(sm->sm_wrapped, count);
+	if (r)
+		return r;
+
+	count -= sm->nr_allocated;
+	return 0;
 }
 
 static int get_count(void *context, dm_block_t b, uint32_t *result)
@@ -368,6 +396,7 @@ static int commit(void *context)
 		}
 		INIT_HLIST_HEAD(sm->buckets + i);
 	}
+	sm->nr_allocated = 0;
 
 	return 0;
 }
@@ -377,6 +406,7 @@ static int commit(void *context)
 static struct dm_space_map_ops combined_ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
+	.get_nr_free = get_nr_free,
 	.get_count = get_count,
 	.set_count = set_count,
 	.get_free = get_free,

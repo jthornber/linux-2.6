@@ -46,6 +46,7 @@ struct dm_space_map_ops {
 	int (*guarantees_no_recycling)(void *context);
 
 	int (*get_nr_blocks)(void *context, dm_block_t *count);
+	int (*get_nr_free)(void *context, dm_block_t *count);
 	int (*get_count)(void *context, dm_block_t b, uint32_t *result);
 	int (*set_count)(void *context, dm_block_t b, uint32_t count);
 	int (*get_free)(void *context, dm_block_t *b); /* doesn't increment the block */
@@ -86,6 +87,12 @@ static inline int
 dm_sm_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
 {
 	return sm->ops->get_nr_blocks(sm->context, count);
+}
+
+static inline int
+dm_sm_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
+{
+	return sm->ops->get_nr_free(sm->context, count);
 }
 
 static inline int

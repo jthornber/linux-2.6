@@ -38,6 +38,7 @@ static int get_free_in_range(void *context,
 	*b = low;
 	return 0;
 }
+
 static int get_free(void *context, dm_block_t *b)
 {
 	BUG_ON(1);
@@ -66,6 +67,7 @@ static int commit(void *context)
 static struct dm_space_map_ops ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
+	.get_nr_free = get_nr_blocks, /* dummy can't allocate */
 	.get_count = get_count,
 	.set_count = set_count,
 	.get_free = get_free,
