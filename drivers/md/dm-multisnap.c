@@ -991,12 +991,24 @@ pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return r;
 	}
 
+	/*
+	 * The pool device and data device must have the same size.
+	 */
+	data_size = get_dev_size(data_dev);
+	if (ti->len != data_size) {
+		ti->error = "Pool and data devices differ in size";
+		dm_put_device(ti, metadata_dev);
+		dm_put_device(ti, data_dev);
+		return -EINVAL;
+	}
+
 	if (sscanf(argv[2], "%llu", &block_size) != 1) {
 		ti->error = "Invalid block size";
 		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
+	do_div(data_size, block_size);
 
 	if (sscanf(argv[3], "%llu", &low_water) != 1) {
 		ti->error = "Invalid low water mark";
@@ -1005,8 +1017,6 @@ pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	data_size = get_dev_size(data_dev);
-	do_div(data_size, block_size);
 	mmd = dm_multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
 		ti->error = "Error opening metadata device";
