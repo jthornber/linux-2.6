@@ -145,7 +145,7 @@ static int init_child(struct btree_info *info, struct node *parent, unsigned ind
 	result->index = index;
 	root = value64(parent, index);
 
-	r = tm_shadow_block(info->tm, root, &result->block, &inc);
+	r = dm_tm_shadow_block(info->tm, root, &result->block, &inc);
 	if (r)
 		return r;
 
@@ -157,7 +157,7 @@ static int init_child(struct btree_info *info, struct node *parent, unsigned ind
 
 static int exit_child(struct btree_info *info, struct child *c)
 {
-	return tm_unlock(info->tm, c->block);
+	return dm_tm_unlock(info->tm, c->block);
 }
 
 static void shift(struct node *left, struct node *right, int count)
@@ -201,7 +201,7 @@ static void rebalance2_(struct btree_info *info,
 		 * We need to decrement the right block, but not it's
 		 * children, since they're still referenced by @left
 		 */
-		tm_dec(info->tm, dm_block_location(r->block));
+		dm_tm_dec(info->tm, dm_block_location(r->block));
 
 	} else {
 		/* rebalance */
@@ -294,7 +294,7 @@ static void rebalance3_(struct btree_info *info,
 		delete_at(parent, c->index, sizeof(__le64));
 		r->index--;
 
-		tm_dec(info->tm, dm_block_location(c->block));
+		dm_tm_dec(info->tm, dm_block_location(c->block));
 		rebalance2_(info, parent, l, r);
 
 	} else {
@@ -368,7 +368,7 @@ static int rebalance3(struct shadow_spine *s,
 	return 0;
 }
 
-static int get_nr_entries(struct transaction_manager *tm,
+static int get_nr_entries(struct dm_transaction_manager *tm,
 			  dm_block_t b,
 			  uint32_t *result)
 {
@@ -376,13 +376,13 @@ static int get_nr_entries(struct transaction_manager *tm,
 	struct dm_block *block;
 	struct node *c;
 
-	r = tm_read_lock(tm, b, &block);
+	r = dm_tm_read_lock(tm, b, &block);
 	if (r)
 		return r;
 
 	c = to_node(block);
 	*result = __le32_to_cpu(c->header.nr_entries);
-	return tm_unlock(tm, block);
+	return dm_tm_unlock(tm, block);
 }
 
 static int rebalance_children(struct shadow_spine *s,
@@ -399,14 +399,15 @@ static int rebalance_children(struct shadow_spine *s,
 		dm_block_t b = value64(n, 0);
 		struct dm_block *child;
 
-		r = tm_read_lock(info->tm, b, &child);
+		r = dm_tm_read_lock(info->tm, b, &child);
 		if (r)
 			return r;
 
 		memcpy(n, dm_block_data(child),
-		       dm_bm_block_size(tm_get_bm(info->tm)));
-		r = tm_unlock(info->tm, child);
-		tm_dec(info->tm, dm_block_location(child));
+		       dm_bm_block_size(
+			       dm_tm_get_bm(info->tm)));
+		r = dm_tm_unlock(info->tm, child);
+		dm_tm_dec(info->tm, dm_block_location(child));
 
 	} else {
 		i = lower_bound(n, key);

@@ -17,7 +17,7 @@ struct sm_root {
 
 /* FIXME: add a spinlock to protect the in core structure */
 struct sm_disk {
-	struct transaction_manager *tm;
+	struct dm_transaction_manager *tm;
 
 	struct btree_info bitmap_info;
 	struct btree_info ref_count_info;
@@ -114,13 +114,13 @@ static inline dm_block_t max_block(dm_block_t b1, dm_block_t b2)
 	return (b1 >= b2) ? b1 : b2;
 }
 
-static struct sm_disk *alloc_smd(struct transaction_manager *tm)
+static struct sm_disk *alloc_smd(struct dm_transaction_manager *tm)
 {
 	return kmalloc(sizeof(struct sm_disk), GFP_KERNEL);
 }
 
 static int io_init(struct sm_disk *io,
-		   struct transaction_manager *tm)
+		   struct dm_transaction_manager *tm)
 {
 	io->tm = tm;
 	io->bitmap_info.tm = tm;
@@ -144,7 +144,7 @@ static int io_init(struct sm_disk *io,
 	io->ref_count_info.value_type.del = NULL;
 	io->ref_count_info.value_type.equal = NULL;
 
-	io->block_size = dm_bm_block_size(tm_get_bm(tm));
+	io->block_size = dm_bm_block_size(dm_tm_get_bm(tm));
 
 	if (io->block_size > (1 << 30)) {
 		printk(KERN_ALERT "block size too big to hold bitmaps");
@@ -158,7 +158,7 @@ static int io_init(struct sm_disk *io,
 	return 0;
 }
 
-static int io_new(struct sm_disk *io, struct transaction_manager *tm, dm_block_t nr_blocks)
+static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm, dm_block_t nr_blocks)
 {
 	int r;
 	dm_block_t i;
@@ -179,12 +179,12 @@ static int io_new(struct sm_disk *io, struct transaction_manager *tm, dm_block_t
 		struct dm_block *b;
 		struct index_entry idx;
 
-		r = tm_new_block(tm, &b);
+		r = dm_tm_new_block(tm, &b);
 		if (r < 0)
 			return r;
 		idx.b = __cpu_to_le64(dm_block_location(b));
 
-		r = tm_unlock(tm, b);
+		r = dm_tm_unlock(tm, b);
 		if (r < 0)
 			return r;
 
@@ -208,7 +208,7 @@ static int io_new(struct sm_disk *io, struct transaction_manager *tm, dm_block_t
 }
 
 static int io_open(struct sm_disk *io,
-		   struct transaction_manager *tm,
+		   struct dm_transaction_manager *tm,
 		   void *root,
 		   size_t len)
 {
@@ -245,13 +245,13 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 
 	{
 		struct dm_block *blk;
-		r = tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
+		r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
 		if (r < 0)
 			return r;
 
 		*result = lookup_bitmap_(dm_block_data(blk),
 					 mod64(b, io->entries_per_block));
-		r = tm_unlock(io->tm, blk);
+		r = dm_tm_unlock(io->tm, blk);
 		if (r < 0) {
 			return r;
 		}
@@ -295,7 +295,7 @@ io_find_unused(struct sm_disk *io, dm_block_t begin, dm_block_t end, dm_block_t 
 				mod64(end, io->entries_per_block) :
 				io->entries_per_block;
 
-			r = tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
+			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
 			if (r < 0)
 				return r;
 
@@ -303,13 +303,13 @@ io_find_unused(struct sm_disk *io, dm_block_t begin, dm_block_t end, dm_block_t 
 				       mod64(begin, io->entries_per_block),
 				       bit_end, &position);
 			if (r < 0) {
-				tm_unlock(io->tm, blk);
+				dm_tm_unlock(io->tm, blk);
 				return r;
 			}
 
 			*result = i * io->entries_per_block + position;
 
-			r = tm_unlock(io->tm, blk);
+			r = dm_tm_unlock(io->tm, blk);
 			if (r < 0)
 				return r;
 
@@ -336,7 +336,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	if (r < 0)
 		return r;
 
-	r = tm_shadow_block(io->tm, __le64_to_cpu(ie.b), &nb, &inc);
+	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.b), &nb, &inc);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow failed");
 		return r;
@@ -365,14 +365,14 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 		set_bitmap_(bm, bit, 3);
 		r = btree_insert(&io->ref_count_info, io->ref_count_root, &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
-			tm_unlock(io->tm, nb);
+			dm_tm_unlock(io->tm, nb);
 			/* FIXME: release shadow? or assume the whole transaction will be ditched */
 			printk(KERN_ALERT "ref count insert failed");
 			return r;
 		}
 	}
 
-	r = tm_unlock(io->tm, nb);
+	r = dm_tm_unlock(io->tm, nb);
 	if (r < 0)
 		return r;
 
@@ -431,9 +431,9 @@ static int set_count(void *context, dm_block_t b, uint32_t count)
 {
 	int r;
 	struct sm_disk *smd = (struct sm_disk *) context;
-	unsigned held = dm_bm_locks_held(tm_get_bm(smd->tm));
+	unsigned held = dm_bm_locks_held(dm_tm_get_bm(smd->tm));
 	r = set_count_(context, b, count);
-	BUG_ON(dm_bm_locks_held(tm_get_bm(smd->tm)) != held);
+	BUG_ON(dm_bm_locks_held(dm_tm_get_bm(smd->tm)) != held);
 	return r;
 }
 
@@ -514,7 +514,7 @@ static struct dm_space_map_ops ops_ = {
 };
 
 struct dm_space_map *
-dm_sm_disk_create(struct transaction_manager *tm,
+dm_sm_disk_create(struct dm_transaction_manager *tm,
 		  dm_block_t nr_blocks)
 {
 	struct dm_space_map *sm = NULL;
@@ -540,7 +540,7 @@ dm_sm_disk_create(struct transaction_manager *tm,
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
-struct dm_space_map *dm_sm_disk_open(struct transaction_manager *tm,
+struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 				     void *root, size_t len)
 {
 	struct dm_space_map *sm = NULL;

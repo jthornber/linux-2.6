@@ -39,7 +39,7 @@ struct node {
 
 /* FIXME: enable close packing for on disk structures */
 
-void inc_children(struct transaction_manager *tm, struct node *n, struct btree_value_type *vt);
+void inc_children(struct dm_transaction_manager *tm, struct node *n, struct btree_value_type *vt);
 
 static inline struct node *to_node(struct dm_block *b)
 {

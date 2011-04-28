@@ -6,7 +6,7 @@ int bn_read_lock(struct btree_info *info,
 		 dm_block_t b,
 		 struct dm_block **result)
 {
-	return tm_read_lock(info->tm, b, result);
+	return dm_tm_read_lock(info->tm, b, result);
 }
 
 int bn_shadow(struct btree_info *info,
@@ -17,7 +17,7 @@ int bn_shadow(struct btree_info *info,
 {
 	int r;
 
-	r = tm_shadow_block(info->tm, orig, result, inc);
+	r = dm_tm_shadow_block(info->tm, orig, result, inc);
 	if (r == 0 && *inc)
 		inc_children(info->tm, to_node(*result), vt);
 
@@ -26,12 +26,12 @@ int bn_shadow(struct btree_info *info,
 
 int bn_new_block(struct btree_info *info, struct dm_block **result)
 {
-	return tm_new_block(info->tm, result);
+	return dm_tm_new_block(info->tm, result);
 }
 
 int bn_unlock(struct btree_info *info, struct dm_block *b)
 {
-	return tm_unlock(info->tm, b);
+	return dm_tm_unlock(info->tm, b);
 }
 
 /*----------------------------------------------------------------*/

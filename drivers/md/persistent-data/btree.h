@@ -56,7 +56,7 @@ struct btree_value_type {
  * The |btree_info| structure describes the shape and contents of a btree.
  */
 struct btree_info {
-	struct transaction_manager *tm;
+	struct dm_transaction_manager *tm;
 
 	/* number of nested btrees (not the depth of a single tree). */
 	unsigned levels;

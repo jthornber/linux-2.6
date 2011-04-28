@@ -46,14 +46,14 @@ int upper_bound(struct node *n, uint64_t key)
 	return bsearch(n, key, 1);
 }
 
-void inc_children(struct transaction_manager *tm, struct node *n, struct btree_value_type *vt)
+void inc_children(struct dm_transaction_manager *tm, struct node *n, struct btree_value_type *vt)
 {
 	unsigned i;
 	uint32_t nr_entries = __le32_to_cpu(n->header.nr_entries);
 
 	if (__le32_to_cpu(n->header.flags) & INTERNAL_NODE)
 		for (i = 0; i < nr_entries; i++)
-			tm_inc(tm, value64(n, i));
+			dm_tm_inc(tm, value64(n, i));
 	else if (vt->copy)
 		for (i = 0; i < nr_entries; i++)
 			vt->copy(vt->context,
@@ -96,14 +96,14 @@ int btree_empty(struct btree_info *info, dm_block_t *root)
 	struct node *n;
 	uint32_t max_entries = calc_max_entries(
 		info->value_type.size,
-		dm_bm_block_size(tm_get_bm(info->tm)));
+		dm_bm_block_size(dm_tm_get_bm(info->tm)));
 
 	r = bn_new_block(info, &b);
 	if (r < 0)
 		return r;
 
 	n = (struct node *) dm_block_data(b);
-	memset(n, 0, dm_bm_block_size(tm_get_bm(info->tm)));
+	memset(n, 0, dm_bm_block_size(dm_tm_get_bm(info->tm)));
 	n->header.flags = __cpu_to_le32(LEAF_NODE);
 	n->header.nr_entries = __cpu_to_le32(0);
 	n->header.max_entries =	__cpu_to_le32(max_entries);
@@ -130,7 +130,7 @@ struct frame {
 };
 
 struct del_stack {
-	struct transaction_manager *tm;
+	struct dm_transaction_manager *tm;
 	int top;
 	struct frame spine[MAX_SPINE_DEPTH];
 };
@@ -153,7 +153,7 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 
 	BUG_ON(s->top >= MAX_SPINE_DEPTH);
 
-	r = tm_ref(s->tm, b, &ref_count);
+	r = dm_tm_ref(s->tm, b, &ref_count);
 	if (r)
 		return r;
 
@@ -162,11 +162,11 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 		 * This is a shared node, so we can just decrement it's
 		 * reference counter and leave the children.
 		 */
-		tm_dec(s->tm, b);
+		dm_tm_dec(s->tm, b);
 
 	} else {
 		struct frame *f = s->spine + ++s->top;
-		r = tm_read_lock(s->tm, b, &f->b);
+		r = dm_tm_read_lock(s->tm, b, &f->b);
 		if (!r) {
 			s->top--;
 			return r;
@@ -184,8 +184,8 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 static void pop_frame(struct del_stack *s)
 {
 	struct frame *f = s->spine + s->top--;
-	tm_dec(s->tm, dm_block_location(f->b));
-	tm_unlock(s->tm, f->b);
+	dm_tm_dec(s->tm, dm_block_location(f->b));
+	dm_tm_unlock(s->tm, f->b);
 }
 
 int btree_del(struct btree_info *info, dm_block_t root)
@@ -749,21 +749,22 @@ int btree_clone(struct btree_info *info, dm_block_t root, dm_block_t *clone)
 	if (r < 0)
 		return r;
 
-	r = tm_read_lock(info->tm, root, &orig_b);
+	r = dm_tm_read_lock(info->tm, root, &orig_b);
 	if (r < 0) {
 		dm_block_t location = dm_block_location(b);
 		bn_unlock(info, b);
-		tm_dec(info->tm, location);
+		dm_tm_dec(info->tm, location);
 	}
 
 	*clone = dm_block_location(b);
 	b_node = (struct node *) dm_block_data(b);
 	orig_node = to_node(orig_b);
 
-	memcpy(b_node, orig_node, dm_bm_block_size(tm_get_bm(info->tm)));
-	tm_unlock(info->tm, orig_b);
+	memcpy(b_node, orig_node,
+	       dm_bm_block_size(dm_tm_get_bm(info->tm)));
+	dm_tm_unlock(info->tm, orig_b);
 	inc_children(info->tm, b_node, &info->value_type);
-	tm_unlock(info->tm, b);
+	dm_tm_unlock(info->tm, b);
 
 	return 0;
 }

@@ -60,8 +60,8 @@ struct multisnap_metadata {
 	struct dm_block_manager *bm;
 	struct dm_space_map *metadata_sm;
 	struct dm_space_map *data_sm;
-	struct transaction_manager *tm;
-	struct transaction_manager *nb_tm;
+	struct dm_transaction_manager *tm;
+	struct dm_transaction_manager *nb_tm;
 
 	/*
 	 * Two level btree, first level is multisnap_dev_t, second level
@@ -135,12 +135,12 @@ alloc_(struct dm_block_manager *bm,
 {
 	int r;
 	struct dm_space_map *sm, *data_sm;
-	struct transaction_manager *tm;
+	struct dm_transaction_manager *tm;
 	struct multisnap_metadata *mmd;
 	struct dm_block *sb;
 
 	if (create) {
-		r = tm_create_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION, &tm, &sm, &sb);
+		r = dm_tm_create_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION, &tm, &sm, &sb);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_create_with_sm failed");
 			dm_block_manager_destroy(bm);
@@ -153,13 +153,13 @@ alloc_(struct dm_block_manager *bm,
 			goto bad;
 		}
 
-		r = tm_pre_commit(tm);
+		r = dm_tm_pre_commit(tm);
 		if (r < 0) {
 			printk(KERN_ALERT "couldn't pre commit");
 			goto bad;
 		}
 
-		r = tm_commit(tm, sb);
+		r = dm_tm_commit(tm, sb);
 		if (r < 0) {
 			printk(KERN_ALERT "couldn't commit");
 			goto bad;
@@ -167,10 +167,10 @@ alloc_(struct dm_block_manager *bm,
 	} else {
 		struct superblock *s = NULL;
 
-		r = tm_open_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
-				    (size_t) &((struct superblock *) NULL)->metadata_space_map_root,
-				    SPACE_MAP_ROOT_SIZE,
-				    &tm, &sm, &sb);
+		r = dm_tm_open_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
+				       (size_t) &((struct superblock *) NULL)->metadata_space_map_root,
+				       SPACE_MAP_ROOT_SIZE,
+				       &tm, &sm, &sb);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_open_with_sm failed");
 			dm_block_manager_destroy(bm);
@@ -191,7 +191,7 @@ alloc_(struct dm_block_manager *bm,
 			goto bad;
 		}
 
-		tm_unlock(tm, sb);
+		dm_tm_unlock(tm, sb);
 	}
 
 	mmd = kmalloc(sizeof(*mmd), GFP_KERNEL);
@@ -204,7 +204,7 @@ alloc_(struct dm_block_manager *bm,
 	mmd->metadata_sm = sm;
 	mmd->data_sm = data_sm;
 	mmd->tm = tm;
-	mmd->nb_tm = tm_create_non_blocking_clone(tm);
+	mmd->nb_tm = dm_tm_create_non_blocking_clone(tm);
 	if (!mmd->nb_tm) {
 		printk(KERN_ALERT "multisnap-metadata could not create clone tm");
 		goto bad;
@@ -261,7 +261,7 @@ alloc_(struct dm_block_manager *bm,
 	return mmd;
 
 bad:
-	tm_destroy(tm);
+	dm_tm_destroy(tm);
 	dm_sm_destroy(sm);
 	dm_block_manager_destroy(bm);
 	return NULL;
@@ -384,8 +384,8 @@ multisnap_metadata_close(struct multisnap_metadata *mmd)
 	if (mmd->sblock)
 		multisnap_metadata_commit(mmd);
 
-	tm_destroy(mmd->tm);
-	tm_destroy(mmd->nb_tm);
+	dm_tm_destroy(mmd->tm);
+	dm_tm_destroy(mmd->nb_tm);
 	dm_block_manager_destroy(mmd->bm);
 	dm_sm_destroy(mmd->metadata_sm);
 	kfree(mmd);
@@ -784,7 +784,7 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 		return r;
 	}
 
-	r = tm_pre_commit(mmd->tm);
+	r = dm_tm_pre_commit(mmd->tm);
 	if (r < 0) {
 		up_write(&mmd->root_lock);
 		return r;
@@ -814,7 +814,7 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 		}
 	}
 
-	r = tm_commit(mmd->tm, mmd->sblock);
+	r = dm_tm_commit(mmd->tm, mmd->sblock);
 
 	/* open the next transaction */
 	mmd->sblock = NULL;
