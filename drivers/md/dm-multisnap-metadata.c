@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2011 Red Hat, Inc. All rights reserved.
  *
  * This file is released under the GPL.
  */
@@ -82,7 +82,7 @@ struct dm_multisnap_metadata {
 	struct dm_btree_info details_info;
 
 	struct rw_semaphore root_lock;
-	uint32_t time;		/* FIXME: persist this */
+	uint32_t time;
 	int have_inserted;
 	struct dm_block *sblock;
 	dm_block_t root;
@@ -280,6 +280,7 @@ begin(struct dm_multisnap_metadata *mmd)
 		return r;
 
 	s = (struct superblock *) dm_block_data(mmd->sblock);
+	mmd->time = __le64_to_cpu(s->time);
 	mmd->root = __le64_to_cpu(s->data_mapping_root);
 	mmd->details_root = __le64_to_cpu(s->device_details_root);
 	return 0;
