@@ -63,7 +63,7 @@ static int commit(void *context)
 }
 
 
-static struct space_map_ops ops_ = {
+static struct dm_space_map_ops ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
 	.get_count = get_count,
@@ -75,9 +75,9 @@ static struct space_map_ops ops_ = {
 	.commit = commit,
 };
 
-struct space_map *sm_dummy_create(dm_block_t nr_blocks)
+struct dm_space_map *dm_sm_dummy_create(dm_block_t nr_blocks)
 {
-	struct space_map *sm = NULL;
+	struct dm_space_map *sm = NULL;
 	struct sm_dummy *smc = kmalloc(sizeof(*smc), GFP_KERNEL);
 	if (smc) {
 		smc->nr_blocks = nr_blocks;
@@ -92,6 +92,6 @@ struct space_map *sm_dummy_create(dm_block_t nr_blocks)
 
 	return sm;
 }
-EXPORT_SYMBOL_GPL(sm_dummy_create);
+EXPORT_SYMBOL_GPL(dm_sm_dummy_create);
 
 /*----------------------------------------------------------------*/

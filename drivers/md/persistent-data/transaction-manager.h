@@ -15,7 +15,7 @@
 struct transaction_manager;
 
 struct transaction_manager *tm_create(struct dm_block_manager *bm,
-				      struct space_map *sm);
+				      struct dm_space_map *sm);
 void tm_destroy(struct transaction_manager *tm);
 
 /*
@@ -117,7 +117,7 @@ struct dm_block_manager *tm_get_bm(struct transaction_manager *tm);
 int tm_create_with_sm(struct dm_block_manager *bm,
 		      dm_block_t superblock,
 		      struct transaction_manager **tm,
-		      struct space_map **sm,
+		      struct dm_space_map **sm,
 		      struct dm_block **sb);
 
 int tm_open_with_sm(struct dm_block_manager *bm,
@@ -125,7 +125,7 @@ int tm_open_with_sm(struct dm_block_manager *bm,
 		    size_t root_offset,
 		    size_t root_max_len,
 		    struct transaction_manager **tm,
-		    struct space_map **sm,
+		    struct dm_space_map **sm,
 		    struct dm_block **sb);
 
 /* useful for debugging performance */

@@ -126,7 +126,7 @@ static int commit(void *context)
 
 /*----------------------------------------------------------------*/
 
-static struct space_map_ops ops_ = {
+static struct dm_space_map_ops ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
 	.get_free = get_free,
@@ -139,9 +139,9 @@ static struct space_map_ops ops_ = {
 	.commit = commit
 };
 
-struct space_map *sm_core_create(dm_block_t nr_blocks)
+struct dm_space_map *dm_sm_core_create(dm_block_t nr_blocks)
 {
-	struct space_map *sm = NULL;
+	struct dm_space_map *sm = NULL;
 	size_t array_size = nr_blocks * sizeof(uint32_t);
 	struct sm_core *smc = kmalloc(sizeof(*smc) + array_size, GFP_KERNEL);
 	if (smc) {
@@ -160,6 +160,6 @@ struct space_map *sm_core_create(dm_block_t nr_blocks)
 
 	return sm;
 }
-EXPORT_SYMBOL_GPL(sm_core_create);
+EXPORT_SYMBOL_GPL(dm_sm_core_create);
 
 /*----------------------------------------------------------------*/

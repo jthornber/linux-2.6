@@ -25,7 +25,7 @@ struct sm_staged {
 	struct list_head deltas;
 	struct hlist_head buckets[NR_BUCKETS];
 
-	struct space_map *sm_wrapped;
+	struct dm_space_map *sm_wrapped;
 	dm_block_t maybe_first_free;
 };
 
@@ -76,7 +76,7 @@ static int add_delta(struct sm_staged *sm, dm_block_t b, int32_t delta)
 
 	if (!ce) {
 		uint32_t ref_count = 0;
-		r = sm_get_count(sm->sm_wrapped, b, &ref_count);
+		r = dm_sm_get_count(sm->sm_wrapped, b, &ref_count);
 		if (r < 0)
 			return r;
 
@@ -102,7 +102,7 @@ static int add_delta(struct sm_staged *sm, dm_block_t b, int32_t delta)
 	return 0;
 }
 
-static struct sm_staged *sm_alloc(struct space_map *sm_wrapped)
+static struct sm_staged *sm_alloc(struct dm_space_map *sm_wrapped)
 {
 	unsigned i;
 	struct sm_staged *sm = kmalloc(sizeof(*sm), GFP_KERNEL);
@@ -149,7 +149,7 @@ static int get_free_in_range_(struct sm_staged *sm, dm_block_t low, dm_block_t h
 	int r;
 	dm_block_t b, nr_blocks;
 
-	r = sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
+	r = dm_sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
 	if (r < 0)
 		return r;
 
@@ -167,7 +167,7 @@ retry:
 	 * We could check the hash for blocks that have been _both_
 	 * allocated and freed within this transaction.
 	 */
-	r = sm_get_free_in_range(sm->sm_wrapped, low, high, &b);
+	r = dm_sm_get_free_in_range(sm->sm_wrapped, low, high, &b);
 	if (r < 0)
 		return r;
 
@@ -205,7 +205,7 @@ static int flush_once(struct sm_staged *sm)
 		if (!ce->unwritten)
 			continue;
 
-		r = sm_set_count(sm->sm_wrapped, ce->block, ce->ref_count + shadow);
+		r = dm_sm_set_count(sm->sm_wrapped, ce->block, ce->ref_count + shadow);
 		if (r < 0)
 			return r;
 
@@ -228,7 +228,7 @@ static void destroy(void *context)
 	struct cache_entry *ce, *tmp;
 
 	if (sm->sm_wrapped)
-		sm_destroy(sm->sm_wrapped);
+		dm_sm_destroy(sm->sm_wrapped);
 
 	list_for_each_entry_safe (ce, tmp, &sm->deltas, lru) {
 		mempool_free(ce, sm->pool);
@@ -242,7 +242,7 @@ static void destroy(void *context)
 static int get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
-	return sm_get_nr_blocks(sm->sm_wrapped, count);
+	return dm_sm_get_nr_blocks(sm->sm_wrapped, count);
 }
 
 static int get_count(void *context, dm_block_t b, uint32_t *result)
@@ -255,7 +255,7 @@ static int get_count(void *context, dm_block_t b, uint32_t *result)
 		return 0;
 	}
 
-	return sm_get_count(sm->sm_wrapped, b, result);
+	return dm_sm_get_count(sm->sm_wrapped, b, result);
 }
 
 static int set_count(void *context, dm_block_t b, uint32_t count)
@@ -296,7 +296,7 @@ static int get_free(void *context, dm_block_t *b)
 	int r;
 	dm_block_t nr_blocks;
 	struct sm_staged *sm = (struct sm_staged *) context;
-	r = sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
+	r = dm_sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
 	if (r < 0)
 		return r;
 
@@ -322,7 +322,7 @@ static int new_block(void *context, dm_block_t *b)
 	struct sm_staged *sm = (struct sm_staged *) context;
 	struct cache_entry *ce;
 
-	r = sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
+	r = dm_sm_get_nr_blocks(sm->sm_wrapped, &nr_blocks);
 	if (r < 0)
 		return r;
 
@@ -338,13 +338,13 @@ static int new_block(void *context, dm_block_t *b)
 static int root_size(void *context, size_t *result)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
-	return sm_root_size(sm->sm_wrapped, result);
+	return dm_sm_root_size(sm->sm_wrapped, result);
 }
 
 static int copy_root(void *context, void *copy_to_here, size_t len)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
-	return sm_copy_root(sm->sm_wrapped, copy_to_here, len);
+	return dm_sm_copy_root(sm->sm_wrapped, copy_to_here, len);
 }
 
 static int commit(void *context)
@@ -374,7 +374,7 @@ static int commit(void *context)
 
 /*----------------------------------------------------------------*/
 
-static struct space_map_ops combined_ops_ = {
+static struct dm_space_map_ops combined_ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
 	.get_count = get_count,
@@ -389,9 +389,9 @@ static struct space_map_ops combined_ops_ = {
 	.commit = commit,
 };
 
-struct space_map *sm_staged_create(struct space_map *wrappee)
+struct dm_space_map *dm_sm_staged_create(struct dm_space_map *wrappee)
 {
-	struct space_map *sm = NULL;
+	struct dm_space_map *sm = NULL;
 	struct sm_staged *smc = sm_alloc(wrappee);
 	if (smc) {
 		sm = kmalloc(sizeof(*sm), GFP_KERNEL);
@@ -405,15 +405,15 @@ struct space_map *sm_staged_create(struct space_map *wrappee)
 
 	return sm;
 }
-EXPORT_SYMBOL_GPL(sm_staged_create);
+EXPORT_SYMBOL_GPL(dm_sm_staged_create);
 
-int sm_staged_set_wrappee(struct space_map *sm,
-			  struct space_map *wrappee)
+int dm_sm_staged_set_wrappee(struct dm_space_map *sm,
+			     struct dm_space_map *wrappee)
 {
 	struct sm_staged *staged = (struct sm_staged *) sm->context;
 	staged->sm_wrapped = wrappee;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(sm_staged_set_wrappee);
+EXPORT_SYMBOL_GPL(dm_sm_staged_set_wrappee);
 
 /*----------------------------------------------------------------*/

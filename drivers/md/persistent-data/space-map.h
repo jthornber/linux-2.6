@@ -33,7 +33,7 @@
  * of cycles (possibly not a btree).
  */
 
-struct space_map_ops {
+struct dm_space_map_ops {
 	void (*destroy)(void *context);
 
 	/*
@@ -69,54 +69,54 @@ struct space_map_ops {
 	int (*copy_root)(void *context, void *copy_to_here, size_t len);
 };
 
-struct space_map {
-	struct space_map_ops *ops;
+struct dm_space_map {
+	struct dm_space_map_ops *ops;
 	void *context;
 };
 
 /*----------------------------------------------------------------*/
 
 static inline void
-sm_destroy(struct space_map *sm)
+dm_sm_destroy(struct dm_space_map *sm)
 {
 	sm->ops->destroy(sm->context);
 }
 
 static inline int
-sm_get_nr_blocks(struct space_map *sm, dm_block_t *count)
+dm_sm_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
 {
 	return sm->ops->get_nr_blocks(sm->context, count);
 }
 
 static inline int
-sm_get_count(struct space_map *sm, dm_block_t b, uint32_t *result)
+dm_sm_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
 {
 	return sm->ops->get_count(sm->context, b, result);
 }
 
 static inline int
-sm_set_count(struct space_map *sm, dm_block_t b, uint32_t count)
+dm_sm_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
 {
 	return sm->ops->set_count(sm->context, b, count);
 }
 
 static inline int
-sm_get_free(struct space_map *sm, dm_block_t *b)
+dm_sm_get_free(struct dm_space_map *sm, dm_block_t *b)
 {
 	return sm->ops->get_free(sm->context, b);
 }
 
 static inline int
-sm_get_free_in_range(struct space_map *sm,
-		     dm_block_t low,
-		     dm_block_t high,
-		     dm_block_t *b)
+dm_sm_get_free_in_range(struct dm_space_map *sm,
+			dm_block_t low,
+			dm_block_t high,
+			dm_block_t *b)
 {
 	return sm->ops->get_free_in_range(sm->context, low, high, b);
 }
 
 static inline int
-sm_commit(struct space_map *sm)
+dm_sm_commit(struct dm_space_map *sm)
 {
 	return sm->ops->commit(sm->context);
 }
@@ -125,7 +125,7 @@ sm_commit(struct space_map *sm)
  * Beware of races when using the default implementations of inc and dec.
  */
 static inline int
-sm_inc_block(struct space_map *sm, dm_block_t b)
+dm_sm_inc_block(struct dm_space_map *sm, dm_block_t b)
 {
 	int r;
 	uint32_t count;
@@ -145,7 +145,7 @@ sm_inc_block(struct space_map *sm, dm_block_t b)
 }
 
 static inline int
-sm_dec_block(struct space_map *sm,
+dm_sm_dec_block(struct dm_space_map *sm,
 	     dm_block_t b)
 {
 	int r;
@@ -166,8 +166,8 @@ sm_dec_block(struct space_map *sm,
 }
 
 static inline int
-sm_new_block(struct space_map *sm,
-	     dm_block_t *b)
+dm_sm_new_block(struct dm_space_map *sm,
+		dm_block_t *b)
 {
 	int r;
 
@@ -182,13 +182,13 @@ sm_new_block(struct space_map *sm,
 }
 
 static inline int
-sm_root_size(struct space_map *sm, size_t *result)
+dm_sm_root_size(struct dm_space_map *sm, size_t *result)
 {
 	return sm->ops->root_size(sm->context, result);
 }
 
 static inline int
-sm_copy_root(struct space_map *sm, void *copy_to_here, size_t len)
+dm_sm_copy_root(struct dm_space_map *sm, void *copy_to_here, size_t len)
 {
 	return sm->ops->copy_root(sm->context, copy_to_here, len);
 }

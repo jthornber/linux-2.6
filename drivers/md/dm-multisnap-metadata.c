@@ -58,8 +58,8 @@ struct multisnap_metadata {
 
 	struct block_device *bdev;
 	struct dm_block_manager *bm;
-	struct space_map *metadata_sm;
-	struct space_map *data_sm;
+	struct dm_space_map *metadata_sm;
+	struct dm_space_map *data_sm;
 	struct transaction_manager *tm;
 	struct transaction_manager *nb_tm;
 
@@ -134,7 +134,7 @@ alloc_(struct dm_block_manager *bm,
        int create)
 {
 	int r;
-	struct space_map *sm, *data_sm;
+	struct dm_space_map *sm, *data_sm;
 	struct transaction_manager *tm;
 	struct multisnap_metadata *mmd;
 	struct dm_block *sb;
@@ -147,7 +147,7 @@ alloc_(struct dm_block_manager *bm,
 			return NULL;
 		}
 
-		data_sm = sm_disk_create(tm, nr_blocks);
+		data_sm = dm_sm_disk_create(tm, nr_blocks);
 		if (!data_sm) {
 			printk(KERN_ALERT "sm_disk_create");
 			goto bad;
@@ -184,7 +184,8 @@ alloc_(struct dm_block_manager *bm,
 			goto bad;
 		}
 
-		data_sm = sm_disk_open(tm, s->data_space_map_root, sizeof(s->data_space_map_root));
+		data_sm = dm_sm_disk_open(tm, s->data_space_map_root,
+					  sizeof(s->data_space_map_root));
 		if (!data_sm) {
 			printk(KERN_ALERT "sm_disk_open failed");
 			goto bad;
@@ -261,7 +262,7 @@ alloc_(struct dm_block_manager *bm,
 
 bad:
 	tm_destroy(tm);
-	sm_destroy(sm);
+	dm_sm_destroy(sm);
 	dm_block_manager_destroy(bm);
 	return NULL;
 }
@@ -386,7 +387,7 @@ multisnap_metadata_close(struct multisnap_metadata *mmd)
 	tm_destroy(mmd->tm);
 	tm_destroy(mmd->nb_tm);
 	dm_block_manager_destroy(mmd->bm);
-	sm_destroy(mmd->metadata_sm);
+	dm_sm_destroy(mmd->metadata_sm);
 	kfree(mmd);
 
 	return 0;
@@ -712,7 +713,7 @@ multisnap_metadata_alloc_data_block(struct ms_device *msd,
 	 * inserted.
 	 */
 	down_write(&mmd->root_lock);
-	r = sm_new_block(msd->mmd->data_sm, result);
+	r = dm_sm_new_block(msd->mmd->data_sm, result);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -726,7 +727,7 @@ multisnap_metadata_free_data_block(struct ms_device *msd,
 	struct multisnap_metadata *mmd = msd->mmd;
 
 	down_write(&mmd->root_lock);
-	r = sm_dec_block(msd->mmd->data_sm, result);
+	r = dm_sm_dec_block(msd->mmd->data_sm, result);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -789,7 +790,7 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 		return r;
 	}
 
-	r = sm_root_size(mmd->metadata_sm, &len);
+	r = dm_sm_root_size(mmd->metadata_sm, &len);
 	if (r < 0) {
 		up_write(&mmd->root_lock);
 		return r;
@@ -800,13 +801,13 @@ int multisnap_metadata_commit(struct multisnap_metadata *mmd)
 		sb->time = __cpu_to_le64(mmd->time);
 		sb->data_mapping_root = __cpu_to_le64(mmd->root);
 		sb->device_details_root = __cpu_to_le64(mmd->details_root);
-		r = sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
+		r = dm_sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
 		if (r < 0) {
 			up_write(&mmd->root_lock);
 			return r;
 		}
 
-		r = sm_copy_root(mmd->data_sm, &sb->data_space_map_root, len);
+		r = dm_sm_copy_root(mmd->data_sm, &sb->data_space_map_root, len);
 		if (r < 0) {
 			up_write(&mmd->root_lock);
 			return r;
@@ -834,7 +835,7 @@ multisnap_metadata_get_unprovisioned_blocks(struct multisnap_metadata *mmd, dm_b
 	/* FIXME: this is the total number of blocks, not the free count.
 	 * We need to extend the space map abstraction to provide this.
 	 */
-	r = sm_get_nr_blocks(mmd->data_sm, result);
+	r = dm_sm_get_nr_blocks(mmd->data_sm, result);
 	up_read(&mmd->root_lock);
 
 	return r;
@@ -861,7 +862,7 @@ multisnap_metadata_get_data_dev_size(struct multisnap_metadata *mmd,
 	int r;
 
 	down_read(&mmd->root_lock);
-	r = sm_get_nr_blocks(mmd->data_sm, result);
+	r = dm_sm_get_nr_blocks(mmd->data_sm, result);
 	up_read(&mmd->root_lock);
 
 	return r;

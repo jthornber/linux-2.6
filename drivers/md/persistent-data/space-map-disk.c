@@ -501,7 +501,7 @@ static int copy_root(void *context, void *where, size_t max)
 
 /*----------------------------------------------------------------*/
 
-static struct space_map_ops ops_ = {
+static struct dm_space_map_ops ops_ = {
 	.destroy = destroy,
 	.get_nr_blocks = get_nr_blocks,
 	.get_count = get_count,
@@ -513,10 +513,11 @@ static struct space_map_ops ops_ = {
 	.copy_root = copy_root
 };
 
-struct space_map *sm_disk_create(struct transaction_manager *tm,
-				 dm_block_t nr_blocks)
+struct dm_space_map *
+dm_sm_disk_create(struct transaction_manager *tm,
+		  dm_block_t nr_blocks)
 {
-	struct space_map *sm = NULL;
+	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd = alloc_smd(tm);
 	if (smd) {
 		int r;
@@ -537,12 +538,12 @@ struct space_map *sm_disk_create(struct transaction_manager *tm,
 
 	return sm;
 }
-EXPORT_SYMBOL_GPL(sm_disk_create);
+EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
-struct space_map *sm_disk_open(struct transaction_manager *tm,
-			       void *root, size_t len)
+struct dm_space_map *dm_sm_disk_open(struct transaction_manager *tm,
+				     void *root, size_t len)
 {
-	struct space_map *sm = NULL;
+	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd = alloc_smd(tm);
 	if (smd) {
 		int r;
@@ -563,5 +564,5 @@ struct space_map *sm_disk_open(struct transaction_manager *tm,
 
 	return sm;
 }
-EXPORT_SYMBOL_GPL(sm_disk_open);
+EXPORT_SYMBOL_GPL(dm_sm_disk_open);
 
