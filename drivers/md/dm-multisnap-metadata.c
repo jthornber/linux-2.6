@@ -168,7 +168,7 @@ alloc_(struct dm_block_manager *bm,
 		struct superblock *s = NULL;
 
 		r = dm_tm_open_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
-				       (size_t) &((struct superblock *) NULL)->metadata_space_map_root,
+				       offsetof(struct superblock, metadata_space_map_root),
 				       SPACE_MAP_ROOT_SIZE,
 				       &tm, &sm, &sb);
 		if (r < 0) {
