@@ -314,43 +314,44 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 		return NULL;
 	mmd->bdev = bdev;
 
-	if (create) {
-		if (!mmd->sblock) {
-			r = begin(mmd);
-			if (r < 0)
-				goto bad;
-		}
-
-		sb = (struct superblock *) dm_block_data(mmd->sblock);
-		sb->magic = __cpu_to_le64(MULTISNAP_SUPERBLOCK_MAGIC);
-		sb->version = __cpu_to_le64(MULTISNAP_VERSION);
-		sb->time = 0;
-		sb->metadata_block_size = __cpu_to_le64(1 << SECTOR_TO_BLOCK_SHIFT);
-		sb->metadata_nr_blocks = __cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
-		sb->data_block_size = __cpu_to_le64(data_block_size);
-
-		r = dm_btree_empty(&mmd->info, &mmd->root);
+	if (!create) {
+		r = begin(mmd);
 		if (r < 0)
 			goto bad;
+		return mmd;
+	}
 
-		r = dm_btree_empty(&mmd->details_info, &mmd->details_root);
-		if (r < 0) {
-			printk(KERN_ALERT "couldn't create devices root");
-			goto bad;
-		}
-
-		mmd->have_inserted = 1;
-		r = dm_multisnap_metadata_commit(mmd);
-		if (r < 0)
-			goto bad;
-	} else {
+	/* Create */
+	if (!mmd->sblock) {
 		r = begin(mmd);
 		if (r < 0)
 			goto bad;
 	}
 
-	return mmd;
+	sb = (struct superblock *) dm_block_data(mmd->sblock);
+	sb->magic = __cpu_to_le64(MULTISNAP_SUPERBLOCK_MAGIC);
+	sb->version = __cpu_to_le64(MULTISNAP_VERSION);
+	sb->time = 0;
+	sb->metadata_block_size = __cpu_to_le64(1 << SECTOR_TO_BLOCK_SHIFT);
+	sb->metadata_nr_blocks = __cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
+	sb->data_block_size = __cpu_to_le64(data_block_size);
 
+	r = dm_btree_empty(&mmd->info, &mmd->root);
+	if (r < 0)
+		goto bad;
+
+	r = dm_btree_empty(&mmd->details_info, &mmd->details_root);
+	if (r < 0) {
+		printk(KERN_ALERT "couldn't create devices root");
+		goto bad;
+	}
+
+	mmd->have_inserted = 1;
+	r = dm_multisnap_metadata_commit(mmd);
+	if (r < 0)
+		goto bad;
+
+	return mmd;
 bad:
 	dm_multisnap_metadata_close(mmd);
 	return NULL;
