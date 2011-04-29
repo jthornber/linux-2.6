@@ -72,22 +72,22 @@ static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 struct dm_transaction_manager * dm_tm_create(struct dm_block_manager *bm,
 					     struct dm_space_map *sm)
 {
+	int i;
 	struct dm_transaction_manager *tm;
 
 	tm = kmalloc(sizeof(*tm), GFP_KERNEL);
-	if (tm) {
-		int i;
+	if (!tm)
+		return ERR_PTR(-ENOMEM);
 
-		tm->is_clone = 0;
-		tm->real = NULL;
-		tm->bm = bm;
-		tm->sm = sm;
+	tm->is_clone = 0;
+	tm->real = NULL;
+	tm->bm = bm;
+	tm->sm = sm;
 
-		for (i = 0; i < HASH_SIZE; i++)
-			INIT_HLIST_HEAD(tm->buckets + i);
+	for (i = 0; i < HASH_SIZE; i++)
+		INIT_HLIST_HEAD(tm->buckets + i);
 
-		tm->shadow_count = 0;
-	}
+	tm->shadow_count = 0;
 
 	return tm;
 }
@@ -404,9 +404,8 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 	}
 
 	*tm = dm_tm_create(bm, staged);
-	if (!tm) {
-		/* FIXME: use IS_ERR/PTR_ERR on dm_tm_create() ERR_PTR return? */
-		r = -ENOMEM;
+	if (IS_ERR(*tm)) {
+		r = PTR_ERR(*tm);
 		goto fail_staged;
 	}
 
