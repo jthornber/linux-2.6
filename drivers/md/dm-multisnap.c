@@ -540,9 +540,9 @@ static void cell_remap_and_issue(struct pool_c *pool, struct cell *cell,
 		remap_and_issue(pool, bio, data_block);
 }
 
-static void cell_remap_and_issue_exception(struct pool_c *pool, struct cell *cell,
-					   dm_block_t data_block,
-					   struct bio *exception)
+static void cell_remap_and_issue_except(struct pool_c *pool, struct cell *cell,
+					dm_block_t data_block,
+					struct bio *exception)
 {
 	struct bio_list bios;
 	struct bio *bio;
@@ -719,33 +719,32 @@ static void process_prepared_mappings(struct pool_c *pool)
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	list_for_each_entry_safe (m, tmp, &maps, list) {
-		bio = m->bio;
+		if (m->err) {
+			cell_error(m->cell);
+			continue;
+		}
 
+		bio = m->bio;
 		if (bio) {
 			bio->bi_end_io = m->bi_end_io;
 			bio->bi_private = m->bi_private;
 		}
 
-		if (m->err)
+		r = dm_multisnap_metadata_insert(m->msd, m->virt_block,
+						 m->data_block);
+		if (r) {
+			printk(KERN_ALERT "dm_multisnap_metadata_insert() failed");
 			cell_error(m->cell);
+		} else {
+			if (m->bio) {
+				bio_endio(bio, 0);
+				cell_remap_and_issue_except(pool, m->cell,
+							    m->data_block, bio);
+			} else
+				cell_remap_and_issue(pool, m->cell, m->data_block);
 
-		else {
-			r = dm_multisnap_metadata_insert(m->msd, m->virt_block,
-							 m->data_block);
-			if (r) {
-				printk(KERN_ALERT "dm_multisnap_metadata_insert() failed");
-				cell_error(m->cell);
-			} else {
-				if (m->bio) {
-					bio_endio(bio, 0);
-					cell_remap_and_issue_exception(pool, m->cell,
-								       m->data_block, bio);
-				} else
-					cell_remap_and_issue(pool, m->cell, m->data_block);
-
-				list_del(&m->list);
-				mempool_free(m, pool->mapping_pool);
-			}
+			list_del(&m->list);
+			mempool_free(m, pool->mapping_pool);
 		}
 	}
 }
