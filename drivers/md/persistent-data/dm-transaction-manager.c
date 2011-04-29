@@ -405,56 +405,59 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 
 	*tm = dm_tm_create(bm, staged);
 	if (!tm) {
-		dm_sm_destroy(staged);
-		return -ENOMEM;
+		/* FIXME: use IS_ERR/PTR_ERR on dm_tm_create() ERR_PTR return? */
+		r = -ENOMEM;
+		goto fail_staged;
 	}
 
 	/* nasty bootstrap problem, first create the disk space map ... */
 	r = dm_tm_begin(*tm);
-	if (r < 0) {
-		dm_tm_destroy(*tm);
-		dm_sm_destroy(staged);
-		return r;
-	}
+	if (r < 0)
+		goto fail_tm;
+
+	/* FIXME: push all KERN_ALERTs into relevant methods' error path? */
 
 	r = dm_tm_reserve_block(*tm, superblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't reserve superblock");
-		dm_tm_destroy(*tm);
-		dm_sm_destroy(staged);
-		return r;
+		goto fail_tm;
 	}
 
 	r = dm_bm_write_lock(dm_tm_get_bm(*tm), superblock, sb);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
-		dm_tm_destroy(*tm);
-		dm_sm_destroy(staged);
-		return r;
+		goto fail_tm;
 	}
 
-	disk = dm_sm_disk_open(*tm, dm_block_data(*sb) + root_offset, root_max_len);
+	disk = dm_sm_disk_open(*tm, dm_block_data(*sb) + root_offset,
+			       root_max_len);
 	if (!disk) {
 		printk(KERN_ALERT "couldn't create disk space map");
-		dm_bm_unlock(*sb);
-		dm_tm_destroy(*tm);
-		dm_sm_destroy(staged);
-		return -ENOMEM;
+		/* FIXME: use IS_ERR/PTR_ERR on dm_sm_disk_open() ERR_PTR return? */
+		r = -ENOMEM;
+		goto fail_sb;
 	}
 
 	/* ... now we swap the dummy out and the disk in ... */
 	r = dm_sm_staged_set_wrappee(staged, disk);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't set staged wrappee");
-		dm_bm_unlock(*sb);
-		dm_tm_destroy(*tm);
-		dm_sm_destroy(staged);
-		return r;
+		goto fail_sb;
 	}
 
 	dm_sm_destroy(dummy);
 	*sm = staged;
+
 	return 0;
+
+fail_sb:
+	dm_bm_unlock(*sb);
+fail_tm:
+	dm_tm_destroy(*tm);
+fail_staged:
+	dm_sm_destroy(staged);
+
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_tm_open_with_sm);
 
