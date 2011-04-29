@@ -760,6 +760,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 {
 	int r;
 	size_t len;
+	struct superblock *sb;
 
 	down_read(&mmd->root_lock);
 	if (!mmd->have_inserted) {
@@ -770,50 +771,39 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 
 	down_write(&mmd->root_lock);
 	r = write_changed_details_(mmd);
-	if (r < 0) {
-		up_write(&mmd->root_lock);
-		return r;
-	}
+	if (r < 0)
+		goto out;
 
 	r = dm_tm_pre_commit(mmd->tm);
-	if (r < 0) {
-		up_write(&mmd->root_lock);
-		return r;
-	}
+	if (r < 0)
+		goto out;
 
 	r = dm_sm_root_size(mmd->metadata_sm, &len);
-	if (r < 0) {
-		up_write(&mmd->root_lock);
-		return r;
-	}
+	if (r < 0)
+		goto out;
 
-	{
-		struct superblock *sb = dm_block_data(mmd->sblock);
-		sb->time = __cpu_to_le64(mmd->time);
-		sb->data_mapping_root = __cpu_to_le64(mmd->root);
-		sb->device_details_root = __cpu_to_le64(mmd->details_root);
-		r = dm_sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
-		if (r < 0) {
-			up_write(&mmd->root_lock);
-			return r;
-		}
+	sb = dm_block_data(mmd->sblock);
+	sb->time = __cpu_to_le64(mmd->time);
+	sb->data_mapping_root = __cpu_to_le64(mmd->root);
+	sb->device_details_root = __cpu_to_le64(mmd->details_root);
+	r = dm_sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
+	if (r < 0)
+		goto out;
 
-		r = dm_sm_copy_root(mmd->data_sm, &sb->data_space_map_root, len);
-		if (r < 0) {
-			up_write(&mmd->root_lock);
-			return r;
-		}
-	}
+	r = dm_sm_copy_root(mmd->data_sm, &sb->data_space_map_root, len);
+	if (r < 0)
+		goto out;
 
-	r = dm_tm_commit(mmd->tm, mmd->sblock);
+	/* FIXME: unchecked dm_tm_commit() and begin() error codes? */
+	r = dm_tm_commit(mmd->tm, mmd->sblock);	
 
 	/* open the next transaction */
 	mmd->sblock = NULL;
 
 	/* FIXME: the semantics of failure are confusing here, did the commit fail, or the begin? */
 	r = begin(mmd);
+out:
 	up_write(&mmd->root_lock);
-
 	return r;
 }
 
