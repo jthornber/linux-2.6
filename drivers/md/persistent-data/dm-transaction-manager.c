@@ -430,10 +430,9 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 
 	disk = dm_sm_disk_open(*tm, dm_block_data(*sb) + root_offset,
 			       root_max_len);
-	if (!disk) {
+	if (IS_ERR(disk)) {
 		printk(KERN_ALERT "couldn't create disk space map");
-		/* FIXME: use IS_ERR/PTR_ERR on dm_sm_disk_open() ERR_PTR return? */
-		r = -ENOMEM;
+		r = PTR_ERR(disk);
 		goto fail_sb;
 	}
 

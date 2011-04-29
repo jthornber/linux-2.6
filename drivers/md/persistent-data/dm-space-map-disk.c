@@ -148,7 +148,7 @@ static int io_init(struct sm_disk *io,
 
 	if (io->block_size > (1 << 30)) {
 		printk(KERN_ALERT "block size too big to hold bitmaps");
-		return -1;
+		return -EINVAL;
 	}
 	io->entries_per_block = io->block_size * 4;
 	io->nr_blocks = 0;
@@ -552,24 +552,27 @@ EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 				     void *root, size_t len)
 {
+	int r;
 	struct dm_space_map *sm = NULL;
-	struct sm_disk *smd = alloc_smd(tm);
-	if (smd) {
-		int r;
-		r = io_open(smd, tm, root, len);
-		if (r < 0) {
-			kfree(smd);
-			return NULL;
-		}
+	struct sm_disk *smd;
 
-		sm = kmalloc(sizeof(*sm), GFP_KERNEL);
-		if (!sm) {
-			kfree(smd);
-		} else {
-			sm->ops = &ops_;
-			sm->context = smd;
-		}
+	smd = alloc_smd(tm);
+	if (!smd)
+		return ERR_PTR(-ENOMEM);
+
+	r = io_open(smd, tm, root, len);
+	if (r < 0) {
+		kfree(smd);
+		return ERR_PTR(r);
 	}
+
+	sm = kmalloc(sizeof(*sm), GFP_KERNEL);
+	if (!sm) {
+		kfree(smd);
+		return ERR_PTR(-ENOMEM);
+	}
+	sm->ops = &ops_;
+	sm->context = smd;
 
 	return sm;
 }
