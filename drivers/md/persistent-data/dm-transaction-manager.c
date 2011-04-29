@@ -1,4 +1,6 @@
 #include "dm-transaction-manager.h"
+#include "dm-space-map-staged.h"
+#include "dm-space-map-disk.h"
 
 #include <linux/slab.h>
 
@@ -28,15 +30,13 @@ struct dm_transaction_manager {
 /*----------------------------------------------------------------*/
 
 /* FIXME: similar code in block-manager */
-static unsigned
-hash_block(dm_block_t b)
+static unsigned hash_block(dm_block_t b)
 {
 	const unsigned BIG_PRIME = 4294967291UL;
 	return (((unsigned) b) * BIG_PRIME) & HASH_MASK;
 }
 
-static int
-is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
+static int is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	unsigned bucket = hash_block(b);
 	struct shadow_info *si;
@@ -53,11 +53,12 @@ is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
  * This can silently fail if there's no memory.  We're ok with this since
  * creating redundant shadows causes no harm.
  */
-static void
-insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
+static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	unsigned bucket;
-	struct shadow_info *si = kmalloc(sizeof(*si), GFP_NOIO);
+	struct shadow_info *si;
+
+	si = kmalloc(sizeof(*si), GFP_NOIO);
 	if (si) {
 		si->where = b;
 		bucket = hash_block(b);
@@ -68,11 +69,12 @@ insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 
 /*----------------------------------------------------------------*/
 
-struct dm_transaction_manager *
-dm_tm_create(struct dm_block_manager *bm,
-	     struct dm_space_map *sm)
+struct dm_transaction_manager * dm_tm_create(struct dm_block_manager *bm,
+					     struct dm_space_map *sm)
 {
-	struct dm_transaction_manager *tm = kmalloc(sizeof(*tm), GFP_KERNEL);
+	struct dm_transaction_manager *tm;
+
+	tm = kmalloc(sizeof(*tm), GFP_KERNEL);
 	if (tm) {
 		int i;
 
@@ -94,25 +96,25 @@ EXPORT_SYMBOL_GPL(dm_tm_create);
 struct dm_transaction_manager *
 dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real)
 {
-	struct dm_transaction_manager *tm = kmalloc(sizeof(*tm), GFP_KERNEL);
+	struct dm_transaction_manager *tm;
+
+	tm = kmalloc(sizeof(*tm), GFP_KERNEL);
 	if (tm) {
 		tm->is_clone = 1;
 		tm->real = real;
 	}
+
 	return tm;
 }
 EXPORT_SYMBOL_GPL(dm_tm_create_non_blocking_clone);
 
-void
-dm_tm_destroy(struct dm_transaction_manager *tm)
+void dm_tm_destroy(struct dm_transaction_manager *tm)
 {
 	kfree(tm);
 }
 EXPORT_SYMBOL_GPL(dm_tm_destroy);
 
-int
-dm_tm_reserve_block(struct dm_transaction_manager *tm,
-		    dm_block_t b)
+int dm_tm_reserve_block(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
@@ -121,15 +123,13 @@ dm_tm_reserve_block(struct dm_transaction_manager *tm,
 }
 EXPORT_SYMBOL_GPL(dm_tm_reserve_block);
 
-int
-dm_tm_begin(struct dm_transaction_manager *tm)
+int dm_tm_begin(struct dm_transaction_manager *tm)
 {
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_tm_begin);
 
-int
-dm_tm_pre_commit(struct dm_transaction_manager *tm)
+int dm_tm_pre_commit(struct dm_transaction_manager *tm)
 {
 	int r;
 
@@ -144,9 +144,7 @@ dm_tm_pre_commit(struct dm_transaction_manager *tm)
 }
 EXPORT_SYMBOL_GPL(dm_tm_pre_commit);
 
-int
-dm_tm_commit(struct dm_transaction_manager *tm,
-	     struct dm_block *root)
+int dm_tm_commit(struct dm_transaction_manager *tm, struct dm_block *root)
 {
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
@@ -155,55 +153,51 @@ dm_tm_commit(struct dm_transaction_manager *tm,
 }
 EXPORT_SYMBOL_GPL(dm_tm_commit);
 
-int
-dm_tm_alloc_block(struct dm_transaction_manager *tm,
-		  dm_block_t *new)
+int dm_tm_alloc_block(struct dm_transaction_manager *tm, dm_block_t *new_block)
+		      
 {
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
-	return dm_sm_new_block(tm->sm, new);
+	return dm_sm_new_block(tm->sm, new_block);
 }
 EXPORT_SYMBOL_GPL(dm_tm_alloc_block);
 
-int
-dm_tm_new_block(struct dm_transaction_manager *tm,
-		struct dm_block **result)
+int dm_tm_new_block(struct dm_transaction_manager *tm, struct dm_block **result)
 {
 	int r;
-	dm_block_t new;
+	dm_block_t new_block;
 
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
-	r = dm_sm_new_block(tm->sm, &new);
+	r = dm_sm_new_block(tm->sm, &new_block);
 	if (r < 0)
 		return r;
 
-	r = dm_bm_write_lock_zero(tm->bm, new, result);
+	r = dm_bm_write_lock_zero(tm->bm, new_block, result);
 	if (r < 0) {
-		dm_sm_dec_block(tm->sm, new);
+		dm_sm_dec_block(tm->sm, new_block);
 		return r;
 	}
 
-	/* New blocks count as shadows, in that they don't need to be
+	/*
+	 * New blocks count as shadows, in that they don't need to be
 	 * shadowed again.
 	 */
-	insert_shadow(tm, new);
+	insert_shadow(tm, new_block);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_tm_new_block);
 
-static int
-shadow_block_(struct dm_transaction_manager *tm,
-	      dm_block_t orig,
-	      struct dm_block **result,
-	      int *inc_children)
+static int shadow_block_(struct dm_transaction_manager *tm, dm_block_t orig,
+			 struct dm_block **result, int *inc_children)
 {
 	int r;
 	dm_block_t new;
 	uint32_t count;
-	struct dm_block *origb;
+	struct dm_block *orig_block;
 
 	r = dm_sm_new_block(tm->sm, &new);
 	if (r < 0) {
@@ -218,15 +212,14 @@ shadow_block_(struct dm_transaction_manager *tm,
 		return r;
 	}
 
-	r = dm_bm_read_lock(tm->bm, orig, &origb);
+	r = dm_bm_read_lock(tm->bm, orig, &orig_block);
 	if (r < 0) {
 		dm_sm_dec_block(tm->sm, new);
 		return r;
 	}
-	memcpy(dm_block_data(*result),
-	       dm_block_data(origb),
+	memcpy(dm_block_data(*result), dm_block_data(orig_block),
 	       dm_bm_block_size(tm->bm));
-	r = dm_bm_unlock(origb);
+	r = dm_bm_unlock(orig_block);
 	if (r < 0) {
 		dm_sm_dec_block(tm->sm, new);
 		return r;
@@ -269,12 +262,10 @@ dm_tm_shadow_block(struct dm_transaction_manager *tm,
 		r = dm_sm_get_count(tm->sm, orig, &count);
 		if (r < 0)
 			return r;
-
 		if (count < 2) {
 			*inc_children = 0;
 			return dm_bm_write_lock(tm->bm, orig, result);
 		}
-
 		/* fall through */
 	}
 
@@ -285,51 +276,43 @@ dm_tm_shadow_block(struct dm_transaction_manager *tm,
 		return r;
 	tm->shadow_count++;
 	insert_shadow(tm, dm_block_location(*result));
+
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_tm_shadow_block);
 
-int
-dm_tm_read_lock(struct dm_transaction_manager *tm,
-		dm_block_t b,
-		struct dm_block **blk)
+int dm_tm_read_lock(struct dm_transaction_manager *tm, dm_block_t b,
+		    struct dm_block **blk)
 {
-	return tm->is_clone ?
-		dm_bm_read_try_lock(tm->real->bm, b, blk) :
-		dm_bm_read_lock(tm->bm, b, blk);
+	if (tm->is_clone)
+		return dm_bm_read_try_lock(tm->real->bm, b, blk);
+
+	return dm_bm_read_lock(tm->bm, b, blk);
 }
 EXPORT_SYMBOL_GPL(dm_tm_read_lock);
 
-int
-dm_tm_unlock(struct dm_transaction_manager *tm,
-	     struct dm_block *b)
+int dm_tm_unlock(struct dm_transaction_manager *tm, struct dm_block *b)
 {
 	return dm_bm_unlock(b);
 }
 EXPORT_SYMBOL_GPL(dm_tm_unlock);
 
-void
-dm_tm_inc(struct dm_transaction_manager *tm,
-	  dm_block_t b)
+void dm_tm_inc(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	BUG_ON(tm->is_clone);
 	dm_sm_inc_block(tm->sm, b);
 }
 EXPORT_SYMBOL_GPL(dm_tm_inc);
 
-void
-dm_tm_dec(struct dm_transaction_manager *tm,
-	  dm_block_t b)
+void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	BUG_ON(tm->is_clone);
 	dm_sm_dec_block(tm->sm, b);
 }
 EXPORT_SYMBOL_GPL(dm_tm_dec);
 
-int
-dm_tm_ref(struct dm_transaction_manager *tm,
-	  dm_block_t b,
-	  uint32_t *result)
+int dm_tm_ref(struct dm_transaction_manager *tm, dm_block_t b,
+	      uint32_t *result)
 {
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
@@ -338,8 +321,7 @@ dm_tm_ref(struct dm_transaction_manager *tm,
 }
 EXPORT_SYMBOL_GPL(dm_tm_ref);
 
-struct dm_block_manager *
-dm_tm_get_bm(struct dm_transaction_manager *tm)
+struct dm_block_manager *dm_tm_get_bm(struct dm_transaction_manager *tm)
 {
 	BUG_ON(tm->is_clone);
 	return tm->bm;
@@ -348,19 +330,14 @@ EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 
 /*----------------------------------------------------------------*/
 
-// FIXME: does this belong here ?
-#include "dm-space-map-staged.h"
-#include "dm-space-map-disk.h"
-
-int
-dm_tm_create_with_sm(struct dm_block_manager *bm,
-		     dm_block_t superblock,
-		     struct dm_transaction_manager **tm,
-		     struct dm_space_map **sm,
-		     struct dm_block **sb)
+int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
+			 struct dm_transaction_manager **tm,
+			 struct dm_space_map **sm, struct dm_block **sb)
 {
 	int r;
-	struct dm_space_map *dummy = dm_sm_dummy_create(dm_bm_nr_blocks(bm)), *disk, *staged;
+	struct dm_space_map *dummy, *disk, *staged;
+
+	dummy = dm_sm_dummy_create(dm_bm_nr_blocks(bm));
 
 	staged = dm_sm_staged_create(dummy);
 	if (!staged) {
@@ -405,21 +382,20 @@ dm_tm_create_with_sm(struct dm_block_manager *bm,
 
 	dm_sm_destroy(dummy);
 	*sm = staged;
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_tm_create_with_sm);
 
-int
-dm_tm_open_with_sm(struct dm_block_manager *bm,
-		   dm_block_t superblock,
-		   size_t root_offset,
-		   size_t root_max_len,
-		   struct dm_transaction_manager **tm,
-		   struct dm_space_map **sm,
-		   struct dm_block **sb)
+int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
+		       size_t root_offset, size_t root_max_len,
+		       struct dm_transaction_manager **tm,
+		       struct dm_space_map **sm, struct dm_block **sb)
 {
 	int r;
-	struct dm_space_map *dummy = dm_sm_dummy_create(dm_bm_nr_blocks(bm)), *disk, *staged;
+	struct dm_space_map *dummy, *disk, *staged;
+
+	dummy = dm_sm_dummy_create(dm_bm_nr_blocks(bm));
 
 	staged = dm_sm_staged_create(dummy);
 	if (!staged) {
@@ -479,12 +455,10 @@ dm_tm_open_with_sm(struct dm_block_manager *bm,
 	dm_sm_destroy(dummy);
 	*sm = staged;
 	return 0;
-
 }
 EXPORT_SYMBOL_GPL(dm_tm_open_with_sm);
 
-unsigned
-dm_tm_shadow_count(struct dm_transaction_manager *tm)
+unsigned dm_tm_shadow_count(struct dm_transaction_manager *tm)
 {
 	return tm->shadow_count;
 }
