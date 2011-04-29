@@ -146,7 +146,7 @@ static struct dm_multisnap_metadata *alloc_(struct dm_block_manager *bm,
 		}
 
 		data_sm = dm_sm_disk_create(tm, nr_blocks);
-		if (!data_sm) {
+		if (IS_ERR(data_sm)) {
 			printk(KERN_ALERT "sm_disk_create");
 			goto bad;
 		}

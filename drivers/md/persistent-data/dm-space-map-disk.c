@@ -527,26 +527,27 @@ static struct dm_space_map_ops ops_ = {
 struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 				       dm_block_t nr_blocks)
 {
+	int r;
 	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd;
 	
 	smd = alloc_smd(tm);
-	if (smd) {
-		int r;
-		r = io_new(smd, tm, nr_blocks);
-		if (r < 0) {
-			kfree(smd);
-			return NULL;
-		}
+	if (!smd)
+		return ERR_PTR(-ENOMEM);
 
-		sm = kmalloc(sizeof(*sm), GFP_KERNEL);
-		if (!sm) {
-			kfree(smd);
-		} else {
-			sm->ops = &ops_;
-			sm->context = smd;
-		}
+	r = io_new(smd, tm, nr_blocks);
+	if (r < 0) {
+		kfree(smd);
+		return ERR_PTR(r);
 	}
+
+	sm = kmalloc(sizeof(*sm), GFP_KERNEL);
+	if (!sm) {
+		kfree(smd);
+		return ERR_PTR(-ENOMEM);
+	}
+	sm->ops = &ops_;
+	sm->context = smd;
 
 	return sm;
 }

@@ -368,9 +368,9 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 	}
 
 	disk = dm_sm_disk_create(*tm, dm_bm_nr_blocks(bm));
-	if (!disk) {
+	if (IS_ERR(disk)) {
 		printk(KERN_ALERT "couldn't create disk space map");
-		return -ENOMEM;
+		return PTR_ERR(disk);
 	}
 
 	/* ... now we swap the dummy out and the disk in ... */
