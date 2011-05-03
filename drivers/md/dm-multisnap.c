@@ -163,7 +163,7 @@ static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 }
 
 /* @inmates must have been initialised prior to this call */
-static void cell_release_(struct cell *cell, struct bio_list *inmates)
+static void __cell_release(struct cell *cell, struct bio_list *inmates)
 {
 	struct bio_prison *prison = cell->prison;
 	hlist_del(&cell->list);
@@ -177,7 +177,7 @@ static void cell_release(struct cell *cell, struct bio_list *bios)
 	struct bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	cell_release_(cell, bios);
+	__cell_release(cell, bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
 
@@ -191,7 +191,7 @@ static void cell_error(struct cell *cell)
 	bio_list_init(&bios);
 
 	spin_lock_irqsave(&prison->lock, flags);
-	cell_release_(cell, &bios);
+	__cell_release(cell, &bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
@@ -1170,7 +1170,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_delete(pool->mmd, dev_id);
+		r = dm_multisnap_metadata_delete_device(pool->mmd, dev_id);
 
 	} else
 		return -EINVAL;

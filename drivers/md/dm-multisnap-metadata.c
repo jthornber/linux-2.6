@@ -127,8 +127,8 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	return dm_bm_unlock(b);
 }
 
-static struct dm_multisnap_metadata *alloc_(struct dm_block_manager *bm,
-					    dm_block_t nr_blocks, int create)
+static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
+					       dm_block_t nr_blocks, int create)
 {
 	int r;
 	struct dm_space_map *sm, *data_sm;
@@ -309,7 +309,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 		return NULL;
 	}
 
-	mmd = alloc_(bm, data_dev_size, create);
+	mmd = alloc_mmd(bm, data_dev_size, create);
 	if (!mmd)
 		return NULL;
 	mmd->bdev = bdev;
@@ -391,8 +391,9 @@ int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd)
 	return 0;
 }
 
-static int open_device_(struct dm_multisnap_metadata *mmd, dm_multisnap_dev_t dev,
-			int create, struct dm_ms_device **msd)
+static int __open_device(struct dm_multisnap_metadata *mmd,
+			 dm_multisnap_dev_t dev, int create,
+			 struct dm_ms_device **msd)
 {
 	int r, changed = 0;
 	struct dm_ms_device *msd2;
@@ -437,8 +438,8 @@ static int open_device_(struct dm_multisnap_metadata *mmd, dm_multisnap_dev_t de
 	return 0;
 }
 
-static int create_thin_(struct dm_multisnap_metadata *mmd,
-			dm_multisnap_dev_t dev, dm_block_t dev_size)
+static int __create_thin(struct dm_multisnap_metadata *mmd,
+			 dm_multisnap_dev_t dev, dm_block_t dev_size)
 {
 	int r;
 	dm_block_t dev_root;
@@ -464,7 +465,7 @@ static int create_thin_(struct dm_multisnap_metadata *mmd,
 		return r;
 	}
 
-	r = open_device_(mmd, dev, 1, &msd);
+	r = __open_device(mmd, dev, 1, &msd);
 	if (r) {
 		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 		dm_btree_del(&mmd->bl_info, dev_root);
@@ -482,20 +483,20 @@ int dm_multisnap_metadata_create_thin(struct dm_multisnap_metadata *mmd,
 	int r;
 
 	down_write(&mmd->root_lock);
-	r = create_thin_(mmd, dev, dev_size);
+	r = __create_thin(mmd, dev, dev_size);
 	up_write(&mmd->root_lock);
 
 	return r;
 }
 
-static int snapshot_details_(struct dm_multisnap_metadata *mmd,
-			     struct dm_ms_device *snap,
-			     dm_multisnap_dev_t origin, uint32_t time)
+static int __set_snapshot_details(struct dm_multisnap_metadata *mmd,
+				  struct dm_ms_device *snap,
+				  dm_multisnap_dev_t origin, uint32_t time)
 {
 	int r;
 	struct dm_ms_device *msd;
 
-	r = open_device_(mmd, origin, 0, &msd);
+	r = __open_device(mmd, origin, 0, &msd);
 	if (r)
 		return r;
 
@@ -509,8 +510,8 @@ static int snapshot_details_(struct dm_multisnap_metadata *mmd,
 	return 0;
 }
 
-static int create_snap_(struct dm_multisnap_metadata *mmd,
-			dm_multisnap_dev_t dev, dm_multisnap_dev_t origin)
+static int __create_snap(struct dm_multisnap_metadata *mmd,
+			 dm_multisnap_dev_t dev, dm_multisnap_dev_t origin)
 {
 	int r;
 	dm_block_t origin_root, snap_root;
@@ -540,14 +541,14 @@ static int create_snap_(struct dm_multisnap_metadata *mmd,
 
 	mmd->time++;
 
-	r = open_device_(mmd, dev, 1, &msd);
+	r = __open_device(mmd, dev, 1, &msd);
 	if (r) {
 		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 		dm_btree_remove(&mmd->details_info, mmd->details_root,
 				&key, &mmd->details_root);
 	}
 
-	r = snapshot_details_(mmd, msd, origin, mmd->time);
+	r = __set_snapshot_details(mmd, msd, origin, mmd->time);
 	if (r) {
 		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 		dm_btree_remove(&mmd->details_info, mmd->details_root,
@@ -564,26 +565,27 @@ int dm_multisnap_metadata_create_snap(struct dm_multisnap_metadata *mmd,
 	int r;
 
 	down_write(&mmd->root_lock);
-	r = create_snap_(mmd, dev, origin);
+	r = __create_snap(mmd, dev, origin);
 	up_write(&mmd->root_lock);
 
 	return r;
 }
 
-static int delete_(struct dm_multisnap_metadata *mmd, dm_multisnap_dev_t dev)
+static int __delete_device(struct dm_multisnap_metadata *mmd,
+			   dm_multisnap_dev_t dev)
 {
 	uint64_t key = dev;
 
 	return dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 }
 
-int dm_multisnap_metadata_delete(struct dm_multisnap_metadata *mmd,
-				 dm_multisnap_dev_t dev)
+int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
+					dm_multisnap_dev_t dev)
 {
 	int r;
 
 	down_write(&mmd->root_lock);
-	r = delete_(mmd, dev);
+	r = __delete_device(mmd, dev);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -596,7 +598,7 @@ int dm_multisnap_metadata_open_device(struct dm_multisnap_metadata *mmd,
 	int r;
 
 	down_write(&mmd->root_lock);
-	r = open_device_(mmd, dev, 0, msd);
+	r = __open_device(mmd, dev, 0, msd);
 	if (!r) {
 		if ((*msd)->is_open)
 			r = -EBUSY;
@@ -633,7 +635,7 @@ static void unpack_dm_block_time(uint64_t v, dm_block_t *b, uint32_t *t)
 	*t = v & ((1 << 24) - 1);
 }
 
-static int snapshotted_since_(struct dm_ms_device *msd, uint32_t time)
+static int __snapshotted_since(struct dm_ms_device *msd, uint32_t time)
 {
 	return msd->snapshotted_time > time;
 }
@@ -672,7 +674,7 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 		unpack_dm_block_time(dm_block_time, &exception_block,
 				     &exception_time);
 		result->block = exception_block;
-		result->shared = snapshotted_since_(msd, exception_time);
+		result->shared = __snapshotted_since(msd, exception_time);
 	}
 
 	return r;
@@ -725,7 +727,7 @@ int dm_multisnap_metadata_free_data_block(struct dm_ms_device *msd,
 	return r;
 }
 
-static int write_changed_details_(struct dm_multisnap_metadata *mmd)
+static int __write_changed_details(struct dm_multisnap_metadata *mmd)
 {
 	int r;
 	struct dm_ms_device *msd, *tmp;
@@ -770,7 +772,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	up_read(&mmd->root_lock);
 
 	down_write(&mmd->root_lock);
-	r = write_changed_details_(mmd);
+	r = __write_changed_details(mmd);
 	if (r < 0)
 		goto out;
 

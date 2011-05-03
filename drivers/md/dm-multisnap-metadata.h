@@ -51,8 +51,8 @@ dm_multisnap_metadata_create_snap(struct dm_multisnap_metadata *mmd,
  * failing.  You still need to call close() on the device.
  */
 int
-dm_multisnap_metadata_delete(struct dm_multisnap_metadata *mmd,
-			     dm_multisnap_dev_t dev);
+dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
+				    dm_multisnap_dev_t dev);
 
 /*
  * Commits _all_ metadata changes: device creation, deletion, mapping
