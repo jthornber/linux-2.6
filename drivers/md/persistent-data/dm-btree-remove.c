@@ -386,13 +386,13 @@ static int rebalance_children(struct shadow_spine *s,
 	int i, r, has_left_sibling, has_right_sibling;
 	uint32_t child_entries;
 	struct node *n;
-	dm_block_t b;
-	struct dm_block *child;
 
 	n = to_node(shadow_current(s));
 
 	if (__le32_to_cpu(n->header.nr_entries) == 1) {
-		b = value64(n, 0);
+		struct dm_block *child;
+		dm_block_t b = value64(n, 0);
+
 		r = dm_tm_read_lock(info->tm, b, &child);
 		if (r)
 			return r;

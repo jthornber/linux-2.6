@@ -386,8 +386,6 @@ static int sm_staged_commit(void *context)
 {
 	int r;
 	unsigned i;
-	struct cache_entry *ce;
-	struct hlist_node *l, *tmp;
 	struct sm_staged *sm = (struct sm_staged *) context;
 
 	while (!list_empty(&sm->deltas)) {
@@ -398,6 +396,9 @@ static int sm_staged_commit(void *context)
 
 	/* wipe the cache completely */
 	for (i = 0; i < NR_BUCKETS; i++) {
+		struct cache_entry *ce;
+		struct hlist_node *l, *tmp;
+
 		hlist_for_each_entry_safe (ce, l, tmp, sm->buckets + i, hash)
 			mempool_free(ce, sm->pool);
 		INIT_HLIST_HEAD(sm->buckets + i);
