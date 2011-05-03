@@ -80,7 +80,9 @@ static struct dm_space_map_ops ops_ = {
 struct dm_space_map *dm_sm_dummy_create(dm_block_t nr_blocks)
 {
 	struct dm_space_map *sm = NULL;
-	struct sm_dummy *smc = kmalloc(sizeof(*smc), GFP_KERNEL);
+	struct sm_dummy *smc;
+
+	smc = kmalloc(sizeof(*smc), GFP_KERNEL);
 	if (smc) {
 		smc->nr_blocks = nr_blocks;
 		sm = kmalloc(sizeof(*sm), GFP_KERNEL);

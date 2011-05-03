@@ -47,7 +47,8 @@ static int get_free(void *context, dm_block_t *b)
 	return -ENOSPC;
 }
 
-static int get_free_in_range(void *context, dm_block_t low, dm_block_t high, dm_block_t *b)
+static int get_free_in_range(void *context, dm_block_t low,
+			     dm_block_t high, dm_block_t *b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	dm_block_t i;
@@ -117,6 +118,7 @@ static int dec_block(void *context, dm_block_t b)
 static int get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_core *sm = (struct sm_core *) context;
+
 	if (b >= sm->nr)
 		return -EINVAL;
 
@@ -127,6 +129,7 @@ static int get_count(void *context, dm_block_t b, uint32_t *result)
 static int set_count(void *context, dm_block_t b, uint32_t count)
 {
 	struct sm_core *sm = (struct sm_core *) context;
+
 	if (b >= sm->nr)
 		return -EINVAL;
 
@@ -165,7 +168,9 @@ struct dm_space_map *dm_sm_core_create(dm_block_t nr_blocks)
 {
 	struct dm_space_map *sm = NULL;
 	size_t array_size = nr_blocks * sizeof(uint32_t);
-	struct sm_core *smc = kmalloc(sizeof(*smc) + array_size, GFP_KERNEL);
+	struct sm_core *smc;
+
+	smc = kmalloc(sizeof(*smc) + array_size, GFP_KERNEL);
 	if (smc) {
 		smc->nr = nr_blocks;
 		smc->nr_free = nr_blocks;
