@@ -399,13 +399,13 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 
 /*----------------------------------------------------------------*/
 
-static void destroy(void *context)
+static void sm_disk_destroy(void *context)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	kfree(smd);
 }
 
-static int get_nr_blocks(void *context, dm_block_t *count)
+static int sm_disk_get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 
@@ -413,7 +413,7 @@ static int get_nr_blocks(void *context, dm_block_t *count)
 	return 0;
 }
 
-static int get_nr_free(void *context, dm_block_t *count)
+static int sm_disk_get_nr_free(void *context, dm_block_t *count)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 
@@ -421,7 +421,7 @@ static int get_nr_free(void *context, dm_block_t *count)
 	return 0;
 }
 
-static int get_count(void *context, dm_block_t b, uint32_t *result)
+static int sm_disk_get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return io_lookup(smd, b, result);
@@ -433,7 +433,7 @@ static int set_count_(void *context, dm_block_t b, uint32_t count)
 	return io_insert(smd, b, count);
 }
 
-static int set_count(void *context, dm_block_t b, uint32_t count)
+static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
 {
 	int r;
 	struct sm_disk *smd = (struct sm_disk *) context;
@@ -464,19 +464,19 @@ static int get_free_(void *context, dm_block_t low, dm_block_t high,
 	return 0;
 }
 
-static int get_free(void *context, dm_block_t *b)
+static int sm_disk_get_free(void *context, dm_block_t *b)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return get_free_(context, 0, smd->nr_blocks, b);
 }
 
-static int get_free_in_range(void *context, dm_block_t low, dm_block_t high,
-			     dm_block_t *b)
+static int sm_disk_get_free_in_range(void *context, dm_block_t low,
+				     dm_block_t high, dm_block_t *b)
 {
 	return get_free_(context, low, high, b);
 }
 
-static int commit(void *context)
+static int sm_disk_commit(void *context)
 {
 	/*
 	 * We don't need to do anything here other than drop all held block
@@ -485,13 +485,13 @@ static int commit(void *context)
 	return 0;
 }
 
-static int root_size(void *context, size_t *result)
+static int sm_disk_root_size(void *context, size_t *result)
 {
 	*result = sizeof(struct sm_root);
 	return 0;
 }
 
-static int copy_root(void *context, void *where, size_t max)
+static int sm_disk_copy_root(void *context, void *where, size_t max)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	struct sm_root root;
@@ -512,16 +512,16 @@ static int copy_root(void *context, void *where, size_t max)
 /*----------------------------------------------------------------*/
 
 static struct dm_space_map_ops ops_ = {
-	.destroy = destroy,
-	.get_nr_blocks = get_nr_blocks,
-	.get_nr_free = get_nr_free,
-	.get_count = get_count,
-	.set_count = set_count,
-	.get_free = get_free,
-	.get_free_in_range = get_free_in_range,
-	.commit = commit,
-	.root_size = root_size,
-	.copy_root = copy_root
+	.destroy = sm_disk_destroy,
+	.get_nr_blocks = sm_disk_get_nr_blocks,
+	.get_nr_free = sm_disk_get_nr_free,
+	.get_count = sm_disk_get_count,
+	.set_count = sm_disk_set_count,
+	.get_free = sm_disk_get_free,
+	.get_free_in_range = sm_disk_get_free_in_range,
+	.commit = sm_disk_commit,
+	.root_size = sm_disk_root_size,
+	.copy_root = sm_disk_copy_root
 };
 
 struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,

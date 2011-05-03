@@ -11,27 +11,27 @@ struct sm_core {
 	uint32_t counts[0];
 };
 
-static void destroy(void *context)
+static void sm_core_destroy(void *context)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	kfree(sm);
 }
 
-static int get_nr_blocks(void *context, dm_block_t *count)
+static int sm_core_get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	*count = sm->nr;
 	return 0;
 }
 
-static int get_nr_free(void *context, dm_block_t *count)
+static int sm_core_get_nr_free(void *context, dm_block_t *count)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	*count = sm->nr_free;
 	return 0;
 }
 
-static int get_free(void *context, dm_block_t *b)
+static int sm_core_get_free(void *context, dm_block_t *b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	dm_block_t i;
@@ -47,8 +47,8 @@ static int get_free(void *context, dm_block_t *b)
 	return -ENOSPC;
 }
 
-static int get_free_in_range(void *context, dm_block_t low,
-			     dm_block_t high, dm_block_t *b)
+static int sm_core_get_free_in_range(void *context, dm_block_t low,
+				     dm_block_t high, dm_block_t *b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	dm_block_t i;
@@ -67,7 +67,7 @@ static int get_free_in_range(void *context, dm_block_t low,
 	return -ENOSPC;
 }
 
-static int new_block(void *context, dm_block_t *b)
+static int sm_core_new_block(void *context, dm_block_t *b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	dm_block_t i;
@@ -85,7 +85,7 @@ static int new_block(void *context, dm_block_t *b)
 	return -ENOSPC;
 }
 
-static int inc_block(void *context, dm_block_t b)
+static int sm_core_inc_block(void *context, dm_block_t b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	if (b >= sm->nr)
@@ -97,7 +97,7 @@ static int inc_block(void *context, dm_block_t b)
 	return 0;
 }
 
-static int dec_block(void *context, dm_block_t b)
+static int sm_core_dec_block(void *context, dm_block_t b)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 	if (b >= sm->nr)
@@ -115,7 +115,7 @@ static int dec_block(void *context, dm_block_t b)
 	return 0;
 }
 
-static int get_count(void *context, dm_block_t b, uint32_t *result)
+static int sm_core_get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 
@@ -126,7 +126,7 @@ static int get_count(void *context, dm_block_t b, uint32_t *result)
 	return 0;
 }
 
-static int set_count(void *context, dm_block_t b, uint32_t count)
+static int sm_core_set_count(void *context, dm_block_t b, uint32_t count)
 {
 	struct sm_core *sm = (struct sm_core *) context;
 
@@ -143,7 +143,7 @@ static int set_count(void *context, dm_block_t b, uint32_t count)
 	return 0;
 }
 
-static int commit(void *context)
+static int sm_core_commit(void *context)
 {
 	return 0;
 }
@@ -151,17 +151,17 @@ static int commit(void *context)
 /*----------------------------------------------------------------*/
 
 static struct dm_space_map_ops ops_ = {
-	.destroy = destroy,
-	.get_nr_blocks = get_nr_blocks,
-	.get_nr_free = get_nr_free,
-	.get_free = get_free,
-	.get_free_in_range = get_free_in_range,
-	.inc_block = inc_block,
-	.dec_block = dec_block,
-	.new_block = new_block,
-	.get_count = get_count,
-	.set_count = set_count,
-	.commit = commit
+	.destroy = sm_core_destroy,
+	.get_nr_blocks = sm_core_get_nr_blocks,
+	.get_nr_free = sm_core_get_nr_free,
+	.get_free = sm_core_get_free,
+	.get_free_in_range = sm_core_get_free_in_range,
+	.inc_block = sm_core_inc_block,
+	.dec_block = sm_core_dec_block,
+	.new_block = sm_core_new_block,
+	.get_count = sm_core_get_count,
+	.set_count = sm_core_set_count,
+	.commit = sm_core_commit
 };
 
 struct dm_space_map *dm_sm_core_create(dm_block_t nr_blocks)

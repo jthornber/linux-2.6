@@ -242,7 +242,7 @@ static int flush_once(struct sm_staged *sm)
 
 /*----------------------------------------------------------------*/
 
-static void destroy(void *context)
+static void sm_staged_destroy(void *context)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	struct cache_entry *ce, *tmp;
@@ -258,13 +258,13 @@ static void destroy(void *context)
 	kfree(sm);
 }
 
-static int get_nr_blocks(void *context, dm_block_t *count)
+static int sm_staged_get_nr_blocks(void *context, dm_block_t *count)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return dm_sm_get_nr_blocks(sm->sm_wrapped, count);
 }
 
-static int get_nr_free(void *context, dm_block_t *count)
+static int sm_staged_get_nr_free(void *context, dm_block_t *count)
 {
 	int r;
 	struct sm_staged *sm = (struct sm_staged *) context;
@@ -277,7 +277,7 @@ static int get_nr_free(void *context, dm_block_t *count)
 	return 0;
 }
 
-static int get_count(void *context, dm_block_t b, uint32_t *result)
+static int sm_staged_get_count(void *context, dm_block_t b, uint32_t *result)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	struct cache_entry *ce = find_entry(sm, b);
@@ -290,7 +290,7 @@ static int get_count(void *context, dm_block_t b, uint32_t *result)
 	return dm_sm_get_count(sm->sm_wrapped, b, result);
 }
 
-static int set_count(void *context, dm_block_t b, uint32_t count)
+static int sm_staged_set_count(void *context, dm_block_t b, uint32_t count)
 {
 	/* FIXME: inefficient */
 	int r;
@@ -298,7 +298,7 @@ static int set_count(void *context, dm_block_t b, uint32_t count)
 	int32_t delta;
 	struct sm_staged *sm = (struct sm_staged *) context;
 
-	r = get_count(context, b, &old_count);
+	r = sm_staged_get_count(context, b, &old_count);
 	if (r < 0)
 		return r;
 
@@ -310,8 +310,8 @@ static int set_count(void *context, dm_block_t b, uint32_t count)
 	return add_delta(sm, b, delta);
 }
 
-static int get_free_in_range(void *context, dm_block_t low, dm_block_t high,
-			     dm_block_t *b)
+static int sm_staged_get_free_in_range(void *context, dm_block_t low,
+				       dm_block_t high, dm_block_t *b)
 {
 	int r;
 	struct sm_staged *sm = (struct sm_staged *) context;
@@ -324,7 +324,8 @@ static int get_free_in_range(void *context, dm_block_t low, dm_block_t high,
 	*b = ce->block;
 	return r;
 }
-static int get_free(void *context, dm_block_t *b)
+
+static int sm_staged_get_free(void *context, dm_block_t *b)
 {
 	int r;
 	dm_block_t nr_blocks;
@@ -334,22 +335,22 @@ static int get_free(void *context, dm_block_t *b)
 	if (r < 0)
 		return r;
 
-	return get_free_in_range(context, 0, nr_blocks, b);
+	return sm_staged_get_free_in_range(context, 0, nr_blocks, b);
 }
 
-static int inc_block(void *context, dm_block_t b)
+static int sm_staged_inc_block(void *context, dm_block_t b)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return add_delta(sm, b, 1);
 }
 
-static int dec_block(void *context, dm_block_t b)
+static int sm_staged_dec_block(void *context, dm_block_t b)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return add_delta(sm, b, -1);
 }
 
-static int new_block(void *context, dm_block_t *b)
+static int sm_staged_new_block(void *context, dm_block_t *b)
 {
 	int r;
 	dm_block_t nr_blocks;
@@ -369,19 +370,19 @@ static int new_block(void *context, dm_block_t *b)
 	return r;
 }
 
-static int root_size(void *context, size_t *result)
+static int sm_staged_root_size(void *context, size_t *result)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return dm_sm_root_size(sm->sm_wrapped, result);
 }
 
-static int copy_root(void *context, void *copy_to_here, size_t len)
+static int sm_staged_copy_root(void *context, void *copy_to_here, size_t len)
 {
 	struct sm_staged *sm = (struct sm_staged *) context;
 	return dm_sm_copy_root(sm->sm_wrapped, copy_to_here, len);
 }
 
-static int commit(void *context)
+static int sm_staged_commit(void *context)
 {
 	int r;
 	unsigned i;
@@ -409,19 +410,19 @@ static int commit(void *context)
 /*----------------------------------------------------------------*/
 
 static struct dm_space_map_ops combined_ops_ = {
-	.destroy = destroy,
-	.get_nr_blocks = get_nr_blocks,
-	.get_nr_free = get_nr_free,
-	.get_count = get_count,
-	.set_count = set_count,
-	.get_free = get_free,
-	.get_free_in_range = get_free_in_range,
-	.inc_block = inc_block,
-	.dec_block = dec_block,
-	.new_block = new_block,
-	.root_size = root_size,
-	.copy_root = copy_root,
-	.commit = commit,
+	.destroy = sm_staged_destroy,
+	.get_nr_blocks = sm_staged_get_nr_blocks,
+	.get_nr_free = sm_staged_get_nr_free,
+	.get_count = sm_staged_get_count,
+	.set_count = sm_staged_set_count,
+	.get_free = sm_staged_get_free,
+	.get_free_in_range = sm_staged_get_free_in_range,
+	.inc_block = sm_staged_inc_block,
+	.dec_block = sm_staged_dec_block,
+	.new_block = sm_staged_new_block,
+	.root_size = sm_staged_root_size,
+	.copy_root = sm_staged_copy_root,
+	.commit = sm_staged_commit,
 };
 
 struct dm_space_map *dm_sm_staged_create(struct dm_space_map *wrappee)
