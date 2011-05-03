@@ -1,7 +1,7 @@
-obj-$(CONFIG_DM_PERSISTENT_DATA) += persistent-data.o
-persistent-data-objs := \
+obj-$(CONFIG_DM_PERSISTENT_DATA) += dm-persistent-data.o
+dm-persistent-data-objs := \
 	dm-block-manager.o \
-	pd-module.o \
+	dm-pd-module.o \
 	dm-space-map-core.o \
 	dm-space-map-disk.o \
 	dm-space-map-staged.o \
