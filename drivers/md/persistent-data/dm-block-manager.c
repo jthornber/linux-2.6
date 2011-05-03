@@ -102,20 +102,20 @@ static unsigned hash_block(struct dm_block_manager *bm, dm_block_t b)
 	return (((unsigned) b) * BIG_PRIME) & bm->hash_mask;
 }
 
-static struct dm_block *find_block_(struct dm_block_manager *bm, dm_block_t b)
+static struct dm_block *__find_block(struct dm_block_manager *bm, dm_block_t b)
 {
 	unsigned bucket = hash_block(bm, b);
 	struct dm_block *blk;
 	struct hlist_node *n;
 
-	hlist_for_each_entry (blk, n, bm->buckets + bucket, hlist)
+	hlist_for_each_entry(blk, n, bm->buckets + bucket, hlist)
 		if (blk->where == b)
 			return blk;
 
 	return NULL;
 }
 
-static void insert_block_(struct dm_block_manager *bm, struct dm_block *b)
+static void __insert_block(struct dm_block_manager *bm, struct dm_block *b)
 {
 	unsigned bucket = hash_block(bm, b->where);
 
@@ -124,7 +124,7 @@ static void insert_block_(struct dm_block_manager *bm, struct dm_block *b)
 
 /*----------------------------------------------------------------
  * Block state:
- * transition_() handles transition of a block between different states.
+ * __transition() handles transition of a block between different states.
  * Study this to understand the state machine.
  *
  * Alternatively run:
@@ -134,7 +134,7 @@ static void insert_block_(struct dm_block_manager *bm, struct dm_block *b)
  *
  * Assumes bm->lock is held.
  *--------------------------------------------------------------*/
-static void transition_(struct dm_block *b, enum dm_block_state new_state)
+static void __transition(struct dm_block *b, enum dm_block_state new_state)
 {
 	/* DOT: digraph BlockStates { */
 	struct dm_block_manager *bm = b->bm;
@@ -185,7 +185,7 @@ static void transition_(struct dm_block *b, enum dm_block_state new_state)
 		/* DOT: empty -> reading */
 		BUG_ON(!(b->state == BS_EMPTY));
 		/* FIXME: insert into the hash */
-		insert_block_(bm, b);
+		__insert_block(bm, b);
 		list_del(&b->list);
 		bm->available_count--;
 		bm->reading_count++;
@@ -274,15 +274,15 @@ static void submit_io(struct dm_block *b, int rw,
 /*----------------------------------------------------------------
  * High level io
  *--------------------------------------------------------------*/
-static void complete_io_(unsigned long error, struct dm_block *b)
+static void __complete_io(unsigned long error, struct dm_block *b)
 {
 	struct dm_block_manager *bm = b->bm;
 
 	if (error) {
 		printk(KERN_ALERT "io error %u", (unsigned) b->where);
-		transition_(b, BS_ERROR);
+		__transition(b, BS_ERROR);
 	} else
-		transition_(b, BS_CLEAN);
+		__transition(b, BS_CLEAN);
 
 	wake_up(&b->io_q);
 	wake_up(&bm->io_q);
@@ -293,7 +293,7 @@ static void complete_io_irq(unsigned long error, struct dm_block *b)
 	struct dm_block_manager *bm = b->bm;
 
 	spin_lock(&bm->lock);
-	complete_io_(error, b);
+	__complete_io(error, b);
 	spin_unlock(&bm->lock);
 }
 
@@ -303,7 +303,7 @@ static void complete_io_fail(unsigned long error, struct dm_block *b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&bm->lock, flags);
-	complete_io_(error, b);
+	__complete_io(error, b);
 	spin_unlock_irqrestore(&bm->lock, flags);
 }
 
@@ -329,7 +329,7 @@ static void write_dirty(struct dm_block_manager *bm, unsigned count)
 	list_for_each_entry_safe (b, tmp, &bm->dirty_list, list) {
 		if (count-- == 0)
 			break;
-		transition_(b, BS_WRITING);
+		__transition(b, BS_WRITING);
 		list_add_tail(&b->list, &dirty);
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
@@ -343,11 +343,11 @@ static void write_all_dirty(struct dm_block_manager *bm)
 	write_dirty(bm, bm->cache_size);
 }
 
-static void clear_errors_(struct dm_block_manager *bm)
+static void __clear_errors(struct dm_block_manager *bm)
 {
 	struct dm_block *b, *tmp;
 	list_for_each_entry_safe (b, tmp, &bm->error_list, list)
-		transition_(b, BS_EMPTY);
+		__transition(b, BS_EMPTY);
 }
 
 static void unplug(struct dm_block_manager *bm)
@@ -392,21 +392,21 @@ do {   								\
 	return ret;   						\
 } while (0)
 
-static int wait_io_(struct dm_block *b, unsigned long *flags)
+static int __wait_io(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, io_schedule,
 		     ((b->state != BS_READING) && (b->state != BS_WRITING)));
 }
 
-static int wait_unlocked_(struct dm_block *b, unsigned long *flags)
+static int __wait_unlocked(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
 		     ((b->state == BS_CLEAN) || (b->state == BS_DIRTY)));
 }
 
-static int wait_read_lockable_(struct dm_block *b, unsigned long *flags)
+static int __wait_read_lockable(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
@@ -415,14 +415,14 @@ static int wait_read_lockable_(struct dm_block *b, unsigned long *flags)
 						 b->state == BS_READ_LOCKED)));
 }
 
-static int wait_all_writes_(struct dm_block_manager *bm, unsigned long *flags)
+static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     !bm->writing_count);
 }
 
-static int wait_clean_(struct dm_block_manager *bm, unsigned long *flags)
+static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
@@ -464,25 +464,25 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 
 		} else if (!list_empty(&bm->clean_list)) {
 			b = list_first_entry(&bm->clean_list, struct dm_block, list);
-			transition_(b, BS_EMPTY);
+			__transition(b, BS_EMPTY);
 			break;
 		}
 
-		wait_clean_(bm, &flags);
+		__wait_clean(bm, &flags);
 	}
 
 	b->where = where;
-	transition_(b, BS_READING);
+	__transition(b, BS_READING);
 
 	if (!need_read) {
 		memset(b->data, 0, bm->block_size);
-		transition_(b, BS_CLEAN);
+		__transition(b, BS_CLEAN);
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
 		read_block(b);
 		unplug(bm);
 		spin_lock_irqsave(&bm->lock, flags);
-		wait_io_(b, &flags);
+		__wait_io(b, &flags);
 
 		/* FIXME: can |b| have been recycled between io completion and here ? */
 
@@ -492,7 +492,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 			 * clear the error immediately.  Failed writes are
 			 * revealed during a commit.
 			 */
-			transition_(b, BS_EMPTY);
+			__transition(b, BS_EMPTY);
 			ret = -EIO;
 		}
 	}
@@ -666,7 +666,7 @@ static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 
 	spin_lock_irqsave(&bm->lock, flags);
 retry:
-	b = find_block_(bm, block);
+	b = __find_block(bm, block);
 	if (b) {
 		switch (how) {
 		case READ:
@@ -678,7 +678,7 @@ retry:
 					return -EWOULDBLOCK;
 				}
 
-				wait_read_lockable_(b, &flags);
+				__wait_read_lockable(b, &flags);
 
 				if (b->where != block)
 					goto retry;
@@ -693,7 +693,7 @@ retry:
 				}
 
 				b->write_lock_pending++;
-				wait_unlocked_(b, &flags);
+				__wait_unlocked(b, &flags);
 				b->write_lock_pending--;
 				if (b->where != block)
 					goto retry;
@@ -717,13 +717,13 @@ retry:
 			if (b->read_lock_count > 1)
 				bm->shared_read_count++;
 			if (b->state == BS_DIRTY)
-				transition_(b, BS_READ_LOCKED_DIRTY);
+				__transition(b, BS_READ_LOCKED_DIRTY);
 			else if (b->state == BS_CLEAN)
-				transition_(b, BS_READ_LOCKED);
+				__transition(b, BS_READ_LOCKED);
 			break;
 
 		case WRITE:
-			transition_(b, BS_WRITE_LOCKED);
+			__transition(b, BS_WRITE_LOCKED);
 			break;
 		}
 
@@ -781,20 +781,20 @@ int dm_bm_unlock(struct dm_block *b)
 
 	switch (b->state) {
 	case BS_WRITE_LOCKED:
-		transition_(b, BS_DIRTY);
+		__transition(b, BS_DIRTY);
 		wake_up(&b->io_q);
 		break;
 
 	case BS_READ_LOCKED:
 		if (!--b->read_lock_count) {
-			transition_(b, BS_CLEAN);
+			__transition(b, BS_CLEAN);
 			wake_up(&b->io_q);
 		}
 		break;
 
 	case BS_READ_LOCKED_DIRTY:
 		if (!--b->read_lock_count) {
-			transition_(b, BS_DIRTY);
+			__transition(b, BS_DIRTY);
 			wake_up(&b->io_q);
 		}
 		break;
@@ -804,24 +804,24 @@ int dm_bm_unlock(struct dm_block *b)
 		ret = -EINVAL;
 		break;
 	}
-
 	spin_unlock_irqrestore(&b->bm->lock, flags);
+
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dm_bm_unlock);
 
-static int wait_flush_(struct dm_block_manager *bm)
+static int __wait_flush(struct dm_block_manager *bm)
 {
 	int ret = 0;
 	unsigned long flags;
 
 	unplug(bm);
 	spin_lock_irqsave(&bm->lock, flags);
-	wait_all_writes_(bm, &flags);
+	__wait_all_writes(bm, &flags);
 
 	if (!list_empty(&bm->error_list)) {
 		ret = -EIO;
-		clear_errors_(bm);
+		__clear_errors(bm);
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
 
@@ -838,7 +838,7 @@ int dm_bm_flush(struct dm_block_manager *bm, int block)
 	 * complete.
 	 */
 
-	return wait_flush_(bm);
+	return __wait_flush(bm);
 }
 EXPORT_SYMBOL_GPL(dm_bm_flush);
 
@@ -849,7 +849,7 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	unsigned long flags;
 
 	write_all_dirty(bm);
-	r = wait_flush_(bm);
+	r = __wait_flush(bm);
 	if (r)
 		return r;
 
@@ -860,7 +860,7 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	dm_bm_unlock(superblock);
 	write_all_dirty(bm);
 
-	return wait_flush_(bm);
+	return __wait_flush(bm);
 }
 EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
 

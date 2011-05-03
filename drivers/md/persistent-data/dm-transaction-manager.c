@@ -191,8 +191,8 @@ int dm_tm_new_block(struct dm_transaction_manager *tm, struct dm_block **result)
 }
 EXPORT_SYMBOL_GPL(dm_tm_new_block);
 
-static int shadow_block_(struct dm_transaction_manager *tm, dm_block_t orig,
-			 struct dm_block **result, int *inc_children)
+static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
+			  struct dm_block **result, int *inc_children)
 {
 	int r;
 	dm_block_t new;
@@ -271,7 +271,7 @@ dm_tm_shadow_block(struct dm_transaction_manager *tm,
 
 	// putting a printk here reveals a bug
 	//printk(KERN_ALERT "shadows = %u", ++shadows);
-	r = shadow_block_(tm, orig, result, inc_children);
+	r = __shadow_block(tm, orig, result, inc_children);
 	if (r < 0)
 		return r;
 	tm->shadow_count++;

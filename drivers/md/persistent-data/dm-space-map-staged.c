@@ -161,8 +161,8 @@ static void inc_entry(struct sm_staged *sm, struct cache_entry *ce)
 	ce->unwritten++;
 }
 
-static int get_free_in_range_(struct sm_staged *sm, dm_block_t low,
-			      dm_block_t high, struct cache_entry **ce)
+static int __get_free_in_range(struct sm_staged *sm, dm_block_t low,
+			       dm_block_t high, struct cache_entry **ce)
 {
 	int r;
 	dm_block_t b, nr_blocks;
@@ -317,7 +317,7 @@ static int sm_staged_get_free_in_range(void *context, dm_block_t low,
 	struct sm_staged *sm = (struct sm_staged *) context;
 	struct cache_entry *ce;
 
-	r = get_free_in_range_(sm, low, high, &ce);
+	r = __get_free_in_range(sm, low, high, &ce);
 	if (r < 0)
 		return r;
 
@@ -361,7 +361,7 @@ static int sm_staged_new_block(void *context, dm_block_t *b)
 	if (r < 0)
 		return r;
 
-	r = get_free_in_range_(context, 0, nr_blocks, &ce);
+	r = __get_free_in_range(context, 0, nr_blocks, &ce);
 	if (r < 0)
 		return r;
 

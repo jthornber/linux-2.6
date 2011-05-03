@@ -181,8 +181,8 @@ static void shift(struct node *left, struct node *right, int count)
 		__cpu_to_le32(__le32_to_cpu(right->header.nr_entries) + count);
 }
 
-static void rebalance2_(struct dm_btree_info *info, struct node *parent,
-			struct child *l, struct child *r)
+static void __rebalance2(struct dm_btree_info *info, struct node *parent,
+			 struct child *l, struct child *r)
 {
 	struct node *left = l->n;
 	struct node *right = r->n;
@@ -235,7 +235,7 @@ static int rebalance2(struct shadow_spine *s, struct dm_btree_info *info,
 		return r;
 	}
 
-	rebalance2_(info, parent, &left, &right);
+	__rebalance2(info, parent, &left, &right);
 
 	r = exit_child(info, &left);
 	if (r) {
@@ -250,8 +250,8 @@ static int rebalance2(struct shadow_spine *s, struct dm_btree_info *info,
 	return 0;
 }
 
-static void rebalance3_(struct dm_btree_info *info, struct node *parent,
-			struct child *l, struct child *c, struct child *r)
+static void __rebalance3(struct dm_btree_info *info, struct node *parent,
+			 struct child *l, struct child *c, struct child *r)
 {
 	struct node *left = l->n;
 	struct node *center = c->n;
@@ -291,7 +291,7 @@ static void rebalance3_(struct dm_btree_info *info, struct node *parent,
 		r->index--;
 
 		dm_tm_dec(info->tm, dm_block_location(c->block));
-		rebalance2_(info, parent, l, r);
+		__rebalance2(info, parent, l, r);
 
 	} else {
 		/* rebalance */
@@ -341,7 +341,7 @@ static int rebalance3(struct shadow_spine *s, struct dm_btree_info *info,
 		return r;
 	}
 
-	rebalance3_(info, parent, &left, &center, &right);
+	__rebalance3(info, parent, &left, &center, &right);
 
 	r = exit_child(info, &left);
 	if (r) {

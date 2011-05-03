@@ -60,7 +60,7 @@ static uint64_t mod64(uint64_t n, uint64_t d)
  * for blocks that are over 2.
  */
 #define ENTRIES_PER_WORD 32
-static unsigned lookup_bitmap_(void *addr, dm_block_t b)
+static unsigned __lookup_bitmap(void *addr, dm_block_t b)
 {
 	unsigned val = 0;
 	__le64 *words = (__le64 *) addr;
@@ -73,7 +73,7 @@ static unsigned lookup_bitmap_(void *addr, dm_block_t b)
 	return val;
 }
 
-static void set_bitmap_(void *addr, dm_block_t b, unsigned val)
+static void __set_bitmap(void *addr, dm_block_t b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
 	__le64 *w = words + (b / ENTRIES_PER_WORD);
@@ -90,12 +90,12 @@ static void set_bitmap_(void *addr, dm_block_t b, unsigned val)
 		generic___clear_le_bit(b * 2 + 1, (void *) w);
 }
 
-static int find_free_(void *addr, unsigned begin, unsigned end,
-		      unsigned *position)
+static int __find_free(void *addr, unsigned begin, unsigned end,
+		       unsigned *position)
 {
 	/* FIXME: slow, find a quicker way in Hackers Delight */
 	while (begin < end) {
-		if (!lookup_bitmap_(addr, begin)) {
+		if (!__lookup_bitmap(addr, begin)) {
 			*position = begin;
 			return 0;
 		}
@@ -248,7 +248,7 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 		if (r < 0)
 			return r;
 
-		*result = lookup_bitmap_(dm_block_data(blk),
+		*result = __lookup_bitmap(dm_block_data(blk),
 					 mod64(b, io->entries_per_block));
 		r = dm_tm_unlock(io->tm, blk);
 		if (r < 0) {
@@ -297,9 +297,9 @@ static int io_find_unused(struct sm_disk *io, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = find_free_(dm_block_data(blk),
-				       mod64(begin, io->entries_per_block),
-				       bit_end, &position);
+			r = __find_free(dm_block_data(blk),
+					mod64(begin, io->entries_per_block),
+					bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(io->tm, blk);
 				return r;
@@ -342,11 +342,11 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 
 	bm = dm_block_data(nb);
 	bit = mod64(b, io->entries_per_block);
-	old = lookup_bitmap_(bm, bit);
+	old = __lookup_bitmap(bm, bit);
 
 	if (ref_count <= 2) {
-		set_bitmap_(bm, bit, ref_count);
-		BUG_ON(lookup_bitmap_(bm, bit) != ref_count);
+		__set_bitmap(bm, bit, ref_count);
+		BUG_ON(__lookup_bitmap(bm, bit) != ref_count);
 
 		if (old > 2) {
 #if 0
@@ -357,7 +357,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 		}
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
-		set_bitmap_(bm, bit, 3);
+		__set_bitmap(bm, bit, 3);
 		r = dm_btree_insert(&io->ref_count_info, io->ref_count_root,
 				    &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
@@ -427,7 +427,7 @@ static int sm_disk_get_count(void *context, dm_block_t b, uint32_t *result)
 	return io_lookup(smd, b, result);
 }
 
-static int set_count_(void *context, dm_block_t b, uint32_t count)
+static int __set_count(void *context, dm_block_t b, uint32_t count)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return io_insert(smd, b, count);
@@ -439,14 +439,14 @@ static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
 	struct sm_disk *smd = (struct sm_disk *) context;
 	unsigned held = dm_bm_locks_held(dm_tm_get_bm(smd->tm));
 
-	r = set_count_(context, b, count);
+	r = __set_count(context, b, count);
 	BUG_ON(dm_bm_locks_held(dm_tm_get_bm(smd->tm)) != held);
 
 	return r;
 }
 
-static int get_free_(void *context, dm_block_t low, dm_block_t high,
-		     dm_block_t *b)
+static int __get_free(void *context, dm_block_t low, dm_block_t high,
+		      dm_block_t *b)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	int r;
@@ -467,13 +467,13 @@ static int get_free_(void *context, dm_block_t low, dm_block_t high,
 static int sm_disk_get_free(void *context, dm_block_t *b)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
-	return get_free_(context, 0, smd->nr_blocks, b);
+	return __get_free(context, 0, smd->nr_blocks, b);
 }
 
 static int sm_disk_get_free_in_range(void *context, dm_block_t low,
 				     dm_block_t high, dm_block_t *b)
 {
-	return get_free_(context, low, high, b);
+	return __get_free(context, low, high, b);
 }
 
 static int sm_disk_commit(void *context)
