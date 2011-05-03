@@ -627,7 +627,7 @@ int hsm_metadata_update(struct hsm_metadata *hsm,
 	if (r < 0)
 		return r;
 
-DMINFO("%s pool_block=%llu flags=%lu", __func__, (LLU) pool_block, flags);
+// DMINFO("%s pool_block=%llu flags=%lu", __func__, (LLU) pool_block, flags);
 	pool_block |= (flags << 60);
 	pool_block = __cpu_to_le64(pool_block);
 

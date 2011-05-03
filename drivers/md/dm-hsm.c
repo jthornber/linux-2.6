@@ -23,7 +23,7 @@
  *
  */
 
-static const char version[] = "1.0.32";
+static const char version[] = "1.0.41";
 
 #include "dm.h"
 #include "hsm-metadata.h"
@@ -51,7 +51,7 @@ static const char version[] = "1.0.32";
 #define	LLU	long long unsigned
 
 #define	MIN_IOS	32
-#define	DM_KCOPYD_PAGES	64
+#define	PARALLEL_COPIES	16
 
 /* Cache for block io housekeeping. */
 static struct kmem_cache *block_cache;
@@ -59,9 +59,7 @@ static struct kmem_cache *block_cache;
 enum hsm_c_flags {
 	HC_BOUNCE_MODE,
 	HC_ERROR_EVENT,
-	HC_LOW_WATER_EVENT,
 	HC_REFLUSHED,
-	HC_RESUMED,
 };
 
 /* Hierarchical storage context. */
@@ -100,8 +98,11 @@ struct hsm_c {
 	sector_t cached_sectors;/* Size of cached device in sectors. */
 	block_t provisioned_count;
 	block_t updates_since_last_commit;
+	atomic_t dirty_blocks;
+	int allocations;
 	unsigned long flags;
 	atomic_t block_writes;
+	wait_queue_head_t pending_block_io;
 };
 
 struct hsm_block {
@@ -186,9 +187,15 @@ out:
 static void put_block(struct hsm_block *b)
 {
 	if (atomic_dec_and_test(&b->ref)) {
+		struct hsm_c *hc = b->hc;
+
 		list_del(&b->list);
-		mempool_free(b, b->hc->block_pool);
-	}
+		mempool_free(b, hc->block_pool);
+
+		if (list_empty(&hc->hsm_blocks))
+			wake_up_all(&hc->pending_block_io);
+	} else
+		BUG_ON(atomic_read(&b->ref) < 0);
 }
 
 /* Return size of device in sectors. */
@@ -270,61 +277,66 @@ static void block_copy_endio(int read_err, unsigned long write_err,
 /* Copy blocks between cache and original (cached) device. */
 static int block_copy(int rw, struct hsm_block *b)
 {
-	struct dm_io_region cache = {
-		.bdev = b->hc->data_dev->bdev,
-		.sector = _remap_sector(b->hc, 0, b->pool_block),
-	}, orig = {
-		.bdev = b->hc->cached_dev->bdev,
-		.sector = _remap_sector(b->hc, 0, b->cache_block),
-	}, *from, *to;
+	int r = 0;
 
-	if (test_and_set_bit(BLOCK_ACTIVE, (unsigned long*) &b->flags))
-		return 0;
+	if (!test_and_set_bit(BLOCK_ACTIVE, &b->flags)) {
+		struct hsm_c *hc = b->hc;
+		struct dm_io_region cache = {
+			.bdev = hc->data_dev->bdev,
+			.sector = _remap_sector(hc, 0, b->pool_block),
+		}, orig = {
+			.bdev = hc->cached_dev->bdev,
+			.sector = _remap_sector(hc, 0, b->cache_block),
+		}, *from, *to;
 
-	BUG_ON(cache.sector >= b->hc->data_sectors);
+		BUG_ON(cache.sector >= hc->data_sectors);
 
-	/* Check for partial extent at origin device end. */
-	cache.count = orig.count =
-		min(b->hc->block_sectors, b->hc->data_sectors - orig.sector);
+		/* Check for partial extent at origin device end. */
+		cache.count = orig.count = min(hc->block_sectors,
+					       hc->data_sectors - orig.sector);
 
-	/* Set source and destination. */
-	if (rw == READ) {
-		from = &orig,  to = &cache;
-	} else {
-		atomic_inc(&b->hc->block_writes);
-		from = &cache, to = &orig;
+		/* Set source and destination. */
+		if (rw == READ) {
+			from = &orig,  to = &cache;
+		} else {
+			atomic_inc(&hc->block_writes);
+			from = &cache, to = &orig;
+		}
+
+		r = dm_kcopyd_copy(hc->kcopyd_client, from, 1, to, 0,
+				   block_copy_endio, b);
 	}
 
-	return dm_kcopyd_copy(b->hc->kcopyd_client, from, 1, to, 0,
-			      block_copy_endio, b);
+	return r;
 }
 
-static void requeue_bios(struct hsm_c *hc, struct bio_list *bl, spinlock_t *lock)
+static void _requeue_bios(struct bio_list *bl)
 {
 	struct bio *bio;
+
+	while ((bio = bio_list_pop(bl)))
+		bio_endio(bio, DM_ENDIO_REQUEUE);
+}
+
+static void requeue_bios(struct hsm_c *hc, struct bio_list *bl,
+			 spinlock_t *lock)
+{
 	struct bio_list bios;
 
 	bio_list_init(&bios);
+
 	spin_lock(lock);
 	bio_list_merge(&bios, bl);
 	bio_list_init(bl);
 	spin_unlock(lock);
 
-	while ((bio = bio_list_pop(&bios)))
-		bio_endio(bio, DM_ENDIO_REQUEUE);
+	_requeue_bios(&bios);
 }
 
 static void requeue_all_bios(struct hsm_c *hc)
 {
 	requeue_bios(hc, &hc->in, &hc->lock);
 	requeue_bios(hc, &hc->no_space, &hc->no_space_lock);
-}
-
-/* Return number of allocated blocks. */
-
-static block_t allocated_count(struct hsm_c *hc)
-{
-	return hc->updates_since_last_commit + hc->provisioned_count;
 }
 
 static int _congested(struct dm_dev *dev, int bdi_bits)
@@ -344,16 +356,10 @@ static int hc_congested(void *congested_data, int bdi_bits)
 	r = !bio_list_empty(&hc->no_space);
 	spin_unlock(&hc->no_space_lock);
 
-	if (r) {
-		r = _congested(hc->cached_dev, bdi_bits);
-		if (!r) {
-			r = _congested(hc->meta_dev, bdi_bits);
-			if (!r)
-				r = _congested(hc->data_dev, bdi_bits);
-		}
-	}
-
-	return r;
+	return r ||
+	       _congested(hc->cached_dev, bdi_bits) ||
+	       _congested(hc->data_dev,   bdi_bits) ||
+	       _congested(hc->meta_dev,   bdi_bits);
 }
 
 /* Set congested function. */
@@ -367,21 +373,26 @@ static void hc_set_congested_fn(struct hsm_c *hc)
 	bdi->congested_data = hc;
 }
 
-static void inc_update(struct hsm_c *hc)
+/* @allocated: amount to add to blocks allocated. */
+static void inc_update(struct hsm_c *hc, int allocated)
 {
 	spin_lock(&hc->provisioned_lock);
 	hc->updates_since_last_commit++;
+	hc->allocations += allocated;
 	spin_unlock(&hc->provisioned_lock);
 }
 
 /* If commit fails, log an error and throw an event. */
 static int commit(struct hsm_c *hc)
 {
-	int r = 0;
+	int allocations, r = 0;
 	block_t updates;
 
 	spin_lock(&hc->provisioned_lock);
 	updates = hc->updates_since_last_commit;
+	allocations = hc->allocations;
+	hc->updates_since_last_commit = 0;
+	hc->allocations = 0;
 	spin_unlock(&hc->provisioned_lock);
 
 	if (updates) {
@@ -397,8 +408,7 @@ static int commit(struct hsm_c *hc)
 			}
 		} else {
 			spin_lock(&hc->provisioned_lock);
-			hc->provisioned_count += updates;
-			hc->updates_since_last_commit = 0;
+			hc->provisioned_count += allocations;
 			spin_unlock(&hc->provisioned_lock);
 		}
 	}
@@ -410,8 +420,7 @@ static void do_schedule_block_flush(struct hsm_c *hc, unsigned long j)
 {
 	if (!list_empty(&hc->flush_blocks)) {
 		unsigned long timeout =
-			list_entry(&hc->flush_blocks, struct hsm_block,
-				   flush_endio)->timeout;
+			list_first_entry(&hc->flush_blocks, struct hsm_block, flush_endio)->timeout;
 		wake_do_hsm_delayed(hc, j < timeout ? timeout - j : 0);
 	}
 }
@@ -426,35 +435,48 @@ static void flush_add_sorted(struct hsm_block *b)
 		_get_block(b);
 		b->timeout = jiffies + 3 * HZ;
 		list_add_tail(&b->flush_endio, &b->hc->flush_blocks);
-DMINFO("Added cache_block=%llu pool_block=%llu to flush", (LLU) b->cache_block, (LLU) b->pool_block);
+		atomic_inc(&b->hc->dirty_blocks);
+// DMINFO("Added cache_block=%llu pool_block=%llu to flush", (LLU) b->cache_block, (LLU) b->pool_block);
+	}
+}
+
+/* Clear out flush list on suspend. */
+static void clear_flush_blocks(struct hsm_c *hc)
+{
+	struct hsm_block *b, *tmp;
+
+	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, flush_endio) {
+		BUG_ON(atomic_read(&b->ref) != 1);
+		put_block(b);
 	}
 }
 
 /* Process any write updating metadata and delaying respective block flush. */
 static int _process_write(struct hsm_block *b, struct bio *bio)
 {
+	int r = 0;
+
 	if (bio_data_dir(bio) == WRITE) {
 		if (test_and_set_bit(BLOCK_DIRTY, &b->flags)) {
 			if (test_bit(BLOCK_ACTIVE, &b->flags) ||
 			    b->timeout != ~0)
-				set_bit(BLOCK_FORCE_DIRTY,
-					&b->flags);
+				set_bit(BLOCK_FORCE_DIRTY, &b->flags);
+
 		} else {
 			int r = hsm_metadata_update(b->hc->hmd, b->hc->dev,
 						    b->cache_block, b->flags);
-			if (r) { /* Fatal. */
+			if (r) /* Fatal. */
 				bio_io_error(bio);
-				return -EIO;
-			} else {
-				flush_add_sorted(b);
-				inc_update(b->hc);
-			}
 
+			else {
+				flush_add_sorted(b);
+				inc_update(b->hc, 0);
+			}
 // _try_lookup(b->hc, b->cache_block);
 		}
 	}
 
-	return 0;
+	return r;
 }
 
 /* Remap and submit a bio. */
@@ -479,37 +501,34 @@ static void do_leftover_dirty_blocks(struct hsm_c *hc)
 		if (r)
 			continue;
 
-		/* Now look up persistent flags. */
+		/* Retrieve persistent flags. */
 		r = hsm_metadata_lookup(hc->hmd, hc->dev, cache_block, 1,
 					&pool_block1, &flags);
-		if (r)
+		if (r || !test_bit(BLOCK_DIRTY, &flags))
 			continue;
 
 		BUG_ON(pool_block != pool_block1);
 
+		/* Schedule any dirty blocks for io. */
 		b = get_block(hc, cache_block);
 		if (!b) {
-			DMERR("Failed to allocate control block "
-			      "for %llu", (LLU) cache_block);
+			DMERR("Failed to allocate control block for %llu",
+			      (LLU) cache_block);
 			break;
 		}
 
 		b->pool_block = pool_block;
 		b->flags = flags;
-
-		/* Schedule any dirty blocks for io. */
-		if (test_bit(BLOCK_DIRTY, &flags)) {
-DMINFO("Adding pool_block=%llu flags=%lu to flush list", (LLU) pool_block, flags);
-			flush_add_sorted(b);
-			put_block(b);
-		}
+DMINFO("Adding pool_block=%llu flags=%lu to flush list", (LLU) pool_block, b->flags);
+		flush_add_sorted(b);
+		put_block(b);
 	}
 }
 
 /* Process all endios on blocks. */
 static void do_endios(struct hsm_c *hc)
 {
-	int commit_err, err = 0, r = 0;
+	int commit_err, r = 0;
 	struct hsm_block *b, *tmp;
 	LIST_HEAD(endios);
 
@@ -533,14 +552,14 @@ static void do_endios(struct hsm_c *hc)
 			int update = 0;
 
 			if (test_and_set_bit(BLOCK_UPTODATE, &b->flags)) {
-				if (test_and_clear_bit(BLOCK_FORCE_DIRTY,
-						       &b->flags))
-					/*
-					 * Reforce write;
-					 * we've been written to again.
-					 */
-					flush_add_sorted(b);
-				else {
+				atomic_dec(&hc->dirty_blocks);
+
+				/*
+				 * Reforce write;
+				 * we've been written to again.
+				 */
+				if (!test_and_clear_bit(BLOCK_FORCE_DIRTY,
+							&b->flags)) {
 					clear_bit(BLOCK_DIRTY, &b->flags);
 					update = 1;
 				}
@@ -552,44 +571,45 @@ static void do_endios(struct hsm_c *hc)
 							b->cache_block,
 							b->flags);
 				if (!r)
-					inc_update(hc);
+					inc_update(hc, 0);
 			}
 		}
 	}
 
+	/* Now commit any metadata transaction. */
 	commit_err = commit(hc);
 
-	/* Second round to submit the actual io _after_ a metadata commit. */
+	/* Second round to submit the actual io _after_ any metadata commit. */
 	list_for_each_entry_safe(b, tmp, &endios, flush_endio) {
+		int err;
 		struct bio *bio;
 		struct bio_list bios;
 
-		list_del_init(&b->flush_endio);
 		bio_list_init(&bios);
+		list_del_init(&b->flush_endio);
+
+		if (test_bit(BLOCK_DIRTY, &b->flags))
+			flush_add_sorted(b);
 
 		spin_lock_irq(&b->endio_lock);
 		bio_list_merge(&bios, &b->endio);
 		bio_list_init(&b->endio);
 		spin_unlock_irq(&b->endio_lock);
 
-		err = (commit_err || test_bit(BLOCK_ERROR, &b->flags)) ?
-		      -EIO : 0;
+		/* Error all pending io if we got a commit error. */
+		err = (commit_err < 0 ||
+		       test_bit(BLOCK_ERROR, &b->flags)) ? -EIO : 0;
+
 		while ((bio = bio_list_pop(&bios)))
 			bio_endio(bio, err);
 
-		/*
-		 * Submit any bios waiting for io on this block.
-		 *
-		 * Writes will cause adjusting BLOCK_FORCE_DIRTY and
-		 * thus metadata updates which can fail, so this needs
-		 * to run before the endio processing below.
-		 */
+		/* Submit any bios waiting for io on this block. */
 		while ((bio = bio_list_pop(&b->io))) {
-// DMINFO("%s %s sector=%llu", __func__, bio_data_dir(bio) == WRITE ? "writing" : "reading", (LLU) bio->bi_sector);
-
 			if (err)
 				bio_endio(bio, err);
+
 			else {
+// DMINFO("%s %s sector=%llu", __func__, bio_data_dir(bio) == WRITE ? "writing" : "reading", (LLU) bio->bi_sector);
 				r = _process_write(b, bio);
 				if (!r)
 					_generic_make_request(b, bio);
@@ -619,7 +639,7 @@ static void do_bios(struct hsm_c *hc, struct bio_list *bios)
 			r = hsm_metadata_insert(hc->hmd, hc->dev, cache_block,
 					        &pool_block, &flags);
 			if (!r)
-				inc_update(hc);
+				inc_update(hc, 1);
 
 			else if (r == -ENOSPC)
 				/*
@@ -654,7 +674,10 @@ nospace:
 		 * bio->bi_destructor got preserved in the map function
 		 * and will be restored at the end of the end_io function.
 		 *
-		 * All bio endio processing may occur after this only!
+		 * Submit later, because all bio endio
+		 * processing may occur after this only
+		 * so that the end_io method is able to
+		 * reference the block!
 		 */
 		bio->bi_destructor = (void*) b;
 
@@ -683,10 +706,13 @@ nospace:
 			 * bio until the block got read into the cache.
 			 */
 			bio_list_add(&b->io, bio);
-			_get_block(b);
-if (!test_bit(BLOCK_ACTIVE, &b->flags))
-DMINFO("Reading block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
-			BUG_ON(block_copy(READ, b));
+
+			if (!test_bit(BLOCK_ACTIVE, &b->flags)) {
+// DMINFO("Reading block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
+				_get_block(b);
+				BUG_ON(block_copy(READ, b));
+			}
+
 			continue;
 		}
 
@@ -705,14 +731,14 @@ static void do_block_flushs(struct hsm_c *hc)
 	unsigned long j = jiffies;
 
 	list_for_each_entry_safe(b, tmp, &hc->flush_blocks, flush_endio) {
-		if (atomic_read(&hc->block_writes) > 2)
+		if (atomic_read(&hc->block_writes) > PARALLEL_COPIES / 2)
 			break;
 
 		if (j >= b->timeout) {
 			if (!test_bit(BLOCK_ACTIVE, &b->flags)) {
 				list_del_init(&b->flush_endio);
 				b->timeout = ~0;
-DMINFO("Writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
+// DMINFO("Writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 				BUG_ON(block_copy(WRITE, b));
 			}
 		} else
@@ -766,11 +792,11 @@ static void do_block_free(struct hsm_c *hc)
 			r = block_inactive(hc, pool_block, &cache_block);
 			BUG_ON(r < 0);
 			if (r) {
-DMINFO("Freeing pool_block=%llu", (LLU) pool_block);
+// DMINFO("Freeing pool_block=%llu", (LLU) pool_block);
 				r = hsm_metadata_remove(hc->hmd, hc->dev,
 							cache_block);
 				if (!r)
-					inc_update(hc);
+					inc_update(hc, -1);
 
 				break;
 			} else
@@ -783,37 +809,38 @@ DMINFO("Freeing pool_block=%llu", (LLU) pool_block);
 static void do_hsm(struct work_struct *ws)
 {
 	struct hsm_c *hc = container_of(ws, struct hsm_c, dws.work);
+	int bounce_mode = test_bit(HC_BOUNCE_MODE, &hc->flags);
+	struct bio_list bios;
 
-	if (test_bit(HC_RESUMED, &hc->flags)) {
-		int bounce_mode;
-		struct bio_list bios;
+	bio_list_init(&bios);
 
-		bio_list_init(&bios);
+	if (!bounce_mode &&
+	    !test_and_set_bit(HC_REFLUSHED, &hc->flags))
+		do_leftover_dirty_blocks(hc);
 
-		if (!test_and_set_bit(HC_REFLUSHED, &hc->flags))
-			do_leftover_dirty_blocks(hc);
+	do_endios(hc);
 
-		do_endios(hc);
+	spin_lock(&hc->lock);
+	bio_list_merge(&bios, &hc->in);
+	bio_list_init(&hc->in);
+	spin_unlock(&hc->lock);
 
-		spin_lock(&hc->lock);
-		bio_list_merge(&bios, &hc->in);
-		bio_list_init(&hc->in);
-		bounce_mode = test_bit(HC_BOUNCE_MODE, &hc->flags);
-		spin_unlock(&hc->lock);
+	if (bounce_mode)
+		_requeue_bios(&bios);
+	else
+		do_bios(hc, &bios);
 
-		if (bounce_mode) {
-			struct bio *bio;
-	
-			while ((bio = bio_list_pop(&bios)))
-				bio_endio(bio, DM_ENDIO_REQUEUE);
-		} else
-			do_bios(hc, &bios);
-
+	if (!bounce_mode) {
 		do_block_flushs(hc);
 		do_block_free(hc);
 		do_schedule_block_flush(hc, jiffies);
-		commit(hc);	/* FIXME: error handling. */
 	}
+
+	commit(hc);	/* FIXME: error handling. */
+
+	/* Unplug cached and data devices. */
+	blk_unplug(bdev_get_queue(hc->cached_dev->bdev));
+	blk_unplug(bdev_get_queue(hc->data_dev->bdev));
 }
 
 static void hsm_flush(struct dm_target *ti)
@@ -892,12 +919,12 @@ static int __get_device(struct dm_target *ti, char *arg, struct dm_dev **dev,
 
 static int _get_devices(struct hsm_c *hc, char **argv)
 {
-	return (__get_device(hc->ti, argv[0], &hc->cached_dev,
-			     "Error opening cached device") ||
-		__get_device(hc->ti, argv[1], &hc->data_dev,
-			     "Error opening data device") ||
-		__get_device(hc->ti, argv[2], &hc->meta_dev,
-			     "Error opening metadata device"));
+	return __get_device(hc->ti, argv[0], &hc->cached_dev,
+			    "Error opening cached device") ||
+	       __get_device(hc->ti, argv[1], &hc->data_dev,
+			    "Error opening data device") ||
+	       __get_device(hc->ti, argv[2], &hc->meta_dev,
+			    "Error opening metadata device");
 
 }
 
@@ -959,12 +986,14 @@ static int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	spin_lock_init(&hc->no_space_lock);
 	bio_list_init(&hc->no_space);
 	atomic_set(&hc->block_writes, 0);
+	atomic_set(&hc->dirty_blocks, 0);
+	init_waitqueue_head(&hc->pending_block_io);
 
 	r = _get_devices(hc, argv);
 	if (r)
 		goto err;
 
-	r = dm_kcopyd_client_create(DM_KCOPYD_PAGES, &hc->kcopyd_client);
+	r = dm_kcopyd_client_create((block_sectors >> (PAGE_SHIFT - SECTOR_SHIFT)) * PARALLEL_COPIES, &hc->kcopyd_client);
 	if (r) 
 		goto err;
 
@@ -1045,15 +1074,14 @@ static void hsm_presuspend(struct dm_target *ti)
 {
 	struct hsm_c *hc = ti->private;
 
-	spin_lock(&hc->lock);
 	set_bit(HC_BOUNCE_MODE, &hc->flags);
-	spin_unlock(&hc->lock);
-
-	clear_bit(HC_RESUMED, &hc->flags);
 	cancel_delayed_work(&hc->dws);
 	hsm_flush(ti);
 	cancel_delayed_work(&hc->dws);
 	requeue_all_bios(hc);
+	clear_flush_blocks(hc);
+DMINFO("%s", __func__);
+	wait_event(hc->pending_block_io, list_empty(&hc->hsm_blocks));
 }
 
 static void hsm_postsuspend(struct dm_target *ti)
@@ -1082,9 +1110,8 @@ static int hsm_preresume(struct dm_target *ti)
 	block_t data_blocks, sb_data_blocks;
 	struct hsm_c *hc = ti->private;
 
-	spin_lock(&hc->lock);
 	clear_bit(HC_BOUNCE_MODE, &hc->flags);
-	spin_unlock(&hc->lock);
+	clear_bit(HC_ERROR_EVENT, &hc->flags);
 
 	if (!hc->hmd) {
 		r = create_hsd(hc);
@@ -1114,7 +1141,6 @@ static int hsm_preresume(struct dm_target *ti)
 			spin_lock(&hc->provisioned_lock);
 			hc->data_sectors = data_sectors;
 			hc->data_blocks = data_blocks;
-			clear_bit(HC_LOW_WATER_EVENT, &hc->flags);
 			spin_unlock(&hc->provisioned_lock);
 			goto wake;
 		}
@@ -1124,7 +1150,6 @@ static int hsm_preresume(struct dm_target *ti)
 
 wake:
 	hc->flags = 0;
-	set_bit(HC_RESUMED, &hc->flags);
 	wake_do_hsm(hc);
 	return 0;
 }
@@ -1134,21 +1159,21 @@ static int hsm_status(struct dm_target *ti, status_type_t type,
 			char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
-	block_t provisioned, data_blocks;
+	block_t allocated, data_blocks;
 	char buf[BDEVNAME_SIZE];
 	struct hsm_c *hc = ti->private;
 
 	spin_lock(&hc->provisioned_lock);
-	provisioned = allocated_count(hc);
+	allocated = hc->provisioned_count + hc->allocations;
 	data_blocks = hc->data_blocks;
 	spin_unlock(&hc->provisioned_lock);
 
 	switch (type) {
 	case STATUSTYPE_INFO:
 		/*   <chunks free> <chunks used> */
-		DMEMIT("%llu %llu",
-		       (LLU) data_blocks - provisioned,
-		       (LLU) provisioned);
+		DMEMIT("%llu %llu %d",
+		       (LLU) data_blocks - allocated, (LLU) allocated,
+		       atomic_read(&hc->dirty_blocks));
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -1196,7 +1221,7 @@ hsm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	struct hsm_c *hc = ti->private;
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, hc->data_sectors);
+	blk_limits_io_opt(limits, hc->block_sectors);
 }
 
 static int hsm_iterate_devices(struct dm_target *ti,
