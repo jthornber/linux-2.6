@@ -44,8 +44,7 @@
 /*
  * Some little utilities for moving node data around.
  */
-static void
-node_shift(struct node *n, int shift)
+static void node_shift(struct node *n, int shift)
 {
 	uint32_t nr_entries = __le32_to_cpu(n->header.nr_entries);
 
@@ -67,8 +66,7 @@ node_shift(struct node *n, int shift)
 	}
 }
 
-static void
-node_copy(struct node *left, struct node *right, int shift)
+static void node_copy(struct node *left, struct node *right, int shift)
 {
 	uint32_t nr_left = __le32_to_cpu(left->header.nr_entries);
 
@@ -93,8 +91,7 @@ node_copy(struct node *left, struct node *right, int shift)
 /*
  * Delete a specific entry from a leaf node.
  */
-static void
-delete_at(struct node *n, unsigned index, size_t value_size)
+static void delete_at(struct node *n, unsigned index, size_t value_size)
 {
 	unsigned nr_entries = __le32_to_cpu(n->header.nr_entries);
 	unsigned nr_to_copy = nr_entries - (index + 1);
@@ -112,14 +109,12 @@ delete_at(struct node *n, unsigned index, size_t value_size)
 	n->header.nr_entries = __cpu_to_le32(nr_entries - 1);
 }
 
-static unsigned
-del_threshold(struct node *n)
+static unsigned del_threshold(struct node *n)
 {
 	return __le32_to_cpu(n->header.max_entries) / 3;
 }
 
-static unsigned
-merge_threshold(struct node *n)
+static unsigned merge_threshold(struct node *n)
 {
 	/*
 	 * The extra one is because we know we're potentially going to
@@ -142,11 +137,8 @@ static struct dm_btree_value_type internal_type_ = {
 	.equal = NULL
 };
 
-static int
-init_child(struct dm_btree_info *info,
-	   struct node *parent,
-	   unsigned index,
-	   struct child *result)
+static int init_child(struct dm_btree_info *info, struct node *parent,
+		      unsigned index, struct child *result)
 {
 	int r, inc;
 	dm_block_t root;
@@ -164,14 +156,12 @@ init_child(struct dm_btree_info *info,
 	return 0;
 }
 
-static int
-exit_child(struct dm_btree_info *info, struct child *c)
+static int exit_child(struct dm_btree_info *info, struct child *c)
 {
 	return dm_tm_unlock(info->tm, c->block);
 }
 
-static void
-shift(struct node *left, struct node *right, int count)
+static void shift(struct node *left, struct node *right, int count)
 {
 	if (count == 0)
 		return;
@@ -185,15 +175,14 @@ shift(struct node *left, struct node *right, int count)
 		node_shift(right, count);
 	}
 
-	left->header.nr_entries = __cpu_to_le32(__le32_to_cpu(left->header.nr_entries) - count);
-	right->header.nr_entries = __cpu_to_le32(__le32_to_cpu(right->header.nr_entries) + count);
+	left->header.nr_entries =
+		__cpu_to_le32(__le32_to_cpu(left->header.nr_entries) - count);
+	right->header.nr_entries =
+		__cpu_to_le32(__le32_to_cpu(right->header.nr_entries) + count);
 }
 
-static void
-rebalance2_(struct dm_btree_info *info,
-	    struct node *parent,
-	    struct child *l,
-	    struct child *r)
+static void rebalance2_(struct dm_btree_info *info, struct node *parent,
+			struct child *l, struct child *r)
 {
 	struct node *left = l->n;
 	struct node *right = r->n;
@@ -227,10 +216,8 @@ rebalance2_(struct dm_btree_info *info,
 	}
 }
 
-static int
-rebalance2(struct shadow_spine *s,
-	   struct dm_btree_info *info,
-	   unsigned left_index)
+static int rebalance2(struct shadow_spine *s, struct dm_btree_info *info,
+		      unsigned left_index)
 {
 	int r;
 	struct node *parent;
@@ -263,12 +250,8 @@ rebalance2(struct shadow_spine *s,
 	return 0;
 }
 
-static void
-rebalance3_(struct dm_btree_info *info,
-	    struct node *parent,
-	    struct child *l,
-	    struct child *c,
-	    struct child *r)
+static void rebalance3_(struct dm_btree_info *info, struct node *parent,
+			struct child *l, struct child *c, struct child *r)
 {
 	struct node *left = l->n;
 	struct node *center = c->n;
@@ -333,10 +316,8 @@ rebalance3_(struct dm_btree_info *info,
 	}
 }
 
-static int
-rebalance3(struct shadow_spine *s,
-	   struct dm_btree_info *info,
-	   unsigned left_index)
+static int rebalance3(struct shadow_spine *s, struct dm_btree_info *info,
+		      unsigned left_index)
 {
 	int r;
 	struct node *parent = to_node(shadow_current(s));
@@ -382,10 +363,8 @@ rebalance3(struct shadow_spine *s,
 	return 0;
 }
 
-static int
-get_nr_entries(struct dm_transaction_manager *tm,
-	       dm_block_t b,
-	       uint32_t *result)
+static int get_nr_entries(struct dm_transaction_manager *tm,
+			  dm_block_t b, uint32_t *result)
 {
 	int r;
 	struct dm_block *block;
@@ -397,31 +376,29 @@ get_nr_entries(struct dm_transaction_manager *tm,
 
 	c = to_node(block);
 	*result = __le32_to_cpu(c->header.nr_entries);
+
 	return dm_tm_unlock(tm, block);
 }
 
-static int
-rebalance_children(struct shadow_spine *s,
-		   struct dm_btree_info *info,
-		   uint64_t key)
+static int rebalance_children(struct shadow_spine *s,
+			      struct dm_btree_info *info, uint64_t key)
 {
 	int i, r, has_left_sibling, has_right_sibling;
 	uint32_t child_entries;
 	struct node *n;
+	dm_block_t b;
+	struct dm_block *child;
 
 	n = to_node(shadow_current(s));
 
 	if (__le32_to_cpu(n->header.nr_entries) == 1) {
-		dm_block_t b = value64(n, 0);
-		struct dm_block *child;
-
+		b = value64(n, 0);
 		r = dm_tm_read_lock(info->tm, b, &child);
 		if (r)
 			return r;
 
 		memcpy(n, dm_block_data(child),
-		       dm_bm_block_size(
-			       dm_tm_get_bm(info->tm)));
+		       dm_bm_block_size(dm_tm_get_bm(info->tm)));
 		r = dm_tm_unlock(info->tm, child);
 		dm_tm_dec(info->tm, dm_block_location(child));
 
@@ -439,7 +416,8 @@ rebalance_children(struct shadow_spine *s,
 			return 0;
 
 		has_left_sibling = i > 0 ? 1 : 0;
-		has_right_sibling = i >= (__le32_to_cpu(n->header.nr_entries) - 1) ? 0 : 1;
+		has_right_sibling =
+			(i >= (__le32_to_cpu(n->header.nr_entries) - 1)) ? 0 : 1;
 
 		if (!has_left_sibling)
 			r = rebalance2(s, info, i);
@@ -454,8 +432,7 @@ rebalance_children(struct shadow_spine *s,
 	return r;
 }
 
-static int
-do_leaf(struct node *n, uint64_t key, unsigned *index)
+static int do_leaf(struct node *n, uint64_t key, unsigned *index)
 {
 	int i = lower_bound(n, key);
 
@@ -472,13 +449,9 @@ do_leaf(struct node *n, uint64_t key, unsigned *index)
  * Prepares for removal from one level of the hierarchy.  The caller must
  * actually call delete_at() to remove the entry at index.
  */
-static int
-remove_raw(struct shadow_spine *s,
-	   struct dm_btree_info *info,
-	   struct dm_btree_value_type *vt,
-	   dm_block_t root,
-	   uint64_t key,
-	   unsigned *index)
+static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
+		      struct dm_btree_value_type *vt, dm_block_t root,
+		      uint64_t key, unsigned *index)
 {
 	int i = *index, inc, r;
 	struct node *n;
@@ -526,11 +499,8 @@ remove_raw(struct shadow_spine *s,
 	return r;
 }
 
-int
-dm_btree_remove(struct dm_btree_info *info,
-		dm_block_t root,
-		uint64_t *keys,
-		dm_block_t *new_root)
+int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
+		    uint64_t *keys, dm_block_t *new_root)
 {
 	unsigned level, last_level = info->levels - 1;
 	int index = 0, r = 0;
@@ -545,19 +515,18 @@ dm_btree_remove(struct dm_btree_info *info,
 	internal_type.equal = NULL;
 
 	init_shadow_spine(&spine, info);
-
 	for (level = 0; level < info->levels; level++) {
 		r = remove_raw(&spine, info,
-			       level == last_level ? &info->value_type : &internal_type,
-			       root,
-			       keys[level], &index);
-
+			       (level == last_level ?
+				&info->value_type : &internal_type),
+			       root, keys[level], &index);
 		if (r < 0)
 			break;
 
 		n = to_node(shadow_current(&spine));
 		if (level == last_level) {
-			BUG_ON(index < 0 || index >= __le32_to_cpu(n->header.nr_entries));
+			BUG_ON(index < 0 ||
+			       index >= __le32_to_cpu(n->header.nr_entries));
 			delete_at(n, index, info->value_type.size);
 			r = 0;
 			*new_root = shadow_root(&spine);
@@ -565,8 +534,8 @@ dm_btree_remove(struct dm_btree_info *info,
 		} else
 			root = value64(n, index);
 	}
-
 	exit_shadow_spine(&spine);
+
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_btree_remove);
