@@ -933,8 +933,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	 * The pool device and data device must have the same size.
 	 */
 	data_size = get_dev_size(data_dev);
-	if (ti->len != data_size) {
-		ti->error = "Pool and data devices differ in size";
+	if (ti->len > data_size) {
+		ti->error = "Pool device bigger than data device";
 		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
