@@ -198,7 +198,8 @@ static void __cell_release(struct cell *cell, struct bio_list *inmates)
 {
 	struct bio_prison *prison = cell->prison;
 	hlist_del(&cell->list);
-	bio_list_merge(inmates, &cell->bios);
+	if (inmates)
+		bio_list_merge(inmates, &cell->bios);
 	mempool_free(cell, prison->cell_pool);
 }
 
@@ -628,97 +629,109 @@ static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
 	return 0;
 }
 
+static void break_sharing(struct pool_c *pool, struct dm_ms_device *msd,
+			  struct bio *bio, dm_block_t block, struct cell_key *key,
+			  struct dm_multisnap_lookup_result *lookup_result)
+{
+	int r;
+	dm_block_t data_block;
+	unsigned count;
+	struct cell *cell;
+
+	count = bio_detain(pool->prison, key, bio, &cell);
+	BUG_ON(count); /* can't happen with a single worker thread */
+
+	r = alloc_data_block(pool, msd, &data_block);
+	switch (r) {
+	case 0:
+		schedule_copy(pool, msd, block,
+			      lookup_result->block,
+			      data_block, cell, bio);
+		break;
+
+	case -ENOSPC:
+		cell_release(cell, NULL);
+		bio->bi_next = NULL;
+		retry_later(bio);
+		break;
+
+	default:
+		printk(KERN_ALERT "alloc_data_block() failed");
+		cell_error(cell);
+		break;
+	}
+}
+
+static void provision_block(struct pool_c *pool, struct dm_ms_device *msd,
+			    struct bio *bio, dm_block_t block, struct cell_key *key)
+{
+	int r;
+	unsigned count;
+	dm_block_t data_block;
+	struct cell *cell;
+
+	count = bio_detain(pool->prison, key, bio, &cell);
+	BUG_ON(count);	     /* can't happen with a single worker thread */
+
+	r = alloc_data_block(pool, msd, &data_block);
+	switch (r) {
+	case 0:
+		schedule_zero(pool, msd, block, data_block, cell, bio);
+		break;
+
+	case -ENOSPC:
+		cell_release(cell, NULL);
+		bio->bi_next = NULL;
+		retry_later(bio);
+		break;
+
+	default:
+		printk(KERN_ALERT "-ENODATA alloc_data_block() failed");
+		cell_error(cell);
+		break;
+	}
+}
+
 static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 			struct bio *bio)
 {
-	int r, count;
-	dm_block_t block = get_bio_block(pool, bio), data_block;
+	int r;
+	dm_block_t block = get_bio_block(pool, bio);
 	struct dm_multisnap_lookup_result lookup_result;
-	struct bio_list bios;
 	struct cell *cell;
 	struct cell_key key;
-
-	bio_list_init(&bios);
 
 	/*
 	 * First we detain the bio against the cell for the virtual cell.
 	 * We can then check whether it's been provisioned.
 	 */
 	build_virtual_key(msd, block, &key);
-	count = bio_detain_if_occupied(pool->prison, &key, bio, &cell);
-	if (count)
+	if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
 		return; /* already underway */
 
 	r = dm_multisnap_metadata_lookup(msd, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		build_data_key(msd, block, &key);
-		count = bio_detain_if_occupied(pool->prison, &key, bio, &cell);
-		if (count)
+		build_data_key(msd, lookup_result.block, &key);
+		if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
 			return; /* already underway */
 
 		if (lookup_result.shared) {
-			if (bio_data_dir(bio) == READ) {
+			if (bio_data_dir(bio) == WRITE)
+				break_sharing(pool, msd, bio, block, &key, &lookup_result);
+			else {
 				/*
 				 * FIXME: hook the bios so we can do deferred
 				 * release of old data blocks
 				 */
 				remap_and_issue(pool, bio, lookup_result.block);
-
-			} else {
-				/*
-				 * We need to break sharing on a data
-				 * block.
-				 */
-				count = bio_detain(pool->prison, &key, bio, &cell);
-				BUG_ON(count); /* can't happen with a single worker thread */
-
-				r = alloc_data_block(pool, msd, &data_block);
-				switch (r) {
-				case 0:
-					schedule_copy(pool, msd, block,
-						      lookup_result.block,
-						      data_block, cell, bio);
-					break;
-
-				case -ENOSPC:
-					cell_release(cell, &bios);
-					bio->bi_next = NULL;
-					retry_later(bio);
-					break;
-
-				default:
-					printk(KERN_ALERT "alloc_data_block() failed");
-					cell_error(cell);
-					break;
-				}
 			}
 		} else
 			remap_and_issue(pool, bio, lookup_result.block);
 		break;
 
 	case -ENODATA:
-		/* prepare a new block */
-		count = bio_detain(pool->prison, &key, bio, &cell);
-		BUG_ON(count);
-
-		r = alloc_data_block(pool, msd, &data_block);
-		switch (r) {
-		case 0:
-			schedule_zero(pool, msd, block, data_block, cell, bio);
-			break;
-
-		case -ENOSPC:
-			cell_release(cell, &bios);
-			bio->bi_next = NULL;
-			retry_later(bio);
-			break;
-
-		default:
-			printk(KERN_ALERT "-ENODATA alloc_data_block() failed");
-			cell_error(cell);
-			break;
-		}
+		provision_block(pool, msd, bio, block, &key);
 		break;
 
 	default:
