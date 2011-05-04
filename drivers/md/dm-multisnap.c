@@ -162,6 +162,37 @@ static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 	return r;
 }
 
+static int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
+				  struct bio *inmate, struct cell **ref)
+{
+	int r, found = 0;
+	unsigned long flags;
+	uint32_t hash = hash_key(prison, key);
+	struct cell *uninitialized_var(cell);
+	struct hlist_node *tmp;
+
+	BUG_ON(hash > prison->nr_buckets);
+
+	spin_lock_irqsave(&prison->lock, flags);
+	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
+		if (!memcmp(&cell->key, key, sizeof(cell->key))) {
+			found = 1;
+			break;
+		}
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	if (!found)
+		return 0;
+
+	spin_lock_irqsave(&prison->lock, flags);
+	r = cell->count++;
+	bio_list_add(&cell->bios, inmate);
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	*ref = cell;
+	return r;
+}
+
 /* @inmates must have been initialised prior to this call */
 static void __cell_release(struct cell *cell, struct bio_list *inmates)
 {
@@ -607,46 +638,41 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 	struct cell *cell;
 	struct cell_key key;
 
+	bio_list_init(&bios);
+
 	/*
 	 * First we detain the bio against the cell for the virtual cell.
 	 * We can then check whether it's been provisioned.
 	 */
 	build_virtual_key(msd, block, &key);
-	count = bio_detain(pool->prison, &key, bio, &cell);
-	if (count > 0)
-		/* Someone's already handling this, leave it to them. */
-		return;
+	count = bio_detain_if_occupied(pool->prison, &key, bio, &cell);
+	if (count)
+		return; /* already underway */
 
 	r = dm_multisnap_metadata_lookup(msd, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		/*
-		 * A virtual block will only ever be locked once, during
-		 * provisioning.  We know this has been provisioned, so
-		 * it's safe to release the bio.
-		 */
-		bio_list_init(&bios);
-		cell_release(cell, &bios);
+		build_data_key(msd, block, &key);
+		count = bio_detain_if_occupied(pool->prison, &key, bio, &cell);
+		if (count)
+			return; /* already underway */
 
-		if (bio_data_dir(bio) == READ) {
-			/*
-			 * FIXME: hook the bios so we can do deferred
-			 * release of old data blocks
-			 */
-			while ((bio = bio_list_pop(&bios)))
+		if (lookup_result.shared) {
+			if (bio_data_dir(bio) == READ) {
+				/*
+				 * FIXME: hook the bios so we can do deferred
+				 * release of old data blocks
+				 */
 				remap_and_issue(pool, bio, lookup_result.block);
 
-		} else {
-			/*
-			 * Given it's a WRITE io, we may need to break
-			 * sharing on a data block.
-			 */
-			build_data_key(msd, block, &key);
-			count = bio_detain(pool->prison, &key, bio, &cell);
-			if (count > 0)
-				return; /* already underway */
+			} else {
+				/*
+				 * We need to break sharing on a data
+				 * block.
+				 */
+				count = bio_detain(pool->prison, &key, bio, &cell);
+				BUG_ON(count); /* can't happen with a single worker thread */
 
-			if (lookup_result.shared) {
 				r = alloc_data_block(pool, msd, &data_block);
 				switch (r) {
 				case 0:
@@ -657,8 +683,8 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 
 				case -ENOSPC:
 					cell_release(cell, &bios);
-					while ((bio = bio_list_pop(&bios)))
-						retry_later(bio);
+					bio->bi_next = NULL;
+					retry_later(bio);
 					break;
 
 				default:
@@ -666,13 +692,16 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 					cell_error(cell);
 					break;
 				}
-			} else
-				cell_remap_and_issue(pool, cell, lookup_result.block);
-		}
+			}
+		} else
+			remap_and_issue(pool, bio, lookup_result.block);
 		break;
 
 	case -ENODATA:
 		/* prepare a new block */
+		count = bio_detain(pool->prison, &key, bio, &cell);
+		BUG_ON(count);
+
 		r = alloc_data_block(pool, msd, &data_block);
 		switch (r) {
 		case 0:
@@ -680,6 +709,8 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 			break;
 
 		case -ENOSPC:
+			cell_release(cell, &bios);
+			bio->bi_next = NULL;
 			retry_later(bio);
 			break;
 
