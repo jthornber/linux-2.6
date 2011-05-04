@@ -203,10 +203,11 @@ static void cell_error(struct cell *cell)
 /*
  * Key building.
  */
-static void build_data_key(dm_block_t b, struct cell_key *key)
+static void build_data_key(struct dm_ms_device *msd,
+			   dm_block_t b, struct cell_key *key)
 {
 	key->virtual = 0;
-	key->dev = 0;
+	key->dev = dm_multisnap_device_dev(msd);
 	key->block = b;
 }
 
@@ -632,7 +633,7 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 			 * Given it's a WRITE io, we may need to break
 			 * sharing on a data block.
 			 */
-			build_data_key(block, &key);
+			build_data_key(msd, block, &key);
 			count = bio_detain(pool->prison, &key, bio, &cell);
 			if (count > 0)
 				return; /* already underway */
