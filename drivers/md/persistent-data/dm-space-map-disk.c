@@ -427,22 +427,10 @@ static int sm_disk_get_count(void *context, dm_block_t b, uint32_t *result)
 	return io_lookup(smd, b, result);
 }
 
-static int __set_count(void *context, dm_block_t b, uint32_t count)
+static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
 {
 	struct sm_disk *smd = (struct sm_disk *) context;
 	return io_insert(smd, b, count);
-}
-
-static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
-{
-	int r;
-	struct sm_disk *smd = (struct sm_disk *) context;
-	unsigned held = dm_bm_locks_held(dm_tm_get_bm(smd->tm));
-
-	r = __set_count(context, b, count);
-	BUG_ON(dm_bm_locks_held(dm_tm_get_bm(smd->tm)) != held);
-
-	return r;
 }
 
 static int __get_free(void *context, dm_block_t low, dm_block_t high,
