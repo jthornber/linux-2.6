@@ -2,7 +2,6 @@ obj-$(CONFIG_DM_PERSISTENT_DATA) += dm-persistent-data.o
 dm-persistent-data-objs := \
 	dm-block-manager.o \
 	dm-pd-module.o \
-	dm-space-map-core.o \
 	dm-space-map-disk.o \
 	dm-space-map-staged.o \
 	dm-space-map-dummy.o \
