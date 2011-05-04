@@ -628,7 +628,15 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 		bio_list_init(&bios);
 		cell_release(cell, &bios);
 
-		if (bio_data_dir(bio) == WRITE) {
+		if (bio_data_dir(bio) == READ) {
+			/*
+			 * FIXME: hook the bios so we can do deferred
+			 * release of old data blocks
+			 */
+			while ((bio = bio_list_pop(&bios)))
+				remap_and_issue(pool, bio, lookup_result.block);
+
+		} else {
 			/*
 			 * Given it's a WRITE io, we may need to break
 			 * sharing on a data block.
@@ -648,7 +656,9 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 					break;
 
 				case -ENOSPC:
-					retry_later(bio);
+					cell_release(cell, &bios);
+					while ((bio = bio_list_pop(&bios)))
+						retry_later(bio);
 					break;
 
 				default:
@@ -658,8 +668,7 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 				}
 			} else
 				cell_remap_and_issue(pool, cell, lookup_result.block);
-		} else
-			remap_and_issue(pool, bio, lookup_result.block);
+		}
 		break;
 
 	case -ENODATA:
@@ -786,15 +795,10 @@ static int bio_map(struct pool_c *pool, struct dm_target *ti, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	/*
-	 * FIXME: we could detain_if_cell_occupied() here.  It would save
-	 * a couple of lookups in the btree.
-	 */
-
 	r = dm_multisnap_metadata_lookup(msd, block, 0, &result);
 	switch (r) {
 	case 0:
-		if (bio_data_dir(bio) == WRITE && result.shared) {
+		if (unlikely(result.shared)) {
 			/*
 			 * We have a race condition here between the
 			 * result.shared value returned by the lookup and
@@ -1004,6 +1008,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
+	pool->bouncing = 0;
+	pool->triggered = 0;
+	bio_list_init(&pool->retry_list);
 	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers */
 	pool->ti = ti;
 	set_congestion_fn(pool);
