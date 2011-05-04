@@ -179,12 +179,12 @@ static int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *ke
 			found = 1;
 			break;
 		}
-	spin_unlock_irqrestore(&prison->lock, flags);
 
-	if (!found)
+	if (!found) {
+		spin_unlock_irqrestore(&prison->lock, flags);
 		return 0;
+	}
 
-	spin_lock_irqsave(&prison->lock, flags);
 	r = cell->count++;
 	bio_list_add(&cell->bios, inmate);
 	spin_unlock_irqrestore(&prison->lock, flags);
@@ -299,8 +299,10 @@ struct pool_c {
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
 
-	struct workqueue_struct *wq;
-	struct work_struct ws;
+	struct workqueue_struct *producer_wq;
+	struct workqueue_struct *consumer_wq;
+	struct work_struct producer;
+	struct work_struct consumer;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -440,9 +442,14 @@ static void remap_and_issue(struct pool_c *pool, struct bio *bio,
 	generic_make_request(bio);
 }
 
-static void wake_worker(struct pool_c *pool)
+static void wake_producer(struct pool_c *pool)
 {
-	queue_work(pool->wq, &pool->ws);
+	queue_work(pool->producer_wq, &pool->producer);
+}
+
+static void wake_consumer(struct pool_c *pool)
+{
+	queue_work(pool->consumer_wq, &pool->consumer);
 }
 
 static void copy_complete(int read_err, unsigned long write_err, void *context)
@@ -456,7 +463,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	list_add(&m->list, &m->pool->prepared_mappings);
 	spin_unlock_irqrestore(&m->pool->lock, flags);
 
-	wake_worker(m->pool);
+	wake_consumer(m->pool);
 }
 
 static void bio_complete(struct bio *bio, int err)
@@ -475,7 +482,7 @@ static void bio_complete(struct bio *bio, int err)
 	list_add(&m->list, &m->pool->prepared_mappings);
 	spin_unlock_irqrestore(&m->pool->lock, flags);
 
-	wake_worker(m->pool);
+	wake_consumer(m->pool);
 }
 
 static int io_covers_block(struct pool_c *pool, struct bio *bio)
@@ -637,9 +644,11 @@ static void break_sharing(struct pool_c *pool, struct dm_ms_device *msd,
 	dm_block_t data_block;
 	unsigned count;
 	struct cell *cell;
+	struct bio_list bios;
+	bio_list_init(&bios);
 
 	count = bio_detain(pool->prison, key, bio, &cell);
-	BUG_ON(count); /* can't happen with a single worker thread */
+	//BUG_ON(count); /* can't happen with a single worker thread */
 
 	r = alloc_data_block(pool, msd, &data_block);
 	switch (r) {
@@ -650,9 +659,9 @@ static void break_sharing(struct pool_c *pool, struct dm_ms_device *msd,
 		break;
 
 	case -ENOSPC:
-		cell_release(cell, NULL);
-		bio->bi_next = NULL;
-		retry_later(bio);
+		cell_release(cell, &bios);
+		while ((bio = bio_list_pop(&bios)))
+			retry_later(bio);
 		break;
 
 	default:
@@ -662,16 +671,41 @@ static void break_sharing(struct pool_c *pool, struct dm_ms_device *msd,
 	}
 }
 
+static void process_shared_bio(struct pool_c *pool,
+			       struct dm_ms_device *msd,
+			       struct bio *bio,
+			       dm_block_t block,
+			       struct dm_multisnap_lookup_result *lookup_result)
+{
+	struct cell *cell;
+	struct cell_key key;
+
+	build_data_key(msd, lookup_result->block, &key);
+	if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
+		return; /* already underway */
+
+	if (bio_data_dir(bio) == WRITE)
+		break_sharing(pool, msd, bio, block, &key, lookup_result);
+	else {
+		/*
+		 * FIXME: hook the bios so we can do deferred
+		 * release of old data blocks
+		 */
+		remap_and_issue(pool, bio, lookup_result->block);
+	}
+}
+
 static void provision_block(struct pool_c *pool, struct dm_ms_device *msd,
-			    struct bio *bio, dm_block_t block, struct cell_key *key)
+			    struct bio *bio, dm_block_t block)
 {
 	int r;
-	unsigned count;
 	dm_block_t data_block;
 	struct cell *cell;
+	struct cell_key key;
 
-	count = bio_detain(pool->prison, key, bio, &cell);
-	BUG_ON(count);	     /* can't happen with a single worker thread */
+	build_virtual_key(msd, block, &key);
+	if (bio_detain(pool->prison, &key, bio, &cell))
+		return; /* already underway */
 
 	r = alloc_data_block(pool, msd, &data_block);
 	switch (r) {
@@ -698,40 +732,18 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 	int r;
 	dm_block_t block = get_bio_block(pool, bio);
 	struct dm_multisnap_lookup_result lookup_result;
-	struct cell *cell;
-	struct cell_key key;
-
-	/*
-	 * First we detain the bio against the cell for the virtual cell.
-	 * We can then check whether it's been provisioned.
-	 */
-	build_virtual_key(msd, block, &key);
-	if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
-		return; /* already underway */
 
 	r = dm_multisnap_metadata_lookup(msd, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		build_data_key(msd, lookup_result.block, &key);
-		if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
-			return; /* already underway */
-
-		if (lookup_result.shared) {
-			if (bio_data_dir(bio) == WRITE)
-				break_sharing(pool, msd, bio, block, &key, &lookup_result);
-			else {
-				/*
-				 * FIXME: hook the bios so we can do deferred
-				 * release of old data blocks
-				 */
-				remap_and_issue(pool, bio, lookup_result.block);
-			}
-		} else
+		if (lookup_result.shared)
+			process_shared_bio(pool, msd, bio, block, &lookup_result);
+		else
 			remap_and_issue(pool, bio, lookup_result.block);
 		break;
 
 	case -ENODATA:
-		provision_block(pool, msd, bio, block, &key);
+		provision_block(pool, msd, bio, block);
 		break;
 
 	default:
@@ -803,11 +815,15 @@ static void process_prepared_mappings(struct pool_c *pool)
 	}
 }
 
-static void do_work(struct work_struct *ws)
+static void do_producer(struct work_struct *ws)
 {
-	struct pool_c *pool = container_of(ws, struct pool_c, ws);
-
+	struct pool_c *pool = container_of(ws, struct pool_c, producer);
 	process_bios(pool);
+}
+
+static void do_consumer(struct work_struct *ws)
+{
+	struct pool_c *pool = container_of(ws, struct pool_c, consumer);
 	process_prepared_mappings(pool);
 }
 
@@ -819,7 +835,7 @@ static void defer_bio(struct pool_c *pool, struct dm_target *ti, struct bio *bio
 	bio_list_add(&pool->deferred_bios, bio);
 	spin_unlock(&pool->lock);
 
-	wake_worker(pool);
+	wake_producer(pool);
 }
 
 /*
@@ -936,8 +952,12 @@ static void pool_dtr(struct dm_target *ti)
 
 	prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
-	if (pool->wq)
-		destroy_workqueue(pool->wq);
+
+	if (pool->producer_wq)
+		destroy_workqueue(pool->producer_wq);
+
+	if (pool->consumer_wq)
+		destroy_workqueue(pool->consumer_wq);
 
 	mempool_destroy(pool->mapping_pool);
 	kfree(pool);
@@ -1042,13 +1062,22 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	/* Create singlethreaded workqueue that will service all devices
 	 * that use this metadata.
 	 */
-	pool->wq = alloc_ordered_workqueue(DM_MSG_PREFIX, WQ_MEM_RECLAIM);
-	if (!pool->wq) {
+	pool->producer_wq = alloc_ordered_workqueue(DM_MSG_PREFIX "-producer",
+						    WQ_MEM_RECLAIM);
+	if (!pool->producer_wq) {
 		printk(KERN_ALERT "couldn't create workqueue for metadata object");
 		/* FIXME: finish */
 	}
 
-	INIT_WORK(&pool->ws, do_work);
+	pool->consumer_wq = alloc_ordered_workqueue(DM_MSG_PREFIX "-consumer",
+						    WQ_MEM_RECLAIM);
+	if (!pool->consumer_wq) {
+		printk(KERN_ALERT "couldn't create workqueue for metadata object");
+		/* FIXME: finish */
+	}
+
+	INIT_WORK(&pool->producer, do_producer);
+	INIT_WORK(&pool->consumer, do_consumer);
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
@@ -1094,7 +1123,8 @@ static void pool_presuspend(struct dm_target *ti)
 	spin_unlock(&pool->lock);
 
 	/* Wait until all io has been processed. */
-	flush_workqueue(pool->wq);
+	flush_workqueue(pool->producer_wq);
+	flush_workqueue(pool->consumer_wq);
 	if (dm_multisnap_metadata_commit(pool->mmd) < 0) {
 		printk(KERN_ALERT "multisnap metadata write failed.");
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
@@ -1148,7 +1178,7 @@ static int pool_preresume(struct dm_target *ti)
 	pool->triggered = 0;
 	spin_unlock(&pool->lock);
 
-	wake_worker(pool);
+	wake_producer(pool);
 	return 0;
 }
 
