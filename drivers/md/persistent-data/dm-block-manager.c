@@ -521,9 +521,6 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 	if (!b)
 		return NULL;
 
-	printk(KERN_ALERT "block offset = %u",
-	       (unsigned) ((uint64_t) b & (bm->block_size - 1)));
-
 	INIT_LIST_HEAD(&b->list);
 	INIT_HLIST_NODE(&b->hlist);
 
