@@ -18,6 +18,8 @@
 
 #define	DM_MSG_PREFIX	"multisnap"
 
+// FIXME: can cells and new_mappings be combined?
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -642,13 +644,11 @@ static void break_sharing(struct pool_c *pool, struct dm_ms_device *msd,
 {
 	int r;
 	dm_block_t data_block;
-	unsigned count;
 	struct cell *cell;
 	struct bio_list bios;
-	bio_list_init(&bios);
 
-	count = bio_detain(pool->prison, key, bio, &cell);
-	//BUG_ON(count); /* can't happen with a single worker thread */
+	bio_list_init(&bios);
+	bio_detain(pool->prison, key, bio, &cell);
 
 	r = alloc_data_block(pool, msd, &data_block);
 	switch (r) {
@@ -803,9 +803,9 @@ static void process_prepared_mappings(struct pool_c *pool)
 			cell_error(m->cell);
 		} else {
 			if (m->bio) {
-				bio_endio(bio, 0);
 				cell_remap_and_issue_except(pool, m->cell,
 							    m->data_block, bio);
+				bio_endio(bio, 0);
 			} else
 				cell_remap_and_issue(pool, m->cell, m->data_block);
 
