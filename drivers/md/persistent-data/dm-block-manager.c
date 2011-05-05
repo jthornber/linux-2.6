@@ -7,6 +7,8 @@
 
 /*----------------------------------------------------------------*/
 
+#define SECTOR_SIZE 512
+
 enum dm_block_state {
 	BS_EMPTY,
 	BS_CLEAN,
@@ -24,6 +26,7 @@ struct dm_block {
 	struct hlist_node hlist;
 
 	dm_block_t where;
+	void *data_actual;
 	void *data;
 	enum dm_block_state state;
 	wait_queue_head_t io_q;
@@ -506,19 +509,29 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 /*----------------------------------------------------------------
  * Low level block management
  *--------------------------------------------------------------*/
+static void *align(void *ptr, size_t amount)
+{
+	size_t offset = (uint64_t) ptr & (amount - 1);
+	return ((unsigned char *) ptr) + (amount - offset);
+}
+
 static struct dm_block *alloc_block(struct dm_block_manager *bm)
 {
 	struct dm_block *b = kmalloc(sizeof(*b), GFP_KERNEL);
 	if (!b)
 		return NULL;
 
+	printk(KERN_ALERT "block offset = %u",
+	       (unsigned) ((uint64_t) b & (bm->block_size - 1)));
+
 	INIT_LIST_HEAD(&b->list);
 	INIT_HLIST_NODE(&b->hlist);
 
-	if (!(b->data = kmalloc(bm->block_size, GFP_KERNEL))) {
+	if (!(b->data_actual = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL))) {
 		kfree(b);
 		return NULL;
 	}
+	b->data = align(b->data_actual, SECTOR_SIZE);
 	b->state = BS_EMPTY;
 	init_waitqueue_head(&b->io_q);
 	b->read_lock_count = 0;
@@ -531,7 +544,7 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 
 static void free_block(struct dm_block *b)
 {
-	kfree(b->data);
+	kfree(b->data_actual);
 	kfree(b);
 }
 
