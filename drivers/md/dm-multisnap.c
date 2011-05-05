@@ -638,6 +638,59 @@ static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
 	return 0;
 }
 
+static void process_discard(struct pool_c *pool, struct dm_ms_device *msd,
+			    struct bio *bio)
+{
+	int r;
+	dm_block_t block = get_bio_block(pool, bio);
+	struct dm_multisnap_lookup_result lookup_result;
+
+	printk(KERN_ALERT "handling discard");
+	r = dm_multisnap_metadata_lookup(msd, block, 1, &lookup_result);
+	switch (r) {
+	case 0:
+		if (lookup_result.shared)
+			/*
+			 * We just ignore shared discards for now, these
+			 * are hard, and I want to get deferred
+			 * deallocation working first.
+			 */
+			bio_endio(bio, 0);
+
+		else {
+			r = dm_multisnap_metadata_remove(msd, block);
+			if (r) {
+				printk(KERN_ALERT "dm_multisnap_metadata_remove() failed");
+				bio_io_error(bio);
+			} else {
+				// FIXME: this should be handled by the value_type ops
+				r = dm_multisnap_metadata_free_data_block(msd, lookup_result.block);
+				if (r) {
+					printk(KERN_ALERT "dm_multiisnap_metadata_free_data_block failed");
+					/* carry on regardless, we've lost an unused data block */
+				}
+
+				remap_and_issue(pool, bio, lookup_result.block);
+			}
+		}
+		break;
+
+	case -ENODATA:
+		/* Either this isn't provisioned, or preparation for
+		 * provisioning may be pending (we could find out by
+		 * calling bio_detain_if_occupied).  But even in this case
+		 * it's easier to just forget the discard.
+		 */
+		bio_endio(bio, 0);
+		break;
+
+	default:
+		printk(KERN_ALERT "dm_multisnap_metadata_lookup failed, error = %d", r);
+		bio_io_error(bio);
+		break;
+	}
+}
+
 static void break_sharing(struct pool_c *pool, struct dm_ms_device *msd,
 			  struct bio *bio, dm_block_t block, struct cell_key *key,
 			  struct dm_multisnap_lookup_result *lookup_result)
@@ -767,7 +820,11 @@ static void process_bios(struct pool_c *pool)
 
 	while ((bio = bio_list_pop(&bios))) {
 		struct dm_ms_device *msd = get_msd(bio);
-		process_bio(pool, msd, bio);
+
+		if (bio->bi_rw & REQ_DISCARD)
+			process_discard(pool, msd, bio);
+		else
+			process_bio(pool, msd, bio);
 	}
 }
 
@@ -850,7 +907,18 @@ static int bio_map(struct pool_c *pool, struct dm_target *ti, struct bio *bio)
 	struct dm_ms_device *msd = mc->msd;
 	struct dm_multisnap_lookup_result result;
 
-	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+	/*
+	 * XXX(hch): in theory higher level code should prevent this
+	 * from happening, not sure why we ever get here.
+	 */
+	if ((bio->bi_rw & REQ_DISCARD) &&
+	    bio->bi_size < (pool->sectors_per_block << SECTOR_SHIFT)) {
+		printk(KERN_ALERT "discard too small");
+		bio_endio(bio, 0);
+		return DM_MAPIO_SUBMITTED;
+	}
+
+	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
 		defer_bio(pool, ti, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1088,6 +1156,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool->ti = ti;
 	set_congestion_fn(pool);
 	ti->num_flush_requests = 1;
+	ti->num_discard_requests = 1;
 	ti->private = pool;
 
 	bdev_table_insert(&bdev_table_, pool);
@@ -1381,6 +1450,7 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	ti->split_io = mc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
+	ti->num_discard_requests = 1;
 
 	return 0;
 }
@@ -1453,6 +1523,13 @@ static void multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+
+	/*
+	 * Only allow discard requests aligned to our block size, and make
+	 * sure that we never get sent larger discard requests either.
+	 */
+	limits->max_discard_sectors = pool->sectors_per_block;
+	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
 }
 
 static struct target_type multisnap_target = {
