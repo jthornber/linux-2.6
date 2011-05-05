@@ -680,10 +680,9 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 	return r;
 }
 
-int dm_multisnap_metadata_insert(struct dm_ms_device *msd,
-				 dm_block_t block, dm_block_t data_block)
+int __insert(struct dm_ms_device *msd,
+	     dm_block_t block, dm_block_t data_block)
 {
-	/* FIXME: remove @data_block from the allocated tracking data structure */
 	dm_block_t keys[2];
 	__le64 value;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
@@ -695,6 +694,43 @@ int dm_multisnap_metadata_insert(struct dm_ms_device *msd,
 	value = __cpu_to_le64(pack_dm_block_time(data_block, mmd->time));
 
 	return dm_btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
+}
+
+int dm_multisnap_metadata_insert(struct dm_ms_device *msd,
+				 dm_block_t block, dm_block_t data_block)
+{
+	int r;
+
+	down_write(&msd->mmd->root_lock);
+	r = __insert(msd, block, data_block);
+	up_write(&msd->mmd->root_lock);
+
+	return r;
+}
+
+static int __remove(struct dm_ms_device *msd, dm_block_t block)
+{
+	int r;
+	struct dm_multisnap_metadata *mmd = msd->mmd;
+	dm_block_t keys[2] = { msd->id, block };
+
+	r = dm_btree_remove(&mmd->info, mmd->root, keys, &mmd->root);
+	if (r)
+		return r;
+
+	mmd->have_inserted = 1;
+	return 0;
+}
+
+int dm_multisnap_metadata_remove(struct dm_ms_device *msd, dm_block_t block)
+{
+	int r;
+
+	down_write(&msd->mmd->root_lock);
+	r = __remove(msd, block);
+	up_write(&msd->mmd->root_lock);
+
+	return r;
 }
 
 int dm_multisnap_metadata_alloc_data_block(struct dm_ms_device *msd,
@@ -771,6 +807,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	}
 	up_read(&mmd->root_lock);
 
+	printk(KERN_ALERT "committing");
 	down_write(&mmd->root_lock);
 	r = __write_changed_details(mmd);
 	if (r < 0)

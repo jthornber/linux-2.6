@@ -103,6 +103,10 @@ dm_multisnap_metadata_insert(struct dm_ms_device *msd,
 			     dm_block_t data_block);
 
 int
+dm_multisnap_metadata_remove(struct dm_ms_device *msd,
+			     dm_block_t block);
+
+int
 dm_multisnap_metadata_alloc_data_block(struct dm_ms_device *msd,
 				       dm_block_t *result);
 
