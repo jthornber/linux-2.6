@@ -61,14 +61,7 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 int dm_bm_unlock(struct dm_block *b);
 
 /*
- * dm_bm_flush() tells the block manager to write all changed data back to the
- * disk.  If |should_block| is set then it will block until all data has
- * hit the disk.
- */
-int dm_bm_flush(struct dm_block_manager *bm,
-		int should_block);
-
-/* It's a common idiom to have a superblock that should be committed last.
+ * It's a common idiom to have a superblock that should be committed last.
  *
  * |superblock| should be write locked, it will be unlocked during this
  * function.  All dirty blocks are guaranteed to be written and flushed

@@ -838,20 +838,6 @@ static int __wait_flush(struct dm_block_manager *bm)
 	return ret;
 }
 
-int dm_bm_flush(struct dm_block_manager *bm, int block)
-{
-	write_all_dirty(bm);
-	if (!block)
-		return 0;
-
-	/* FIXME: we need to issue a REQ_FLUSH, and wait for _that_ to
-	 * complete.
-	 */
-
-	return __wait_flush(bm);
-}
-EXPORT_SYMBOL_GPL(dm_bm_flush);
-
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock)
 {
