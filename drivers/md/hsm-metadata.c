@@ -84,7 +84,7 @@ struct hsm_metadata {
 
 /*----------------------------------------------------------------*/
 
-/* A little global cache of thinp metadata devs */
+/* A little global cache of hsm metadata devs */
 struct hsm_metadata;
 
 /* FIXME: add a spin lock round the table */
@@ -492,7 +492,7 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 	if (b >= nr_blocks) {
 		up_write(&hsm->root_lock);
 		/* we've run out of space, client should extend and then retry*/
-		printk(KERN_ALERT "out of thinp data space");
+		// printk(KERN_ALERT "out of hsm data space");
 		return -ENOSPC;
 	}
 
