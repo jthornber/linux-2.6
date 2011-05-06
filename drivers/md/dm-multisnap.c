@@ -235,6 +235,108 @@ static void cell_error(struct cell *cell)
 /*----------------------------------------------------------------*/
 
 /*
+ * We use the deferred set to keep track of pending reads to shared blocks.
+ * We do this to ensure the new mapping caused by a write isn't performed
+ * until these prior reads have completed.  Otherwise the insertion of the
+ * new mapping could free the old block that the read bios are mapped to.
+ */
+#define DEFERRED_SET_SIZE 64
+
+struct deferred_set;
+struct deferred_entry {
+	struct deferred_set *ds;
+	unsigned count;
+	struct list_head work_items;
+};
+
+struct deferred_set {
+	spinlock_t lock;
+	unsigned current_entry;
+	unsigned sweeper;
+	struct deferred_entry entries[DEFERRED_SET_SIZE];
+};
+
+static void ds_init(struct deferred_set *ds)
+{
+	int i;
+
+	spin_lock_init(&ds->lock);
+	ds->current_entry = 0;
+	ds->sweeper = 0;
+	for (i = 0; i < DEFERRED_SET_SIZE; i++) {
+		ds->entries[i].ds = ds;
+		ds->entries[i].count = 0;
+		INIT_LIST_HEAD(&ds->entries[i].work_items);
+	}
+}
+
+static struct deferred_entry *ds_inc(struct deferred_set *ds)
+{
+	unsigned long flags;
+	struct deferred_entry *entry;
+
+	spin_lock_irqsave(&ds->lock, flags);
+	entry = ds->entries + ds->current_entry;
+	entry->count++;
+	spin_unlock_irqrestore(&ds->lock, flags);
+
+	return entry;
+}
+
+static unsigned ds_next(unsigned index)
+{
+	return (index + 1) % DEFERRED_SET_SIZE;
+}
+
+static void __sweep(struct deferred_set *ds, struct list_head *head)
+{
+	while ((ds->sweeper != ds->current_entry) && !ds->entries[ds->sweeper].count) {
+		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
+		ds->sweeper = ds_next(ds->sweeper);
+	}
+
+	if ((ds->sweeper == ds->current_entry) && !ds->entries[ds->sweeper].count)
+		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
+}
+
+static void ds_dec(struct deferred_entry *entry, struct list_head *head)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&entry->ds->lock, flags);
+	BUG_ON(!entry->count);
+	--entry->count;
+	__sweep(entry->ds, head);
+	spin_unlock_irqrestore(&entry->ds->lock, flags);
+}
+
+/* 1 if deferred, 0 if no pending items to delay job */
+static int ds_add_work(struct deferred_set *ds, struct list_head *work)
+{
+	int r = 1;
+	unsigned long flags;
+	unsigned next_entry;
+
+	spin_lock_irqsave(&ds->lock, flags);
+	if ((ds->sweeper == ds->current_entry) &&
+	    !ds->entries[ds->current_entry].count)
+		r = 0;
+	else {
+		list_add(work, &ds->entries[ds->current_entry].work_items);
+		next_entry = ds_next(ds->current_entry);
+		if (!ds->entries[next_entry].count) {
+			BUG_ON(!list_empty(&ds->entries[next_entry].work_items));
+			ds->current_entry = next_entry;
+		}
+	}
+	spin_unlock_irqrestore(&ds->lock, flags);
+
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
+/*
  * Key building.
  */
 static void build_data_key(struct dm_ms_device *msd,
@@ -264,6 +366,8 @@ struct pool_c;
 
 struct new_mapping {
 	struct list_head list;
+
+	int prepared;
 
 	struct pool_c *pool;
 	struct dm_ms_device *msd;
@@ -318,13 +422,23 @@ struct pool_c {
 	int triggered;		/* a dm event has been sent */
 	struct bio_list retry_list;
 
+	struct deferred_set ds;	/* FIXME: move to multisnap_c */
+
 	mempool_t *mapping_pool;
+	mempool_t *endio_hook_pool;
 };
 
 struct multisnap_c {
 	struct pool_c *pool;
 	struct dm_dev *pool_dev;
 	struct dm_ms_device *msd;
+};
+
+struct endio_hook {
+	struct pool_c *pool;
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
+	struct deferred_entry *entry;
 };
 
 /*----------------------------------------------------------------*/
@@ -449,9 +563,12 @@ static void wake_producer(struct pool_c *pool)
 	queue_work(pool->producer_wq, &pool->producer);
 }
 
-static void wake_consumer(struct pool_c *pool)
+static void __maybe_add_mapping(struct pool_c *pool, struct new_mapping *m)
 {
-	queue_work(pool->consumer_wq, &pool->consumer);
+	if (list_empty(&m->list) && m->prepared) {
+		list_add(&m->list, &pool->prepared_mappings);
+		queue_work(pool->consumer_wq, &pool->consumer);
+	}
 }
 
 static void copy_complete(int read_err, unsigned long write_err, void *context)
@@ -462,29 +579,47 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	m->err = read_err || write_err ? -EIO : 0;
 
 	spin_lock_irqsave(&m->pool->lock, flags);
-	list_add(&m->list, &m->pool->prepared_mappings);
+	m->prepared = 1;
+	__maybe_add_mapping(m->pool, m);
 	spin_unlock_irqrestore(&m->pool->lock, flags);
-
-	wake_consumer(m->pool);
 }
 
-static void bio_complete(struct bio *bio, int err)
+static void overwrite_complete(struct bio *bio, int err)
 {
 	unsigned long flags;
 	struct new_mapping *m = (struct new_mapping *) bio->bi_private;
 
-	/*
-	 * We can't call the proper endio function here, because the
-	 * mapping hasn't been inserted yet.  Shame, the context switch to
-	 * the worker is going to cause latency.
-	 */
 	m->err = err;
 
 	spin_lock_irqsave(&m->pool->lock, flags);
-	list_add(&m->list, &m->pool->prepared_mappings);
+	m->prepared = 1;
+	__maybe_add_mapping(m->pool, m);
 	spin_unlock_irqrestore(&m->pool->lock, flags);
+}
 
-	wake_consumer(m->pool);
+static void shared_read_complete(struct bio *bio, int err)
+{
+	struct list_head mappings;
+	struct new_mapping *m, *tmp;
+	struct endio_hook *h = (struct endio_hook *) bio->bi_private;
+	unsigned long flags;
+
+	bio->bi_end_io = h->bi_end_io;
+	bio->bi_private = h->bi_private;
+	bio_endio(bio, err);
+
+	INIT_LIST_HEAD(&mappings);
+	ds_dec(h->entry, &mappings);
+
+	spin_lock_irqsave(&h->pool->lock, flags);
+	list_for_each_entry_safe (m, tmp, &mappings, list) {
+		list_del(&m->list);
+		INIT_LIST_HEAD(&m->list);
+		__maybe_add_mapping(m->pool, m);
+	}
+	spin_unlock_irqrestore(&h->pool->lock, flags);
+
+	mempool_free(h, h->pool->endio_hook_pool);
 }
 
 static int io_covers_block(struct pool_c *pool, struct bio *bio)
@@ -501,6 +636,8 @@ static void schedule_copy(struct pool_c *pool, struct dm_ms_device *msd,
 	int r;
 	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
 
+	INIT_LIST_HEAD(&m->list);
+	m->prepared = 0;
 	m->pool = pool;
 	m->msd = msd;
 	m->virt_block = virt_block;
@@ -508,13 +645,14 @@ static void schedule_copy(struct pool_c *pool, struct dm_ms_device *msd,
 	m->cell = cell;
 	m->err = 0;
 	m->bio = NULL;
+	ds_add_work(&pool->ds, &m->list);
 
 	if (io_covers_block(pool, bio)) {
 		/* no copy needed, since all data is going to change */
 		m->bio = bio;
 		m->bi_end_io = bio->bi_end_io;
 		m->bi_private = bio->bi_private;
-		bio->bi_end_io = bio_complete;
+		bio->bi_end_io = overwrite_complete;
 		bio->bi_private = m;
 		remap_and_issue(pool, bio, data_dest);
 
@@ -546,6 +684,8 @@ static void schedule_zero(struct pool_c *pool, struct dm_ms_device *msd,
 {
 	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
 
+	INIT_LIST_HEAD(&m->list);
+	m->prepared = 0;
 	m->pool = pool;
 	m->msd = msd;
 	m->virt_block = virt_block;
@@ -559,7 +699,7 @@ static void schedule_zero(struct pool_c *pool, struct dm_ms_device *msd,
 		m->bio = bio;
 		m->bi_end_io = bio->bi_end_io;
 		m->bi_private = bio->bi_private;
-		bio->bi_end_io = bio_complete;
+		bio->bi_end_io = overwrite_complete;
 		bio->bi_private = m;
 		remap_and_issue(pool, bio, data_block);
 
@@ -601,15 +741,16 @@ static void retry_later(struct bio *bio)
 	struct dm_target *ti = get_ti(bio);
 	struct multisnap_c *mc = ti->private;
 	struct pool_c *pool = mc->pool;
+	unsigned long flags;
 
 	/* restore the bio to a pristine state */
 	bio->bi_bdev = ti_to_bdev(ti);
 	bio->bi_sector += ti->begin;
 
 	/* push it onto the retry list */
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	bio_list_add(&pool->retry_list, bio);
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
 static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
@@ -617,6 +758,7 @@ static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
 {
 	int r;
 	dm_block_t free_blocks;
+	unsigned long flags;
 
 	r = dm_multisnap_metadata_alloc_data_block(msd, result);
 	if (r)
@@ -629,9 +771,9 @@ static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
 	}
 
 	if (free_blocks <= pool->low_water_mark) {
-		spin_lock(&pool->lock);
+		spin_lock_irqsave(&pool->lock, flags);
 		pool->triggered = 1;
-		spin_unlock(&pool->lock);
+		spin_unlock_irqrestore(&pool->lock, flags);
 		dm_table_event(pool->ti->table);
 	}
 
@@ -740,10 +882,17 @@ static void process_shared_bio(struct pool_c *pool,
 	if (bio_data_dir(bio) == WRITE)
 		break_sharing(pool, msd, bio, block, &key, lookup_result);
 	else {
-		/*
-		 * FIXME: hook the bios so we can do deferred
-		 * release of old data blocks
-		 */
+		struct endio_hook *h = mempool_alloc(pool->endio_hook_pool,
+						     GFP_NOIO);
+
+		h->pool = pool;
+		h->bi_end_io = bio->bi_end_io;
+		h->bi_private = bio->bi_private;
+		h->entry = ds_inc(&pool->ds);
+
+		bio->bi_end_io = shared_read_complete;
+		bio->bi_private = h;
+
 		remap_and_issue(pool, bio, lookup_result->block);
 	}
 }
@@ -796,6 +945,7 @@ static void process_bio(struct pool_c *pool, struct dm_ms_device *msd,
 		break;
 
 	case -ENODATA:
+		/* FIXME: fill with zeroes for reads ? */
 		provision_block(pool, msd, bio, block);
 		break;
 
@@ -886,11 +1036,13 @@ static void do_consumer(struct work_struct *ws)
 
 static void defer_bio(struct pool_c *pool, struct dm_target *ti, struct bio *bio)
 {
+	unsigned long flags;
+
 	set_ti(bio, ti);
 
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	bio_list_add(&pool->deferred_bios, bio);
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_producer(pool);
 }
@@ -950,6 +1102,14 @@ static int bio_map(struct pool_c *pool, struct dm_target *ti, struct bio *bio)
 		break;
 
 	case -ENODATA:
+
+		if (bio_rw(bio) == READA)
+			bio_io_error(bio);
+		else
+			defer_bio(pool, ti, bio);
+		r = DM_MAPIO_SUBMITTED;
+		break;
+
 	case -EWOULDBLOCK:
 		defer_bio(pool, ti, bio);
 		r = DM_MAPIO_SUBMITTED;
@@ -963,10 +1123,11 @@ static int is_congested(void *congested_data, int bdi_bits)
 {
 	int r;
 	struct pool_c *pool = congested_data;
+	unsigned long flags;
 
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	r = !bio_list_empty(&pool->retry_list);
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	if (!r) {
 		struct request_queue *q = bdev_get_queue(pool->data_dev->bdev);
@@ -990,12 +1151,13 @@ static void requeue_bios(struct bio_list *bl, spinlock_t *lock)
 {
 	struct bio *bio;
 	struct bio_list bios;
+	unsigned long flags;
 
 	bio_list_init(&bios);
-	spin_lock(lock);
+	spin_lock_irqsave(lock, flags);
 	bio_list_merge(&bios, bl);
 	bio_list_init(bl);
-	spin_unlock(lock);
+	spin_unlock_irqrestore(lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_endio(bio, DM_ENDIO_REQUEUE);
@@ -1028,6 +1190,7 @@ static void pool_dtr(struct dm_target *ti)
 		destroy_workqueue(pool->consumer_wq);
 
 	mempool_destroy(pool->mapping_pool);
+	mempool_destroy(pool->endio_hook_pool);
 	kfree(pool);
 }
 
@@ -1152,7 +1315,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool->bouncing = 0;
 	pool->triggered = 0;
 	bio_list_init(&pool->retry_list);
-	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers */
+	ds_init(&pool->ds);
+	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers, error handling */
+	pool->endio_hook_pool = mempool_create_kmalloc_pool(10240, sizeof(struct endio_hook)); /* FIXME: magic numbers, error handling */
 	pool->ti = ti;
 	set_congestion_fn(pool);
 	ti->num_flush_requests = 1;
@@ -1167,10 +1332,11 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 static int pool_map(struct dm_target *ti, struct bio *bio,
 		    union map_info *map_context)
 {
-	struct pool_c *pool = ti->private;
 	int r;
+	struct pool_c *pool = ti->private;
+	unsigned long flags;
 
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	if (pool->bouncing) {
 		bio_list_add(&pool->retry_list, bio);
 		r = DM_MAPIO_SUBMITTED;
@@ -1178,7 +1344,7 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 		bio->bi_bdev = pool->data_dev->bdev;
 		r = DM_MAPIO_REMAPPED;
 	}
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	return r;
 }
@@ -1186,10 +1352,11 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 static void pool_presuspend(struct dm_target *ti)
 {
 	struct pool_c *pool = ti->private;
+	unsigned long flags;
 
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	pool->bouncing = 1;
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	/* Wait until all io has been processed. */
 	flush_workqueue(pool->producer_wq);
@@ -1218,10 +1385,11 @@ static int pool_preresume(struct dm_target *ti)
 	int r;
 	struct pool_c *pool = ti->private;
 	dm_block_t data_size, sb_data_size;
+	unsigned long flags;
 
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	pool->bouncing = 0;
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	data_size = get_dev_size(pool->data_dev) >> pool->block_shift;
 	r = dm_multisnap_metadata_get_data_dev_size(pool->mmd, &sb_data_size);
@@ -1242,10 +1410,10 @@ static int pool_preresume(struct dm_target *ti)
 		}
 	}
 
-	spin_lock(&pool->lock);
+	spin_lock_irqsave(&pool->lock, flags);
 	pool->data_size = data_size;
 	pool->triggered = 0;
-	spin_unlock(&pool->lock);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_producer(pool);
 	return 0;
