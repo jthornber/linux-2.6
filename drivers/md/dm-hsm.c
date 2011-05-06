@@ -372,10 +372,10 @@ static void hc_set_congested_fn(struct hsm_c *hc)
 /* @allocated: amount to add to blocks allocated. */
 static void inc_update(struct hsm_c *hc, int allocated)
 {
-	spin_lock_irq(&hc->provisioned_lock);
+	spin_lock(&hc->provisioned_lock);
 	hc->updates_since_last_commit++;
 	hc->allocations += allocated;
-	spin_unlock_irq(&hc->provisioned_lock);
+	spin_unlock(&hc->provisioned_lock);
 }
 
 /* If commit fails, log an error and throw an event. */
@@ -384,12 +384,12 @@ static int commit(struct hsm_c *hc)
 	int allocations, r = 0;
 	block_t updates;
 
-	spin_lock_irq(&hc->provisioned_lock);
+	spin_lock(&hc->provisioned_lock);
 	updates = hc->updates_since_last_commit;
 	allocations = hc->allocations;
 	hc->updates_since_last_commit = 0;
 	hc->allocations = 0;
-	spin_unlock_irq(&hc->provisioned_lock);
+	spin_unlock(&hc->provisioned_lock);
 
 	if (updates) {
 		r = hsm_metadata_commit(hc->hmd);
@@ -403,9 +403,9 @@ static int commit(struct hsm_c *hc)
 				dm_table_event(hc->ti->table);
 			}
 		} else {
-			spin_lock_irq(&hc->provisioned_lock);
+			spin_lock(&hc->provisioned_lock);
 			hc->provisioned_count += allocations;
-			spin_unlock_irq(&hc->provisioned_lock);
+			spin_unlock(&hc->provisioned_lock);
 		}
 	}
 
@@ -646,10 +646,10 @@ static void do_bios(struct hsm_c *hc, struct bio_list *bios)
 				 * until we evict blocks from the cache or
 				 * more space added by userland.
 				 */
-				spin_lock_irq(&hc->no_space_lock);
+				spin_lock(&hc->no_space_lock);
 				bio_list_add(&hc->no_space, bio);
 				set_bit(HC_NO_SPACE, &hc->flags);
-				spin_unlock_irq(&hc->no_space_lock);
+				spin_unlock(&hc->no_space_lock);
 
 				continue;
 			}
@@ -840,15 +840,15 @@ DMINFO("Freeing pool_block=%llu", (LLU) pool);
 					commit(hc);
 				}
 
-				spin_lock_irq(&hc->no_space_lock);
+				spin_lock(&hc->no_space_lock);
 				bio_list_merge(&bios, &hc->no_space);
 				bio_list_init(&hc->no_space);
-				spin_unlock_irq(&hc->no_space_lock);
+				spin_unlock(&hc->no_space_lock);
 
-				spin_lock_irq(&hc->lock);
+				spin_lock(&hc->lock);
 				bio_list_merge(&hc->in, &bios);
 				clear_bit(HC_NO_SPACE, &hc->flags);
-				spin_unlock_irq(&hc->lock);
+				spin_unlock(&hc->lock);
 
 				wake_do_hsm(hc);
 				break;
@@ -875,10 +875,10 @@ static void do_hsm(struct work_struct *ws)
 
 	do_endios(hc);
 
-	spin_lock_irq(&hc->lock);
+	spin_lock(&hc->lock);
 	bio_list_merge(&bios, &hc->in);
 	bio_list_init(&hc->in);
-	spin_unlock_irq(&hc->lock);
+	spin_unlock(&hc->lock);
 
 	if (bounce_mode)
 		_requeue_bios(&bios);
@@ -1089,9 +1089,9 @@ static int hsm_map(struct dm_target *ti, struct bio *bio,
 	bio->bi_sector -= ti->begin;
 	map_context->ptr = (void*) bio->bi_destructor;
 
-	spin_lock_irq(&hc->lock);
+	spin_lock(&hc->lock);
 	bio_list_add(&hc->in, bio);
-	spin_unlock_irq(&hc->lock);
+	spin_unlock(&hc->lock);
 
 	wake_do_hsm(hc);
 	return DM_MAPIO_SUBMITTED;
@@ -1108,9 +1108,9 @@ static int hsm_end_io(struct dm_target *ti, struct bio *bio,
 	 * the metadata isn't written yet unless error.
 	 */
 	if (!error && test_bit(BLOCK_ACTIVE, &b->flags)) {
-		spin_lock_irq(&b->endio_lock);
+		spin_lock(&b->endio_lock);
 		bio_list_add(&b->endio, bio);
-		spin_unlock_irq(&b->endio_lock);
+		spin_unlock(&b->endio_lock);
 		return DM_ENDIO_INCOMPLETE;
 	}
 

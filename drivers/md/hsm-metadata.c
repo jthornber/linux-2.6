@@ -33,7 +33,8 @@ struct superblock {
 
 	__le64 data_block_size;	/* in sectors */
 	__le64 data_nr_blocks;
-	__le64 first_free_block;
+	__le64 first_free_block; /* Initial allocation. */
+	__le64 freed_block;	 /* Allocation of freed block. */
 
 	__le64 btree_root;
 	__le64 btree_reverse_root;
@@ -72,7 +73,7 @@ struct hsm_metadata {
 	/* just the top level, for deleting whole devices */
 	struct btree_info dev_info;
 
-	int have_inserted;
+	int have_updated;
 
 	struct rw_semaphore root_lock;
 	struct block *sblock;
@@ -239,7 +240,7 @@ alloc_(struct block_manager *bm, int create)
 	hsm->dev_info.value_type.del = NULL;
 	hsm->dev_info.value_type.equal = NULL;
 
-	hsm->have_inserted = 0;
+	hsm->have_updated = 0;
 	hsm->root = 0;
 
 	init_rwsem(&hsm->root_lock);
@@ -269,7 +270,7 @@ static int hsm_metadata_begin(struct hsm_metadata *hsm)
 	struct superblock *s;
 
 	BUG_ON(hsm->sblock);
-	hsm->have_inserted = 0;
+	hsm->have_updated = 0;
 	r = bm_write_lock(hsm->bm, HSM_SUPERBLOCK_LOCATION, &hsm->sblock);
 	if (r)
 		return r;
@@ -325,6 +326,7 @@ hsm_metadata_open_(struct block_device *bdev,
 		sb->data_block_size = __cpu_to_le64(data_block_size);
 		sb->data_nr_blocks = __cpu_to_le64(data_dev_size);
 		sb->first_free_block = 0;
+		sb->freed_block = __cpu_to_le64(~0);
 
 		r = btree_empty(&hsm->info, &hsm->root);
 		if (r < 0)
@@ -336,7 +338,7 @@ hsm_metadata_open_(struct block_device *bdev,
 			goto bad;
 		}
 
-		hsm->have_inserted = 1;
+		hsm->have_updated = 1;
 		r = hsm_metadata_commit(hsm);
 		if (r < 0)
 			goto bad;
@@ -422,7 +424,7 @@ int hsm_metadata_commit(struct hsm_metadata *hsm)
 	int r;
 	size_t len;
 
-	if (!hsm->have_inserted)
+	if (!hsm->have_updated)
 		/* if nothing's been inserted, then nothing has changed */
 		return 0;
 
@@ -484,22 +486,29 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
-	hsm->have_inserted = 1;
 	sb = block_data(hsm->sblock);
 	nr_blocks = __le64_to_cpu(sb->data_nr_blocks);
 	b = __le64_to_cpu(sb->first_free_block);
 
 	if (b >= nr_blocks) {
-		up_write(&hsm->root_lock);
-		/* we've run out of space, client should extend and then retry*/
-		// printk(KERN_ALERT "out of hsm data space");
-		return -ENOSPC;
+		b = __le64_to_cpu(sb->freed_block);
+		if (b >= nr_blocks) {
+			/*
+			 * We've run out of space, client should
+			 * remove block or extend and then retry.
+			 */
+			up_write(&hsm->root_lock);
+			// printk(KERN_ALERT "out of hsm data space");
+			return -ENOSPC;
+		}
 	}
 
 	/* Block may not be interfearing with flags in the high bits. */
 	split_result(b, &dummy, &f);
-	if (f)
+	if (f) {
+		up_write(&hsm->root_lock);
 		return -EPERM;
+	}
 
 	b_le64 = __cpu_to_le64(b);
 	r = btree_insert(&hsm->info, hsm->root, keys, &b_le64, &hsm->root);
@@ -508,13 +517,23 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 		cache_block = __cpu_to_le64(cache_block);
 		r = btree_insert(&hsm->info, hsm->reverse_root,
 				 keys, &cache_block, &hsm->reverse_root);
+		if (r) {
+			keys[1] = __le64_to_cpu(cache_block);
+			btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
+		}
 	}
 
-	sb->first_free_block = __cpu_to_le64(b + 1);
-	up_write(&hsm->root_lock);
+	if (sb->first_free_block < nr_blocks)
+		sb->first_free_block = __cpu_to_le64(b + 1);
 
-	if (r < 0)
+	if (r < 0) {
+		up_write(&hsm->root_lock);
 		return r;
+	}
+
+	sb->freed_block = __cpu_to_le64(~0);
+	hsm->have_updated = 1;
+	up_write(&hsm->root_lock);
 
 	*pool_block = b;
 	*flags = 0;
@@ -529,6 +548,7 @@ int hsm_metadata_remove(struct hsm_metadata *hsm,
 	int r;
 	unsigned long dummy;
 	block_t keys[2], pool_block;
+	struct superblock *sb;
 
 	/* Mapping has to exists on update. */
 	r = hsm_metadata_lookup(hsm, dev, cache_block, 1, &pool_block, &dummy);
@@ -542,12 +562,16 @@ int hsm_metadata_remove(struct hsm_metadata *hsm,
 	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
+	sb = block_data(hsm->sblock);
 	r = btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
 	if (!r) {
 		keys[1] = pool_block;
 		r = btree_remove(&hsm->info, hsm->reverse_root,
 				 keys, &hsm->reverse_root);
 	}
+
+	if (!r)
+		sb->freed_block = __cpu_to_le64(pool_block);
 
 	up_write(&hsm->root_lock);
 	return r;
@@ -635,7 +659,7 @@ int hsm_metadata_update(struct hsm_metadata *hsm,
 	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
-	hsm->have_inserted = 1;
+	hsm->have_updated = 1;
 	r = btree_insert(&hsm->info, hsm->root, keys, &pool_block, &hsm->root);
 	up_write(&hsm->root_lock);
 
