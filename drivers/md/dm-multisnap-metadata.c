@@ -807,7 +807,6 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	}
 	up_read(&mmd->root_lock);
 
-	printk(KERN_ALERT "committing");
 	down_write(&mmd->root_lock);
 	r = __write_changed_details(mmd);
 	if (r < 0)
@@ -834,7 +833,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 		goto out;
 
 	/* FIXME: unchecked dm_tm_commit() and begin() error codes? */
-	r = dm_tm_commit(mmd->tm, mmd->sblock);	
+	r = dm_tm_commit(mmd->tm, mmd->sblock);
 
 	/* open the next transaction */
 	mmd->sblock = NULL;
