@@ -33,10 +33,10 @@ struct superblock {
 	__le32 time;
 	__u8 padding[4];
 
-	__le64 metadata_block_size; /* in sectors */
-	__le64 metadata_nr_blocks;
+	__le32 data_block_size;	/* in 512-byte sectors */
 
-	__le64 data_block_size;	/* in 512-byte sectors */
+	__le32 metadata_block_size; /* in 512-byte sectors */
+	__le64 metadata_nr_blocks;
 
 	/* 2 level btree mapping (dev_id, (dev block, time)) -> data block */
 	__le64 data_mapping_root;
@@ -287,7 +287,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 }
 
 struct dm_multisnap_metadata *
-dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
+dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 			   dm_block_t data_dev_size)
 {
 	int r;
@@ -333,9 +333,9 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 	sb->magic = __cpu_to_le64(MULTISNAP_SUPERBLOCK_MAGIC);
 	sb->version = __cpu_to_le64(MULTISNAP_VERSION);
 	sb->time = 0;
-	sb->metadata_block_size = __cpu_to_le64(1 << SECTOR_TO_BLOCK_SHIFT);
+	sb->metadata_block_size = __cpu_to_le32(MULTISNAP_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	sb->metadata_nr_blocks = __cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
-	sb->data_block_size = __cpu_to_le64(data_block_size);
+	sb->data_block_size = __cpu_to_le32(data_block_size);
 
 	r = dm_btree_empty(&mmd->info, &mmd->root);
 	if (r < 0)
@@ -859,13 +859,13 @@ int dm_multisnap_metadata_get_free_blocks(struct dm_multisnap_metadata *mmd,
 }
 
 int dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
-					      sector_t *result)
+					      unsigned *result)
 {
 	struct superblock *sb;
 
 	down_read(&mmd->root_lock);
 	sb = (struct superblock *) dm_block_data(mmd->sblock);
-	*result = __le64_to_cpu(sb->data_block_size);
+	*result = __le32_to_cpu(sb->data_block_size);
 	up_read(&mmd->root_lock);
 
 	return 0;
