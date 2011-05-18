@@ -28,7 +28,7 @@
 /* This should be plenty */
 #define SPACE_MAP_ROOT_SIZE 128
 
-struct superblock {
+struct multisnap_super_block {
 	__u8 csum[MULTISNAP_CSUM_SIZE];
 	__u8 csum_type; /* checksum algorithm */
 	__u8 uuid[DM_UUID_LEN]; /* DM_UUID_LEN = 129, leaves hole */
@@ -146,11 +146,11 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 	struct dm_space_map *sm, *data_sm;
 	struct dm_transaction_manager *tm;
 	struct dm_multisnap_metadata *mmd;
-	struct dm_block *sb;
+	struct dm_block *sblock;
 
 	if (create) {
 		r = dm_tm_create_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
-					 &tm, &sm, &sb);
+					 &tm, &sm, &sblock);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_create_with_sm failed");
 			dm_block_manager_destroy(bm);
@@ -169,39 +169,40 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 			goto bad;
 		}
 
-		r = dm_tm_commit(tm, sb);
+		r = dm_tm_commit(tm, sblock);
 		if (r < 0) {
 			printk(KERN_ALERT "couldn't commit");
 			goto bad;
 		}
 	} else {
-		struct superblock *s = NULL;
+		struct multisnap_super_block *sb = NULL;
+		size_t space_map_root_offset =
+			offsetof(struct multisnap_super_block, metadata_space_map_root);
 
 		r = dm_tm_open_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
-				       offsetof(struct superblock, metadata_space_map_root),
-				       SPACE_MAP_ROOT_SIZE,
-				       &tm, &sm, &sb);
+				       space_map_root_offset, SPACE_MAP_ROOT_SIZE,
+				       &tm, &sm, &sblock);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_open_with_sm failed");
 			dm_block_manager_destroy(bm);
 			return NULL;
 		}
 
-		s = dm_block_data(sb);
-		if (__le64_to_cpu(s->magic) != MULTISNAP_SUPERBLOCK_MAGIC) {
+		sb = dm_block_data(sblock);
+		if (__le64_to_cpu(sb->magic) != MULTISNAP_SUPERBLOCK_MAGIC) {
 			printk(KERN_ALERT "multisnap-metadata superblock is invalid (was %llu)",
-			       __le64_to_cpu(s->magic));
+			       __le64_to_cpu(sb->magic));
 			goto bad;
 		}
 
-		data_sm = dm_sm_disk_open(tm, s->data_space_map_root,
-					  sizeof(s->data_space_map_root));
+		data_sm = dm_sm_disk_open(tm, sb->data_space_map_root,
+					  sizeof(sb->data_space_map_root));
 		if (!data_sm) {
 			printk(KERN_ALERT "sm_disk_open failed");
 			goto bad;
 		}
 
-		dm_tm_unlock(tm, sb);
+		dm_tm_unlock(tm, sblock);
 	}
 
 	mmd = kmalloc(sizeof(*mmd), GFP_KERNEL);
@@ -281,7 +282,7 @@ bad:
 static int begin(struct dm_multisnap_metadata *mmd)
 {
 	int r;
-	struct superblock *s;
+	struct multisnap_super_block *sb;
 
 	BUG_ON(mmd->sblock);
 	mmd->have_inserted = 0;
@@ -289,10 +290,10 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	if (r)
 		return r;
 
-	s = (struct superblock *) dm_block_data(mmd->sblock);
-	mmd->time = __le32_to_cpu(s->time);
-	mmd->root = __le64_to_cpu(s->data_mapping_root);
-	mmd->details_root = __le64_to_cpu(s->device_details_root);
+	sb = (struct multisnap_super_block *) dm_block_data(mmd->sblock);
+	mmd->time = __le32_to_cpu(sb->time);
+	mmd->root = __le64_to_cpu(sb->data_mapping_root);
+	mmd->details_root = __le64_to_cpu(sb->device_details_root);
 
 	return 0;
 }
@@ -302,7 +303,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 			   dm_block_t data_dev_size)
 {
 	int r;
-	struct superblock *sb;
+	struct multisnap_super_block *sb;
 	struct dm_multisnap_metadata *mmd;
 	sector_t bdev_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
 	struct dm_block_manager *bm;
@@ -340,7 +341,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 			goto bad;
 	}
 
-	sb = (struct superblock *) dm_block_data(mmd->sblock);
+	sb = (struct multisnap_super_block *) dm_block_data(mmd->sblock);
 	sb->magic = __cpu_to_le64(MULTISNAP_SUPERBLOCK_MAGIC);
 	sb->version = __cpu_to_le64(MULTISNAP_VERSION);
 	sb->time = 0;
@@ -810,7 +811,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 {
 	int r;
 	size_t len;
-	struct superblock *sb;
+	struct multisnap_super_block *sb;
 
 	down_read(&mmd->root_lock);
 	if (!mmd->have_inserted) {
@@ -872,10 +873,10 @@ int dm_multisnap_metadata_get_free_blocks(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
 					      unsigned *result)
 {
-	struct superblock *sb;
+	struct multisnap_super_block *sb;
 
 	down_read(&mmd->root_lock);
-	sb = (struct superblock *) dm_block_data(mmd->sblock);
+	sb = (struct multisnap_super_block *) dm_block_data(mmd->sblock);
 	*result = __le32_to_cpu(sb->data_block_size);
 	up_read(&mmd->root_lock);
 

@@ -330,9 +330,9 @@ EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 
 /*----------------------------------------------------------------*/
 
-int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
+int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 			 struct dm_transaction_manager **tm,
-			 struct dm_space_map **sm, struct dm_block **sb)
+			 struct dm_space_map **sm, struct dm_block **sblock)
 {
 	int r;
 	struct dm_space_map *dummy, *disk, *staged;
@@ -355,13 +355,13 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 	if (r < 0)
 		return r;
 
-	r = dm_tm_reserve_block(*tm, superblock);
+	r = dm_tm_reserve_block(*tm, sb_location);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't reserve superblock");
 		return r;
 	}
 
-	r = dm_bm_write_lock(dm_tm_get_bm(*tm), superblock, sb);
+	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
 		return r;
@@ -387,10 +387,10 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 }
 EXPORT_SYMBOL_GPL(dm_tm_create_with_sm);
 
-int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
+int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		       size_t root_offset, size_t root_max_len,
 		       struct dm_transaction_manager **tm,
-		       struct dm_space_map **sm, struct dm_block **sb)
+		       struct dm_space_map **sm, struct dm_block **sblock)
 {
 	int r;
 	struct dm_space_map *dummy, *disk, *staged;
@@ -416,19 +416,19 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 
 	/* FIXME: push all KERN_ALERTs into relevant methods' error path? */
 
-	r = dm_tm_reserve_block(*tm, superblock);
+	r = dm_tm_reserve_block(*tm, sb_location);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't reserve superblock");
 		goto fail_tm;
 	}
 
-	r = dm_bm_write_lock(dm_tm_get_bm(*tm), superblock, sb);
+	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
 		goto fail_tm;
 	}
 
-	disk = dm_sm_disk_open(*tm, dm_block_data(*sb) + root_offset,
+	disk = dm_sm_disk_open(*tm, dm_block_data(*sblock) + root_offset,
 			       root_max_len);
 	if (IS_ERR(disk)) {
 		printk(KERN_ALERT "couldn't create disk space map");
@@ -449,7 +449,7 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t superblock,
 	return 0;
 
 fail_sb:
-	dm_bm_unlock(*sb);
+	dm_bm_unlock(*sblock);
 fail_tm:
 	dm_tm_destroy(*tm);
 fail_staged:
