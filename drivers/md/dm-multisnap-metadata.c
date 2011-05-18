@@ -10,12 +10,14 @@
 
 #include <linux/list.h>
 #include <linux/device-mapper.h>
+#include <linux/dm-ioctl.h> /* For DM_UUID_LEN */
 #include <linux/workqueue.h>
 
 /*----------------------------------------------------------------*/
 
 #define	DAEMON "multisnap-metadata"
 
+#define MULTISNAP_CSUM_SIZE 32
 #define MULTISNAP_SUPERBLOCK_MAGIC 27022010
 #define MULTISNAP_SUPERBLOCK_LOCATION 0
 #define MULTISNAP_VERSION 1
@@ -26,17 +28,18 @@
 /* This should be plenty */
 #define SPACE_MAP_ROOT_SIZE 128
 
-// FIXME: we should put some form of checksum in here
 struct superblock {
+	__u8 csum[MULTISNAP_CSUM_SIZE];
+	__u8 csum_type; /* checksum algorithm */
+	__u8 uuid[DM_UUID_LEN]; /* DM_UUID_LEN = 129, leaves hole */
+	__u8 padding[6]; /* Padding to fill hole */
+	__le64 blocknr; /* this block number, dm_block_t */
+	__le64 flags;
+
 	__le64 magic;
-	__le64 version;
-	__le32 time;
-	__u8 padding[4];
 
-	__le32 data_block_size;	/* in 512-byte sectors */
-
-	__le32 metadata_block_size; /* in 512-byte sectors */
-	__le64 metadata_nr_blocks;
+	__u8 data_space_map_root[SPACE_MAP_ROOT_SIZE];
+	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 
 	/* 2 level btree mapping (dev_id, (dev block, time)) -> data block */
 	__le64 data_mapping_root;
@@ -44,8 +47,16 @@ struct superblock {
 	/* device detail root mapping dev_id -> device_details */
 	__le64 device_details_root;
 
-	__u8 data_space_map_root[SPACE_MAP_ROOT_SIZE];
-	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
+	__le32 version;
+	__le32 time;
+
+	__le32 data_block_size;	/* in 512-byte sectors */
+
+	__le32 metadata_block_size; /* in 512-byte sectors */
+	__le64 metadata_nr_blocks;
+
+	__le64 compat_flags;
+	__le64 incompat_flags;
 } __attribute__ ((packed));
 
 struct device_details {
