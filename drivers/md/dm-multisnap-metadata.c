@@ -30,7 +30,8 @@
 struct superblock {
 	__le64 magic;
 	__le64 version;
-	__le64 time;
+	__le32 time;
+	__u8 padding[4];
 
 	__le64 metadata_block_size; /* in sectors */
 	__le64 metadata_nr_blocks;
@@ -278,7 +279,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 		return r;
 
 	s = (struct superblock *) dm_block_data(mmd->sblock);
-	mmd->time = __le64_to_cpu(s->time);
+	mmd->time = __le32_to_cpu(s->time);
 	mmd->root = __le64_to_cpu(s->data_mapping_root);
 	mmd->details_root = __le64_to_cpu(s->device_details_root);
 
@@ -415,7 +416,7 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 			changed = 1;
 			details.dev_size = 0;
 			details.mapped_blocks = 0;
-			details.snapshotted_time = __cpu_to_le64(mmd->time);
+			details.snapshotted_time = __cpu_to_le32(mmd->time);
 
 		} else
 			return r;
@@ -821,7 +822,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 		goto out;
 
 	sb = dm_block_data(mmd->sblock);
-	sb->time = __cpu_to_le64(mmd->time);
+	sb->time = __cpu_to_le32(mmd->time);
 	sb->data_mapping_root = __cpu_to_le64(mmd->root);
 	sb->device_details_root = __cpu_to_le64(mmd->details_root);
 	r = dm_sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
