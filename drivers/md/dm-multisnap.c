@@ -1204,12 +1204,13 @@ static void pool_dtr(struct dm_target *ti)
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	long long unsigned block_size;
+	unsigned long block_size;
 	struct pool_c *pool;
 	struct dm_multisnap_metadata *mmd;
 	struct dm_dev *metadata_dev, *data_dev;
 	dm_block_t data_size;
 	dm_block_t low_water;
+	char *end;
 
 	if (argc != 4) {
 		ti->error = "Invalid argument count";
@@ -1240,7 +1241,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	if (sscanf(argv[2], "%llu", &block_size) != 1) {
+	block_size = simple_strtoul(argv[2], &end, 10);
+	if (!block_size || *end) {
 		ti->error = "Invalid block size";
 		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
@@ -1248,7 +1250,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	do_div(data_size, block_size);
 
-	if (sscanf(argv[3], "%llu", &low_water) != 1) {
+	low_water = simple_strtoull(argv[3], &end, 10);
+	if (!low_water || *end) {
 		ti->error = "Invalid low water mark";
 		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
@@ -1433,14 +1436,16 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	struct pool_c *pool = ti->private;
 	dm_multisnap_dev_t dev_id;
+	char *end;
 
 	if (argc < 2) {
 		ti->error = invalid_args;
 		return -EINVAL;
 	}
 
-	if (sscanf(argv[1], "%llu", &dev_id) != 1) {
-		ti->error = "Invalid dev id";
+	dev_id = simple_strtoull(argv[1], &end, 10);
+	if (*end) {
+		ti->error = "Invalid device id";
 		return -EINVAL;
 	}
 
@@ -1452,7 +1457,8 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		if (sscanf(argv[2], "%llu", &dev_size) != 1) {
+		dev_size = simple_strtoull(argv[2], &end, 10);
+		if (!dev_size || *end) {
 			ti->error = "Invalid dev size";
 			return -EINVAL;
 		}
@@ -1472,7 +1478,8 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		if (sscanf(argv[2], "%llu", &origin_id) != 1) {
+		origin_id = simple_strtoull(argv[2], &end, 10);
+		if (!origin_id || *end) {
 			ti->error = "Invalid origin id";
 			return -EINVAL;
 		}
@@ -1562,9 +1569,10 @@ static void multisnap_dtr(struct dm_target *ti)
 static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	unsigned long dev_id;
+	dm_multisnap_dev_t dev_id;
 	struct multisnap_c *mc;
 	struct dm_dev *pool_dev, *metadata_dev;
+	char *end;
 
 	if (argc != 3) {
 		ti->error = "Invalid argument count";
@@ -1604,7 +1612,8 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	dm_put_device(ti, metadata_dev);
 	mc->pool->pool_dev = pool_dev->bdev; /* hack */
 
-	if (sscanf(argv[2], "%lu", &dev_id) != 1) {
+	dev_id = simple_strtoull(argv[2], &end, 10);
+	if (*end) {
 		ti->error = "Invalid device id";
 		multisnap_dtr(ti);
 		return -EINVAL;
