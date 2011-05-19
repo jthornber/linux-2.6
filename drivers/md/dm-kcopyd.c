@@ -29,6 +29,7 @@
 
 #define SUB_JOB_SIZE	128
 #define SPLIT_COUNT	8
+#define MIN_JOBS	1
 
 /*-----------------------------------------------------------------
  * Each kcopyd client has its own little pool of preallocated
@@ -222,9 +223,6 @@ struct kcopyd_job {
 
 	struct kcopyd_job *master_job;
 };
-
-/* FIXME: this should scale with the number of pages */
-#define MIN_JOBS 512
 
 static struct kmem_cache *_job_cache;
 
