@@ -2,6 +2,7 @@
 
 #include <linux/dm-io.h>
 #include <linux/slab.h>
+#include <linux/device-mapper.h> /* For SECTOR_SHIFT */
 
 #define DEBUG
 
@@ -49,13 +50,14 @@ struct dm_block {
 
 struct dm_block_manager {
 	struct block_device *bdev;
-	unsigned cache_size;
-	size_t block_size;
-	sector_t sectors_per_block;
+	unsigned cache_size; /* in bytes */
+	unsigned block_size; /* in bytes */
 	dm_block_t nr_blocks;
 
 	/* this will trigger everytime an io completes */
 	wait_queue_head_t io_q;
+
+	struct dm_io_client *io;
 
 	/* |lock| protects all the lists and the hash table */
 	spinlock_t lock;
@@ -66,7 +68,6 @@ struct dm_block_manager {
 	unsigned available_count;
 	unsigned reading_count;
 	unsigned writing_count;
-	struct dm_io_client *io;
 
 #ifdef DEBUG
 	/* FIXME: debug only */
@@ -80,7 +81,7 @@ struct dm_block_manager {
 	 */
 	unsigned hash_size;
 	unsigned hash_mask;
-	struct hlist_head buckets[0];
+	struct hlist_head buckets[0]; /* must be last member of struct */
 };
 
 dm_block_t dm_block_location(struct dm_block *b)
@@ -257,10 +258,11 @@ static void submit_io(struct dm_block *b, int rw,
 	struct dm_block_manager *bm = b->bm;
 	struct dm_io_request req;
 	struct dm_io_region region;
+	unsigned sectors_per_block = bm->block_size >> SECTOR_SHIFT;
 
 	region.bdev = bm->bdev;
-	region.sector = b->where * bm->sectors_per_block;
-	region.count = bm->sectors_per_block;
+	region.sector = b->where * sectors_per_block;
+	region.count = sectors_per_block;
 
 	req.bi_rw = rw;
 	req.mem.type = DM_IO_KMEM;
@@ -597,7 +599,6 @@ dm_block_manager_create(struct block_device *bdev,
 	bm->bdev = bdev;
 	bm->cache_size = max(16u, cache_size);
 	bm->block_size = block_size;
-	bm->sectors_per_block = block_size / 512;
 	bm->nr_blocks = i_size_read(bdev->bd_inode);
 	do_div(bm->nr_blocks, block_size);
 	init_waitqueue_head(&bm->io_q);
@@ -654,7 +655,7 @@ void dm_block_manager_destroy(struct dm_block_manager *bm)
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
 
-size_t dm_bm_block_size(struct dm_block_manager *bm)
+unsigned dm_bm_block_size(struct dm_block_manager *bm)
 {
 	return bm->block_size;
 }
@@ -724,8 +725,10 @@ retry:
 		switch (how) {
 		case READ:
 			b->read_lock_count++;
+#ifdef DEBUG
 			if (b->read_lock_count > 1)
 				bm->shared_read_count++;
+#endif
 			if (b->state == BS_DIRTY)
 				__transition(b, BS_READ_LOCKED_DIRTY);
 			else if (b->state == BS_CLEAN)

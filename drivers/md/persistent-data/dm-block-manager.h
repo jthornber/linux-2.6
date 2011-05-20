@@ -22,7 +22,7 @@ dm_block_manager_create(struct block_device *bdev,
 			unsigned cache_size);
 void dm_block_manager_destroy(struct dm_block_manager *bm);
 
-size_t dm_bm_block_size(struct dm_block_manager *bm);
+unsigned dm_bm_block_size(struct dm_block_manager *bm);
 dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
 
 /*
