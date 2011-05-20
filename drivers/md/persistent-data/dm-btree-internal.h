@@ -1,5 +1,5 @@
-#ifndef SNAPSHOTS_BTREE_INTERNAL_H
-#define SNAPSHOTS_BTREE_INTERNAL_H
+#ifndef DM_BTREE_INTERNAL_H
+#define DM_BTREE_INTERNAL_H
 
 #include "dm-btree.h"
 

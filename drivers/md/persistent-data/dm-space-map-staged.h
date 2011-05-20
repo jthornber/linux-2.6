@@ -1,5 +1,5 @@
-#ifndef SNAPSHOTS_SPACE_MAP_STAGED_H
-#define SNAPSHOTS_SPACE_MAP_STAGED_H
+#ifndef DM_SPACE_MAP_STAGED_H
+#define DM_SPACE_MAP_STAGED_H
 
 #include "dm-space-map.h"
 

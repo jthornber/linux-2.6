@@ -1,5 +1,5 @@
-#ifndef SNAPSHOTS_TRANSACTION_MANAGER_H
-#define SNAPSHOTS_TRANSACTION_MANAGER_H
+#ifndef DM_TRANSACTION_MANAGER_H
+#define DM_TRANSACTION_MANAGER_H
 
 #include "dm-block-manager.h"
 #include "dm-space-map.h"

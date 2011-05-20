@@ -1,5 +1,5 @@
-#ifndef SNAPSHOTS_SPACE_MAP_H
-#define SNAPSHOTS_SPACE_MAP_H
+#ifndef DM_SPACE_MAP_H
+#define DM_SPACE_MAP_H
 
 #include "dm-block-manager.h"
 

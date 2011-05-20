@@ -1,5 +1,5 @@
-#ifndef DRIVERS_MD_TBD_BLOCK_MANAGER_H
-#define DRIVERS_MD_TBD_BLOCK_MANAGER_H
+#ifndef DM_BLOCK_MANAGER_H
+#define DM_BLOCK_MANAGER_H
 
 #include <linux/blkdev.h>
 #include <linux/types.h>

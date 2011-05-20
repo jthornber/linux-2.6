@@ -1,5 +1,5 @@
-#ifndef SNAPSHOTS_BTREE_H
-#define SNAPSHOTS_BTREE_H
+#ifndef DM_BTREE_H
+#define DM_BTREE_H
 
 #include "dm-transaction-manager.h"
 
