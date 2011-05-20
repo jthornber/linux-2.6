@@ -17,8 +17,7 @@ void *dm_block_data(struct dm_block *b);
 
 struct dm_block_manager;
 struct dm_block_manager *
-dm_block_manager_create(struct block_device *bdev,
-			unsigned block_size,
+dm_block_manager_create(struct block_device *bdev, unsigned block_size,
 			unsigned cache_size);
 void dm_block_manager_destroy(struct dm_block_manager *bm);
 
@@ -36,28 +35,26 @@ dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
  * changes you make to memory pointed to by |data| will be written back to
  * the disk sometime after dm_bm_unlock is called.
  */
-int dm_bm_read_lock(struct dm_block_manager *bm,
-		    dm_block_t b,
+int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 		    struct dm_block **result);
-int dm_bm_write_lock(struct dm_block_manager *bm,
-		     dm_block_t b,
+
+int dm_bm_write_lock(struct dm_block_manager *bm, dm_block_t b,
 		     struct dm_block **result);
 
 /*
  * The *_try_lock variants return -EWOULDBLOCK if the block isn't
  * immediately available.
  */
-int dm_bm_read_try_lock(struct dm_block_manager *bm,
-			dm_block_t b,
+int dm_bm_read_try_lock(struct dm_block_manager *bm, dm_block_t b,
 			struct dm_block **result);
 
 /*
  * dm_bm_write_lock_zero() is for use when you know you're going to completely
  * overwrite the block.  It saves a disk read.
  */
-int dm_bm_write_lock_zero(struct dm_block_manager *bm,
-			  dm_block_t b,
+int dm_bm_write_lock_zero(struct dm_block_manager *bm, dm_block_t b,
 			  struct dm_block **result);
+
 int dm_bm_unlock(struct dm_block *b);
 
 /*
