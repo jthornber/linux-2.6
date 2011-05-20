@@ -29,10 +29,10 @@ struct dm_block {
 	dm_block_t where;
 	void *data_actual;
 	void *data;
-	enum dm_block_state state;
 	wait_queue_head_t io_q;
 	unsigned read_lock_count;
 	unsigned write_lock_pending;
+	enum dm_block_state state;
 
 	/* Extra flags like REQ_FLUSH and REQ_FUA can be set here.  This is
 	 * mainly as to avoid a race condition in flush_and_unlock() where
