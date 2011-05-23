@@ -296,9 +296,11 @@ static int run_complete_job(struct kcopyd_job *job)
 
 	if (job->pages)
 		kcopyd_put_pages(kc, job->pages);
+
 	/* Do not free sub-jobs */
 	if (context != job)
 		mempool_free(job, kc->job_pool);
+
 	fn(read_err, write_err, context);
 
 	if (atomic_dec_and_test(&kc->nr_jobs))
