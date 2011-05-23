@@ -67,9 +67,9 @@ static unsigned __lookup_bitmap(void *addr, dm_block_t b)
 	__le64 *w = words + (b / ENTRIES_PER_WORD);
 	b %= ENTRIES_PER_WORD;
 
-	val = generic_test_le_bit(b * 2, (void *) w) ? 1 : 0;
+	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
 	val <<= 1;
-	val |= generic_test_le_bit(b * 2 + 1, (void *) w) ? 1 : 0;
+	val |= test_bit_le(b * 2 + 1, (void *) w) ? 1 : 0;
 	return val;
 }
 
@@ -80,14 +80,14 @@ static void __set_bitmap(void *addr, dm_block_t b, unsigned val)
 	b %= ENTRIES_PER_WORD;
 
 	if (val & 2)
-		generic___set_le_bit(b * 2, (void *) w);
+		__set_bit_le(b * 2, (void *) w);
 	else
-		generic___clear_le_bit(b * 2, (void *) w);
+		__clear_bit_le(b * 2, (void *) w);
 
 	if (val & 1)
-		generic___set_le_bit(b * 2 + 1, (void *) w);
+		__set_bit_le(b * 2 + 1, (void *) w);
 	else
-		generic___clear_le_bit(b * 2 + 1, (void *) w);
+		__clear_bit_le(b * 2 + 1, (void *) w);
 }
 
 static int __find_free(void *addr, unsigned begin, unsigned end,
