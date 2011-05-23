@@ -260,9 +260,9 @@ do_ftrace_mod_code(unsigned long ip, void *new_code)
 	return mod_code_status;
 }
 
-static unsigned char *ftrace_nop_replace(void)
+static const unsigned char *ftrace_nop_replace(void)
 {
-	return ideal_nop5;
+	return ideal_nops[NOP_ATOMIC5];
 }
 
 static int
@@ -437,18 +437,19 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
 		return;
 	}
 
-	if (ftrace_push_return_trace(old, self_addr, &trace.depth,
-		    frame_pointer) == -EBUSY) {
+	trace.func = self_addr;
+	trace.depth = current->curr_ret_stack + 1;
+
+	/* Only trace if the calling function expects to */
+	if (!ftrace_graph_entry(&trace)) {
 		*parent = old;
 		return;
 	}
 
-	trace.func = self_addr;
-
-	/* Only trace if the calling function expects to */
-	if (!ftrace_graph_entry(&trace)) {
-		current->curr_ret_stack--;
+	if (ftrace_push_return_trace(old, self_addr, &trace.depth,
+		    frame_pointer) == -EBUSY) {
 		*parent = old;
+		return;
 	}
 }
 #endif /* CONFIG_FUNCTION_GRAPH_TRACER */

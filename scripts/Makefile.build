@@ -49,6 +49,40 @@ ifeq ($(KBUILD_NOPEDANTIC),)
                 $(error CFLAGS was changed in "$(kbuild-file)". Fix it to use EXTRA_CFLAGS)
         endif
 endif
+
+#
+# make W=1 settings
+#
+# $(call cc-option... ) handles gcc -W.. options which
+# are not supported by all versions of the compiler
+ifdef KBUILD_ENABLE_EXTRA_GCC_CHECKS
+KBUILD_EXTRA_WARNINGS := -Wextra
+KBUILD_EXTRA_WARNINGS += -Wunused -Wno-unused-parameter
+KBUILD_EXTRA_WARNINGS += -Waggregate-return
+KBUILD_EXTRA_WARNINGS += -Wbad-function-cast
+KBUILD_EXTRA_WARNINGS += -Wcast-qual
+KBUILD_EXTRA_WARNINGS += -Wcast-align
+KBUILD_EXTRA_WARNINGS += -Wconversion
+KBUILD_EXTRA_WARNINGS += -Wdisabled-optimization
+KBUILD_EXTRA_WARNINGS += -Wlogical-op
+KBUILD_EXTRA_WARNINGS += -Wmissing-declarations
+KBUILD_EXTRA_WARNINGS += -Wmissing-format-attribute
+KBUILD_EXTRA_WARNINGS += $(call cc-option, -Wmissing-include-dirs,)
+KBUILD_EXTRA_WARNINGS += -Wmissing-prototypes
+KBUILD_EXTRA_WARNINGS += -Wnested-externs
+KBUILD_EXTRA_WARNINGS += -Wold-style-definition
+KBUILD_EXTRA_WARNINGS += $(call cc-option, -Woverlength-strings,)
+KBUILD_EXTRA_WARNINGS += -Wpacked
+KBUILD_EXTRA_WARNINGS += -Wpacked-bitfield-compat
+KBUILD_EXTRA_WARNINGS += -Wpadded
+KBUILD_EXTRA_WARNINGS += -Wpointer-arith
+KBUILD_EXTRA_WARNINGS += -Wredundant-decls
+KBUILD_EXTRA_WARNINGS += -Wshadow
+KBUILD_EXTRA_WARNINGS += -Wswitch-default
+KBUILD_EXTRA_WARNINGS += $(call cc-option, -Wvla,)
+KBUILD_CFLAGS += $(KBUILD_EXTRA_WARNINGS)
+endif
+
 include scripts/Makefile.lib
 
 ifdef host-progs
@@ -210,14 +244,19 @@ endif
 
 ifdef CONFIG_FTRACE_MCOUNT_RECORD
 ifdef BUILD_C_RECORDMCOUNT
+ifeq ("$(origin RECORDMCOUNT_WARN)", "command line")
+  RECORDMCOUNT_FLAGS = -w
+endif
 # Due to recursion, we must skip empty.o.
 # The empty.o file is created in the make process in order to determine
 #  the target endianness and word size. It is made before all other C
 #  files, including recordmcount.
 sub_cmd_record_mcount =					\
 	if [ $(@) != "scripts/mod/empty.o" ]; then	\
-		$(objtree)/scripts/recordmcount "$(@)";	\
+		$(objtree)/scripts/recordmcount $(RECORDMCOUNT_FLAGS) "$(@)";	\
 	fi;
+recordmcount_source := $(srctree)/scripts/recordmcount.c \
+		    $(srctree)/scripts/recordmcount.h
 else
 sub_cmd_record_mcount = set -e ; perl $(srctree)/scripts/recordmcount.pl "$(ARCH)" \
 	"$(if $(CONFIG_CPU_BIG_ENDIAN),big,little)" \
@@ -225,6 +264,7 @@ sub_cmd_record_mcount = set -e ; perl $(srctree)/scripts/recordmcount.pl "$(ARCH
 	"$(OBJDUMP)" "$(OBJCOPY)" "$(CC) $(KBUILD_CFLAGS)" \
 	"$(LD)" "$(NM)" "$(RM)" "$(MV)" \
 	"$(if $(part-of-module),1,0)" "$(@)";
+recordmcount_source := $(srctree)/scripts/recordmcount.pl
 endif
 cmd_record_mcount = 						\
 	if [ "$(findstring -pg,$(_c_flags))" = "-pg" ]; then	\
@@ -245,13 +285,13 @@ define rule_cc_o_c
 endef
 
 # Built-in and composite module parts
-$(obj)/%.o: $(src)/%.c FORCE
+$(obj)/%.o: $(src)/%.c $(recordmcount_source) FORCE
 	$(call cmd,force_checksrc)
 	$(call if_changed_rule,cc_o_c)
 
 # Single-part modules are special since we need to mark them in $(MODVERDIR)
 
-$(single-used-m): $(obj)/%.o: $(src)/%.c FORCE
+$(single-used-m): $(obj)/%.o: $(src)/%.c $(recordmcount_source) FORCE
 	$(call cmd,force_checksrc)
 	$(call if_changed_rule,cc_o_c)
 	@{ echo $(@:.o=.ko); echo $@; } > $(MODVERDIR)/$(@F:.o=.mod)
@@ -402,7 +442,6 @@ cmd_files := $(wildcard $(foreach f,$(targets),$(dir $(f)).$(notdir $(f)).cmd))
 ifneq ($(cmd_files),)
   include $(cmd_files)
 endif
-
 
 # Declare the contents of the .PHONY variable as phony.  We keep that
 # information in a variable se we can use it in if_changed and friends.

@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2009-2010 Emulex.  All rights reserved.                *
+ * Copyright (C) 2009-2011 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -348,7 +348,10 @@ lpfc_bsg_send_mgmt_cmd(struct fc_bsg_job *job)
 	dd_data->context_un.iocb.bmp = bmp;
 
 	if (phba->cfg_poll & DISABLE_FCP_RING_INT) {
-		creg_val = readl(phba->HCregaddr);
+		if (lpfc_readl(phba->HCregaddr, &creg_val)) {
+			rc = -EIO ;
+			goto free_cmdiocbq;
+		}
 		creg_val |= (HC_R0INT_ENA << LPFC_FCP_RING);
 		writel(creg_val, phba->HCregaddr);
 		readl(phba->HCregaddr); /* flush */
@@ -599,7 +602,10 @@ lpfc_bsg_rport_els(struct fc_bsg_job *job)
 	dd_data->context_un.iocb.ndlp = ndlp;
 
 	if (phba->cfg_poll & DISABLE_FCP_RING_INT) {
-		creg_val = readl(phba->HCregaddr);
+		if (lpfc_readl(phba->HCregaddr, &creg_val)) {
+			rc = -EIO;
+			goto linkdown_err;
+		}
 		creg_val |= (HC_R0INT_ENA << LPFC_FCP_RING);
 		writel(creg_val, phba->HCregaddr);
 		readl(phba->HCregaddr); /* flush */
@@ -613,6 +619,7 @@ lpfc_bsg_rport_els(struct fc_bsg_job *job)
 	else
 		rc = -EIO;
 
+linkdown_err:
 	pci_unmap_sg(phba->pcidev, job->request_payload.sg_list,
 		     job->request_payload.sg_cnt, DMA_TO_DEVICE);
 	pci_unmap_sg(phba->pcidev, job->reply_payload.sg_list,
@@ -1357,7 +1364,10 @@ lpfc_issue_ct_rsp(struct lpfc_hba *phba, struct fc_bsg_job *job, uint32_t tag,
 	dd_data->context_un.iocb.ndlp = ndlp;
 
 	if (phba->cfg_poll & DISABLE_FCP_RING_INT) {
-		creg_val = readl(phba->HCregaddr);
+		if (lpfc_readl(phba->HCregaddr, &creg_val)) {
+			rc = -IOCB_ERROR;
+			goto issue_ct_rsp_exit;
+		}
 		creg_val |= (HC_R0INT_ENA << LPFC_FCP_RING);
 		writel(creg_val, phba->HCregaddr);
 		readl(phba->HCregaddr); /* flush */
@@ -1929,7 +1939,7 @@ out:
  * @rxxri: Receive exchange id
  * @len: Number of data bytes
  *
- * This function allocates and posts a data buffer of sufficient size to recieve
+ * This function allocates and posts a data buffer of sufficient size to receive
  * an unsolicted CT command.
  **/
 static int lpfcdiag_loop_post_rxbufs(struct lpfc_hba *phba, uint16_t rxxri,
@@ -2416,6 +2426,7 @@ lpfc_bsg_wake_mbox_wait(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmboxq)
 {
 	struct bsg_job_data *dd_data;
 	struct fc_bsg_job *job;
+	struct lpfc_mbx_nembed_cmd *nembed_sge;
 	uint32_t size;
 	unsigned long flags;
 	uint8_t *to;
@@ -2459,9 +2470,8 @@ lpfc_bsg_wake_mbox_wait(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmboxq)
 			memcpy(to, from, size);
 		} else if ((phba->sli_rev == LPFC_SLI_REV4) &&
 			(pmboxq->u.mb.mbxCommand == MBX_SLI4_CONFIG)) {
-			struct lpfc_mbx_nembed_cmd *nembed_sge =
-				(struct lpfc_mbx_nembed_cmd *)
-				&pmboxq->u.mb.un.varWords[0];
+			nembed_sge = (struct lpfc_mbx_nembed_cmd *)
+					&pmboxq->u.mb.un.varWords[0];
 
 			from = (uint8_t *)dd_data->context_un.mbox.dmp->dma.
 						virt;
@@ -2479,21 +2489,25 @@ lpfc_bsg_wake_mbox_wait(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmboxq)
 
 	from = (uint8_t *)dd_data->context_un.mbox.mb;
 	job = dd_data->context_un.mbox.set_job;
-	size = job->reply_payload.payload_len;
-	job->reply->reply_payload_rcv_len =
-		sg_copy_from_buffer(job->reply_payload.sg_list,
-				job->reply_payload.sg_cnt,
-				from, size);
-	job->reply->result = 0;
-
-	dd_data->context_un.mbox.set_job = NULL;
-	job->dd_data = NULL;
-	job->job_done(job);
-	/* need to hold the lock until we call job done to hold off
-	 * the timeout handler returning to the midlayer while
-	 * we are stillprocessing the job
-	 */
-	spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+	if (job) {
+		size = job->reply_payload.payload_len;
+		job->reply->reply_payload_rcv_len =
+			sg_copy_from_buffer(job->reply_payload.sg_list,
+					job->reply_payload.sg_cnt,
+					from, size);
+		job->reply->result = 0;
+		/* need to hold the lock until we set job->dd_data to NULL
+		 * to hold off the timeout handler returning to the mid-layer
+		 * while we are still processing the job.
+		 */
+		job->dd_data = NULL;
+		dd_data->context_un.mbox.set_job = NULL;
+		spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+		job->job_done(job);
+	} else {
+		dd_data->context_un.mbox.set_job = NULL;
+		spin_unlock_irqrestore(&phba->ct_ev_lock, flags);
+	}
 
 	kfree(dd_data->context_un.mbox.mb);
 	mempool_free(dd_data->context_un.mbox.pmboxq, phba->mbox_mem_pool);
@@ -2632,6 +2646,11 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 	struct ulp_bde64 *rxbpl = NULL;
 	struct dfc_mbox_req *mbox_req = (struct dfc_mbox_req *)
 		job->request->rqst_data.h_vendor.vendor_cmd;
+	struct READ_EVENT_LOG_VAR *rdEventLog;
+	uint32_t transmit_length, receive_length, mode;
+	struct lpfc_mbx_nembed_cmd *nembed_sge;
+	struct mbox_header *header;
+	struct ulp_bde64 *bde;
 	uint8_t *ext = NULL;
 	int rc = 0;
 	uint8_t *from;
@@ -2639,9 +2658,16 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 	/* in case no data is transferred */
 	job->reply->reply_payload_rcv_len = 0;
 
+	/* sanity check to protect driver */
+	if (job->reply_payload.payload_len > BSG_MBOX_SIZE ||
+	    job->request_payload.payload_len > BSG_MBOX_SIZE) {
+		rc = -ERANGE;
+		goto job_done;
+	}
+
 	/* check if requested extended data lengths are valid */
-	if ((mbox_req->inExtWLen > MAILBOX_EXT_SIZE) ||
-		(mbox_req->outExtWLen > MAILBOX_EXT_SIZE)) {
+	if ((mbox_req->inExtWLen > BSG_MBOX_SIZE/sizeof(uint32_t)) ||
+	    (mbox_req->outExtWLen > BSG_MBOX_SIZE/sizeof(uint32_t))) {
 		rc = -ERANGE;
 		goto job_done;
 	}
@@ -2732,8 +2758,8 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 	 * use ours
 	 */
 	if (pmb->mbxCommand == MBX_RUN_BIU_DIAG64) {
-		uint32_t transmit_length = pmb->un.varWords[1];
-		uint32_t receive_length = pmb->un.varWords[4];
+		transmit_length = pmb->un.varWords[1];
+		receive_length = pmb->un.varWords[4];
 		/* transmit length cannot be greater than receive length or
 		 * mailbox extension size
 		 */
@@ -2783,10 +2809,9 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 		from += sizeof(MAILBOX_t);
 		memcpy((uint8_t *)dmp->dma.virt, from, transmit_length);
 	} else if (pmb->mbxCommand == MBX_READ_EVENT_LOG) {
-		struct READ_EVENT_LOG_VAR *rdEventLog =
-			&pmb->un.varRdEventLog ;
-		uint32_t receive_length = rdEventLog->rcv_bde64.tus.f.bdeSize;
-		uint32_t mode =	 bf_get(lpfc_event_log, rdEventLog);
+		rdEventLog = &pmb->un.varRdEventLog;
+		receive_length = rdEventLog->rcv_bde64.tus.f.bdeSize;
+		mode = bf_get(lpfc_event_log, rdEventLog);
 
 		/* receive length cannot be greater than mailbox
 		 * extension size
@@ -2831,7 +2856,7 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 			/* rebuild the command for sli4 using our own buffers
 			* like we do for biu diags
 			*/
-			uint32_t receive_length = pmb->un.varWords[2];
+			receive_length = pmb->un.varWords[2];
 			/* receive length cannot be greater than mailbox
 			 * extension size
 			 */
@@ -2867,8 +2892,7 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 			pmb->un.varWords[4] = putPaddrHigh(dmp->dma.phys);
 		} else if ((pmb->mbxCommand == MBX_UPDATE_CFG) &&
 			pmb->un.varUpdateCfg.co) {
-			struct ulp_bde64 *bde =
-				(struct ulp_bde64 *)&pmb->un.varWords[4];
+			bde = (struct ulp_bde64 *)&pmb->un.varWords[4];
 
 			/* bde size cannot be greater than mailbox ext size */
 			if (bde->tus.f.bdeSize > MAILBOX_EXT_SIZE) {
@@ -2909,10 +2933,6 @@ lpfc_bsg_issue_mbox(struct lpfc_hba *phba, struct fc_bsg_job *job,
 			memcpy((uint8_t *)dmp->dma.virt, from,
 				bde->tus.f.bdeSize);
 		} else if (pmb->mbxCommand == MBX_SLI4_CONFIG) {
-			struct lpfc_mbx_nembed_cmd *nembed_sge;
-			struct mbox_header *header;
-			uint32_t receive_length;
-
 			/* rebuild the command for sli4 using our own buffers
 			* like we do for biu diags
 			*/
@@ -3374,6 +3394,7 @@ no_dd_data:
 	job->dd_data = NULL;
 	return rc;
 }
+
 /**
  * lpfc_bsg_hst_vendor - process a vendor-specific fc_bsg_job
  * @job: fc_bsg_job to handle

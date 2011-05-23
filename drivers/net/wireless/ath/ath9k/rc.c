@@ -792,7 +792,7 @@ static void ath_get_rate(void *priv, struct ieee80211_sta *sta, void *priv_sta,
 
 		tx_info->flags |= IEEE80211_TX_CTL_RATE_CTRL_PROBE;
 	} else {
-		/* Set the choosen rate. No RTS for first series entry. */
+		/* Set the chosen rate. No RTS for first series entry. */
 		ath_rc_rate_set_series(rate_table, &rates[i++], txrc,
 				       try_per_rate, rix, 0);
 	}
@@ -854,14 +854,13 @@ static void ath_get_rate(void *priv, struct ieee80211_sta *sta, void *priv_sta,
 	ath_rc_rate_set_rtscts(sc, rate_table, tx_info);
 }
 
-static bool ath_rc_update_per(struct ath_softc *sc,
+static void ath_rc_update_per(struct ath_softc *sc,
 			      const struct ath_rate_table *rate_table,
 			      struct ath_rate_priv *ath_rc_priv,
 				  struct ieee80211_tx_info *tx_info,
 			      int tx_rate, int xretries, int retries,
 			      u32 now_msec)
 {
-	bool state_change = false;
 	int count, n_bad_frames;
 	u8 last_per;
 	static const u32 nretry_to_per_lookup[10] = {
@@ -992,8 +991,6 @@ static bool ath_rc_update_per(struct ath_softc *sc,
 
 		}
 	}
-
-	return state_change;
 }
 
 static void ath_debug_stat_retries(struct ath_rate_priv *rc, int rix,
@@ -1017,7 +1014,6 @@ static void ath_rc_update_ht(struct ath_softc *sc,
 	u32 now_msec = jiffies_to_msecs(jiffies);
 	int rate;
 	u8 last_per;
-	bool state_change = false;
 	const struct ath_rate_table *rate_table = ath_rc_priv->rate_table;
 	int size = ath_rc_priv->rate_table_size;
 
@@ -1027,9 +1023,9 @@ static void ath_rc_update_ht(struct ath_softc *sc,
 	last_per = ath_rc_priv->per[tx_rate];
 
 	/* Update PER first */
-	state_change = ath_rc_update_per(sc, rate_table, ath_rc_priv,
-					 tx_info, tx_rate, xretries,
-					 retries, now_msec);
+	ath_rc_update_per(sc, rate_table, ath_rc_priv,
+			  tx_info, tx_rate, xretries,
+			  retries, now_msec);
 
 	/*
 	 * If this rate looks bad (high PER) then stop using it for
@@ -1092,8 +1088,7 @@ static int ath_rc_get_rateindex(const struct ath_rate_table *rate_table,
 	if (!(rate->flags & IEEE80211_TX_RC_MCS))
 		return rate->idx;
 
-	while (rate->idx > mcs_rix_off[i] &&
-	       i < ARRAY_SIZE(mcs_rix_off)) {
+	while (i < ARRAY_SIZE(mcs_rix_off) && rate->idx > mcs_rix_off[i]) {
 		rix++; i++;
 	}
 
@@ -1328,7 +1323,7 @@ static void ath_tx_status(void *priv, struct ieee80211_supported_band *sband,
 
 	hdr = (struct ieee80211_hdr *)skb->data;
 	fc = hdr->frame_control;
-	for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
+	for (i = 0; i < sc->hw->max_rates; i++) {
 		struct ieee80211_tx_rate *rate = &tx_info->status.rates[i];
 		if (!rate->count)
 			break;
@@ -1560,8 +1555,7 @@ static void ath_rate_add_sta_debugfs(void *priv, void *priv_sta,
 
 static void *ath_rate_alloc(struct ieee80211_hw *hw, struct dentry *debugfsdir)
 {
-	struct ath_wiphy *aphy = hw->priv;
-	return aphy->sc;
+	return hw->priv;
 }
 
 static void ath_rate_free(void *priv)

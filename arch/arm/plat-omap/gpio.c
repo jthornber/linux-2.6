@@ -17,7 +17,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
-#include <linux/sysdev.h>
+#include <linux/syscore_ops.h>
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/io.h>
@@ -755,18 +755,12 @@ static int gpio_irq_type(struct irq_data *d, unsigned type)
 	bank = irq_data_get_irq_chip_data(d);
 	spin_lock_irqsave(&bank->lock, flags);
 	retval = _set_gpio_triggering(bank, get_gpio_index(gpio), type);
-	if (retval == 0) {
-		struct irq_desc *desc = irq_to_desc(d->irq);
-
-		desc->status &= ~IRQ_TYPE_SENSE_MASK;
-		desc->status |= type;
-	}
 	spin_unlock_irqrestore(&bank->lock, flags);
 
 	if (type & (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH))
-		__set_irq_handler_unlocked(d->irq, handle_level_irq);
+		__irq_set_handler_locked(d->irq, handle_level_irq);
 	else if (type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
-		__set_irq_handler_unlocked(d->irq, handle_edge_irq);
+		__irq_set_handler_locked(d->irq, handle_edge_irq);
 
 	return retval;
 }
@@ -1146,7 +1140,7 @@ static void gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
 
 	desc->irq_data.chip->irq_ack(&desc->irq_data);
 
-	bank = get_irq_data(irq);
+	bank = irq_get_handler_data(irq);
 #ifdef CONFIG_ARCH_OMAP1
 	if (bank->method == METHOD_MPUIO)
 		isr_reg = bank->base +
@@ -1270,8 +1264,7 @@ static void gpio_unmask_irq(struct irq_data *d)
 	unsigned int gpio = d->irq - IH_GPIO_BASE;
 	struct gpio_bank *bank = irq_data_get_irq_chip_data(d);
 	unsigned int irq_mask = 1 << get_gpio_index(gpio);
-	struct irq_desc *desc = irq_to_desc(d->irq);
-	u32 trigger = desc->status & IRQ_TYPE_SENSE_MASK;
+	u32 trigger = irqd_get_trigger_type(d);
 
 	if (trigger)
 		_set_gpio_triggering(bank, get_gpio_index(gpio), trigger);
@@ -1379,9 +1372,7 @@ static const struct dev_pm_ops omap_mpuio_dev_pm_ops = {
 	.resume_noirq = omap_mpuio_resume_noirq,
 };
 
-/* use platform_driver for this, now that there's no longer any
- * point to sys_device (other than not disturbing old code).
- */
+/* use platform_driver for this. */
 static struct platform_driver omap_mpuio_driver = {
 	.driver		= {
 		.name	= "mpuio",
@@ -1672,19 +1663,17 @@ static void __init omap_gpio_chip_init(struct gpio_bank *bank)
 
 	for (j = bank->virtual_irq_start;
 		     j < bank->virtual_irq_start + bank_width; j++) {
-		struct irq_desc *d = irq_to_desc(j);
-
-		lockdep_set_class(&d->lock, &gpio_lock_class);
-		set_irq_chip_data(j, bank);
+		irq_set_lockdep_class(j, &gpio_lock_class);
+		irq_set_chip_data(j, bank);
 		if (bank_is_mpuio(bank))
-			set_irq_chip(j, &mpuio_irq_chip);
+			irq_set_chip(j, &mpuio_irq_chip);
 		else
-			set_irq_chip(j, &gpio_irq_chip);
-		set_irq_handler(j, handle_simple_irq);
+			irq_set_chip(j, &gpio_irq_chip);
+		irq_set_handler(j, handle_simple_irq);
 		set_irq_flags(j, IRQF_VALID);
 	}
-	set_irq_chained_handler(bank->irq, gpio_irq_handler);
-	set_irq_data(bank->irq, bank);
+	irq_set_chained_handler(bank->irq, gpio_irq_handler);
+	irq_set_handler_data(bank->irq, bank);
 }
 
 static int __devinit omap_gpio_probe(struct platform_device *pdev)
@@ -1754,7 +1743,7 @@ static int __devinit omap_gpio_probe(struct platform_device *pdev)
 }
 
 #if defined(CONFIG_ARCH_OMAP16XX) || defined(CONFIG_ARCH_OMAP2PLUS)
-static int omap_gpio_suspend(struct sys_device *dev, pm_message_t mesg)
+static int omap_gpio_suspend(void)
 {
 	int i;
 
@@ -1804,12 +1793,12 @@ static int omap_gpio_suspend(struct sys_device *dev, pm_message_t mesg)
 	return 0;
 }
 
-static int omap_gpio_resume(struct sys_device *dev)
+static void omap_gpio_resume(void)
 {
 	int i;
 
 	if (!cpu_class_is_omap2() && !cpu_is_omap16xx())
-		return 0;
+		return;
 
 	for (i = 0; i < gpio_bank_count; i++) {
 		struct gpio_bank *bank = &gpio_bank[i];
@@ -1845,19 +1834,11 @@ static int omap_gpio_resume(struct sys_device *dev)
 		__raw_writel(bank->saved_wakeup, wake_set);
 		spin_unlock_irqrestore(&bank->lock, flags);
 	}
-
-	return 0;
 }
 
-static struct sysdev_class omap_gpio_sysclass = {
-	.name		= "gpio",
+static struct syscore_ops omap_gpio_syscore_ops = {
 	.suspend	= omap_gpio_suspend,
 	.resume		= omap_gpio_resume,
-};
-
-static struct sys_device omap_gpio_device = {
-	.id		= 0,
-	.cls		= &omap_gpio_sysclass,
 };
 
 #endif
@@ -2117,21 +2098,14 @@ postcore_initcall(omap_gpio_drv_reg);
 
 static int __init omap_gpio_sysinit(void)
 {
-	int ret = 0;
-
 	mpuio_init();
 
 #if defined(CONFIG_ARCH_OMAP16XX) || defined(CONFIG_ARCH_OMAP2PLUS)
-	if (cpu_is_omap16xx() || cpu_class_is_omap2()) {
-		if (ret == 0) {
-			ret = sysdev_class_register(&omap_gpio_sysclass);
-			if (ret == 0)
-				ret = sysdev_register(&omap_gpio_device);
-		}
-	}
+	if (cpu_is_omap16xx() || cpu_class_is_omap2())
+		register_syscore_ops(&omap_gpio_syscore_ops);
 #endif
 
-	return ret;
+	return 0;
 }
 
 arch_initcall(omap_gpio_sysinit);

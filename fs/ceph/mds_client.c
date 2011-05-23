@@ -693,9 +693,11 @@ static int __choose_mds(struct ceph_mds_client *mdsc,
 				dout("choose_mds %p %llx.%llx "
 				     "frag %u mds%d (%d/%d)\n",
 				     inode, ceph_vinop(inode),
-				     frag.frag, frag.mds,
+				     frag.frag, mds,
 				     (int)r, frag.ndist);
-				return mds;
+				if (ceph_mdsmap_get_state(mdsc->mdsmap, mds) >=
+				    CEPH_MDS_STATE_ACTIVE)
+					return mds;
 			}
 
 			/* since this file/dir wasn't known to be
@@ -708,7 +710,9 @@ static int __choose_mds(struct ceph_mds_client *mdsc,
 				dout("choose_mds %p %llx.%llx "
 				     "frag %u mds%d (auth)\n",
 				     inode, ceph_vinop(inode), frag.frag, mds);
-				return mds;
+				if (ceph_mdsmap_get_state(mdsc->mdsmap, mds) >=
+				    CEPH_MDS_STATE_ACTIVE)
+					return mds;
 			}
 		}
 	}
@@ -3211,9 +3215,15 @@ void ceph_mdsc_destroy(struct ceph_fs_client *fsc)
 {
 	struct ceph_mds_client *mdsc = fsc->mdsc;
 
+	dout("mdsc_destroy %p\n", mdsc);
 	ceph_mdsc_stop(mdsc);
+
+	/* flush out any connection work with references to us */
+	ceph_msgr_flush();
+
 	fsc->mdsc = NULL;
 	kfree(mdsc);
+	dout("mdsc_destroy %p done\n", mdsc);
 }
 
 
@@ -3294,8 +3304,8 @@ static void con_put(struct ceph_connection *con)
 {
 	struct ceph_mds_session *s = con->private;
 
+	dout("mdsc con_put %p (%d)\n", s, atomic_read(&s->s_ref) - 1);
 	ceph_put_mds_session(s);
-	dout("mdsc con_put %p (%d)\n", s, atomic_read(&s->s_ref));
 }
 
 /*

@@ -80,7 +80,7 @@ static void nes_terminate_start_timer(struct nes_qp *nesqp);
 
 #ifdef CONFIG_INFINIBAND_NES_DEBUG
 static unsigned char *nes_iwarp_state_str[] = {
-	"Non-Existant",
+	"Non-Existent",
 	"Idle",
 	"RTS",
 	"Closing",
@@ -91,7 +91,7 @@ static unsigned char *nes_iwarp_state_str[] = {
 };
 
 static unsigned char *nes_tcp_state_str[] = {
-	"Non-Existant",
+	"Non-Existent",
 	"Closed",
 	"Listen",
 	"SYN Sent",
@@ -2610,9 +2610,11 @@ static void nes_process_mac_intr(struct nes_device *nesdev, u32 mac_number)
 					netif_carrier_on(nesvnic->netdev);
 
 					spin_lock(&nesvnic->port_ibevent_lock);
-					if (nesdev->iw_status == 0) {
-						nesdev->iw_status = 1;
-						nes_port_ibevent(nesvnic);
+					if (nesvnic->of_device_registered) {
+						if (nesdev->iw_status == 0) {
+							nesdev->iw_status = 1;
+							nes_port_ibevent(nesvnic);
+						}
 					}
 					spin_unlock(&nesvnic->port_ibevent_lock);
 				}
@@ -2642,9 +2644,11 @@ static void nes_process_mac_intr(struct nes_device *nesdev, u32 mac_number)
 					netif_carrier_off(nesvnic->netdev);
 
 					spin_lock(&nesvnic->port_ibevent_lock);
-					if (nesdev->iw_status == 1) {
-						nesdev->iw_status = 0;
-						nes_port_ibevent(nesvnic);
+					if (nesvnic->of_device_registered) {
+						if (nesdev->iw_status == 1) {
+							nesdev->iw_status = 0;
+							nes_port_ibevent(nesvnic);
+						}
 					}
 					spin_unlock(&nesvnic->port_ibevent_lock);
 				}
@@ -2703,9 +2707,11 @@ void nes_recheck_link_status(struct work_struct *work)
 				netif_carrier_on(nesvnic->netdev);
 
 				spin_lock(&nesvnic->port_ibevent_lock);
-				if (nesdev->iw_status == 0) {
-					nesdev->iw_status = 1;
-					nes_port_ibevent(nesvnic);
+				if (nesvnic->of_device_registered) {
+					if (nesdev->iw_status == 0) {
+						nesdev->iw_status = 1;
+						nes_port_ibevent(nesvnic);
+					}
 				}
 				spin_unlock(&nesvnic->port_ibevent_lock);
 			}
@@ -2723,9 +2729,11 @@ void nes_recheck_link_status(struct work_struct *work)
 				netif_carrier_off(nesvnic->netdev);
 
 				spin_lock(&nesvnic->port_ibevent_lock);
-				if (nesdev->iw_status == 1) {
-					nesdev->iw_status = 0;
-					nes_port_ibevent(nesvnic);
+				if (nesvnic->of_device_registered) {
+					if (nesdev->iw_status == 1) {
+						nesdev->iw_status = 0;
+						nes_port_ibevent(nesvnic);
+					}
 				}
 				spin_unlock(&nesvnic->port_ibevent_lock);
 			}
@@ -2877,9 +2885,8 @@ void nes_nic_ce_handler(struct nes_device *nesdev, struct nes_hw_nic_cq *cq)
 					if ((cqe_errv &
 							(NES_NIC_ERRV_BITS_IPV4_CSUM_ERR | NES_NIC_ERRV_BITS_TCPUDP_CSUM_ERR |
 							NES_NIC_ERRV_BITS_IPH_ERR | NES_NIC_ERRV_BITS_WQE_OVERRUN)) == 0) {
-						if (nesvnic->rx_checksum_disabled == 0) {
+						if (nesvnic->netdev->features & NETIF_F_RXCSUM)
 							rx_skb->ip_summed = CHECKSUM_UNNECESSARY;
-						}
 					} else
 						nes_debug(NES_DBG_CQ, "%s: unsuccessfully checksummed TCP or UDP packet."
 								" errv = 0x%X, pkt_type = 0x%X.\n",
@@ -2889,7 +2896,7 @@ void nes_nic_ce_handler(struct nes_device *nesdev, struct nes_hw_nic_cq *cq)
 					if ((cqe_errv &
 							(NES_NIC_ERRV_BITS_IPV4_CSUM_ERR | NES_NIC_ERRV_BITS_IPH_ERR |
 							NES_NIC_ERRV_BITS_WQE_OVERRUN)) == 0) {
-						if (nesvnic->rx_checksum_disabled == 0) {
+						if (nesvnic->netdev->features & NETIF_F_RXCSUM) {
 							rx_skb->ip_summed = CHECKSUM_UNNECESSARY;
 							/* nes_debug(NES_DBG_CQ, "%s: Reporting successfully checksummed IPv4 packet.\n",
 								  nesvnic->netdev->name); */

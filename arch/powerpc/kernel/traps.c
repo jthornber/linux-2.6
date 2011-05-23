@@ -143,7 +143,6 @@ int die(const char *str, struct pt_regs *regs, long err)
 #endif
 		printk("%s\n", ppc_md.name ? ppc_md.name : "");
 
-		sysfs_printk_last_file();
 		if (notify_die(DIE_OOPS, str, regs, err, 255,
 			       SIGSEGV) == NOTIFY_STOP)
 			return 1;
@@ -199,7 +198,7 @@ void _exception(int signr, struct pt_regs *regs, int code, unsigned long addr)
 	} else if (show_unhandled_signals &&
 		    unhandled_signal(current, signr) &&
 		    printk_ratelimit()) {
-			printk(regs->msr & MSR_SF ? fmt64 : fmt32,
+			printk(regs->msr & MSR_64BIT ? fmt64 : fmt32,
 				current->comm, current->pid, signr,
 				addr, regs->nip, regs->link, code);
 		}
@@ -221,7 +220,7 @@ void system_reset_exception(struct pt_regs *regs)
 	}
 
 #ifdef CONFIG_KEXEC
-	cpu_set(smp_processor_id(), cpus_in_sr);
+	cpumask_set_cpu(smp_processor_id(), &cpus_in_sr);
 #endif
 
 	die("System Reset", regs, SIGABRT);
@@ -626,12 +625,6 @@ void machine_check_exception(struct pt_regs *regs)
 	if (recover > 0)
 		return;
 
-	if (user_mode(regs)) {
-		regs->msr |= MSR_RI;
-		_exception(SIGBUS, regs, BUS_ADRERR, regs->nip);
-		return;
-	}
-
 #if defined(CONFIG_8xx) && defined(CONFIG_PCI)
 	/* the qspan pci read routines can cause machine checks -- Cort
 	 *
@@ -643,16 +636,12 @@ void machine_check_exception(struct pt_regs *regs)
 	return;
 #endif
 
-	if (debugger_fault_handler(regs)) {
-		regs->msr |= MSR_RI;
+	if (debugger_fault_handler(regs))
 		return;
-	}
 
 	if (check_io_access(regs))
 		return;
 
-	if (debugger_fault_handler(regs))
-		return;
 	die("Machine check", regs, SIGBUS);
 
 	/* Must die if the interrupt is not recoverable */
@@ -919,6 +908,26 @@ static int emulate_instruction(struct pt_regs *regs)
 		return emulate_isel(regs, instword);
 	}
 
+#ifdef CONFIG_PPC64
+	/* Emulate the mfspr rD, DSCR. */
+	if (((instword & PPC_INST_MFSPR_DSCR_MASK) == PPC_INST_MFSPR_DSCR) &&
+			cpu_has_feature(CPU_FTR_DSCR)) {
+		PPC_WARN_EMULATED(mfdscr, regs);
+		rd = (instword >> 21) & 0x1f;
+		regs->gpr[rd] = mfspr(SPRN_DSCR);
+		return 0;
+	}
+	/* Emulate the mtspr DSCR, rD. */
+	if (((instword & PPC_INST_MTSPR_DSCR_MASK) == PPC_INST_MTSPR_DSCR) &&
+			cpu_has_feature(CPU_FTR_DSCR)) {
+		PPC_WARN_EMULATED(mtdscr, regs);
+		rd = (instword >> 21) & 0x1f;
+		mtspr(SPRN_DSCR, regs->gpr[rd]);
+		current->thread.dscr_inherit = 1;
+		return 0;
+	}
+#endif
+
 	return -EINVAL;
 }
 
@@ -969,7 +978,7 @@ void __kprobes program_check_exception(struct pt_regs *regs)
 	 * ESR_DST (!?) or 0.  In the process of chasing this with the
 	 * hardware people - not sure if it can happen on any illegal
 	 * instruction or only on FP instructions, whether there is a
-	 * pattern to occurences etc. -dgibson 31/Mar/2003 */
+	 * pattern to occurrences etc. -dgibson 31/Mar/2003 */
 	switch (do_mathemu(regs)) {
 	case 0:
 		emulate_single_step(regs);
@@ -1515,6 +1524,10 @@ struct ppc_emulated ppc_emulated = {
 #endif
 #ifdef CONFIG_VSX
 	WARN_EMULATED_SETUP(vsx),
+#endif
+#ifdef CONFIG_PPC64
+	WARN_EMULATED_SETUP(mfdscr),
+	WARN_EMULATED_SETUP(mtdscr),
 #endif
 };
 

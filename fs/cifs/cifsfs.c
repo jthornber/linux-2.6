@@ -53,7 +53,6 @@ int cifsFYI = 0;
 int cifsERROR = 1;
 int traceSMB = 0;
 unsigned int oplockEnabled = 1;
-unsigned int experimEnabled = 0;
 unsigned int linuxExtEnabled = 1;
 unsigned int lookupCacheEnabled = 1;
 unsigned int multiuser_mount = 0;
@@ -77,7 +76,11 @@ unsigned int cifs_max_pending = CIFS_MAX_REQ;
 module_param(cifs_max_pending, int, 0);
 MODULE_PARM_DESC(cifs_max_pending, "Simultaneous requests to server. "
 				   "Default: 50 Range: 2 to 256");
-
+unsigned short echo_retries = 5;
+module_param(echo_retries, ushort, 0644);
+MODULE_PARM_DESC(echo_retries, "Number of echo attempts before giving up and "
+			       "reconnecting server. Default: 5. 0 means "
+			       "never reconnect.");
 extern mempool_t *cifs_sm_req_poolp;
 extern mempool_t *cifs_req_poolp;
 extern mempool_t *cifs_mid_poolp;
@@ -123,30 +126,24 @@ cifs_read_super(struct super_block *sb, void *data,
 		kfree(cifs_sb);
 		return rc;
 	}
+	cifs_sb->bdi.ra_pages = default_backing_dev_info.ra_pages;
 
-#ifdef CONFIG_CIFS_DFS_UPCALL
-	/* copy mount params to sb for use in submounts */
-	/* BB: should we move this after the mount so we
-	 * do not have to do the copy on failed mounts?
-	 * BB: May be it is better to do simple copy before
-	 * complex operation (mount), and in case of fail
-	 * just exit instead of doing mount and attempting
-	 * undo it if this copy fails?*/
+	/*
+	 * Copy mount params to sb for use in submounts. Better to do
+	 * the copy here and deal with the error before cleanup gets
+	 * complicated post-mount.
+	 */
 	if (data) {
-		int len = strlen(data);
-		cifs_sb->mountdata = kzalloc(len + 1, GFP_KERNEL);
+		cifs_sb->mountdata = kstrndup(data, PAGE_SIZE, GFP_KERNEL);
 		if (cifs_sb->mountdata == NULL) {
 			bdi_destroy(&cifs_sb->bdi);
 			kfree(sb->s_fs_info);
 			sb->s_fs_info = NULL;
 			return -ENOMEM;
 		}
-		strncpy(cifs_sb->mountdata, data, len + 1);
-		cifs_sb->mountdata[len] = '\0';
 	}
-#endif
 
-	rc = cifs_mount(sb, cifs_sb, data, devname);
+	rc = cifs_mount(sb, cifs_sb, devname);
 
 	if (rc) {
 		if (!silent)
@@ -159,7 +156,7 @@ cifs_read_super(struct super_block *sb, void *data,
 	sb->s_bdi = &cifs_sb->bdi;
 	sb->s_blocksize = CIFS_MAX_MSGSIZE;
 	sb->s_blocksize_bits = 14;	/* default 2**14 = CIFS_MAX_MSGSIZE */
-	inode = cifs_root_iget(sb, ROOT_I);
+	inode = cifs_root_iget(sb);
 
 	if (IS_ERR(inode)) {
 		rc = PTR_ERR(inode);
@@ -180,12 +177,12 @@ cifs_read_super(struct super_block *sb, void *data,
 	else
 		sb->s_d_op = &cifs_dentry_ops;
 
-#ifdef CONFIG_CIFS_EXPERIMENTAL
+#ifdef CIFS_NFSD_EXPORT
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
 		cFYI(1, "export ops supported");
 		sb->s_export_op = &cifs_export_ops;
 	}
-#endif /* EXPERIMENTAL */
+#endif /* CIFS_NFSD_EXPORT */
 
 	return 0;
 
@@ -198,12 +195,10 @@ out_no_root:
 
 out_mount_failed:
 	if (cifs_sb) {
-#ifdef CONFIG_CIFS_DFS_UPCALL
 		if (cifs_sb->mountdata) {
 			kfree(cifs_sb->mountdata);
 			cifs_sb->mountdata = NULL;
 		}
-#endif
 		unload_nls(cifs_sb->local_nls);
 		bdi_destroy(&cifs_sb->bdi);
 		kfree(cifs_sb);
@@ -227,12 +222,10 @@ cifs_put_super(struct super_block *sb)
 	rc = cifs_umount(sb, cifs_sb);
 	if (rc)
 		cERROR(1, "cifs_umount failed with return code %d", rc);
-#ifdef CONFIG_CIFS_DFS_UPCALL
 	if (cifs_sb->mountdata) {
 		kfree(cifs_sb->mountdata);
 		cifs_sb->mountdata = NULL;
 	}
-#endif
 
 	unload_nls(cifs_sb->local_nls);
 	bdi_destroy(&cifs_sb->bdi);
@@ -405,8 +398,8 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
 
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MULTIUSER)
 		seq_printf(s, ",multiuser");
-	else if (tcon->ses->userName)
-		seq_printf(s, ",username=%s", tcon->ses->userName);
+	else if (tcon->ses->user_name)
+		seq_printf(s, ",username=%s", tcon->ses->user_name);
 
 	if (tcon->ses->domainName)
 		seq_printf(s, ",domain=%s", tcon->ses->domainName);
@@ -596,10 +589,17 @@ static ssize_t cifs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 {
 	struct inode *inode = iocb->ki_filp->f_path.dentry->d_inode;
 	ssize_t written;
+	int rc;
 
 	written = generic_file_aio_write(iocb, iov, nr_segs, pos);
-	if (!CIFS_I(inode)->clientCanCacheAll)
-		filemap_fdatawrite(inode->i_mapping);
+
+	if (CIFS_I(inode)->clientCanCacheAll)
+		return written;
+
+	rc = filemap_fdatawrite(inode->i_mapping);
+	if (rc)
+		cFYI(1, "cifs_file_aio_write: %d rc on %p inode", rc, inode);
+
 	return written;
 }
 
@@ -607,16 +607,31 @@ static loff_t cifs_llseek(struct file *file, loff_t offset, int origin)
 {
 	/* origin == SEEK_END => we must revalidate the cached file length */
 	if (origin == SEEK_END) {
-		int retval;
+		int rc;
+		struct inode *inode = file->f_path.dentry->d_inode;
 
-		/* some applications poll for the file length in this strange
-		   way so we must seek to end on non-oplocked files by
-		   setting the revalidate time to zero */
-		CIFS_I(file->f_path.dentry->d_inode)->time = 0;
+		/*
+		 * We need to be sure that all dirty pages are written and the
+		 * server has the newest file length.
+		 */
+		if (!CIFS_I(inode)->clientCanCacheRead && inode->i_mapping &&
+		    inode->i_mapping->nrpages != 0) {
+			rc = filemap_fdatawait(inode->i_mapping);
+			if (rc) {
+				mapping_set_error(inode->i_mapping, rc);
+				return rc;
+			}
+		}
+		/*
+		 * Some applications poll for the file length in this strange
+		 * way so we must seek to end on non-oplocked files by
+		 * setting the revalidate time to zero.
+		 */
+		CIFS_I(inode)->time = 0;
 
-		retval = cifs_revalidate_file(file);
-		if (retval < 0)
-			return (loff_t)retval;
+		rc = cifs_revalidate_file_attr(file);
+		if (rc < 0)
+			return (loff_t)rc;
 	}
 	return generic_file_llseek_unlocked(file, offset, origin);
 }
@@ -729,11 +744,31 @@ const struct file_operations cifs_file_ops = {
 	.setlease = cifs_setlease,
 };
 
+const struct file_operations cifs_file_strict_ops = {
+	.read = do_sync_read,
+	.write = do_sync_write,
+	.aio_read = cifs_strict_readv,
+	.aio_write = cifs_strict_writev,
+	.open = cifs_open,
+	.release = cifs_close,
+	.lock = cifs_lock,
+	.fsync = cifs_strict_fsync,
+	.flush = cifs_flush,
+	.mmap = cifs_file_strict_mmap,
+	.splice_read = generic_file_splice_read,
+	.llseek = cifs_llseek,
+#ifdef CONFIG_CIFS_POSIX
+	.unlocked_ioctl	= cifs_ioctl,
+#endif /* CONFIG_CIFS_POSIX */
+	.setlease = cifs_setlease,
+};
+
 const struct file_operations cifs_file_direct_ops = {
-	/* no aio, no readv -
-	   BB reevaluate whether they can be done with directio, no cache */
-	.read = cifs_user_read,
-	.write = cifs_user_write,
+	/* BB reevaluate whether they can be done with directio, no cache */
+	.read = do_sync_read,
+	.write = do_sync_write,
+	.aio_read = cifs_user_readv,
+	.aio_write = cifs_user_writev,
 	.open = cifs_open,
 	.release = cifs_close,
 	.lock = cifs_lock,
@@ -747,6 +782,7 @@ const struct file_operations cifs_file_direct_ops = {
 	.llseek = cifs_llseek,
 	.setlease = cifs_setlease,
 };
+
 const struct file_operations cifs_file_nobrl_ops = {
 	.read = do_sync_read,
 	.write = do_sync_write,
@@ -765,11 +801,30 @@ const struct file_operations cifs_file_nobrl_ops = {
 	.setlease = cifs_setlease,
 };
 
+const struct file_operations cifs_file_strict_nobrl_ops = {
+	.read = do_sync_read,
+	.write = do_sync_write,
+	.aio_read = cifs_strict_readv,
+	.aio_write = cifs_strict_writev,
+	.open = cifs_open,
+	.release = cifs_close,
+	.fsync = cifs_strict_fsync,
+	.flush = cifs_flush,
+	.mmap = cifs_file_strict_mmap,
+	.splice_read = generic_file_splice_read,
+	.llseek = cifs_llseek,
+#ifdef CONFIG_CIFS_POSIX
+	.unlocked_ioctl	= cifs_ioctl,
+#endif /* CONFIG_CIFS_POSIX */
+	.setlease = cifs_setlease,
+};
+
 const struct file_operations cifs_file_direct_nobrl_ops = {
-	/* no mmap, no aio, no readv -
-	   BB reevaluate whether they can be done with directio, no cache */
-	.read = cifs_user_read,
-	.write = cifs_user_write,
+	/* BB reevaluate whether they can be done with directio, no cache */
+	.read = do_sync_read,
+	.write = do_sync_write,
+	.aio_read = cifs_user_readv,
+	.aio_write = cifs_user_writev,
 	.open = cifs_open,
 	.release = cifs_close,
 	.fsync = cifs_fsync,
@@ -932,10 +987,10 @@ init_cifs(void)
 	int rc = 0;
 	cifs_proc_init();
 	INIT_LIST_HEAD(&cifs_tcp_ses_list);
-#ifdef CONFIG_CIFS_EXPERIMENTAL
+#ifdef CONFIG_CIFS_DNOTIFY_EXPERIMENTAL /* unused temporarily */
 	INIT_LIST_HEAD(&GlobalDnotifyReqList);
 	INIT_LIST_HEAD(&GlobalDnotifyRsp_Q);
-#endif
+#endif /* was needed for dnotify, and will be needed for inotify when VFS fix */
 /*
  *  Initialize Global counters
  */
@@ -984,22 +1039,33 @@ init_cifs(void)
 	if (rc)
 		goto out_destroy_mids;
 
-	rc = register_filesystem(&cifs_fs_type);
-	if (rc)
-		goto out_destroy_request_bufs;
 #ifdef CONFIG_CIFS_UPCALL
 	rc = register_key_type(&cifs_spnego_key_type);
 	if (rc)
-		goto out_unregister_filesystem;
-#endif
+		goto out_destroy_request_bufs;
+#endif /* CONFIG_CIFS_UPCALL */
+
+#ifdef CONFIG_CIFS_ACL
+	rc = init_cifs_idmap();
+	if (rc)
+		goto out_register_key_type;
+#endif /* CONFIG_CIFS_ACL */
+
+	rc = register_filesystem(&cifs_fs_type);
+	if (rc)
+		goto out_init_cifs_idmap;
 
 	return 0;
 
-#ifdef CONFIG_CIFS_UPCALL
-out_unregister_filesystem:
-	unregister_filesystem(&cifs_fs_type);
+out_init_cifs_idmap:
+#ifdef CONFIG_CIFS_ACL
+	exit_cifs_idmap();
+out_register_key_type:
 #endif
+#ifdef CONFIG_CIFS_UPCALL
+	unregister_key_type(&cifs_spnego_key_type);
 out_destroy_request_bufs:
+#endif
 	cifs_destroy_request_bufs();
 out_destroy_mids:
 	cifs_destroy_mids();
@@ -1020,6 +1086,10 @@ exit_cifs(void)
 	cifs_fscache_unregister();
 #ifdef CONFIG_CIFS_DFS_UPCALL
 	cifs_dfs_release_automount_timer();
+#endif
+#ifdef CONFIG_CIFS_ACL
+	cifs_destroy_idmaptrees();
+	exit_cifs_idmap();
 #endif
 #ifdef CONFIG_CIFS_UPCALL
 	unregister_key_type(&cifs_spnego_key_type);

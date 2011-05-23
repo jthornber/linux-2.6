@@ -27,6 +27,7 @@
 #include <linux/fb.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/prefetch.h>
 #include <linux/delay.h>
 #include <video/udlfb.h>
 #include "edid.h"
@@ -769,7 +770,7 @@ static int dlfb_ops_ioctl(struct fb_info *info, unsigned int cmd,
 
 		/*
 		 * If we have a damage-aware client, turn fb_defio "off"
-		 * To avoid perf imact of unecessary page fault handling.
+		 * To avoid perf imact of unnecessary page fault handling.
 		 * Done by resetting the delay for this fb_info to a very
 		 * long period. Pages will become writable and stay that way.
 		 * Reset to normal value when all clients have closed this fb.

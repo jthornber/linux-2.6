@@ -23,6 +23,7 @@
 #include <linux/cpu.h>
 #include <linux/freezer.h>
 #include <linux/gfp.h>
+#include <linux/syscore_ops.h>
 #include <scsi/scsi_scan.h>
 #include <asm/suspend.h>
 
@@ -271,7 +272,7 @@ static int create_image(int platform_mode)
 
 	local_irq_disable();
 
-	error = sysdev_suspend(PMSG_FREEZE);
+	error = syscore_suspend();
 	if (error) {
 		printk(KERN_ERR "PM: Some system devices failed to power down, "
 			"aborting hibernation\n");
@@ -295,7 +296,7 @@ static int create_image(int platform_mode)
 	}
 
  Power_up:
-	sysdev_resume();
+	syscore_resume();
 	/* NOTE:  dpm_resume_noirq() is just a resume() for devices
 	 * that suspended with irqs off ... no overall powerup.
 	 */
@@ -326,20 +327,25 @@ static int create_image(int platform_mode)
 
 int hibernation_snapshot(int platform_mode)
 {
+	pm_message_t msg = PMSG_RECOVER;
 	int error;
 
 	error = platform_begin(platform_mode);
 	if (error)
 		goto Close;
 
+	error = dpm_prepare(PMSG_FREEZE);
+	if (error)
+		goto Complete_devices;
+
 	/* Preallocate image memory before shutting down devices. */
 	error = hibernate_preallocate_memory();
 	if (error)
-		goto Close;
+		goto Complete_devices;
 
 	suspend_console();
 	pm_restrict_gfp_mask();
-	error = dpm_suspend_start(PMSG_FREEZE);
+	error = dpm_suspend(PMSG_FREEZE);
 	if (error)
 		goto Recover_platform;
 
@@ -357,13 +363,17 @@ int hibernation_snapshot(int platform_mode)
 	if (error || !in_suspend)
 		swsusp_free();
 
-	dpm_resume_end(in_suspend ?
-		(error ? PMSG_RECOVER : PMSG_THAW) : PMSG_RESTORE);
+	msg = in_suspend ? (error ? PMSG_RECOVER : PMSG_THAW) : PMSG_RESTORE;
+	dpm_resume(msg);
 
 	if (error || !in_suspend)
 		pm_restore_gfp_mask();
 
 	resume_console();
+
+ Complete_devices:
+	dpm_complete(msg);
+
  Close:
 	platform_end(platform_mode);
 	return error;
@@ -402,7 +412,7 @@ static int resume_target_kernel(bool platform_mode)
 
 	local_irq_disable();
 
-	error = sysdev_suspend(PMSG_QUIESCE);
+	error = syscore_suspend();
 	if (error)
 		goto Enable_irqs;
 
@@ -429,7 +439,7 @@ static int resume_target_kernel(bool platform_mode)
 	restore_processor_state();
 	touch_softlockup_watchdog();
 
-	sysdev_resume();
+	syscore_resume();
 
  Enable_irqs:
 	local_irq_enable();
@@ -515,7 +525,7 @@ int hibernation_platform_enter(void)
 		goto Platform_finish;
 
 	local_irq_disable();
-	sysdev_suspend(PMSG_HIBERNATE);
+	syscore_suspend();
 	if (pm_wakeup_pending()) {
 		error = -EAGAIN;
 		goto Power_up;
@@ -526,7 +536,7 @@ int hibernation_platform_enter(void)
 	while (1);
 
  Power_up:
-	sysdev_resume();
+	syscore_resume();
 	local_irq_enable();
 	enable_nonboot_cpus();
 
@@ -967,10 +977,33 @@ static ssize_t image_size_store(struct kobject *kobj, struct kobj_attribute *att
 
 power_attr(image_size);
 
+static ssize_t reserved_size_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lu\n", reserved_size);
+}
+
+static ssize_t reserved_size_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t n)
+{
+	unsigned long size;
+
+	if (sscanf(buf, "%lu", &size) == 1) {
+		reserved_size = size;
+		return n;
+	}
+
+	return -EINVAL;
+}
+
+power_attr(reserved_size);
+
 static struct attribute * g[] = {
 	&disk_attr.attr,
 	&resume_attr.attr,
 	&image_size_attr.attr,
+	&reserved_size_attr.attr,
 	NULL,
 };
 

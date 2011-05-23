@@ -124,7 +124,7 @@ static int inet_csk_diag_fill(struct sock *sk,
 
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
 	if (r->idiag_family == AF_INET6) {
-		struct ipv6_pinfo *np = inet6_sk(sk);
+		const struct ipv6_pinfo *np = inet6_sk(sk);
 
 		ipv6_addr_copy((struct in6_addr *)r->id.idiag_src,
 			       &np->rcv_saddr);
@@ -858,7 +858,7 @@ static int inet_diag_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	    nlmsg_len(nlh) < hdrlen)
 		return -EINVAL;
 
-	if ((nlh->nlmsg_flags & NLM_F_DUMP) == NLM_F_DUMP) {
+	if (nlh->nlmsg_flags & NLM_F_DUMP) {
 		if (nlmsg_attrlen(nlh, hdrlen)) {
 			struct nlattr *attr;
 

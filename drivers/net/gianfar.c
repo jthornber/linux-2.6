@@ -123,8 +123,7 @@ static irqreturn_t gfar_interrupt(int irq, void *dev_id);
 static void adjust_link(struct net_device *dev);
 static void init_registers(struct net_device *dev);
 static int init_phy(struct net_device *dev);
-static int gfar_probe(struct platform_device *ofdev,
-		const struct of_device_id *match);
+static int gfar_probe(struct platform_device *ofdev);
 static int gfar_remove(struct platform_device *ofdev);
 static void free_skb_resources(struct gfar_private *priv);
 static void gfar_set_multi(struct net_device *dev);
@@ -366,7 +365,7 @@ static void gfar_init_mac(struct net_device *ndev)
 		gfar_write(&regs->rir0, DEFAULT_RIR0);
 	}
 
-	if (priv->rx_csum_enable)
+	if (ndev->features & NETIF_F_RXCSUM)
 		rctrl |= RCTRL_CHECKSUMMING;
 
 	if (priv->extended_hash) {
@@ -464,6 +463,7 @@ static const struct net_device_ops gfar_netdev_ops = {
 	.ndo_start_xmit = gfar_start_xmit,
 	.ndo_stop = gfar_close,
 	.ndo_change_mtu = gfar_change_mtu,
+	.ndo_set_features = gfar_set_features,
 	.ndo_set_multicast_list = gfar_set_multi,
 	.ndo_tx_timeout = gfar_timeout,
 	.ndo_do_ioctl = gfar_ioctl,
@@ -514,7 +514,7 @@ void unlock_tx_qs(struct gfar_private *priv)
 /* Returns 1 if incoming frames use an FCB */
 static inline int gfar_uses_fcb(struct gfar_private *priv)
 {
-	return priv->vlgrp || priv->rx_csum_enable ||
+	return priv->vlgrp || (priv->ndev->features & NETIF_F_RXCSUM) ||
 		(priv->device_flags & FSL_GIANFAR_DEV_HAS_TIMER);
 }
 
@@ -950,6 +950,11 @@ static void gfar_detect_errata(struct gfar_private *priv)
 			(pvr == 0x80861010 && (mod & 0xfff9) == 0x80c0))
 		priv->errata |= GFAR_ERRATA_A002;
 
+	/* MPC8313 Rev < 2.0, MPC8548 rev 2.0 */
+	if ((pvr == 0x80850010 && mod == 0x80b0 && rev < 0x0020) ||
+			(pvr == 0x80210020 && mod == 0x8030 && rev == 0x0020))
+		priv->errata |= GFAR_ERRATA_12;
+
 	if (priv->errata)
 		dev_info(dev, "enabled errata workarounds, flags: 0x%x\n",
 			 priv->errata);
@@ -957,8 +962,7 @@ static void gfar_detect_errata(struct gfar_private *priv)
 
 /* Set up the ethernet device structure, private data,
  * and anything else we need before we start */
-static int gfar_probe(struct platform_device *ofdev,
-		const struct of_device_id *match)
+static int gfar_probe(struct platform_device *ofdev)
 {
 	u32 tempval;
 	struct net_device *dev = NULL;
@@ -1027,10 +1031,11 @@ static int gfar_probe(struct platform_device *ofdev,
 		netif_napi_add(dev, &priv->gfargrp[i].napi, gfar_poll, GFAR_DEV_WEIGHT);
 
 	if (priv->device_flags & FSL_GIANFAR_DEV_HAS_CSUM) {
-		priv->rx_csum_enable = 1;
-		dev->features |= NETIF_F_IP_CSUM | NETIF_F_SG | NETIF_F_HIGHDMA;
-	} else
-		priv->rx_csum_enable = 0;
+		dev->hw_features = NETIF_F_IP_CSUM | NETIF_F_SG |
+			NETIF_F_RXCSUM;
+		dev->features |= NETIF_F_IP_CSUM | NETIF_F_SG |
+			NETIF_F_RXCSUM | NETIF_F_HIGHDMA;
+	}
 
 	priv->vlgrp = NULL;
 
@@ -1920,7 +1925,7 @@ int startup_gfar(struct net_device *ndev)
 		if (err) {
 			for (j = 0; j < i; j++)
 				free_grp_irqs(&priv->gfargrp[j]);
-				goto irq_fail;
+			goto irq_fail;
 		}
 	}
 
@@ -2156,8 +2161,15 @@ static int gfar_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Set up checksumming */
 	if (CHECKSUM_PARTIAL == skb->ip_summed) {
 		fcb = gfar_add_fcb(skb);
-		lstatus |= BD_LFLAG(TXBD_TOE);
-		gfar_tx_checksum(skb, fcb);
+		/* as specified by errata */
+		if (unlikely(gfar_has_errata(priv, GFAR_ERRATA_12)
+			     && ((unsigned long)fcb % 0x20) > 0x18)) {
+			__skb_pull(skb, GMAC_FCB_LEN);
+			skb_checksum_help(skb);
+		} else {
+			lstatus |= BD_LFLAG(TXBD_TOE);
+			gfar_tx_checksum(skb, fcb);
+		}
 	}
 
 	if (vlan_tx_tag_present(skb)) {
@@ -2687,7 +2699,7 @@ static int gfar_process_frame(struct net_device *dev, struct sk_buff *skb,
 	if (priv->padding)
 		skb_pull(skb, priv->padding);
 
-	if (priv->rx_csum_enable)
+	if (dev->features & NETIF_F_RXCSUM)
 		gfar_rx_checksum(skb, fcb);
 
 	/* Tell the skb what kind of packet this is */
@@ -3256,7 +3268,7 @@ static struct of_device_id gfar_match[] =
 MODULE_DEVICE_TABLE(of, gfar_match);
 
 /* Structure for a device driver */
-static struct of_platform_driver gfar_driver = {
+static struct platform_driver gfar_driver = {
 	.driver = {
 		.name = "fsl-gianfar",
 		.owner = THIS_MODULE,
@@ -3269,12 +3281,12 @@ static struct of_platform_driver gfar_driver = {
 
 static int __init gfar_init(void)
 {
-	return of_register_platform_driver(&gfar_driver);
+	return platform_driver_register(&gfar_driver);
 }
 
 static void __exit gfar_exit(void)
 {
-	of_unregister_platform_driver(&gfar_driver);
+	platform_driver_unregister(&gfar_driver);
 }
 
 module_init(gfar_init);

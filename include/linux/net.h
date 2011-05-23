@@ -42,6 +42,7 @@
 #define SYS_RECVMSG	17		/* sys_recvmsg(2)		*/
 #define SYS_ACCEPT4	18		/* sys_accept4(2)		*/
 #define SYS_RECVMMSG	19		/* sys_recvmmsg(2)		*/
+#define SYS_SENDMMSG	20		/* sys_sendmmsg(2)		*/
 
 typedef enum {
 	SS_FREE = 0,			/* not allocated		*/
@@ -118,6 +119,7 @@ enum sock_shutdown_cmd {
 };
 
 struct socket_wq {
+	/* Note: wait MUST be first field of socket_wq */
 	wait_queue_head_t	wait;
 	struct fasync_struct	*fasync_list;
 	struct rcu_head		rcu;
@@ -142,7 +144,7 @@ struct socket {
 
 	unsigned long		flags;
 
-	struct socket_wq	*wq;
+	struct socket_wq __rcu	*wq;
 
 	struct file		*file;
 	struct sock		*sk;
