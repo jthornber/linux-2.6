@@ -27,12 +27,15 @@
 
 #include "dm.h"
 
+#define SUB_JOB_SIZE	128
+#define SPLIT_COUNT	8
+#define MIN_JOBS	1
+
 /*-----------------------------------------------------------------
  * Each kcopyd client has its own little pool of preallocated
  * pages for kcopyd io.
  *---------------------------------------------------------------*/
 struct dm_kcopyd_client {
-	spinlock_t lock;
 	struct page_list *pages;
 	unsigned int nr_pages;
 	unsigned int nr_free_pages;
@@ -95,11 +98,8 @@ static int kcopyd_get_pages(struct dm_kcopyd_client *kc,
 {
 	struct page_list *pl;
 
-	spin_lock(&kc->lock);
-	if (kc->nr_free_pages < nr) {
-		spin_unlock(&kc->lock);
+	if (kc->nr_free_pages < nr)
 		return -ENOMEM;
-	}
 
 	kc->nr_free_pages -= nr;
 	for (*pages = pl = kc->pages; --nr; pl = pl->next)
@@ -108,8 +108,6 @@ static int kcopyd_get_pages(struct dm_kcopyd_client *kc,
 	kc->pages = pl->next;
 	pl->next = NULL;
 
-	spin_unlock(&kc->lock);
-
 	return 0;
 }
 
@@ -117,14 +115,12 @@ static void kcopyd_put_pages(struct dm_kcopyd_client *kc, struct page_list *pl)
 {
 	struct page_list *cursor;
 
-	spin_lock(&kc->lock);
 	for (cursor = pl; cursor->next; cursor = cursor->next)
 		kc->nr_free_pages++;
 
 	kc->nr_free_pages++;
 	cursor->next = kc->pages;
 	kc->pages = pl;
-	spin_unlock(&kc->lock);
 }
 
 /*
@@ -216,16 +212,17 @@ struct kcopyd_job {
 	struct mutex lock;
 	atomic_t sub_jobs;
 	sector_t progress;
-};
 
-/* FIXME: this should scale with the number of pages */
-#define MIN_JOBS 512
+	struct kcopyd_job *master_job;
+};
 
 static struct kmem_cache *_job_cache;
 
 int __init dm_kcopyd_init(void)
 {
-	_job_cache = KMEM_CACHE(kcopyd_job, 0);
+	_job_cache = kmem_cache_create("kcopyd_job",
+				sizeof(struct kcopyd_job) * (SPLIT_COUNT + 1),
+				__alignof__(struct kcopyd_job), 0, NULL);
 	if (!_job_cache)
 		return -ENOMEM;
 
@@ -299,7 +296,11 @@ static int run_complete_job(struct kcopyd_job *job)
 
 	if (job->pages)
 		kcopyd_put_pages(kc, job->pages);
-	mempool_free(job, kc->job_pool);
+
+	/* Do not free sub-jobs */
+	if (context != job)
+		mempool_free(job, kc->job_pool);
+
 	fn(read_err, write_err, context);
 
 	if (atomic_dec_and_test(&kc->nr_jobs))
@@ -460,14 +461,14 @@ static void dispatch_job(struct kcopyd_job *job)
 	wake(kc);
 }
 
-#define SUB_JOB_SIZE 128
 static void segment_complete(int read_err, unsigned long write_err,
 			     void *context)
 {
 	/* FIXME: tidy this function */
 	sector_t progress = 0;
 	sector_t count = 0;
-	struct kcopyd_job *job = (struct kcopyd_job *) context;
+	struct kcopyd_job *sub_job = (struct kcopyd_job *) context;
+	struct kcopyd_job *job = sub_job->master_job;
 	struct dm_kcopyd_client *kc = job->kc;
 
 	mutex_lock(&job->lock);
@@ -498,10 +499,9 @@ static void segment_complete(int read_err, unsigned long write_err,
 
 	if (count) {
 		int i;
-		struct kcopyd_job *sub_job = mempool_alloc(kc->job_pool,
-							   GFP_NOIO);
 
 		*sub_job = *job;
+		sub_job->master_job = job;
 		sub_job->source.sector += progress;
 		sub_job->source.count = count;
 
@@ -511,7 +511,7 @@ static void segment_complete(int read_err, unsigned long write_err,
 		}
 
 		sub_job->fn = segment_complete;
-		sub_job->context = job;
+		sub_job->context = sub_job;
 		dispatch_job(sub_job);
 
 	} else if (atomic_dec_and_test(&job->sub_jobs)) {
@@ -534,7 +534,6 @@ static void segment_complete(int read_err, unsigned long write_err,
  * Create some little jobs that will do the move between
  * them.
  */
-#define SPLIT_COUNT 8
 static void split_job(struct kcopyd_job *job)
 {
 	int i;
@@ -542,8 +541,10 @@ static void split_job(struct kcopyd_job *job)
 	atomic_inc(&job->kc->nr_jobs);
 
 	atomic_set(&job->sub_jobs, SPLIT_COUNT);
-	for (i = 0; i < SPLIT_COUNT; i++)
-		segment_complete(0, 0u, job);
+	for (i = 0; i < SPLIT_COUNT; i++) {
+		job[i + 1].master_job = job;
+		segment_complete(0, 0u, &job[i + 1]);
+	}
 }
 
 int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
@@ -578,7 +579,7 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 	job->fn = fn;
 	job->context = context;
 
-	if (job->source.count < SUB_JOB_SIZE)
+	if (job->source.count <= SUB_JOB_SIZE)
 		dispatch_job(job);
 
 	else {
@@ -616,7 +617,6 @@ int dm_kcopyd_client_create(unsigned int nr_pages,
 	if (!kc)
 		return -ENOMEM;
 
-	spin_lock_init(&kc->lock);
 	spin_lock_init(&kc->job_lock);
 	INIT_LIST_HEAD(&kc->complete_jobs);
 	INIT_LIST_HEAD(&kc->io_jobs);
@@ -638,7 +638,7 @@ int dm_kcopyd_client_create(unsigned int nr_pages,
 	if (r)
 		goto bad_client_pages;
 
-	kc->io_client = dm_io_client_create(nr_pages);
+	kc->io_client = dm_io_client_create();
 	if (IS_ERR(kc->io_client)) {
 		r = PTR_ERR(kc->io_client);
 		goto bad_io_client;
