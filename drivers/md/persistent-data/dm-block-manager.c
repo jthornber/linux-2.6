@@ -616,7 +616,7 @@ dm_block_manager_create(struct block_device *bdev,
 	for (i = 0; i < hash_size; i++)
 		INIT_HLIST_HEAD(bm->buckets + i);
 
-	if (!(bm->io = dm_io_client_create(cache_size / 4))) {
+	if (!(bm->io = dm_io_client_create())) {
 		kfree(bm);
 		return NULL;
 	}
