@@ -1479,7 +1479,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		}
 
 		origin_id = simple_strtoull(argv[2], &end, 10);
-		if (!origin_id || *end) {
+		if (*end) {
 			ti->error = "Invalid origin id";
 			return -EINVAL;
 		}
