@@ -77,9 +77,8 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root);
  */
 
 /* Tries to find a key that matches exactly.  O(ln(n)) */
-/* FIXME: rename this to plain btree_lookup */
-int dm_btree_lookup_equal(struct dm_btree_info *info, dm_block_t root,
-			  uint64_t *keys, void *value);
+int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
+		    uint64_t *keys, void *value);
 
 /*
  * Find the greatest key that is less than or equal to that requested.  A

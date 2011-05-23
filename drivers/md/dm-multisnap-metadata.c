@@ -109,7 +109,7 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	int r, i;
 	struct dm_block *b;
 	uint64_t *data;
-	size_t block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
+	unsigned block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
 
 	r = dm_bm_read_lock(bm, MULTISNAP_SUPERBLOCK_LOCATION, &b);
 	if (r)
@@ -408,8 +408,8 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 		}
 
 	/* check the device exists */
-	r = dm_btree_lookup_equal(&mmd->details_info, mmd->details_root,
-				  &key, &details);
+	r = dm_btree_lookup(&mmd->details_info, mmd->details_root,
+			    &key, &details);
 	if (r) {
 		if (r == -ENODATA && create) {
 			changed = 1;
@@ -447,8 +447,8 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 	__le64 value;
 	struct dm_ms_device *msd;
 
-	r = dm_btree_lookup_equal(&mmd->details_info, mmd->details_root,
-				  &key, &value);
+	r = dm_btree_lookup(&mmd->details_info, mmd->details_root,
+			    &key, &value);
 	if (!r)
 		return -EEXIST;
 
@@ -520,7 +520,7 @@ static int __create_snap(struct dm_multisnap_metadata *mmd,
 	__le64 value;
 
 	/* find the mapping tree for the origin */
-	r = dm_btree_lookup_equal(&mmd->tl_info, mmd->root, &key, &value);
+	r = dm_btree_lookup(&mmd->tl_info, mmd->root, &key, &value);
 	if (r)
 		return r;
 	origin_root = __le64_to_cpu(value);
@@ -654,13 +654,13 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 
 	if (can_block) {
 		down_read(&mmd->root_lock);
-		r = dm_btree_lookup_equal(&mmd->info, mmd->root, keys, &value);
+		r = dm_btree_lookup(&mmd->info, mmd->root, keys, &value);
 		if (!r)
 			dm_block_time = __le64_to_cpu(value);
 		up_read(&mmd->root_lock);
 
 	} else if (down_read_trylock(&mmd->root_lock)) {
-		r = dm_btree_lookup_equal(&mmd->nb_info, mmd->root, keys, &value);
+		r = dm_btree_lookup(&mmd->nb_info, mmd->root, keys, &value);
 		if (!r)
 			dm_block_time = __le64_to_cpu(value);
 		up_read(&mmd->root_lock);

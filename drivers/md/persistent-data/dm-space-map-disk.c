@@ -238,7 +238,7 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 
 	do_div(index, io->entries_per_block);
 
-	r = dm_btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
+	r = dm_btree_lookup(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
 		return r;
 
@@ -249,7 +249,7 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 			return r;
 
 		*result = __lookup_bitmap(dm_block_data(blk),
-					 mod64(b, io->entries_per_block));
+					  mod64(b, io->entries_per_block));
 		r = dm_tm_unlock(io->tm, blk);
 		if (r < 0) {
 			return r;
@@ -258,9 +258,8 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 
 	if (*result == 3) {
 		__le32 le_rc;
-		r = dm_btree_lookup_equal(&io->ref_count_info,
-					  io->ref_count_root,
-					  &b, &le_rc);
+		r = dm_btree_lookup(&io->ref_count_info, io->ref_count_root,
+				    &b, &le_rc);
 		if (r < 0)
 			return r;
 
@@ -280,8 +279,7 @@ static int io_find_unused(struct sm_disk *io, dm_block_t begin,
 
 	do_div(index_begin, io->entries_per_block);
 	for (i = index_begin; i < index_end; i++, begin = 0) {
-		r = dm_btree_lookup_equal(&io->bitmap_info,
-					  io->bitmap_root, &i, &ie);
+		r = dm_btree_lookup(&io->bitmap_info, io->bitmap_root, &i, &ie);
 		if (r < 0)
 			return r;
 
@@ -330,7 +328,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	int inc;
 
 	do_div(index, io->entries_per_block);
-	r = dm_btree_lookup_equal(&io->bitmap_info, io->bitmap_root, &index, &ie);
+	r = dm_btree_lookup(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
 		return r;
 

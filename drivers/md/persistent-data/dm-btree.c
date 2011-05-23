@@ -285,8 +285,8 @@ static int btree_lookup_raw(struct ro_spine *s, dm_block_t block, uint64_t key,
 	return 0;
 }
 
-int dm_btree_lookup_equal(struct dm_btree_info *info, dm_block_t root,
-			  uint64_t *keys, void *value)
+int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
+		    uint64_t *keys, void *value)
 {
 	unsigned level, last_level = info->levels - 1;
 	int r;
@@ -328,7 +328,7 @@ int dm_btree_lookup_equal(struct dm_btree_info *info, dm_block_t root,
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_btree_lookup_equal);
+EXPORT_SYMBOL_GPL(dm_btree_lookup);
 
 int dm_btree_lookup_le(struct dm_btree_info *info, dm_block_t root,
 		       uint64_t *keys, uint64_t *key, void *value)
