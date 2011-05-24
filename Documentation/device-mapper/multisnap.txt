@@ -164,11 +164,3 @@ Always teardown the pool last.
 
  pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  dev id: the internal device identifier (32bit value)
-
-
-
-
-
-
-
-
