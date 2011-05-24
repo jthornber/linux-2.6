@@ -100,11 +100,9 @@ collision the message will fail.
 
 Thin provisioned volumes are instanced using the 'multisnap' target.
 
-    dmsetup create thin --table "0 2097152 multisnap /dev/mapper/pool $metadata_dev 0"
+    dmsetup create thin --table "0 2097152 multisnap /dev/mapper/pool 0"
 
-We need to reference both the pool device and the metadata device
-(this is ugly).  Finally the last parameter is the 32bit identifier
-for the thinp device.
+The last parameter is the 32bit identifier for the thinp device.
 
 ** Internal snapshots
 
@@ -131,7 +129,7 @@ activating/removing them both.
 
 Activate exactly the same way as any other thin provisioned volume.
 
-    dmsetup create snap --table "0 2097152 multisnap /dev/mapper/pool $metadata_dev 1"
+    dmsetup create snap --table "0 2097152 multisnap /dev/mapper/pool 1"
 
 ** Teardown
 

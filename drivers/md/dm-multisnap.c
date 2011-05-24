@@ -429,8 +429,15 @@ struct pool_c {
 };
 
 struct multisnap_c {
-	struct pool_c *pool;
 	struct dm_dev *pool_dev;
+	dm_multisnap_dev_t dev_id;
+
+	/*
+	 * These fields are only valid while the device is resumed.  This
+	 * is because the pool_c may totally change due to table reloads
+	 * (where as the pool_dev above remains constant).
+	 */
+	struct pool_c *pool;
 	struct dm_ms_device *msd;
 };
 
@@ -473,7 +480,7 @@ static void
 bdev_table_insert(struct bdev_table *t,
 		  struct pool_c *pool)
 {
-	unsigned bucket = hash_bdev(pool->metadata_dev->bdev);
+	unsigned bucket = hash_bdev(pool->pool_dev);
 	spin_lock(&t->lock);
 	hlist_add_head(&pool->hlist, t->buckets + bucket);
 	spin_unlock(&t->lock);
@@ -495,7 +502,7 @@ bdev_table_lookup(struct bdev_table *t, struct block_device *bdev)
 	struct pool_c *pool;
 
 	hlist_for_each_entry (pool, n, t->buckets + bucket, hlist)
-		if (pool->metadata_dev->bdev == bdev)
+		if (pool->pool_dev == bdev)
 			return pool;
 
 	return NULL;
@@ -1175,7 +1182,6 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pool = ti->private;
 
-	bdev_table_remove(&bdev_table_, pool);
 	dm_multisnap_metadata_close(pool->mmd);
 	dm_put_device(ti, pool->metadata_dev);
 	dm_put_device(ti, pool->data_dev);
@@ -1327,8 +1333,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->num_discard_requests = 1;
 	ti->private = pool;
 
-	bdev_table_insert(&bdev_table_, pool);
-
 	return 0;
 }
 
@@ -1352,24 +1356,9 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 	return r;
 }
 
-static void pool_presuspend(struct dm_target *ti)
+struct block_device *get_target_bdev(struct dm_target *ti)
 {
-	struct pool_c *pool = ti->private;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	pool->bouncing = 1;
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	/* Wait until all io has been processed. */
-	flush_workqueue(pool->producer_wq);
-	flush_workqueue(pool->consumer_wq);
-	if (dm_multisnap_metadata_commit(pool->mmd) < 0) {
-		printk(KERN_ALERT "multisnap metadata write failed.");
-		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
-	}
-
-	requeue_all_bios(pool);
+	return dm_table_get_bdev(ti->table);
 }
 
 /*
@@ -1419,7 +1408,35 @@ static int pool_preresume(struct dm_target *ti)
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_producer(pool);
+
+	/* The pool object is only present if the pool is active */
+	pool->pool_dev = get_target_bdev(ti);
+	bdev_table_insert(&bdev_table_, pool);
 	return 0;
+}
+
+static void pool_presuspend(struct dm_target *ti)
+{
+	struct pool_c *pool = ti->private;
+	unsigned long flags;
+
+	/* FIXME: we should fail if there are any msd's open */
+	bdev_table_remove(&bdev_table_, pool);
+	pool->pool_dev = NULL;
+
+	spin_lock_irqsave(&pool->lock, flags);
+	pool->bouncing = 1;
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	/* Wait until all io has been processed. */
+	flush_workqueue(pool->producer_wq);
+	flush_workqueue(pool->consumer_wq);
+	if (dm_multisnap_metadata_commit(pool->mmd) < 0) {
+		printk(KERN_ALERT "multisnap metadata write failed.");
+		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
+	}
+
+	requeue_all_bios(pool);
 }
 
 /*
@@ -1552,8 +1569,10 @@ static struct target_type pool_target = {
 static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
-	if (mc->msd)
-		dm_multisnap_metadata_close_device(mc->msd);
+
+	BUG_ON(mc->pool);
+	BUG_ON(mc->msd);
+
 	dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
 }
@@ -1561,7 +1580,7 @@ static void multisnap_dtr(struct dm_target *ti)
 /*
  * Construct a multisnap device:
  *
- * <start> <length> multisnap <pool dev> <metadata dev> <dev id>
+ * <start> <length> multisnap <pool dev> <dev id>
  *
  * pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  * dev id: the internal device identifier
@@ -1569,12 +1588,11 @@ static void multisnap_dtr(struct dm_target *ti)
 static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	dm_multisnap_dev_t dev_id;
 	struct multisnap_c *mc;
-	struct dm_dev *pool_dev, *metadata_dev;
+	struct dm_dev *pool_dev;
 	char *end;
 
-	if (argc != 3) {
+	if (argc != 2) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -1593,43 +1611,49 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	mc->pool_dev = pool_dev;
 
-	r = dm_get_device(ti, argv[1], FMODE_READ, &metadata_dev);
-	if (r) {
-		ti->error = "Error opening metadata device";
-		dm_put_device(ti, pool_dev);
-		kfree(mc);
-		return r;
-	}
-
-	mc->pool = bdev_table_lookup(&bdev_table_, metadata_dev->bdev);
-	if (!mc->pool) {
-		ti->error = "Couldn't find pool object";
-		dm_put_device(ti, pool_dev);
-		dm_put_device(ti, metadata_dev);
-		kfree(mc);
-		return -EINVAL;
-	}
-	dm_put_device(ti, metadata_dev);
-	mc->pool->pool_dev = pool_dev->bdev; /* hack */
-
-	dev_id = simple_strtoull(argv[2], &end, 10);
+	mc->dev_id = simple_strtoull(argv[1], &end, 10);
 	if (*end) {
 		ti->error = "Invalid device id";
 		multisnap_dtr(ti);
 		return -EINVAL;
 	}
 
-	r = dm_multisnap_metadata_open_device(mc->pool->mmd, dev_id, &mc->msd);
-	if (r) {
-		ti->error = "Couldn't open multisnap internal device";
-		multisnap_dtr(ti);
-		return r;
-	}
-	ti->split_io = mc->pool->sectors_per_block;
+	ti->split_io = 0;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
 
 	return 0;
+}
+
+static int multisnap_preresume(struct dm_target *ti)
+{
+	int r;
+	struct multisnap_c *mc = ti->private;
+
+	mc->pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
+	if (!mc->pool) {
+		printk(KERN_ALERT "Couldn't find pool object");
+		return -EINVAL;
+	}
+
+	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
+	if (r) {
+		printk(KERN_ALERT "Couldn't open multisnap internal device");
+		return r;
+	}
+
+	/* FIXME: check this gets picked up */
+	ti->split_io = mc->pool->sectors_per_block;
+	return 0;
+}
+
+static void multisnap_postsuspend(struct dm_target *ti)
+{
+	struct multisnap_c *mc = ti->private;
+
+	mc->pool = NULL;
+	dm_multisnap_metadata_close_device(mc->msd);
+	mc->msd = NULL;
 }
 
 static int multisnap_map(struct dm_target *ti, struct bio *bio,
@@ -1649,22 +1673,24 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 	dm_block_t mapped;
 	char buf[BDEVNAME_SIZE];
 	struct multisnap_c *mc = ti->private;
-	unsigned long dev_id;
 
-	r = dm_multisnap_metadata_get_mapped_count(mc->msd, &mapped);
-	if (r)
-		return r;
+	if (mc->msd) {
+		r = dm_multisnap_metadata_get_mapped_count(mc->msd, &mapped);
+		if (r)
+			return r;
 
-	switch (type) {
-	case STATUSTYPE_INFO:
-		DMEMIT("%llu", mapped);
-		break;
+		switch (type) {
+		case STATUSTYPE_INFO:
+			DMEMIT("%llu", mapped);
+			break;
 
-	case STATUSTYPE_TABLE:
-		dev_id = dm_multisnap_device_dev(mc->msd);
-		DMEMIT("%s %lu",
-		       format_dev_t(buf, mc->pool_dev->bdev->bd_dev),
-		       dev_id);
+		case STATUSTYPE_TABLE:
+			DMEMIT("%s %lu",
+			       format_dev_t(buf, mc->pool_dev->bdev->bd_dev),
+			       (unsigned long) mc->dev_id);
+		}
+	} else {
+		DMEMIT("-");
 	}
 
 	return 0;
@@ -1690,13 +1716,27 @@ static int multisnap_iterate_devices(struct dm_target *ti,
 				     iterate_devices_callout_fn fn, void *data)
 {
 	struct multisnap_c *mc = ti->private;
-	return fn(ti, mc->pool_dev, 0, mc->pool->sectors_per_block, data);
+	struct pool_c *pool;
+
+	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
+	if (!pool) {
+		printk(KERN_ALERT "Couldn't find pool object");
+		return -EINVAL;
+	}
+
+	return fn(ti, mc->pool_dev, 0, pool->sectors_per_block, data);
 }
 
 static void multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct multisnap_c *mc = ti->private;
-	struct pool_c *pool = mc->pool;
+	struct pool_c *pool;
+
+	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
+	if (!pool) {
+		printk(KERN_ALERT "Couldn't find pool object");
+		return;
+	}
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
@@ -1715,6 +1755,8 @@ static struct target_type multisnap_target = {
 	.module	= THIS_MODULE,
 	.ctr = multisnap_ctr,
 	.dtr = multisnap_dtr,
+	.preresume = multisnap_preresume,
+	.postsuspend = multisnap_postsuspend,
 	.map = multisnap_map,
 	.status = multisnap_status,
 	.merge = multisnap_bvec_merge,
