@@ -355,12 +355,6 @@ static void __clear_errors(struct dm_block_manager *bm)
 		__transition(b, BS_EMPTY);
 }
 
-static void unplug(struct dm_block_manager *bm)
-{
-	/* This is unneccessary, and will stop us scaling */
-	//blk_unplug(bdev_get_queue(bm->bdev));
-}
-
 /*----------------------------------------------------------------
  * Waiting
  *--------------------------------------------------------------*/
@@ -368,6 +362,15 @@ static void unplug(struct dm_block_manager *bm)
 # define __retains(x)	__attribute__((context(x,1,1)))
 #else
 # define __retains(x)
+#endif
+
+#ifdef USE_PLUGGING
+static inline unplug(void)
+{
+	blk_flush_plug(current);
+}
+#else
+static inline void unplug(void) {}
 #endif
 
 #define __wait_block(wq, lock, flags, sched_fn, condition)	\
@@ -400,6 +403,7 @@ do {   								\
 static int __wait_io(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
+	unplug();
 	__wait_block(&b->io_q, &b->bm->lock, *flags, io_schedule,
 		     ((b->state != BS_READING) && (b->state != BS_WRITING)));
 }
@@ -423,6 +427,7 @@ static int __wait_read_lockable(struct dm_block *b, unsigned long *flags)
 static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
+	unplug();
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     !bm->writing_count);
 }
@@ -430,6 +435,7 @@ static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
+	unplug();
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     (!list_empty(&bm->clean_list) ||
 		      (bm->writing_count == 0)));
@@ -456,10 +462,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		available = bm->available_count + bm->writing_count;
 		if (available < bm->cache_size / 4) {
 			spin_unlock_irqrestore(&bm->lock, flags);
-			{
-				write_dirty(bm, bm->cache_size / 4);
-				unplug(bm);
-			}
+			write_dirty(bm, bm->cache_size / 4);
 			spin_lock_irqsave(&bm->lock, flags);
 		}
 
@@ -485,7 +488,6 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
 		read_block(b);
-		unplug(bm);
 		spin_lock_irqsave(&bm->lock, flags);
 		__wait_io(b, &flags);
 
@@ -507,6 +509,21 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		*result = b;
 	return ret;
 }
+
+#ifdef USE_PLUGGING
+static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t where,
+				       int need_read, struct dm_block **result)
+{
+	int r;
+	struct blk_plug plug;
+
+	blk_start_plug(&plug);
+	r = recycle_block(bm, where, need_read, result);
+	blk_finish_plug(&plug);
+
+	return r;
+}
+#endif
 
 /*----------------------------------------------------------------
  * Low level block management
@@ -717,7 +734,11 @@ retry:
 
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
+#ifdef USE_PLUGGING
+		ret = recycle_block_with_plugging(bm, block, need_read, &b);
+#else
 		ret = recycle_block(bm, block, need_read, &b);
+#endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
 
@@ -828,7 +849,6 @@ static int __wait_flush(struct dm_block_manager *bm)
 	int ret = 0;
 	unsigned long flags;
 
-	unplug(bm);
 	spin_lock_irqsave(&bm->lock, flags);
 	__wait_all_writes(bm, &flags);
 

@@ -236,10 +236,10 @@ config DM_SNAPSHOT
          Allow volume managers to take writable snapshots of a device.
 
 config DM_MULTISNAP
-       tristate "Shared snapshots target (EXPERIMENTAL)"
+       tristate "Multisnap target (EXPERIMENTAL)"
        depends on BLK_DEV_DM && DM_PERSISTENT_DATA && EXPERIMENTAL
        ---help---
-         Shared snapshots target for volume managers.
+         Provides thin provisioning and snapshots that share a data store.
 
 config DM_MIRROR
        tristate "Mirror target"

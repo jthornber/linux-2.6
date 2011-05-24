@@ -878,6 +878,11 @@ struct dm_md_mempools *dm_table_get_md_mempools(struct dm_table *t)
 	return t->mempools;
 }
 
+struct block_device *dm_table_get_bdev(struct dm_table *t)
+{
+	return dm_bdev(t->md);
+}
+
 static int setup_indexes(struct dm_table *t)
 {
 	int i;
