@@ -73,11 +73,11 @@ primarily interested in thin provisioning may want to set this larger
 (e.g., 128).  $data_block_size must be the same for the lifetime of
 the metadata device.
 
-The $low_water_mark is expressed in units of $data_block_size, if free
-space on the data device drops below this level then a dm event will
-be sent to userland.  This event is edge triggered, it will occur only
-once, so volume manager writers should register for the event, then
-double check the status of the target.  FIXME: move last sentence to
+The $low_water_mark is expressed in 512 byte sectors, if free space on
+the data device drops below this level then a dm event will be sent to
+userland.  This event is edge triggered, it will occur only once, so
+volume manager writers should register for the event, then double
+check the status of the target.  FIXME: move last sentence to
 reference.
 
 ** Thin provisioning
