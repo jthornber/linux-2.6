@@ -119,6 +119,18 @@ static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
 	return (uint32_t) (hash & prison->hash_mask);
 }
 
+static struct cell *__search_bucket(struct hlist_head *bucket, struct cell_key *key)
+{
+	struct cell *cell;
+	struct hlist_node *tmp;
+
+	hlist_for_each_entry (cell, tmp, bucket, list)
+		if (!memcmp(&cell->key, key, sizeof(cell->key)))
+			return cell;
+
+	return NULL;
+}
+
 /*
  * This may block if a new cell needs allocating.  You must ensure that
  * cells will be unlocked even if the calling thread is blocked.
@@ -129,36 +141,46 @@ static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
 static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 		      struct bio *inmate, struct cell **ref)
 {
-	int r, found = 0;
+	int r;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
-	struct cell *uninitialized_var(cell);
-	struct hlist_node *tmp;
+	struct cell *uninitialized_var(cell), *cell2 = NULL;
 
 	BUG_ON(hash > prison->nr_buckets);
 
 	spin_lock_irqsave(&prison->lock, flags);
-	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
-		if (!memcmp(&cell->key, key, sizeof(cell->key))) {
-			found = 1;
-			break;
-		}
-	spin_unlock_irqrestore(&prison->lock, flags);
+	cell = __search_bucket(prison->cells + hash, key);
 
-	if (!found) {
+	if (!cell) {
 		/* allocate a new cell */
-		cell = mempool_alloc(prison->cell_pool, GFP_NOIO);
-		cell->prison = prison;
-		memcpy(&cell->key, key, sizeof(cell->key));
-		cell->count = 0;
-		bio_list_init(&cell->bios);
-		hlist_add_head(&cell->list, prison->cells + hash);
+		spin_unlock_irqrestore(&prison->lock, flags);
+		cell2 = mempool_alloc(prison->cell_pool, GFP_NOIO);
+		spin_lock_irqsave(&prison->lock, flags);
+
+		/*
+		 * We've been unlocked, so we have to double check that
+		 * nobody else has inserted this cell in the mean time.
+		 */
+		cell = __search_bucket(prison->cells + hash, key);
+
+		if (!cell) {
+			cell = cell2;
+			cell2 = NULL;
+
+			cell->prison = prison;
+			memcpy(&cell->key, key, sizeof(cell->key));
+			cell->count = 0;
+			bio_list_init(&cell->bios);
+			hlist_add_head(&cell->list, prison->cells + hash);
+		}
 	}
 
-	spin_lock_irqsave(&prison->lock, flags);
 	r = cell->count++;
 	bio_list_add(&cell->bios, inmate);
 	spin_unlock_irqrestore(&prison->lock, flags);
+
+	if (cell2)
+		mempool_free(cell2, prison->cell_pool);
 
 	*ref = cell;
 	return r;
@@ -167,22 +189,17 @@ static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 static int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
 				  struct bio *inmate, struct cell **ref)
 {
-	int r, found = 0;
+	int r;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
 	struct cell *uninitialized_var(cell);
-	struct hlist_node *tmp;
 
 	BUG_ON(hash > prison->nr_buckets);
 
 	spin_lock_irqsave(&prison->lock, flags);
-	hlist_for_each_entry (cell, tmp, prison->cells + hash, list)
-		if (!memcmp(&cell->key, key, sizeof(cell->key))) {
-			found = 1;
-			break;
-		}
+	cell = __search_bucket(prison->cells + hash, key);
 
-	if (!found) {
+	if (!cell) {
 		spin_unlock_irqrestore(&prison->lock, flags);
 		return 0;
 	}
