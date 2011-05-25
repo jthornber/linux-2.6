@@ -1515,7 +1515,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	} else if (!strcmp(argv[0], "trans-id")) {
 		uint64_t transaction_id;
 
-		if (argc != 3) {
+		if (argc != 3) {  /* FIXME: no need for <dev id> */
 			ti->error = invalid_args;
 			return -EINVAL;
 		}
@@ -1527,7 +1527,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		}
 
 		r = dm_multisnap_metadata_set_transaction_id(pool->mmd,
-						dev_id, transaction_id);
+							     transaction_id);
 		if (r) {
 			ti->error = "Setting userspace transaction id failed";
 			return r;

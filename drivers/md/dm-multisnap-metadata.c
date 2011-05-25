@@ -603,32 +603,30 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 }
 
 int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
-					     dm_multisnap_dev_t dev,
 					     uint64_t transaction_id)
 {
 	struct multisnap_super_block *sb;
 
 	down_write(&mmd->root_lock);
 	sb = dm_block_data(mmd->sblock);
+	/* FIXME check if transaction id is already set/in-use */
 	sb->userspace_transaction_id = __cpu_to_le64(transaction_id);
 	up_write(&mmd->root_lock);
 
 	return 0;
 }
 
-uint64_t
-dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
-					 dm_multisnap_dev_t dev)
+int dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
+					     uint64_t *result)
 {
 	struct multisnap_super_block *sb;
-	uint64_t r;
 
 	down_read(&mmd->root_lock);
 	sb = dm_block_data(mmd->sblock);
-	r = __le64_to_cpu(sb->userspace_transaction_id);
+	*result = __le64_to_cpu(sb->userspace_transaction_id);
 	up_read(&mmd->root_lock);
 
-	return r;
+	return 0;
 }
 
 int dm_multisnap_metadata_open_device(struct dm_multisnap_metadata *mmd,
