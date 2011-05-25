@@ -288,7 +288,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	if (r)
 		return r;
 
-	sb = (struct multisnap_super_block *) dm_block_data(mmd->sblock);
+	sb = dm_block_data(mmd->sblock);
 	mmd->time = __le32_to_cpu(sb->time);
 	mmd->root = __le64_to_cpu(sb->data_mapping_root);
 	mmd->details_root = __le64_to_cpu(sb->device_details_root);
@@ -339,7 +339,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 			goto bad;
 	}
 
-	sb = (struct multisnap_super_block *) dm_block_data(mmd->sblock);
+	sb = dm_block_data(mmd->sblock);
 	sb->magic = __cpu_to_le64(MULTISNAP_SUPERBLOCK_MAGIC);
 	sb->version = __cpu_to_le64(MULTISNAP_VERSION);
 	sb->time = 0;
@@ -784,7 +784,7 @@ int dm_multisnap_metadata_alloc_data_block(struct dm_ms_device *msd,
 	 * inserted.
 	 */
 	down_write(&mmd->root_lock);
-	r = dm_sm_new_block(msd->mmd->data_sm, result);
+	r = dm_sm_new_block(mmd->data_sm, result);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -797,7 +797,7 @@ int dm_multisnap_metadata_free_data_block(struct dm_ms_device *msd,
 	struct dm_multisnap_metadata *mmd = msd->mmd;
 
 	down_write(&mmd->root_lock);
-	r = dm_sm_dec_block(msd->mmd->data_sm, result);
+	r = dm_sm_dec_block(mmd->data_sm, result);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -903,7 +903,7 @@ int dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
 	struct multisnap_super_block *sb;
 
 	down_read(&mmd->root_lock);
-	sb = (struct multisnap_super_block *) dm_block_data(mmd->sblock);
+	sb = dm_block_data(mmd->sblock);
 	*result = __le32_to_cpu(sb->data_block_size);
 	up_read(&mmd->root_lock);
 
