@@ -61,6 +61,18 @@ dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 int
 dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd);
 
+
+/*
+ * Set/get userspace transaction id
+ */
+int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
+					     dm_multisnap_dev_t dev,
+					     uint64_t transaction_id);
+
+uint64_t
+dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
+					 dm_multisnap_dev_t dev);
+
 /*
  * Actions on a single virtual device.
  */

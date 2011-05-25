@@ -34,6 +34,8 @@ struct multisnap_super_block {
 
 	__le64 magic;
 
+	__le64 userspace_transaction_id;
+
 	__u8 data_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 
@@ -596,6 +598,35 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 	down_write(&mmd->root_lock);
 	r = __delete_device(mmd, dev);
 	up_write(&mmd->root_lock);
+
+	return r;
+}
+
+int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
+					     dm_multisnap_dev_t dev,
+					     uint64_t transaction_id)
+{
+	struct multisnap_super_block *sb;
+
+	down_write(&mmd->root_lock);
+	sb = dm_block_data(mmd->sblock);
+	sb->userspace_transaction_id = __cpu_to_le64(transaction_id);
+	up_write(&mmd->root_lock);
+
+	return 0;
+}
+
+uint64_t
+dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
+					 dm_multisnap_dev_t dev)
+{
+	struct multisnap_super_block *sb;
+	uint64_t r;
+
+	down_read(&mmd->root_lock);
+	sb = dm_block_data(mmd->sblock);
+	r = __le64_to_cpu(sb->userspace_transaction_id);
+	up_read(&mmd->root_lock);
 
 	return r;
 }

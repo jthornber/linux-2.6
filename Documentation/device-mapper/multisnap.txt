@@ -157,6 +157,7 @@ Always teardown the pool last.
  new-thin <dev id> <dev size in sectors>
  new-snap <dev id> <origin id>
  del      <dev id>
+ trans-id <dev id> <userspace transaction id>
 
 ** multisnap target
 

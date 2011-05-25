@@ -1440,6 +1440,7 @@ static void pool_presuspend(struct dm_target *ti)
  *   new-thin <dev id> <dev size in sectors>
  *   new-snap <dev id> <origin id>
  *   del      <dev id>
+ *   trans-id <dev id> <userspace transaction id>
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1510,6 +1511,27 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		}
 
 		r = dm_multisnap_metadata_delete_device(pool->mmd, dev_id);
+
+	} else if (!strcmp(argv[0], "trans-id")) {
+		uint64_t transaction_id;
+
+		if (argc != 3) {
+			ti->error = invalid_args;
+			return -EINVAL;
+		}
+
+		transaction_id = simple_strtoull(argv[2], &end, 10);
+		if (*end) {
+			ti->error = "Invalid userspace transaction id";
+			return -EINVAL;
+		}
+
+		r = dm_multisnap_metadata_set_transaction_id(pool->mmd,
+						dev_id, transaction_id);
+		if (r) {
+			ti->error = "Setting userspace transaction id failed";
+			return r;
+		}
 
 	} else
 		return -EINVAL;
