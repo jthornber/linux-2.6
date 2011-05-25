@@ -93,34 +93,45 @@ static void free_pl(struct page_list *pl)
 	kfree(pl);
 }
 
+static void kcopyd_put_pages(struct dm_kcopyd_client *kc, struct page_list *pl)
+{
+	do {
+		struct page_list *next = pl->next;
+		if (kc->nr_free_pages < kc->nr_pages) {
+			pl->next = kc->pages;
+			kc->pages = pl;
+			kc->nr_free_pages++;
+		} else {
+			free_pl(pl);
+		}
+		pl = next;
+	} while (pl);
+}
+
 static int kcopyd_get_pages(struct dm_kcopyd_client *kc,
 			    unsigned int nr, struct page_list **pages)
 {
 	struct page_list *pl;
 
-	if (kc->nr_free_pages < nr)
-		return -ENOMEM;
-
-	kc->nr_free_pages -= nr;
-	for (*pages = pl = kc->pages; --nr; pl = pl->next)
-		;
-
-	kc->pages = pl->next;
-	pl->next = NULL;
-
+	*pages = NULL;
+	do {
+		pl = alloc_pl(__GFP_NOWARN | __GFP_NORETRY);
+		if (unlikely(!pl)) {
+			pl = kc->pages;
+			if (unlikely(!pl))
+				goto not_enough_memory;
+			kc->pages = pl->next;
+			kc->nr_free_pages--;
+		}
+		pl->next = *pages;
+		*pages = pl;
+	} while (--nr);
 	return 0;
-}
 
-static void kcopyd_put_pages(struct dm_kcopyd_client *kc, struct page_list *pl)
-{
-	struct page_list *cursor;
-
-	for (cursor = pl; cursor->next; cursor = cursor->next)
-		kc->nr_free_pages++;
-
-	kc->nr_free_pages++;
-	cursor->next = kc->pages;
-	kc->pages = pl;
+not_enough_memory:
+	if (*pages)
+		kcopyd_put_pages(kc, *pages);
+	return -ENOMEM;
 }
 
 /*
@@ -153,8 +164,8 @@ static int client_alloc_pages(struct dm_kcopyd_client *kc, unsigned int nr)
 		pl = next;
 	}
 
-	kcopyd_put_pages(kc, pl);
 	kc->nr_pages += nr;
+	kcopyd_put_pages(kc, pl);
 	return 0;
 }
 
