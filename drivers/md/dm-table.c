@@ -882,6 +882,7 @@ struct block_device *dm_table_get_bdev(struct dm_table *t)
 {
 	return dm_bdev(t->md);
 }
+EXPORT_SYMBOL(dm_table_get_bdev);
 
 static int setup_indexes(struct dm_table *t)
 {
