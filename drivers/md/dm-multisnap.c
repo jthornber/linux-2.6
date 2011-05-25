@@ -459,8 +459,7 @@ struct bdev_table {
 	struct hlist_head buckets[TABLE_SIZE];
 };
 
-static void
-bdev_table_init(struct bdev_table *t)
+static void bdev_table_init(struct bdev_table *t)
 {
 	unsigned i;
 	spin_lock_init(&t->lock);
@@ -468,17 +467,14 @@ bdev_table_init(struct bdev_table *t)
 		INIT_HLIST_HEAD(t->buckets + i);
 }
 
-static unsigned
-hash_bdev(struct block_device *bdev)
+static unsigned hash_bdev(struct block_device *bdev)
 {
 	/* FIXME: finish */
 	/* bdev -> dev_t -> unsigned */
 	return 0;
 }
 
-static void
-bdev_table_insert(struct bdev_table *t,
-		  struct pool_c *pool)
+static void bdev_table_insert(struct bdev_table *t, struct pool_c *pool)
 {
 	unsigned bucket = hash_bdev(pool->pool_dev);
 	spin_lock(&t->lock);
@@ -486,22 +482,21 @@ bdev_table_insert(struct bdev_table *t,
 	spin_unlock(&t->lock);
 }
 
-static void
-bdev_table_remove(struct bdev_table *t, struct pool_c *pool)
+static void bdev_table_remove(struct bdev_table *t, struct pool_c *pool)
 {
 	spin_lock(&t->lock);
 	hlist_del(&pool->hlist);
 	spin_unlock(&t->lock);
 }
 
-static struct pool_c *
-bdev_table_lookup(struct bdev_table *t, struct block_device *bdev)
+static struct pool_c *bdev_table_lookup(struct bdev_table *t,
+					struct block_device *bdev)
 {
 	unsigned bucket = hash_bdev(bdev);
 	struct hlist_node *n;
 	struct pool_c *pool;
 
-	hlist_for_each_entry (pool, n, t->buckets + bucket, hlist)
+	hlist_for_each_entry(pool, n, t->buckets + bucket, hlist)
 		if (pool->pool_dev == bdev)
 			return pool;
 
@@ -1369,7 +1364,7 @@ struct block_device *get_target_bdev(struct dm_target *ti)
  * This both copes with opening preallocated data devices in the ctr
  * being followed by a resume
  * -and-
- * calling the resume method individually after userpace has
+ * calling the resume method individually after userspace has
  * grown the data device in reaction to a table event.
  */
 static int pool_preresume(struct dm_target *ti)
@@ -1412,6 +1407,7 @@ static int pool_preresume(struct dm_target *ti)
 	/* The pool object is only present if the pool is active */
 	pool->pool_dev = get_target_bdev(ti);
 	bdev_table_insert(&bdev_table_, pool);
+
 	return 0;
 }
 
