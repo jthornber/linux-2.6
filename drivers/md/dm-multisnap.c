@@ -1452,22 +1452,17 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	dm_multisnap_dev_t dev_id;
 	char *end;
 
-	if (argc < 2) {
-		ti->error = invalid_args;
-		return -EINVAL;
-	}
-
-	dev_id = simple_strtoull(argv[1], &end, 10);
-	if (*end) {
-		ti->error = "Invalid device id";
-		return -EINVAL;
-	}
-
 	if (!strcmp(argv[0], "new-thin")) {
 		dm_block_t dev_size;
 
 		if (argc != 3) {
 			ti->error = invalid_args;
+			return -EINVAL;
+		}
+
+		dev_id = simple_strtoull(argv[1], &end, 10);
+		if (*end) {
+			ti->error = "Invalid device id";
 			return -EINVAL;
 		}
 
@@ -1492,6 +1487,12 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
+		dev_id = simple_strtoull(argv[1], &end, 10);
+		if (*end) {
+			ti->error = "Invalid device id";
+			return -EINVAL;
+		}
+
 		origin_id = simple_strtoull(argv[2], &end, 10);
 		if (*end) {
 			ti->error = "Invalid origin id";
@@ -1510,17 +1511,23 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
+		dev_id = simple_strtoull(argv[1], &end, 10);
+		if (*end) {
+			ti->error = "Invalid device id";
+			return -EINVAL;
+		}
+
 		r = dm_multisnap_metadata_delete_device(pool->mmd, dev_id);
 
 	} else if (!strcmp(argv[0], "trans-id")) {
 		uint64_t transaction_id;
 
-		if (argc != 3) {  /* FIXME: no need for <dev id> */
+		if (argc != 2) {
 			ti->error = invalid_args;
 			return -EINVAL;
 		}
 
-		transaction_id = simple_strtoull(argv[2], &end, 10);
+		transaction_id = simple_strtoull(argv[1], &end, 10);
 		if (*end) {
 			ti->error = "Invalid userspace transaction id";
 			return -EINVAL;
