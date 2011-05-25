@@ -603,14 +603,21 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 }
 
 int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
-					     uint64_t transaction_id)
+					     uint64_t current_id,
+					     uint64_t new_id)
 {
 	struct multisnap_super_block *sb;
 
 	down_write(&mmd->root_lock);
 	sb = dm_block_data(mmd->sblock);
-	/* FIXME check if transaction id is already set/in-use */
-	sb->userspace_transaction_id = __cpu_to_le64(transaction_id);
+	if (__le64_to_cpu(sb->userspace_transaction_id) != current_id) {
+		up_write(&mmd->root_lock);
+		printk(KERN_ALERT "mismatched transaction id");
+		return -EINVAL;
+	}
+
+	sb->userspace_transaction_id = __cpu_to_le64(current_id);
+	mmd->need_commit = 1;
 	up_write(&mmd->root_lock);
 
 	return 0;

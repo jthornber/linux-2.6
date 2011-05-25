@@ -66,7 +66,8 @@ dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd);
  * Set/get userspace transaction id
  */
 int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
-					     uint64_t transaction_id);
+					     uint64_t current_id,
+					     uint64_t new_id);
 
 int dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
 					     uint64_t *result);
