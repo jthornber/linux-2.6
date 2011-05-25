@@ -93,7 +93,7 @@ struct dm_multisnap_metadata {
 
 	struct rw_semaphore root_lock;
 	uint32_t time;
-	int have_inserted;
+	int need_commit;
 	struct dm_block *sblock;
 	dm_block_t root;
 	dm_block_t details_root;
@@ -263,7 +263,7 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 
 	init_rwsem(&mmd->root_lock);
 	mmd->time = 0;
-	mmd->have_inserted = 0;
+	mmd->need_commit = 0;
 	mmd->details_root = 0;
 	INIT_LIST_HEAD(&mmd->ms_devices);
 
@@ -283,7 +283,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	struct multisnap_super_block *sb;
 
 	BUG_ON(mmd->sblock);
-	mmd->have_inserted = 0;
+	mmd->need_commit = 0;
 	r = dm_bm_write_lock(mmd->bm, MULTISNAP_SUPERBLOCK_LOCATION, &mmd->sblock);
 	if (r)
 		return r;
@@ -357,7 +357,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 		goto bad;
 	}
 
-	mmd->have_inserted = 1;
+	mmd->need_commit = 1;
 	r = dm_multisnap_metadata_commit(mmd);
 	if (r < 0)
 		goto bad;
@@ -728,7 +728,7 @@ int __insert(struct dm_ms_device *msd,
 	keys[0] = msd->id;
 	keys[1] = block;
 
-	mmd->have_inserted = 1;
+	mmd->need_commit = 1;
 	value = __cpu_to_le64(pack_dm_block_time(data_block, mmd->time));
 
 	return dm_btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
@@ -756,7 +756,7 @@ static int __remove(struct dm_ms_device *msd, dm_block_t block)
 	if (r)
 		return r;
 
-	mmd->have_inserted = 1;
+	mmd->need_commit = 1;
 	return 0;
 }
 
@@ -839,7 +839,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	struct multisnap_super_block *sb;
 
 	down_read(&mmd->root_lock);
-	if (!mmd->have_inserted) {
+	if (!mmd->need_commit) {
 		up_read(&mmd->root_lock);
 		return 0;
 	}
