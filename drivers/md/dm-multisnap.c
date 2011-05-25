@@ -1566,7 +1566,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	} else
 		return -EINVAL;
 
-	return 0;
+	return dm_multisnap_metadata_commit(pool->mmd);
 }
 
 static int pool_iterate_devices(struct dm_target *ti,
