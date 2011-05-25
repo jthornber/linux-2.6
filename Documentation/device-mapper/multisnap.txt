@@ -1,6 +1,6 @@
 * Introduction
 
-Multisnap is refers to a collection of device-mapper targets that
+Multisnap refers to a collection of device-mapper targets that
 between them implement thin provisioning and snapshots.
 
 The main highlight of this implementation, compared to the previous
@@ -12,7 +12,7 @@ Another big feature is support for arbitrary depth of recursive
 snapshots (snapshots of snapshots of snapshots ...).  Previous
 implementations of snapshots did this by chaining together lookup
 tables, and so performance was O(depth).  This implementation uses a
-single table so we wont get this degradation with depth (fragmentation
+single table so we won't get this degradation with depth (fragmentation
 may be an issue however in some scenarios).
 
 Metadata is stored on a separate device from data, this gives the
@@ -30,9 +30,9 @@ production.
 
 _Do_ experiment with it and give us feedback.  Different use cases
 will have different performance characteristics (for example due to
-fragmentation of the data volume).  If you find this software is
-performing as expected please mail dm-devel@redhat.com with details
-and we'll try our best to improve things for you.
+fragmentation of the data volume).  If you find this software is not
+performing as expected please mail dm-devel@redhat.com with details and
+we'll try our best to improve things for you.
 
 * Cookbook
 
@@ -90,11 +90,10 @@ active pool device.
     dmsetup message /dev/mapper/pool 0 "new-thin 0 2097152"
 
 Here '0' is an identifier for the volume (32bit range).  It's up to
-the caller to allocate and manager these identifiers.  If there's a
+the caller to allocate and manage these identifiers.  If there's a
 collision the message will fail.
 
 '2097152' is the size of the virtual device.
-
 
 *** Using a thinp volume
 
@@ -118,13 +117,16 @@ may proceed without doing anything.
     dmsetup message /dev/mapper/pool 0 "new-snap 1 0"
     dmsetup resume /dev/mapper/thin
 
+Here '1' is an identifier for the volume (32bit range).  '0' is the
+identifier for the origin device.
+
 *** Using an internal snapshot
 
 Once created, the user doesn't have to worry about any connection
 between the origin and the snapshot.  Indeed the snapshot is no
 different from any other thinly provisioned device, and can be
 snapshotted itself via the same method.  It's perfectly legal to have
-only one them active, and there's no ordering requirement on
+only one of them active, and there's no ordering requirement on
 activating/removing them both.
 
 Activate exactly the same way as any other thin provisioned volume.
