@@ -10,7 +10,6 @@
 
 #include <linux/list.h>
 #include <linux/device-mapper.h>
-#include <linux/dm-ioctl.h> /* For DM_UUID_LEN */
 #include <linux/workqueue.h>
 
 /*----------------------------------------------------------------*/
@@ -30,9 +29,6 @@
 
 struct multisnap_super_block {
 	__u8 csum[MULTISNAP_CSUM_SIZE];
-	__u8 csum_type; /* checksum algorithm */
-	__u8 uuid[DM_UUID_LEN]; /* DM_UUID_LEN = 129, leaves hole */
-	__u8 padding[6]; /* Padding to fill hole */
 	__le64 blocknr; /* this block number, dm_block_t */
 	__le64 flags;
 
