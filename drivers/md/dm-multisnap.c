@@ -1218,7 +1218,6 @@ static void pool_dtr(struct dm_target *ti)
  *                <data block size in sectors>
  *                <low water mark (sectors)>
  */
-#define KCOPYD_NR_PAGES 1024
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
@@ -1306,8 +1305,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		/* FIXME: finish */
 	}
 
-	r = dm_kcopyd_client_create(KCOPYD_NR_PAGES, &pool->copier); /* FIXME: magic numbers */
-	if (r) {
+	pool->copier = dm_kcopyd_client_create();
+	if (IS_ERR(pool->copier)) {
+		r = PTR_ERR(pool->copier);
 		/* FIXME: finish */
 	}
 
