@@ -339,8 +339,10 @@ static void write_dirty(struct dm_block_manager *bm, unsigned count)
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
 
-	list_for_each_entry (b, &dirty, list)
+	list_for_each_entry_safe (b, tmp, &dirty, list) {
+		list_del(&b->list);
 		write_block(b);
+	}
 }
 
 static void write_all_dirty(struct dm_block_manager *bm)
