@@ -242,19 +242,20 @@ static int flush_once(struct sm_staged *sm)
 
 /*----------------------------------------------------------------*/
 
-static void sm_staged_destroy(void *context)
+static void sm_staged_destroy(struct dm_space_map *sm)
 {
-	struct sm_staged *sm = (struct sm_staged *) context;
+	struct sm_staged *sms = (struct sm_staged *) sm->context;
 	struct cache_entry *ce, *tmp;
 
-	if (sm->sm_wrapped)
-		dm_sm_destroy(sm->sm_wrapped);
+	if (sms->sm_wrapped)
+		dm_sm_destroy(sms->sm_wrapped);
 
-	list_for_each_entry_safe (ce, tmp, &sm->deltas, lru)
-		mempool_free(ce, sm->pool);
+	list_for_each_entry_safe (ce, tmp, &sms->deltas, lru)
+		mempool_free(ce, sms->pool);
 
-	mempool_destroy(sm->pool);
-	kmem_cache_destroy(sm->slab);
+	mempool_destroy(sms->pool);
+	kmem_cache_destroy(sms->slab);
+	kfree(sms);
 	kfree(sm);
 }
 

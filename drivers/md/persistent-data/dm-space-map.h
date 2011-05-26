@@ -33,8 +33,9 @@
  * of cycles (possibly not a btree).
  */
 
+struct dm_space_map;
 struct dm_space_map_ops {
-	void (*destroy)(void *context);
+	void (*destroy)(struct dm_space_map *sm);
 
 	/*
 	 * In order to use the shadowing optimisation the transaction
@@ -79,7 +80,7 @@ struct dm_space_map {
 
 static inline void dm_sm_destroy(struct dm_space_map *sm)
 {
-	sm->ops->destroy(sm->context);
+	sm->ops->destroy(sm);
 }
 
 static inline int dm_sm_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)

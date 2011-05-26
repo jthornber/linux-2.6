@@ -6,9 +6,10 @@ struct sm_dummy {
 	dm_block_t nr_blocks;
 };
 
-static void sm_dummy_destroy(void *context)
+static void sm_dummy_destroy(struct dm_space_map *sm)
 {
-	kfree(context);
+	kfree(sm->context);
+	kfree(sm);
 }
 
 static int sm_dummy_get_nr_blocks(void *context, dm_block_t *count)

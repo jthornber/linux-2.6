@@ -397,10 +397,10 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 
 /*----------------------------------------------------------------*/
 
-static void sm_disk_destroy(void *context)
+static void sm_disk_destroy(struct dm_space_map *sm)
 {
-	struct sm_disk *smd = (struct sm_disk *) context;
-	kfree(smd);
+	kfree(sm->context);
+	kfree(sm);
 }
 
 static int sm_disk_get_nr_blocks(void *context, dm_block_t *count)
@@ -516,7 +516,7 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 	int r;
 	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd;
-	
+
 	smd = alloc_smd(tm);
 	if (!smd)
 		return ERR_PTR(-ENOMEM);
