@@ -120,7 +120,7 @@ struct hsm_c {
 struct hsm_block {
 	atomic_t ref;
 	struct hsm_c *hc;
-	struct list_head list, hash, flush_endio;
+	struct list_head active, list, hash, flush_endio;
 	struct bio_list io, endio;
 	spinlock_t endio_lock;
 	dm_block_t cache_block, pool_block;
@@ -231,27 +231,28 @@ static struct hsm_block *get_block(struct hsm_c *hc, dm_block_t cache_block,
 {
 	struct hsm_block *b = hash_lookup(&hc->block_hash, cache_block);
 
-	if (b) {
+	if (b)
 		_get_block(b);
-		goto out;
+
+	else {
+		b = mempool_alloc(hc->block_pool, GFP_NOIO);
+		if (b) {
+			memset(b, 0, sizeof(*b));
+			b->hc = hc;
+			atomic_set(&b->ref, 1);
+			INIT_LIST_HEAD(&b->active);
+			INIT_LIST_HEAD(&b->flush_endio);
+			bio_list_init(&b->io);
+			bio_list_init(&b->endio);
+			spin_lock_init(&b->endio_lock);
+			b->cache_block = cache_block;
+			b->pool_block = pool_block;
+			b->flags = flags;
+			list_add(&b->list, &hc->hsm_blocks);
+			hash_insert(&hc->block_hash, b);
+		}
 	}
 
-	b = mempool_alloc(hc->block_pool, GFP_NOIO);
-	if (b) {
-		memset(b, 0, sizeof(*b));
-		atomic_set(&b->ref, 1);
-		b->hc = hc;
-		INIT_LIST_HEAD(&b->flush_endio);
-		bio_list_init(&b->io);
-		bio_list_init(&b->endio);
-		spin_lock_init(&b->endio_lock);
-		b->cache_block = cache_block;
-		b->pool_block = pool_block;
-		b->flags = flags;
-		list_add(&b->list, &hc->hsm_blocks);
-		hash_insert(&hc->block_hash, b);
-	}
-out:
 	return b;
 }
 
@@ -520,8 +521,8 @@ void delete_hsm_blocks(struct hsm_c *hc)
 
 	list_for_each_entry_safe(b, tmp, &hc->hsm_blocks, list) {
 		if (!atomic_read(&b->ref)) {
-			list_del(&b->list);
 			list_del(&b->hash);
+			list_del(&b->list);
 			mempool_free(b, hc->block_pool);
 		}
 	}
@@ -587,7 +588,7 @@ void do_leftover_dirty_blocks(struct hsm_c *hc)
 		/* Schedule any dirty blocks for io. */
 		b = get_block(hc, cache_block, pool_block, flags);
 		BUG_ON(!b);
-DMINFO("Adding pool_block=%llu flags=%lu to flush list", (LLU) pool_block, b->flags);
+// DMINFO("Adding pool_block=%llu flags=%lu to flush list", (LLU) pool_block, b->flags);
 		flush_add_sorted(b); /* Takes another reference out. */
 		put_block(b); /* Release initial reference. */
 	}
@@ -741,6 +742,7 @@ DMINFO("Freeing pool_block=%llu", (LLU) pool);
 		}
 	}
 
+	/* Check in first half. */
 	if (pool == hc->data_blocks) {
 		pool = 0;
 		goto redo;
@@ -755,6 +757,9 @@ void do_bios(struct hsm_c *hc, struct bio_list *bios)
 	int meta_err = 0, r;
 	struct bio *bio;
 	struct hsm_block *b, *tmp;
+	struct list_head active_list;
+
+	INIT_LIST_HEAD(&active_list);
 
 	/* 1/3: process all bios attaching them to block objects. */
 	while ((bio = bio_list_pop(bios))) {
@@ -820,12 +825,16 @@ if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 		}
 
 		bio_list_add(&b->io, bio);
+
+		/* Add to active blocks list for steps 2 + 3 below. */
+		if (list_empty(&b->active))
+			list_add(&b->active, &active_list);
 	}
 
 
 	/* 2/3: check for completely written over blocks. */
 	/* Set block uptodate if completely written over or read it. */
-	list_for_each_entry(b, &hc->hsm_blocks, list) {
+	list_for_each_entry(b, &active_list, active) {
 		sector_t sectors;
 
 		if (bio_list_empty(&b->io) ||
@@ -864,7 +873,7 @@ if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 		meta_err = r;
 
 	/* 3/3: submit bios. */
-	list_for_each_entry_safe(b, tmp, &hc->hsm_blocks, list) {
+	list_for_each_entry_safe(b, tmp, &active_list, active) {
 		if (test_bit(BLOCK_UPTODATE, &b->flags) || meta_err) {
 			while ((bio = bio_list_pop(&b->io))) {
 				if (meta_err)
@@ -885,9 +894,12 @@ if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 			_get_block(b);
 			BUG_ON(block_copy(READ, b));
 		}
+
+		list_del_init(&b->active);
 	}
 
-	commit(hc); /* FIXME: error handling. */
+	if (!meta_err)
+		commit(hc); /* FIXME: error handling. */
 }
 
 /* Process any delayed block writes. */
@@ -910,7 +922,6 @@ void do_block_flushs(struct hsm_c *hc, int no_space)
 
 		list_del_init(&b->flush_endio);
 		b->timeout = ~0;
-DMINFO("Writing block logical=%llu physical=%llu", (LLU) b->cache_block, b->pool_block);
 		BUG_ON(block_copy(WRITE, b));
 		copies++;
 	}
