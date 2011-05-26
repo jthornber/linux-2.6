@@ -52,9 +52,20 @@ const char version[] = "1.0.66";
 
 #define	MIN_IOS	32
 #define	PARALLEL_COPIES	16
+#define	BUCKETS_MAX	16384
 
 /* Cache for block io housekeeping. */
 struct kmem_cache *block_cache;
+
+/* A hsm block hash. */
+/* FIXME:use a transient btree? */
+struct block_hash {
+	struct list_head *hash;
+	unsigned buckets;
+	unsigned mask;
+	unsigned prime;
+	unsigned shift;
+};
 
 enum hsm_c_flags {
 	HC_BOUNCE_MODE,
@@ -78,6 +89,7 @@ struct hsm_c {
 	spinlock_t endio_lock;
 
 	mempool_t *block_pool;
+	struct block_hash block_hash;
 
 	sector_t block_sectors;
 	sector_t offset_mask;	/* mask for offset of a sector within a block */
@@ -108,7 +120,7 @@ struct hsm_c {
 struct hsm_block {
 	atomic_t ref;
 	struct hsm_c *hc;
-	struct list_head list, flush_endio;
+	struct list_head list, hash, flush_endio;
 	struct bio_list io, endio;
 	spinlock_t endio_lock;
 	dm_block_t cache_block, pool_block;
@@ -128,24 +140,82 @@ enum block_flags {
 	BLOCK_SET_DIRTY,
 };
 
-/* REMOVEME: for test lookup and display. */
-void _try_lookup(struct hsm_c *hc, dm_block_t cache_block)
+/* Initialize a block hash. */
+static int hash_init(struct block_hash *hash, dm_block_t blocks)
 {
-	int r;
-	dm_block_t cache_block1, pool_block;
-	unsigned long flags;
+	unsigned buckets = roundup_pow_of_two(blocks) >> 6;
+	static unsigned hash_primes[] = {
+		/* Table of primes for hash_fn optimization. */
+		1, 2, 3, 7, 13, 27, 53, 97, 193, 389, 769,
+		1543, 3079, 6151, 12289, 24593, 49157, 98317,
+	};
 
-	r = hsm_metadata_lookup(hc->hmd, hc->dev, cache_block, 1,
-				    &pool_block, &flags);
-	if (!r)
-		DMINFO("%s 1. cache_block=%llu pool_block=%llu flags=%lu",
-			__func__, (LLU) cache_block, (LLU) pool_block, flags);
+	if (buckets < 2 || buckets > BUCKETS_MAX)
+		buckets = buckets < 2 ? 2 : BUCKETS_MAX;
 
-	r = hsm_metadata_lookup_reverse(hc->hmd, hc->dev, pool_block, 1,
-					&cache_block1);
-	if (!r)
-		DMINFO("%s 2. cache_block=%llu pool_block=%llu flags=%lu",
-			__func__, (LLU) cache_block1, (LLU) pool_block, flags);
+	/* Allocate stripe hash buckets. */
+	hash->hash = vmalloc(buckets * sizeof(*hash->hash));
+	if (!hash->hash)
+		return -ENOMEM;
+
+	hash->buckets = buckets;
+	hash->mask = buckets - 1;
+	hash->shift = ffs(buckets);
+	if (hash->shift > ARRAY_SIZE(hash_primes) - 1)
+		hash->shift = ARRAY_SIZE(hash_primes) - 1;
+
+	BUG_ON(hash->shift < 2);
+	hash->prime = hash_primes[hash->shift];
+
+	/* Initialize buckets. */
+	while (buckets--)
+		INIT_LIST_HEAD(hash->hash + buckets);
+
+	return 0;
+}
+
+/* Free a block hash. */
+static void hash_exit(struct block_hash *hash)
+{
+	if (hash->hash) {
+		vfree(hash->hash);
+		hash->hash = NULL;
+	}
+}
+
+/* Block hash function. */
+static inline unsigned hash_fn(struct block_hash *hash, dm_block_t block)
+{
+	return ((block * hash->prime) >> hash->shift) & hash->mask;
+}
+
+/* Return bucket within hash. */
+static struct list_head *hash_bucket(struct block_hash *hash, dm_block_t block)
+{
+	return hash->hash + hash_fn(hash, block);
+}
+
+/* Insert an entry into a hash. */
+static void hash_insert(struct block_hash *hash, struct hsm_block *b)
+{
+	list_add_tail(&b->hash, hash_bucket(hash, b->cache_block));
+}
+
+/* Lookup a block in the hash. */
+static struct hsm_block *hash_lookup(struct block_hash *hash, dm_block_t block)
+{
+	struct list_head *bucket;
+	struct hsm_block *b;
+
+	BUG_ON(!hash->hash);
+	bucket = hash_bucket(hash, block);
+
+	list_for_each_entry(b, bucket, hash) {
+		if (block == b->cache_block)
+			return b;
+	}
+
+	return NULL;
 }
 
 /*
@@ -159,14 +229,11 @@ static void _get_block(struct hsm_block *b)
 static struct hsm_block *get_block(struct hsm_c *hc, dm_block_t cache_block,
 				   dm_block_t pool_block, unsigned long flags)
 {
-	struct hsm_block *b;
+	struct hsm_block *b = hash_lookup(&hc->block_hash, cache_block);
 
-	/* FIXME: hash this! */
-	list_for_each_entry(b, &hc->hsm_blocks, list) {
-		if (b->cache_block == cache_block) {
-			_get_block(b);
-			goto out;
-		}
+	if (b) {
+		_get_block(b);
+		goto out;
 	}
 
 	b = mempool_alloc(hc->block_pool, GFP_NOIO);
@@ -182,6 +249,7 @@ static struct hsm_block *get_block(struct hsm_c *hc, dm_block_t cache_block,
 		b->pool_block = pool_block;
 		b->flags = flags;
 		list_add(&b->list, &hc->hsm_blocks);
+		hash_insert(&hc->block_hash, b);
 	}
 out:
 	return b;
@@ -453,6 +521,7 @@ void delete_hsm_blocks(struct hsm_c *hc)
 	list_for_each_entry_safe(b, tmp, &hc->hsm_blocks, list) {
 		if (!atomic_read(&b->ref)) {
 			list_del(&b->list);
+			list_del(&b->hash);
 			mempool_free(b, hc->block_pool);
 		}
 	}
@@ -479,7 +548,6 @@ int _process_write(struct hsm_block *b, struct bio *bio)
 				flush_add_sorted(b);
 				inc_update(b->hc, 0);
 			}
-// _try_lookup(b->hc, b->cache_block);
 		}
 	}
 
@@ -910,6 +978,9 @@ void hsm_dtr(struct dm_target *ti)
 {
 	struct hsm_c *hc = ti->private;
 
+	/* Destroy hsm block hash. */
+	hash_exit(&hc->block_hash);
+
 	/* Destroy hsm block pool. */
 	if (hc->block_pool)
 		mempool_destroy(hc->block_pool);
@@ -1045,6 +1116,10 @@ int hsm_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	hc->data_sectors = get_dev_size(hc->data_dev);
 	hc->data_blocks = _sector_to_block(hc, hc->data_sectors);
 	hc->cached_sectors = get_dev_size(hc->cached_dev);
+
+	r = hash_init(&hc->block_hash, hc->data_blocks);
+        if (r)
+		goto err;
 
 	if (ti->len > hc->cached_sectors) {
 		ti->error = "Device size larger than cached device";
