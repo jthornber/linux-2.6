@@ -253,7 +253,7 @@ static void __transition(struct dm_block *b, enum dm_block_state new_state)
 typedef void (completion_fn)(unsigned long error, struct dm_block *b);
 
 static void submit_io(struct dm_block *b, int rw,
-		      completion_fn fn, completion_fn fail)
+		      completion_fn fn)
 {
 	struct dm_block_manager *bm = b->bm;
 	struct dm_io_request req;
@@ -273,7 +273,7 @@ static void submit_io(struct dm_block *b, int rw,
 	req.client = bm->io;
 
 	if (dm_io(&req, 1, &region, NULL) < 0)
-		fail(1, b);
+		fn(1, b);
 }
 
 /*----------------------------------------------------------------
@@ -293,16 +293,7 @@ static void __complete_io(unsigned long error, struct dm_block *b)
 	wake_up(&bm->io_q);
 }
 
-static void complete_io_irq(unsigned long error, struct dm_block *b)
-{
-	struct dm_block_manager *bm = b->bm;
-
-	spin_lock(&bm->lock);
-	__complete_io(error, b);
-	spin_unlock(&bm->lock);
-}
-
-static void complete_io_fail(unsigned long error, struct dm_block *b)
+static void complete_io(unsigned long error, struct dm_block *b)
 {
 	struct dm_block_manager *bm = b->bm;
 	unsigned long flags;
@@ -314,12 +305,12 @@ static void complete_io_fail(unsigned long error, struct dm_block *b)
 
 static void read_block(struct dm_block *b)
 {
-	submit_io(b, READ, complete_io_irq, complete_io_fail);
+	submit_io(b, READ, complete_io);
 }
 
 static void write_block(struct dm_block *b)
 {
-	submit_io(b, WRITE | b->io_flags, complete_io_irq, complete_io_fail);
+	submit_io(b, WRITE | b->io_flags, complete_io);
 }
 
 static void write_dirty(struct dm_block_manager *bm, unsigned count)
