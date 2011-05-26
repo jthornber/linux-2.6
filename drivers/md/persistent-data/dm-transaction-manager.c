@@ -67,6 +67,22 @@ static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 		printk(KERN_ALERT "shadow_insert failed"); /* FIXME: remove */
 }
 
+static void wipe_shadow_table(struct dm_transaction_manager *tm)
+{
+	int i;
+	for (i = 0; i < HASH_SIZE; i++) {
+		struct shadow_info *si;
+		struct hlist_node *n, *tmp;
+		struct hlist_head *bucket = tm->buckets + i;
+		hlist_for_each_entry_safe (si, n, tmp, bucket, hlist)
+			kfree(si);
+
+		INIT_HLIST_HEAD(bucket);
+	}
+
+	tm->shadow_count = 0;
+}
+
 /*----------------------------------------------------------------*/
 
 struct dm_transaction_manager * dm_tm_create(struct dm_block_manager *bm,
@@ -149,12 +165,12 @@ int dm_tm_commit(struct dm_transaction_manager *tm, struct dm_block *root)
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
+	wipe_shadow_table(tm);
 	return dm_bm_flush_and_unlock(tm->bm, root);
 }
 EXPORT_SYMBOL_GPL(dm_tm_commit);
 
 int dm_tm_alloc_block(struct dm_transaction_manager *tm, dm_block_t *new_block)
-		      
 {
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
@@ -348,7 +364,6 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 	*tm = dm_tm_create(bm, staged);
 	if (!tm)
 		return -1;
-
 
 	/* nasty bootstrap problem, first create the disk space map ... */
 	r = dm_tm_begin(*tm);
