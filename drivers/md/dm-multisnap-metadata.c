@@ -397,6 +397,7 @@ int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd)
 	dm_tm_destroy(mmd->nb_tm);
 	dm_block_manager_destroy(mmd->bm);
 	dm_sm_destroy(mmd->metadata_sm);
+	dm_sm_destroy(mmd->data_sm);
 	kfree(mmd);
 
 	return 0;
