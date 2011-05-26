@@ -329,6 +329,12 @@ config DM_DELAY
 
 	If unsure, say N.
 
+config DM_HSM
+       tristate "Single pool hierachical storage target"
+       select DM_PERSISTENT_DATA
+       ---help---
+         Hierachical storage target for volume managers.
+
 config DM_UEVENT
 	bool "DM uevents (EXPERIMENTAL)"
 	depends on BLK_DEV_DM && EXPERIMENTAL
