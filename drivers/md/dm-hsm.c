@@ -23,7 +23,7 @@
  *
  */
 
-const char version[] = "1.0.66";
+const char version[] = "1.0.69";
 
 #include "dm.h"
 #include "dm-hsm-metadata.h"
@@ -515,7 +515,7 @@ void clear_flush_blocks(struct hsm_c *hc)
 }
 
 /* Release any idle blocks. */
-void delete_hsm_blocks(struct hsm_c *hc)
+void free_hsm_blocks(struct hsm_c *hc)
 {
 	struct hsm_block *b, *tmp;
 
@@ -595,28 +595,16 @@ void do_leftover_dirty_blocks(struct hsm_c *hc)
 }
 
 /* Process all endios on blocks. */
-void do_endios(struct hsm_c *hc)
+void do_endios(struct hsm_c *hc, struct list_head *endios)
 {
 	int meta_err = 0, r = 0;
 	struct hsm_block *b, *tmp;
-	struct list_head endios;
-
-	INIT_LIST_HEAD(&endios);
-
-	spin_lock_irq(&hc->endio_lock);
-	list_splice(&hc->endio_blocks, &endios);
-	INIT_LIST_HEAD(&hc->endio_blocks);
-	spin_unlock_irq(&hc->endio_lock);
-
-	if (list_empty(&endios))
-		return;
-
 	/*
 	 * First round to check, if any metadata updates are
 	 * mandatory and need to hit the metadata device
 	 * _before_ any dependent io may be submitted.
 	 */
-	list_for_each_entry(b, &endios, flush_endio) {
+	list_for_each_entry(b, endios, flush_endio) {
 		BUG_ON(!test_and_clear_bit(BLOCK_ACTIVE, &b->flags));
 
 		if (test_bit(BLOCK_UPTODATE, &b->flags))
@@ -657,7 +645,7 @@ void do_endios(struct hsm_c *hc)
 		meta_err = commit(hc);
 
 	/* Second round to submit the actual io _after_ any metadata commit. */
-	list_for_each_entry_safe(b, tmp, &endios, flush_endio) {
+	list_for_each_entry_safe(b, tmp, endios, flush_endio) {
 		int err;
 		struct bio *bio;
 
@@ -722,6 +710,7 @@ int block_inactive(struct hsm_c *hc,
  * there's some, the search start is selected randomly and from
  * thereon, a linear search is being performed.
  */
+/* FIXME: allow to free multiple blocks in dm-hsm-metadata.c. */
 int get_free_block(struct hsm_c *hc)
 {
 	int r;
@@ -733,8 +722,8 @@ int get_free_block(struct hsm_c *hc)
 redo:
 	for (; blocks < hc->data_blocks; blocks++, pool++) {
 		r = block_inactive(hc, pool, &cache);
+DMINFO("Freeing pool_block=%llu %lu", (LLU) pool, jiffies);
 		if (r > 0) {
-DMINFO("Freeing pool_block=%llu", (LLU) pool);
 			r = hsm_metadata_remove(hc->hmd, hc->dev, cache);
 			BUG_ON(r);
 			inc_update(hc, -1);
@@ -761,7 +750,10 @@ void do_bios(struct hsm_c *hc, struct bio_list *bios)
 
 	INIT_LIST_HEAD(&active_list);
 
-	/* 1/3: process all bios attaching them to block objects. */
+	/*
+	 * 1/3: process all bios attaching them to block
+	 *	objects, potentially updating mappings.
+	 */
 	while ((bio = bio_list_pop(bios))) {
 		unsigned long flags;
 		dm_block_t cache_block, pool_block;
@@ -782,9 +774,7 @@ insert:
 				 * No data space, so we try to evict
 				 * an idle block from the cache.
 				 */
-unsigned long j = jiffies;
 				r = get_free_block(hc);
-if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 				if (!r)
 					goto insert;
 
@@ -832,8 +822,10 @@ if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 	}
 
 
-	/* 2/3: check for completely written over blocks. */
-	/* Set block uptodate if completely written over or read it. */
+	/*
+	 * 2/3: check for completely written over blocks.
+	 *	Set block uptodate if completely written over or read it.
+	 */
 	list_for_each_entry(b, &active_list, active) {
 		sector_t sectors;
 
@@ -868,6 +860,7 @@ if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 		}
 	}
 
+	/* Commit any mapping updates from step 1 and 2. */
 	r = commit(hc);
 	if (r && !meta_err)
 		meta_err = r;
@@ -905,7 +898,6 @@ if (!r) DMINFO("got free block in %lu jiffies", jiffies - j);
 /* Process any delayed block writes. */
 void do_block_flushs(struct hsm_c *hc, int no_space)
 {
-	int copies = 0;
 	struct hsm_block *b, *tmp;
 	unsigned long j = jiffies;
 
@@ -923,13 +915,6 @@ void do_block_flushs(struct hsm_c *hc, int no_space)
 		list_del_init(&b->flush_endio);
 		b->timeout = ~0;
 		BUG_ON(block_copy(WRITE, b));
-		copies++;
-	}
-
-	if (copies) {
-		/* Unplug devices. */
-		blk_unplug(bdev_get_queue(hc->cached_dev->bdev));
-		blk_unplug(bdev_get_queue(hc->data_dev->bdev));
 	}
 }
 
@@ -939,7 +924,9 @@ void do_hsm(struct work_struct *ws)
 	struct hsm_c *hc = container_of(ws, struct hsm_c, dws.work);
 	int bounce_mode = test_bit(HC_BOUNCE_MODE, &hc->flags), empty, no_space;
 	struct bio_list bios;
+	struct list_head endios;
 
+	INIT_LIST_HEAD(&endios);
 	bio_list_init(&bios);
 
 	/* FIXME: do leftover dirty blocks in chunks to reduce allocation. */
@@ -947,8 +934,15 @@ void do_hsm(struct work_struct *ws)
 	    !test_and_set_bit(HC_REFLUSHED, &hc->flags))
 		do_leftover_dirty_blocks(hc);
 
-	do_endios(hc);
-	delete_hsm_blocks(hc);
+	spin_lock_irq(&hc->endio_lock);
+	list_splice(&hc->endio_blocks, &endios);
+	INIT_LIST_HEAD(&hc->endio_blocks);
+	spin_unlock_irq(&hc->endio_lock);
+
+	if (!list_empty(&endios))
+		do_endios(hc, &endios);
+
+	free_hsm_blocks(hc);
 
 	spin_lock_irq(&hc->lock);
 	spin_lock_irq(&hc->no_space_lock);
@@ -968,7 +962,7 @@ void do_hsm(struct work_struct *ws)
 		if (!bio_list_empty(&bios))
 			do_bios(hc, &bios);
 
-		// if (empty || no_space)
+		if (empty || no_space)
 			do_block_flushs(hc, no_space);
 
 		do_schedule_block_flush(hc);
@@ -1185,7 +1179,8 @@ static int hsm_end_io(struct dm_target *ti, struct bio *bio,
 
 	bio->bi_destructor = map_context->ptr;
 
-	wake = b ? !put_block(b) : 0;
+	/* Only wake in case this is the last put on this block. */
+	wake = b ? !put_block(b) : 1;
 	if (wake)
 		wake_do_hsm(ti->private);
 
