@@ -1723,12 +1723,13 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 	struct multisnap_c *mc = ti->private;
 
 	if (mc->msd) {
-		r = dm_multisnap_metadata_get_mapped_count(mc->msd, &mapped);
-		if (r)
-			return r;
-
 		switch (type) {
 		case STATUSTYPE_INFO:
+			r = dm_multisnap_metadata_get_mapped_count(mc->msd,
+								   &mapped);
+			if (r)
+				return r;
+
 			DMEMIT("%llu", mapped);
 			break;
 
@@ -1736,6 +1737,7 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 			DMEMIT("%s %lu",
 			       format_dev_t(buf, mc->pool_dev->bdev->bd_dev),
 			       (unsigned long) mc->dev_id);
+			break;
 		}
 	} else {
 		DMEMIT("-");
