@@ -1569,6 +1569,46 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	return dm_multisnap_metadata_commit(pool->mmd);
 }
 
+static int pool_status(struct dm_target *ti, status_type_t type,
+		       char *result, unsigned maxlen)
+{
+	int r;
+	unsigned sz = 0;
+	uint64_t transaction_id;
+	dm_block_t nr_free_blocks_data;
+	char buf[BDEVNAME_SIZE];
+	char buf2[BDEVNAME_SIZE];
+	struct pool_c *pool = ti->private;
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		r = dm_multisnap_metadata_get_transaction_id(pool->mmd,
+							     &transaction_id);
+		if (r)
+			return r;
+
+		r = dm_multisnap_metadata_get_free_blocks(pool->mmd,
+							  &nr_free_blocks_data);
+		if (r)
+			return r;
+
+		/* FIXME display nr_free_blocks_metadata too */
+		DMEMIT("%llu %llu ", transaction_id,
+		       nr_free_blocks_data * pool->sectors_per_block);
+		break;
+
+	case STATUSTYPE_TABLE:
+		DMEMIT("%s %s %lu %lu",
+		       format_dev_t(buf, pool->metadata_dev->bdev->bd_dev),
+		       format_dev_t(buf2, pool->data_dev->bdev->bd_dev),
+		       (unsigned long) pool->sectors_per_block,
+		       (unsigned long) pool->low_water_mark);
+		break;
+	}
+
+	return 0;
+}
+
 static int pool_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
@@ -1607,6 +1647,7 @@ static struct target_type pool_target = {
 	.presuspend = pool_presuspend,
 	.preresume = pool_preresume,
 	.message = pool_message,
+	.status = pool_status,
 	.merge = pool_merge,
 	.iterate_devices = pool_iterate_devices,
 	.io_hints = pool_io_hints,
