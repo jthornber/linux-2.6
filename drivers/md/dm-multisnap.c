@@ -417,7 +417,7 @@ struct pool_c {
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	dm_block_t offset_mask;
-	dm_block_t low_water_mark;
+	sector_t low_water_mark;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -789,7 +789,7 @@ static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
 		return r;
 	}
 
-	if (free_blocks <= pool->low_water_mark) {
+	if ((free_blocks * pool->sectors_per_block) <= pool->low_water_mark) {
 		spin_lock_irqsave(&pool->lock, flags);
 		pool->triggered = 1;
 		spin_unlock_irqrestore(&pool->lock, flags);
@@ -1730,7 +1730,7 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 			if (r)
 				return r;
 
-			DMEMIT("%llu", mapped);
+			DMEMIT("%llu", mapped * mc->pool->sectors_per_block);
 			break;
 
 		case STATUSTYPE_TABLE:
