@@ -1576,6 +1576,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 	unsigned sz = 0;
 	uint64_t transaction_id;
 	dm_block_t nr_free_blocks_data;
+	dm_block_t nr_free_blocks_metadata;
 	char buf[BDEVNAME_SIZE];
 	char buf2[BDEVNAME_SIZE];
 	struct pool_c *pool = ti->private;
@@ -1592,9 +1593,14 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		/* FIXME display nr_free_blocks_metadata too */
-		DMEMIT("%llu %llu ", transaction_id,
-		       nr_free_blocks_data * pool->sectors_per_block);
+		r = dm_multisnap_metadata_get_free_blocks_metadata(pool->mmd,
+							  &nr_free_blocks_metadata);
+		if (r)
+			return r;
+
+		DMEMIT("%llu %llu %llu", transaction_id,
+		       nr_free_blocks_data * pool->sectors_per_block,
+		       nr_free_blocks_metadata * pool->sectors_per_block);
 		break;
 
 	case STATUSTYPE_TABLE:

@@ -903,6 +903,19 @@ int dm_multisnap_metadata_get_free_blocks(struct dm_multisnap_metadata *mmd,
 	return r;
 }
 
+int
+dm_multisnap_metadata_get_free_blocks_metadata(struct dm_multisnap_metadata *mmd,
+					       dm_block_t *result)
+{
+	int r;
+
+	down_read(&mmd->root_lock);
+	r = dm_sm_get_nr_free(mmd->metadata_sm, result);
+	up_read(&mmd->root_lock);
+
+	return r;
+}
+
 int dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
 					      unsigned *result)
 {
