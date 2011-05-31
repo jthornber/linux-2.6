@@ -5,8 +5,6 @@
  */
 
 #include "hsm-metadata.h"
-#include "persistent-data/transaction-manager.h"
-#include "persistent-data/space-map-core.h"
 
 #include <linux/list.h>
 #include <linux/device-mapper.h>
@@ -21,7 +19,7 @@
 #define HSM_SUPERBLOCK_LOCATION 0
 #define HSM_VERSION 1
 #define HSM_METADATA_BLOCK_SIZE 4096
-#define HSM_METADATA_CACHE_SIZE 128
+#define HSM_METADATA_CACHE_SIZE 1024
 #define SECTOR_TO_BLOCK_SHIFT 3
 
 struct superblock {
@@ -54,10 +52,10 @@ struct hsm_metadata {
 	struct hlist_node hash;
 
 	struct block_device *bdev;
-	struct block_manager *bm;
-	struct space_map *sm;
-	struct transaction_manager *tm;
-	struct transaction_manager *nb_tm;
+	struct dm_block_manager *bm;
+	struct dm_space_map *sm;
+	struct dm_transaction_manager *tm;
+	struct dm_transaction_manager *nb_tm;
 
 	/*
 	 * Two level btree, first level is hsm_dev_t,
@@ -65,20 +63,20 @@ struct hsm_metadata {
 	 * I need a reverse mapping btree with the same info
 	 * to be able to free cached blocks.
 	 */
-	struct btree_info info;
+	struct dm_btree_info info;
 
 	/* non-blocking versions of the above */
-	struct btree_info nb_info;
+	struct dm_btree_info nb_info;
 
 	/* just the top level, for deleting whole devices */
-	struct btree_info dev_info;
+	struct dm_btree_info dev_info;
 
 	int have_updated;
 
 	struct rw_semaphore root_lock;
-	struct block *sblock;
-	block_t root;
-	block_t reverse_root;
+	struct dm_block *sblock;
+	dm_block_t root;
+	dm_block_t reverse_root;
 
 	struct workqueue_struct *wq;	/* Work queue. */
 };
@@ -132,18 +130,18 @@ static struct hsm_metadata *hsm_table_lookup(struct block_device *bdev)
 
 /*----------------------------------------------------------------*/
 
-static int superblock_all_zeroes(struct block_manager *bm, int *result)
+static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 {
 	int r, i;
-	struct block *b;
+	struct dm_block *b;
 	uint64_t *data;
-	size_t block_size = bm_block_size(bm) / sizeof(uint64_t);
+	size_t block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
 
-	r = bm_read_lock(bm, HSM_SUPERBLOCK_LOCATION, &b);
+	r = dm_bm_read_lock(bm, HSM_SUPERBLOCK_LOCATION, &b);
 	if (r)
 		return r;
 
-	data = block_data(b);
+	data = dm_block_data(b);
 	*result = 1;
 	for (i = 0; i < block_size; i++) {
 		if (data[i] != 0LL) {
@@ -152,33 +150,33 @@ static int superblock_all_zeroes(struct block_manager *bm, int *result)
 		}
 	}
 
-	return bm_unlock(b);
+	return dm_bm_unlock(b);
 }
 
 static struct hsm_metadata *
-alloc_(struct block_manager *bm, int create)
+alloc_(struct dm_block_manager *bm, int create)
 {
 	int r;
-	struct space_map *sm;
-	struct transaction_manager *tm;
+	struct dm_space_map *sm;
+	struct dm_transaction_manager *tm;
 	struct hsm_metadata *hsm;
-	struct block *sb;
+	struct dm_block *sb;
 
 	if (create) {
-		r = tm_create_with_sm(bm, HSM_SUPERBLOCK_LOCATION, &tm, &sm, &sb);
+		r = dm_tm_create_with_sm(bm, HSM_SUPERBLOCK_LOCATION, &tm, &sm, &sb);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_create_with_sm failed");
-			block_manager_destroy(bm);
+			dm_block_manager_destroy(bm);
 			return NULL;
 		}
 
-		r = tm_pre_commit(tm);
+		r = dm_tm_pre_commit(tm);
 		if (r < 0) {
 			printk(KERN_ALERT "couldn't pre commit");
 			goto bad;
 		}
 
-		r = tm_commit(tm, sb);
+		r = dm_tm_commit(tm, sb);
 		if (r < 0) {
 			printk(KERN_ALERT "couldn't commit");
 			goto bad;
@@ -186,23 +184,23 @@ alloc_(struct block_manager *bm, int create)
 	} else {
 		struct superblock *s = NULL;
 
-		r = tm_open_with_sm(bm, HSM_SUPERBLOCK_LOCATION,
+		r = dm_tm_open_with_sm(bm, HSM_SUPERBLOCK_LOCATION,
 				    (size_t) &((struct superblock *) NULL)->sm_root_start,
 				    32, 	/* FIXME: magic number */
 				    &tm, &sm, &sb);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_open_with_sm failed");
-			block_manager_destroy(bm);
+			dm_block_manager_destroy(bm);
 			return NULL;
 		}
 
-		s = block_data(sb);
+		s = dm_block_data(sb);
 		if (__le64_to_cpu(s->magic) != HSM_SUPERBLOCK_MAGIC) {
 			printk(KERN_ALERT "hsm-metadata superblock is invalid");
 			goto bad;
 		}
 
-		tm_unlock(tm, sb);
+		dm_tm_unlock(tm, sb);
 	}
 
 	hsm = kmalloc(sizeof(*hsm), GFP_KERNEL);
@@ -214,7 +212,7 @@ alloc_(struct block_manager *bm, int create)
 	hsm->bm = bm;
 	hsm->sm = sm;
 	hsm->tm = tm;
-	hsm->nb_tm = tm_create_non_blocking_clone(tm);
+	hsm->nb_tm = dm_tm_create_non_blocking_clone(tm);
 	if (!hsm->nb_tm) {
 		printk(KERN_ALERT "hsm-metadata could not create clone tm");
 		goto bad;
@@ -225,7 +223,7 @@ alloc_(struct block_manager *bm, int create)
 	hsm->info.levels = 2;
 
 	hsm->info.value_type.context = NULL;
-	hsm->info.value_type.size = sizeof(block_t);
+	hsm->info.value_type.size = sizeof(dm_block_t);
 	hsm->info.value_type.copy = NULL; /* because the blocks are held in a separate device */
 	hsm->info.value_type.del = NULL;
 	hsm->info.value_type.equal = NULL;
@@ -258,9 +256,9 @@ alloc_(struct block_manager *bm, int create)
 	return hsm;
 
 bad:
-	tm_destroy(tm);
-	sm_destroy(sm);
-	block_manager_destroy(bm);
+	dm_tm_destroy(tm);
+	dm_sm_destroy(sm);
+	dm_block_manager_destroy(bm);
 	return NULL;
 }
 
@@ -271,11 +269,11 @@ static int hsm_metadata_begin(struct hsm_metadata *hsm)
 
 	BUG_ON(hsm->sblock);
 	hsm->have_updated = 0;
-	r = bm_write_lock(hsm->bm, HSM_SUPERBLOCK_LOCATION, &hsm->sblock);
+	r = dm_bm_write_lock(hsm->bm, HSM_SUPERBLOCK_LOCATION, &hsm->sblock);
 	if (r)
 		return r;
 
-	s = (struct superblock *) block_data(hsm->sblock);
+	s = (struct superblock *) dm_block_data(hsm->sblock);
 	hsm->root = __le64_to_cpu(s->btree_root);
 	hsm->reverse_root = __le64_to_cpu(s->btree_reverse_root);
 	return 0;
@@ -283,16 +281,16 @@ static int hsm_metadata_begin(struct hsm_metadata *hsm)
 
 static struct hsm_metadata *
 hsm_metadata_open_(struct block_device *bdev,
-		   sector_t data_block_size, block_t data_dev_size)
+		   sector_t data_block_size, dm_block_t data_dev_size)
 {
 	int r;
 	struct superblock *sb;
 	struct hsm_metadata *hsm;
 	sector_t bdev_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
-	struct block_manager *bm;
+	struct dm_block_manager *bm;
 	int create;
 
-	bm = block_manager_create(bdev,
+	bm = dm_block_manager_create(bdev,
 				  HSM_METADATA_BLOCK_SIZE,
 				  HSM_METADATA_CACHE_SIZE);
 	if (!bm) {
@@ -302,7 +300,7 @@ hsm_metadata_open_(struct block_device *bdev,
 
 	r = superblock_all_zeroes(bm, &create);
 	if (r) {
-		block_manager_destroy(bm);
+		dm_block_manager_destroy(bm);
 		return NULL;
 	}
 
@@ -318,7 +316,7 @@ hsm_metadata_open_(struct block_device *bdev,
 				goto bad;
 		}
 
-		sb = (struct superblock *) block_data(hsm->sblock);
+		sb = (struct superblock *) dm_block_data(hsm->sblock);
 		sb->magic = __cpu_to_le64(HSM_SUPERBLOCK_MAGIC);
 		sb->version = __cpu_to_le64(HSM_VERSION);
 		sb->metadata_block_size = __cpu_to_le64(1 << SECTOR_TO_BLOCK_SHIFT);
@@ -328,13 +326,13 @@ hsm_metadata_open_(struct block_device *bdev,
 		sb->first_free_block = 0;
 		sb->freed_block = __cpu_to_le64(~0);
 
-		r = btree_empty(&hsm->info, &hsm->root);
+		r = dm_btree_empty(&hsm->info, &hsm->root);
 		if (r < 0)
 			goto bad;
 
-		r = btree_empty(&hsm->info, &hsm->reverse_root);
+		r = dm_btree_empty(&hsm->info, &hsm->reverse_root);
 		if (r < 0) {
-			btree_del(&hsm->info, hsm->root);
+			dm_btree_del(&hsm->info, hsm->root);
 			goto bad;
 		}
 
@@ -357,7 +355,7 @@ bad:
 
 struct hsm_metadata *
 hsm_metadata_open(struct block_device *bdev,
-		  sector_t data_block_size, block_t data_dev_size)
+		  sector_t data_block_size, dm_block_t data_dev_size)
 {
 	struct hsm_metadata *hsm;
 
@@ -406,10 +404,10 @@ hsm_metadata_close(struct hsm_metadata *hsm)
 		if (hsm->sblock)
 			hsm_metadata_commit(hsm);
 
-		tm_destroy(hsm->tm);
-		tm_destroy(hsm->nb_tm);
-		block_manager_destroy(hsm->bm);
-		sm_destroy(hsm->sm);
+		dm_tm_destroy(hsm->tm);
+		dm_tm_destroy(hsm->nb_tm);
+		dm_block_manager_destroy(hsm->bm);
+		dm_sm_destroy(hsm->sm);
 
 		if (hsm->wq)
 			destroy_workqueue(hsm->wq);
@@ -429,23 +427,23 @@ int hsm_metadata_commit(struct hsm_metadata *hsm)
 		return 0;
 
 	down_write(&hsm->root_lock);
-	r = tm_pre_commit(hsm->tm);
+	r = dm_tm_pre_commit(hsm->tm);
 	if (r < 0) {
 		up_write(&hsm->root_lock);
 		return r;
 	}
 
-	r = sm_root_size(hsm->sm, &len);
+	r = dm_sm_root_size(hsm->sm, &len);
 	if (r < 0) {
 		up_write(&hsm->root_lock);
 		return r;
 	}
 
 	{
-		struct superblock *sb = block_data(hsm->sblock);
+		struct superblock *sb = dm_block_data(hsm->sblock);
 		sb->btree_root = __cpu_to_le64(hsm->root);
 		sb->btree_reverse_root = __cpu_to_le64(hsm->reverse_root);
-		r = sm_copy_root(hsm->sm, &sb->sm_root_start, len);
+		r = dm_sm_copy_root(hsm->sm, &sb->sm_root_start, len);
 		if (r < 0) {
 			up_write(&hsm->root_lock);
 			return r;
@@ -454,7 +452,7 @@ int hsm_metadata_commit(struct hsm_metadata *hsm)
 		print_sblock(sb);
 	}
 
-	r = tm_commit(hsm->tm, hsm->sblock);
+	r = dm_tm_commit(hsm->tm, hsm->sblock);
 
 	/* open the next transaction */
 	hsm->sblock = NULL;
@@ -465,32 +463,33 @@ int hsm_metadata_commit(struct hsm_metadata *hsm)
 }
 EXPORT_SYMBOL_GPL(hsm_metadata_commit);
 
-void split_result(block_t result, block_t *b, unsigned long *flags)
+void split_result(dm_block_t result, dm_block_t *b, unsigned long *flags)
 {
-	*b = result & 0xFFFFFFFFFFFFFFF;
-	*flags = (result & 0xF000000000000000) >> 60;
+	*b = result & (((dm_block_t) 1 << 60) - 1);
+	*flags = result >> 60;
 }
 
 int hsm_metadata_insert(struct hsm_metadata *hsm,
 			hsm_dev_t dev,
-			block_t cache_block,
-			block_t *pool_block,
+			dm_block_t cache_block,
+			dm_block_t *pool_block,
 		        unsigned long *flags)
 {
 	int r;
 	unsigned long f;
-	block_t b, b_le64, dummy, nr_blocks, keys[2];
+	dm_block_t b, b_le64, dummy, nr_blocks, keys[2];
 	struct superblock *sb;
 
 	keys[0] = dev;
 	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
-	sb = block_data(hsm->sblock);
+	sb = dm_block_data(hsm->sblock);
 	nr_blocks = __le64_to_cpu(sb->data_nr_blocks);
 	b = __le64_to_cpu(sb->first_free_block);
 
 	if (b >= nr_blocks) {
+		/* All allocated, look for any freed one. */
 		b = __le64_to_cpu(sb->freed_block);
 		if (b >= nr_blocks) {
 			/*
@@ -510,16 +509,18 @@ int hsm_metadata_insert(struct hsm_metadata *hsm,
 		return -EPERM;
 	}
 
+	/* Inserted block doesn't need flag merging. Ie. flags = 0. */
 	b_le64 = __cpu_to_le64(b);
-	r = btree_insert(&hsm->info, hsm->root, keys, &b_le64, &hsm->root);
+	r = dm_btree_insert(&hsm->info, hsm->root, keys, &b_le64, &hsm->root);
 	if (!r) {
 		keys[1] = b;
 		cache_block = __cpu_to_le64(cache_block);
-		r = btree_insert(&hsm->info, hsm->reverse_root,
-				 keys, &cache_block, &hsm->reverse_root);
+		r = dm_btree_insert(&hsm->info, hsm->reverse_root,
+				    keys, &cache_block, &hsm->reverse_root);
 		if (r) {
 			keys[1] = __le64_to_cpu(cache_block);
-			btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
+			dm_btree_remove(&hsm->info, hsm->root, keys,
+					&hsm->root);
 		}
 	}
 
@@ -543,61 +544,56 @@ EXPORT_SYMBOL_GPL(hsm_metadata_insert);
 
 int hsm_metadata_remove(struct hsm_metadata *hsm,
 			hsm_dev_t dev,
-			block_t cache_block)
+			dm_block_t cache_block)
 {
 	int r;
 	unsigned long dummy;
-	block_t keys[2], pool_block;
-	struct superblock *sb;
+	dm_block_t keys[2], pool_block;
+	struct superblock *sb = dm_block_data(hsm->sblock);
 
-	/* Mapping has to exists on update. */
+	/* Mapping has to exist on update. */
 	r = hsm_metadata_lookup(hsm, dev, cache_block, 1, &pool_block, &dummy);
 	if (r < 0)
 		return r;
-
-	pool_block = __le64_to_cpu(pool_block);
-	split_result(pool_block, &pool_block, &dummy);
 
 	keys[0] = dev;
 	keys[1] = cache_block;
 
 	down_write(&hsm->root_lock);
-	sb = block_data(hsm->sblock);
-	r = btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
-	if (!r) {
-		keys[1] = pool_block;
-		r = btree_remove(&hsm->info, hsm->reverse_root,
-				 keys, &hsm->reverse_root);
-	}
-
-	if (!r)
-		sb->freed_block = __cpu_to_le64(pool_block);
-
+	r = dm_btree_remove(&hsm->info, hsm->root, keys, &hsm->root);
+	BUG_ON(r);
+	pool_block = __le64_to_cpu(pool_block);
+	split_result(pool_block, &pool_block, &dummy); /* Remove any flags. */
+	keys[1] = pool_block;
+	r = dm_btree_remove(&hsm->info, hsm->reverse_root,
+			    keys, &hsm->reverse_root);
+	BUG_ON(r);
+	sb->freed_block = __cpu_to_le64(pool_block);
 	up_write(&hsm->root_lock);
+
 	return r;
 }
 EXPORT_SYMBOL_GPL(hsm_metadata_remove);
 
 int
 _hsm_metadata_lookup(struct hsm_metadata *hsm,
-		     hsm_dev_t dev, block_t block_in, int can_block,
-		     block_t *block_out, unsigned long *flags,
-		     block_t btree_root)
+		     hsm_dev_t dev, dm_block_t block_in, int can_block,
+		     dm_block_t *block_out, unsigned long *flags,
+		     dm_block_t btree_root)
 {
 	int r;
-	block_t keys[2], result;
+	dm_block_t keys[2], result;
 
 	keys[0] = dev;
 	keys[1] = block_in;
 
 	if (can_block) {
 		down_read(&hsm->root_lock);
-		r = btree_lookup_equal(&hsm->info, btree_root, keys, &result);
+		r = dm_btree_lookup(&hsm->info, btree_root, keys, &result);
 		up_read(&hsm->root_lock);
 
 	} else if (down_read_trylock(&hsm->root_lock)) {
-		r = btree_lookup_equal(&hsm->nb_info, btree_root,
-				       keys, &result);
+		r = dm_btree_lookup(&hsm->nb_info, btree_root, keys, &result);
 		up_read(&hsm->root_lock);
 
 	} else
@@ -606,9 +602,9 @@ _hsm_metadata_lookup(struct hsm_metadata *hsm,
 	if (!r) {
 		result = __le64_to_cpu(result);
 
-		if (btree_root == hsm->root) {
+		if (btree_root == hsm->root)
 			split_result(result, block_out, flags);
-		} else
+		else
 			*block_out = result;
 	}
 
@@ -617,8 +613,8 @@ _hsm_metadata_lookup(struct hsm_metadata *hsm,
 
 int
 hsm_metadata_lookup(struct hsm_metadata *hsm,
-		    hsm_dev_t dev, block_t cache_block, int can_block,
-		    block_t *pool_block, unsigned long *flags)
+		    hsm_dev_t dev, dm_block_t cache_block, int can_block,
+		    dm_block_t *pool_block, unsigned long *flags)
 {
 	return _hsm_metadata_lookup(hsm, dev, cache_block, can_block,
 				    pool_block, flags, hsm->root);
@@ -627,8 +623,8 @@ EXPORT_SYMBOL_GPL(hsm_metadata_lookup);
 
 int
 hsm_metadata_lookup_reverse(struct hsm_metadata *hsm,
-			    hsm_dev_t dev, block_t pool_block, int can_block,
-			    block_t *cache_block)
+			    hsm_dev_t dev, dm_block_t pool_block, int can_block,
+			    dm_block_t *cache_block)
 {
 	unsigned long dummy;
 	return _hsm_metadata_lookup(hsm, dev, pool_block, can_block,
@@ -639,12 +635,12 @@ EXPORT_SYMBOL_GPL(hsm_metadata_lookup_reverse);
 #define	LLU	long long unsigned
 int hsm_metadata_update(struct hsm_metadata *hsm,
 			hsm_dev_t dev,
-			block_t cache_block,
+			dm_block_t cache_block,
 		        unsigned long flags)
 {
 	int r;
 	unsigned long dummy;
-	block_t keys[2], pool_block;
+	dm_block_t keys[2], pool_block;
 
 	/* Mapping has to exists on update. */
 	r = hsm_metadata_lookup(hsm, dev, cache_block, 1, &pool_block, &dummy);
@@ -660,7 +656,8 @@ int hsm_metadata_update(struct hsm_metadata *hsm,
 
 	down_write(&hsm->root_lock);
 	hsm->have_updated = 1;
-	r = btree_insert(&hsm->info, hsm->root, keys, &pool_block, &hsm->root);
+	r = dm_btree_insert(&hsm->info, hsm->root, keys, &pool_block,
+			    &hsm->root);
 	up_write(&hsm->root_lock);
 
 	return r < 0 ? r : 0;
@@ -684,7 +681,7 @@ hsm_metadata_get_data_block_size(struct hsm_metadata *hsm,
 				   sector_t *result)
 {
 	down_read(&hsm->root_lock);
-	*result = __le64_to_cpu(((struct superblock *) block_data(hsm->sblock))->data_block_size);
+	*result = __le64_to_cpu(((struct superblock *) dm_block_data(hsm->sblock))->data_block_size);
 	up_read(&hsm->root_lock);
 	return 0;
 }
@@ -692,10 +689,10 @@ EXPORT_SYMBOL_GPL(hsm_metadata_get_data_block_size);
 
 int
 hsm_metadata_get_data_dev_size(struct hsm_metadata *hsm,
-			       hsm_dev_t dev, block_t *result)
+			       hsm_dev_t dev, dm_block_t *result)
 {
 	down_read(&hsm->root_lock);
-	*result = __le64_to_cpu(((struct superblock *) block_data(hsm->sblock))->data_nr_blocks);
+	*result = __le64_to_cpu(((struct superblock *) dm_block_data(hsm->sblock))->data_nr_blocks);
 	up_read(&hsm->root_lock);
 	return 0;
 }
@@ -704,10 +701,10 @@ EXPORT_SYMBOL_GPL(hsm_metadata_get_data_dev_size);
 int
 hsm_metadata_get_provisioned_blocks(struct hsm_metadata *hsm,
 				      hsm_dev_t dev,
-				      block_t *result)
+				      dm_block_t *result)
 {
 	down_read(&hsm->root_lock);
-	*result = __le64_to_cpu(((struct superblock *) block_data(hsm->sblock))->first_free_block);
+	*result = __le64_to_cpu(((struct superblock *) dm_block_data(hsm->sblock))->first_free_block);
 	up_read(&hsm->root_lock);
 	return 0;
 }
@@ -716,13 +713,13 @@ EXPORT_SYMBOL_GPL(hsm_metadata_get_provisioned_blocks);
 int
 hsm_metadata_resize_data_dev(struct hsm_metadata *hsm,
 			       hsm_dev_t dev,
-			       block_t new_size)
+			       dm_block_t new_size)
 {
-	block_t b;
+	dm_block_t b;
 
 	down_write(&hsm->root_lock);
 	{
-		struct superblock *sb = (struct superblock *) block_data(hsm->sblock);
+		struct superblock *sb = (struct superblock *) dm_block_data(hsm->sblock);
 
 		b = __le64_to_cpu(sb->first_free_block);
 		if (b > new_size) {

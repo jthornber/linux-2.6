@@ -26,7 +26,7 @@
 const char version[] = "1.0.69";
 
 #include "dm.h"
-#include "dm-hsm-metadata.h"
+#include "hsm-metadata.h"
 #include "persistent-data/dm-transaction-manager.h"
 
 #include <asm/div64.h>
@@ -125,7 +125,6 @@ struct hsm_block {
 	spinlock_t endio_lock;
 	dm_block_t cache_block, pool_block;
 	unsigned long flags, timeout;
-	void *bio_destructor;
 };
 
 enum block_flags {
@@ -277,7 +276,7 @@ dm_block_t _sector_to_block(struct hsm_c *hc, sector_t sector)
 }
 
 /* Convert block to sector. */
-sector_t _dm_block_to_sector(struct hsm_c *hc, dm_block_t block)
+sector_t _block_to_sector(struct hsm_c *hc, dm_block_t block)
 {
 	return block << hc->block_shift;
 }
@@ -313,7 +312,7 @@ struct block_device *_remap_dev(struct hsm_c *hc)
 
 sector_t _remap_sector(struct hsm_c *hc, sector_t sector, dm_block_t block)
 {
-	return _dm_block_to_sector(hc, block) + (sector & hc->offset_mask);
+	return _block_to_sector(hc, block) + (sector & hc->offset_mask);
 }
 
 void remap_bio(struct hsm_c *hc, struct bio *bio, dm_block_t block)
@@ -691,7 +690,7 @@ int block_inactive(struct hsm_c *hc,
 						pool_block, 0);
 		BUG_ON(!b);
 		r = (atomic_read(&b->ref) == 1);
-		BUG_ON(r == 1 &&
+		BUG_ON(r &&
 		       (!bio_list_empty(&b->io) ||
 			!bio_list_empty(&b->endio)));
 		put_block(b);
