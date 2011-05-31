@@ -45,6 +45,9 @@ struct multisnap_super_block {
 	/* device detail root mapping dev_id -> device_details */
 	__le64 device_details_root;
 
+	/* root for userspace's transaction (for migration and friends) */
+	__le64 held_root;
+
 	__le32 version;
 	__le32 time;
 
@@ -632,6 +635,26 @@ int dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
 	down_read(&mmd->root_lock);
 	sb = dm_block_data(mmd->sblock);
 	*result = __le64_to_cpu(sb->userspace_transaction_id);
+	up_read(&mmd->root_lock);
+
+	return 0;
+}
+
+int dm_multisnap_metadata_hold_root(struct dm_multisnap_metadata *mmd)
+{
+	/* FIXME implement */
+
+	return 0;
+}
+
+int dm_multisnap_metadata_get_held_root(struct dm_multisnap_metadata *mmd,
+					void *result)
+{
+	struct multisnap_super_block *sb;
+
+	down_read(&mmd->root_lock);
+	sb = dm_block_data(mmd->sblock);
+	result = (void *)__le64_to_cpu(sb->held_root);
 	up_read(&mmd->root_lock);
 
 	return 0;

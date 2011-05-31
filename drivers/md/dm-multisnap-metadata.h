@@ -67,6 +67,14 @@ int dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
 					     uint64_t *result);
 
 /*
+ * hold/get root for userspace transaction
+ */
+int dm_multisnap_metadata_hold_root(struct dm_multisnap_metadata *mmd);
+
+int dm_multisnap_metadata_get_held_root(struct dm_multisnap_metadata *mmd,
+					void *result);
+
+/*
  * Actions on a single virtual device.
  */
 
