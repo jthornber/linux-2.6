@@ -48,6 +48,8 @@ struct multisnap_super_block {
 	/* root for userspace's transaction (for migration and friends) */
 	__le64 held_root;
 
+	__u8 uuid[16]; /* uuid_t */
+
 	__le32 version;
 	__le32 time;
 
