@@ -16,6 +16,8 @@
 
 #define	DAEMON "multisnap-metadata"
 
+#define DEBUG 1
+
 #define MULTISNAP_CSUM_SIZE 32
 #define MULTISNAP_SUPERBLOCK_MAGIC 27022010
 #define MULTISNAP_SUPERBLOCK_LOCATION 0
@@ -870,6 +872,10 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	int r;
 	size_t len;
 	struct multisnap_super_block *sb;
+
+#if DEBUG
+	BUILD_BUG_ON(sizeof(struct multisnap_super_block) > 512);
+#endif
 
 	down_read(&mmd->root_lock);
 	if (!mmd->need_commit) {
