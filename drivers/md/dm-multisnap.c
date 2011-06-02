@@ -417,7 +417,7 @@ struct pool_c {
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	dm_block_t offset_mask;
-	dm_block_t low_water_mark;
+	sector_t low_water_mark;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -789,7 +789,7 @@ static int alloc_data_block(struct pool_c *pool, struct dm_ms_device *msd,
 		return r;
 	}
 
-	if (free_blocks <= pool->low_water_mark) {
+	if ((free_blocks * pool->sectors_per_block) <= pool->low_water_mark) {
 		spin_lock_irqsave(&pool->lock, flags);
 		pool->triggered = 1;
 		spin_unlock_irqrestore(&pool->lock, flags);
@@ -1569,6 +1569,63 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	return dm_multisnap_metadata_commit(pool->mmd);
 }
 
+static int pool_status(struct dm_target *ti, status_type_t type,
+		       char *result, unsigned maxlen)
+{
+	int r;
+	unsigned sz = 0;
+	uint64_t transaction_id;
+	dm_block_t nr_free_blocks_data;
+	dm_block_t nr_free_blocks_metadata;
+	void *held_root = NULL;
+	char buf[BDEVNAME_SIZE];
+	char buf2[BDEVNAME_SIZE];
+	struct pool_c *pool = ti->private;
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		r = dm_multisnap_metadata_get_transaction_id(pool->mmd,
+							     &transaction_id);
+		if (r)
+			return r;
+
+		r = dm_multisnap_metadata_get_free_blocks(pool->mmd,
+							  &nr_free_blocks_data);
+		if (r)
+			return r;
+
+		r = dm_multisnap_metadata_get_free_blocks_metadata(pool->mmd,
+							  &nr_free_blocks_metadata);
+		if (r)
+			return r;
+
+		r = dm_multisnap_metadata_get_held_root(pool->mmd, held_root);
+		if (r)
+			return r;
+
+		DMEMIT("%llu %llu %llu ", transaction_id,
+		       nr_free_blocks_data * pool->sectors_per_block,
+		       nr_free_blocks_metadata * pool->sectors_per_block);
+
+		if (held_root)
+			DMEMIT("%p", held_root);
+		else
+			DMEMIT("-");
+
+		break;
+
+	case STATUSTYPE_TABLE:
+		DMEMIT("%s %s %lu %lu",
+		       format_dev_t(buf, pool->metadata_dev->bdev->bd_dev),
+		       format_dev_t(buf2, pool->data_dev->bdev->bd_dev),
+		       (unsigned long) pool->sectors_per_block,
+		       (unsigned long) pool->low_water_mark);
+		break;
+	}
+
+	return 0;
+}
+
 static int pool_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
@@ -1607,6 +1664,7 @@ static struct target_type pool_target = {
 	.presuspend = pool_presuspend,
 	.preresume = pool_preresume,
 	.message = pool_message,
+	.status = pool_status,
 	.merge = pool_merge,
 	.iterate_devices = pool_iterate_devices,
 	.io_hints = pool_io_hints,
@@ -1723,19 +1781,21 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 	struct multisnap_c *mc = ti->private;
 
 	if (mc->msd) {
-		r = dm_multisnap_metadata_get_mapped_count(mc->msd, &mapped);
-		if (r)
-			return r;
-
 		switch (type) {
 		case STATUSTYPE_INFO:
-			DMEMIT("%llu", mapped);
+			r = dm_multisnap_metadata_get_mapped_count(mc->msd,
+								   &mapped);
+			if (r)
+				return r;
+
+			DMEMIT("%llu", mapped * mc->pool->sectors_per_block);
 			break;
 
 		case STATUSTYPE_TABLE:
 			DMEMIT("%s %lu",
 			       format_dev_t(buf, mc->pool_dev->bdev->bd_dev),
 			       (unsigned long) mc->dev_id);
+			break;
 		}
 	} else {
 		DMEMIT("-");
