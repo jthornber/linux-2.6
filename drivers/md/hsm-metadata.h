@@ -12,7 +12,6 @@
 /*----------------------------------------------------------------*/
 
 struct hsm_metadata;
-typedef uint64_t hsm_dev_t;
 
 /*
  * Creates a new, empty hsm metadata.
@@ -29,51 +28,41 @@ void hsm_metadata_close(struct hsm_metadata *hsm);
  * Return -EWOULDBLOCK if it would block.
  * May be called concurrently with insert,commit.
  */
-int hsm_metadata_lookup(struct hsm_metadata *hsm, hsm_dev_t dev,
-			dm_block_t cache_block, int can_block,
-			dm_block_t *pool_block, unsigned long *flags);
-int hsm_metadata_lookup_reverse(struct hsm_metadata *hsm, hsm_dev_t dev,
-			dm_block_t pool_block, int can_block,
+int hsm_metadata_lookup(struct hsm_metadata *hsm,
+			int can_block,
+			dm_block_t origin_block,
 			dm_block_t *cache_block);
+
+int hsm_metadata_lookup_reverse(struct hsm_metadata *hsm,
+				int can_block,
+				dm_block_t cache_block,
+				dm_block_t *origin_block);
 
 /*
  * Returns -ENOSPC if the data volume is used up.
  * May be called concurrently with lookup.
  */
-int hsm_metadata_insert(struct hsm_metadata *hsm, hsm_dev_t dev,
-			dm_block_t cache_block, 
-			dm_block_t *pool_block, unsigned long *flags);
-int hsm_metadata_remove(struct hsm_metadata *hsm, hsm_dev_t dev,
+int hsm_metadata_insert(struct hsm_metadata *hsm,
+			dm_block_t origin_block,
 			dm_block_t cache_block);
-int hsm_metadata_update(struct hsm_metadata *hsm, hsm_dev_t dev,
-			dm_block_t cache_block, unsigned long flags);
 
-/*
- * After a commit you know any inserts have hit the disk.
- *
- * May be called concurrently with lookup.
- */
+int hsm_metadata_remove(struct hsm_metadata *hsm,
+			dm_block_t origin_block);
+
+int hsm_metadata_is_dirty(struct hsm_metadata *hsm, dm_block_t origin_block);
+int hsm_metadata_mark_dirty(struct hsm_metadata *hsm, dm_block_t origin_block);
+int hsm_metadata_clear_dirty(struct hsm_metadata *hsm, dm_block_t origin_block);
+
 int hsm_metadata_commit(struct hsm_metadata *hsm);
 
-int hsm_metadata_delete(struct hsm_metadata *hsm, hsm_dev_t dev);
-
-/*
- * FIXME: work out the concurrency guarantees of the rest. */
-int hsm_metadata_get_data_block_size(struct hsm_metadata *hsm, hsm_dev_t dev, sector_t *result);
-int hsm_metadata_get_data_dev_size(struct hsm_metadata *hsm, hsm_dev_t dev, dm_block_t *result);
-int hsm_metadata_get_provisioned_blocks(struct hsm_metadata *hsm, hsm_dev_t dev, dm_block_t *result);
+int hsm_metadata_get_data_block_size(struct hsm_metadata *hsm, sector_t *result);
+int hsm_metadata_get_data_dev_size(struct hsm_metadata *hsm, dm_block_t *result);
 
 /*
  * Returns -ENOSPC if the new size is too small and already allocated
  * blocks would be lost.
  */
-int hsm_metadata_resize_data_dev(struct hsm_metadata *hsm, hsm_dev_t dev, dm_block_t new_size);
-
-/*
- * All hsm devices should use this work queue to perform blocking operations.
- */
-struct workqueue_struct *
-hsm_metadata_get_workqueue(struct hsm_metadata *hsm);
+int hsm_metadata_resize_data_dev(struct hsm_metadata *hsm, dm_block_t new_size);
 
 /*----------------------------------------------------------------*/
 

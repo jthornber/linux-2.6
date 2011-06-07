@@ -11,7 +11,7 @@
 #include <linux/workqueue.h>
 
 /*----------------------------------------------------------------*/
-
+#if 0
 #define	DM_MSG_PREFIX	"dm-hsm"
 #define	DAEMON		DM_MSG_PREFIX	"d"
 
@@ -75,58 +75,10 @@ struct hsm_metadata {
 
 	struct rw_semaphore root_lock;
 	struct dm_block *sblock;
+
 	dm_block_t root;
 	dm_block_t reverse_root;
-
-	struct workqueue_struct *wq;	/* Work queue. */
 };
-
-/*----------------------------------------------------------------*/
-
-/* A little global cache of hsm metadata devs */
-struct hsm_metadata;
-
-/* FIXME: add a spin lock round the table */
-#define TPM_TABLE_SIZE 1024
-static struct hlist_head hsm_table_[TPM_TABLE_SIZE];
-
-static void hsm_table_init(void)
-{
-	unsigned i;
-	for (i = 0; i < TPM_TABLE_SIZE; i++)
-		INIT_HLIST_HEAD(hsm_table_ + i);
-}
-
-static unsigned hash_bdev(struct block_device *bdev)
-{
-	/* FIXME: finish */
-	/* bdev -> dev_t -> unsigned */
-	return 0;
-}
-
-static void hsm_table_insert(struct hsm_metadata *hsm)
-{
-	unsigned bucket = hash_bdev(hsm->bdev);
-	hlist_add_head(&hsm->hash, hsm_table_ + bucket);
-}
-
-static void hsm_table_remove(struct hsm_metadata *hsm)
-{
-	hlist_del(&hsm->hash);
-}
-
-static struct hsm_metadata *hsm_table_lookup(struct block_device *bdev)
-{
-	unsigned bucket = hash_bdev(bdev);
-	struct hsm_metadata *hsm;
-	struct hlist_node *n;
-
-	hlist_for_each_entry (hsm, n, hsm_table_ + bucket, hash)
-		if (hsm->bdev == bdev)
-			return hsm;
-
-	return NULL;
-}
 
 /*----------------------------------------------------------------*/
 
@@ -760,3 +712,4 @@ MODULE_AUTHOR("Joe Thornber");
 MODULE_DESCRIPTION("Metadata manager for thin provisioning dm target");
 
 /*----------------------------------------------------------------*/
+#endif
