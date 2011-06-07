@@ -279,8 +279,6 @@ static void remap_to_cache(struct hsm_c *hsm, struct bio *bio, dm_block_t cache_
 		(bio->bi_sector & hsm->offset_mask);
 }
 
-/*----------------------------------------------------------------*/
-
 static dm_block_t get_bio_block(struct hsm_c *hsm, struct bio *bio)
 {
 	return bio->bi_sector >> hsm->block_shift;
@@ -300,13 +298,7 @@ static void issue(struct hsm_c *hsm, struct bio *bio)
 	generic_make_request(bio);
 }
 
-static void process_discard(struct hsm_c *hsm, struct bio *bio)
-{
-	/* FIXME: finish */
-	bio_endio(bio, 0);
-}
-
-static void process_bio(struct hsm_c *hsm, struct bio *bio)
+static int map_bio(struct hsm_c *hsm, struct bio *bio)
 {
 	int r;
 	dm_block_t block = get_bio_block(hsm, bio), cache_block;
@@ -319,34 +311,62 @@ static void process_bio(struct hsm_c *hsm, struct bio *bio)
 	build_key(block, &key);
 	r = bio_detain_if_occupied(&hsm->prison, &key, bio, &cell);
 	if (r > 0)
-		return;
+		r = DM_MAPIO_SUBMITTED;
 
 	else if (r == 0) {
-		r = hsm_metadata_lookup(hsm->hmd, block, 1, &cache_block);
+		r = hsm_metadata_lookup(hsm->hmd, block, 0, &cache_block);
 		switch (r) {
 		case 0:
 			if (bio_data_dir(bio) == WRITE) {
 				r = hsm_metadata_mark_dirty(hsm->hmd, block);
 				if (r) {
 					printk(KERN_ALERT "hsm_metadata_mark_dirty() failed");
-					bio_io_error(bio);
+				} else {
+					remap_to_cache(hsm, bio, cache_block);
+					r = DM_MAPIO_REMAPPED;
 				}
+			} else {
+				remap_to_cache(hsm, bio, cache_block);
+				r = DM_MAPIO_REMAPPED;
 			}
-			remap_to_cache(hsm, bio, cache_block);
-			issue(hsm, bio);
 			break;
 
 		case -ENODATA:
 			remap_to_origin(hsm, bio);
-			issue(hsm, bio);
+			r = DM_MAPIO_REMAPPED;
 			break;
 
 		default:
-			printk(KERN_ALERT "hsm_metadata_lookup failed");
-			bio_io_error(bio);
+			break;
 		}
-	} else
+	}
+
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
+static void process_discard(struct hsm_c *hsm, struct bio *bio)
+{
+	/* FIXME: finish */
+	bio_endio(bio, 0);
+}
+
+static void process_bio(struct hsm_c *hsm, struct bio *bio)
+{
+	int r = map_bio(hsm, bio);
+	switch (r) {
+	case DM_MAPIO_REMAPPED:
+		issue(hsm, bio);
+		break;
+
+	case DM_MAPIO_SUBMITTED:
+		break;
+
+	default:
 		bio_io_error(bio);
+		break;
+	}
 }
 
 static void process_bios(struct hsm_c *hsm)
@@ -536,61 +556,30 @@ static int hsm_map(struct dm_target *ti, struct bio *bio,
 {
 	int r;
 	struct hsm_c *hsm = ti->private;
-	dm_block_t block = get_bio_block(hsm, bio), cache_block;
-	struct cell_key key;
-	struct cell *cell;
 
 	track_bio(hsm, map_context, bio);
 
-	/*
-	 * Check to see if that block is currently migrating.
-	 */
-	key.virtual = 0;
-	key.dev = 0;
-	key.block = block;
-	r = bio_detain_if_occupied(&hsm->prison, &key, bio, &cell);
-	if (r > 0)
+	/* These may block, so we defer */
+	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
+		defer_bio(hsm, bio);
+		return DM_MAPIO_SUBMITTED;
+	}
+
+	r = map_bio(hsm, bio);
+	switch (r) {
+	case DM_MAPIO_SUBMITTED:
+	case DM_MAPIO_REMAPPED:
+		break;
+
+	case -EWOULDBLOCK:
+		defer_bio(hsm, bio);
 		r = DM_MAPIO_SUBMITTED;
+		break;
 
-	else if (r == 0) {
-		/* These may block, so we defer */
-		if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
-			defer_bio(hsm, bio);
-			r = DM_MAPIO_SUBMITTED;
-		} else {
-			r = hsm_metadata_lookup(hsm->hmd, block, 0, &cache_block);
-			switch (r) {
-			case 0:
-				if (bio_data_dir(bio) == WRITE) {
-					r = hsm_metadata_mark_dirty(hsm->hmd, block);
-					if (r) {
-						printk(KERN_ALERT "hsm_metadata_mark_dirty() failed");
-						bio_io_error(bio);
-					}
-				}
-				remap_to_cache(hsm, bio, cache_block);
-				r = DM_MAPIO_REMAPPED;
-				break;
-
-			case -ENODATA:
-				remap_to_origin(hsm, bio);
-				r = DM_MAPIO_REMAPPED;
-				break;
-
-			case -EWOULDBLOCK:
-				defer_bio(hsm, bio);
-				r = DM_MAPIO_SUBMITTED;
-				break;
-
-			default:
-				printk(KERN_ALERT "hsm_metadata_lookup failed");
-				bio_io_error(bio);
-				r = DM_MAPIO_SUBMITTED;
-			}
-		}
-	} else {
+	default:
 		bio_io_error(bio);
 		r = DM_MAPIO_SUBMITTED;
+		break;
 	}
 
 	return r;
