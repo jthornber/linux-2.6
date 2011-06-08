@@ -406,7 +406,10 @@ static int ll_dec(struct ll_disk *ll, dm_block_t b)
  * service any ll_disk operation.
  *--------------------------------------------------------------*/
 
-/* FIXME: we should calculate this based on the size of the device */
+/*
+ * FIXME: we should calculate this based on the size of the device.
+ * Only the metadata space map needs this functionality.
+ */
 #define MAX_RECURSIVE_ALLOCATIONS 1024
 
 struct sm_disk {
