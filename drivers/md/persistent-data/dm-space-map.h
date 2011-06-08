@@ -37,29 +37,17 @@ struct dm_space_map;
 struct dm_space_map_ops {
 	void (*destroy)(struct dm_space_map *sm);
 
-	/*
-	 * In order to use the shadowing optimisation the transaction
-	 * manager needs a guarantee that blocks freed within the current
-	 * transaction will not be recycled.  Due to memory pressure, this
-	 * guarantee may change as the transaction progresses, so the tm
-	 * calls this as part of every shadow op.
-	 */
-	int (*guarantees_no_recycling)(void *context);
-
 	int (*get_nr_blocks)(void *context, dm_block_t *count);
 	int (*get_nr_free)(void *context, dm_block_t *count);
 	int (*get_count)(void *context, dm_block_t b, uint32_t *result);
 	int (*set_count)(void *context, dm_block_t b, uint32_t count);
-	int (*get_free)(void *context, dm_block_t *b); /* doesn't increment the block */
-	int (*get_free_in_range)(void *context,
-				 dm_block_t low,
-				 dm_block_t high,
-				 dm_block_t *b); /* doesn't increment the block */
+
+	int (*begin)(void *context);
 	int (*commit)(void *context);
 
-	/* optional */
 	int (*inc_block)(void *context, dm_block_t b);
 	int (*dec_block)(void *context, dm_block_t b);
+
 	int (*new_block)(void *context, dm_block_t *b); /* increments the returned block */
 
 	/*
@@ -105,16 +93,9 @@ static inline int dm_sm_set_count(struct dm_space_map *sm, dm_block_t b,
 	return sm->ops->set_count(sm->context, b, count);
 }
 
-static inline int dm_sm_get_free(struct dm_space_map *sm, dm_block_t *b)
+static inline int dm_sm_begin(struct dm_space_map *sm)
 {
-	return sm->ops->get_free(sm->context, b);
-}
-
-static inline int dm_sm_get_free_in_range(struct dm_space_map *sm,
-					  dm_block_t low, dm_block_t high,
-					  dm_block_t *b)
-{
-	return sm->ops->get_free_in_range(sm->context, low, high, b);
+	return sm->ops->commit(sm->context);
 }
 
 static inline int dm_sm_commit(struct dm_space_map *sm)
@@ -165,16 +146,7 @@ static inline int dm_sm_dec_block(struct dm_space_map *sm, dm_block_t b)
 
 static inline int dm_sm_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
-	int r;
-
-	if (sm->ops->new_block)
-		return sm->ops->new_block(sm->context, b);
-
-	r = sm->ops->get_free(sm->context, b);
-	if (r < 0)
-		return r;
-
-	return sm->ops->set_count(sm->context, *b, 1);
+	return sm->ops->new_block(sm->context, b);
 }
 
 static inline int dm_sm_root_size(struct dm_space_map *sm, size_t *result)

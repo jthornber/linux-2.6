@@ -699,6 +699,7 @@ retry:
 					return -EWOULDBLOCK;
 				}
 
+				printk(KERN_ALERT "waiting for block %llu", (unsigned long long) block);
 				__wait_read_lockable(b, &flags);
 
 				if (b->where != block)
