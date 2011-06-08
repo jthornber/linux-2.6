@@ -405,9 +405,13 @@ static int ll_dec(struct ll_disk *ll, dm_block_t b)
  * For this reason we have a pool of pre-allocated blocks large enough to
  * service any ll_disk operation.
  *--------------------------------------------------------------*/
+
+/* FIXME: we should calculate this based on the size of the device */
 #define MAX_RECURSIVE_ALLOCATIONS 1024
 
 struct sm_disk {
+	struct dm_space_map sm;
+
 	struct ll_disk ll;
 	struct ll_disk old_ll;
 
@@ -441,30 +445,29 @@ static int recursing(struct sm_disk *smd)
 
 static void sm_disk_destroy(struct dm_space_map *sm)
 {
-	struct sm_disk *smd = (struct sm_disk *) sm->context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 	kfree(smd);
-	kfree(sm);
 }
 
-static int sm_disk_get_nr_blocks(void *context, dm_block_t *count)
+static int sm_disk_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
 {
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 	*count = smd->ll.nr_blocks;
 	return 0;
 }
 
-static int sm_disk_get_nr_free(void *context, dm_block_t *count)
+static int sm_disk_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 {
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	*count = (smd->old_ll.nr_blocks - smd->old_ll.nr_allocated) + smd->nr_uncommitted;
 	return 0;
 }
 
-static int sm_disk_get_count(void *context, dm_block_t b, uint32_t *result)
+static int sm_disk_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
 {
 	int i;
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	/* FIXME: remove */
 	for (i = 0; i < smd->nr_uncommitted; i++)
@@ -473,10 +476,10 @@ static int sm_disk_get_count(void *context, dm_block_t b, uint32_t *result)
 	return ll_lookup(&smd->ll, b, result);
 }
 
-static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
+static int sm_disk_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
 {
 	int r;
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	in(smd);
 	no_recurse(smd);
@@ -485,10 +488,10 @@ static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
 	return r;
 }
 
-static int sm_disk_inc_block(void *context, dm_block_t b)
+static int sm_disk_inc_block(struct dm_space_map *sm, dm_block_t b)
 {
 	int r;
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	in(smd);
 	no_recurse(smd);
@@ -497,10 +500,10 @@ static int sm_disk_inc_block(void *context, dm_block_t b)
 	return r;
 }
 
-static int sm_disk_dec_block(void *context, dm_block_t b)
+static int sm_disk_dec_block(struct dm_space_map *sm, dm_block_t b)
 {
 	int r;
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	in(smd);
 	no_recurse(smd);
@@ -509,10 +512,10 @@ static int sm_disk_dec_block(void *context, dm_block_t b)
 	return r;
 }
 
-static int sm_disk_new_block(void *context, dm_block_t *b)
+static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
 	int r;
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	r = ll_find_free_block(&smd->old_ll, smd->begin, smd->end, b);
 	if (r)
@@ -531,9 +534,9 @@ static int sm_disk_new_block(void *context, dm_block_t *b)
 	return r;
 }
 
-static int sm_disk_begin(void *context)
+static int sm_disk_begin(struct dm_space_map *sm)
 {
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	if(smd->nr_uncommitted) {
 		printk(KERN_ALERT "space map transaction already open");
@@ -546,10 +549,10 @@ static int sm_disk_begin(void *context)
 	return 0;
 }
 
-static int sm_disk_commit(void *context)
+static int sm_disk_commit(struct dm_space_map *sm)
 {
 	int r = 0;
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	in(smd);
 	while (smd->nr_uncommitted && !r)
@@ -559,15 +562,15 @@ static int sm_disk_commit(void *context)
 	return r;
 }
 
-static int sm_disk_root_size(void *context, size_t *result)
+static int sm_disk_root_size(struct dm_space_map *sm, size_t *result)
 {
 	*result = sizeof(struct sm_root);
 	return 0;
 }
 
-static int sm_disk_copy_root(void *context, void *where, size_t max)
+static int sm_disk_copy_root(struct dm_space_map *sm, void *where, size_t max)
 {
-	struct sm_disk *smd = (struct sm_disk *) context;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 	struct sm_root root;
 
 	printk(KERN_ALERT "smd copy_root");
@@ -587,7 +590,7 @@ static int sm_disk_copy_root(void *context, void *where, size_t max)
 
 /*----------------------------------------------------------------*/
 
-static struct dm_space_map_ops ops_ = {
+static struct dm_space_map ops_ = {
 	.destroy = sm_disk_destroy,
 	.get_nr_blocks = sm_disk_get_nr_blocks,
 	.get_nr_free = sm_disk_get_nr_free,
@@ -606,7 +609,6 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 				       dm_block_t nr_blocks)
 {
 	int r;
-	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd;
 
 	smd = kmalloc(sizeof(*smd), GFP_KERNEL);
@@ -619,15 +621,8 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 		return ERR_PTR(r);
 	}
 
-	sm = kmalloc(sizeof(*sm), GFP_KERNEL);
-	if (!sm) {
-		kfree(smd);
-		return ERR_PTR(-ENOMEM);
-	}
-	sm->ops = &ops_;
-	sm->context = smd;
-
-	return sm;
+	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
+	return &smd->sm;
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
@@ -635,7 +630,6 @@ struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 				     void *root, size_t len)
 {
 	int r;
-	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd;
 
 	smd = kmalloc(sizeof(*smd), GFP_KERNEL);
@@ -648,14 +642,7 @@ struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 		return ERR_PTR(r);
 	}
 
-	sm = kmalloc(sizeof(*sm), GFP_KERNEL);
-	if (!sm) {
-		kfree(smd);
-		return ERR_PTR(-ENOMEM);
-	}
-	sm->ops = &ops_;
-	sm->context = smd;
-
-	return sm;
+	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
+	return &smd->sm;
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_open);
