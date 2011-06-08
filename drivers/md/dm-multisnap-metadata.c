@@ -561,19 +561,19 @@ static int __create_snap(struct dm_multisnap_metadata *mmd,
 	mmd->time++;
 
 	r = __open_device(mmd, dev, 1, &msd);
-	if (r) {
-		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-		dm_btree_remove(&mmd->details_info, mmd->details_root,
-				&key, &mmd->details_root);
-	}
+	if (r)
+		goto bad;
 
 	r = __set_snapshot_details(mmd, msd, origin, mmd->time);
-	if (r) {
-		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
-		dm_btree_remove(&mmd->details_info, mmd->details_root,
-				&key, &mmd->details_root);
-	}
+	if (r)
+		goto bad;
 
+	return 0;
+
+bad:
+	dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+	dm_btree_remove(&mmd->details_info, mmd->details_root,
+			&key, &mmd->details_root);
 	return r;
 }
 
@@ -861,6 +861,8 @@ static int __write_changed_details(struct dm_multisnap_metadata *mmd)
 				list_del(&msd->list);
 				kfree(msd);
 			}
+
+			mmd->need_commit = 1;
 		}
 	}
 
@@ -877,16 +879,12 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	BUILD_BUG_ON(sizeof(struct multisnap_super_block) > 512);
 #endif
 
-	down_read(&mmd->root_lock);
-	if (!mmd->need_commit) {
-		up_read(&mmd->root_lock);
-		return 0;
-	}
-	up_read(&mmd->root_lock);
-
 	down_write(&mmd->root_lock);
 	r = __write_changed_details(mmd);
 	if (r < 0)
+		goto out;
+
+	if (!mmd->need_commit)
 		goto out;
 
 	r = dm_tm_pre_commit(mmd->tm);
