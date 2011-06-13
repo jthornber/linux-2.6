@@ -152,12 +152,28 @@ Always teardown the pool last.
                 <data block size in sectors>
                 <low water mark (sectors)>
 
-** Messages
+*** Status
+
+   <transaction id> <data free space in sectors> <metadata free space in sectors> <held metadata root>
+
+where,
+
+  - transaction id: A 64bit number used by userland to help
+    synchronise with metadata from volume managers.
+
+  - held metadata root.  The location, in sectors, of the metadata
+    root that has been 'held' for userland read access.  '-' indicates
+    there is no root.
+
+*** Messages
 
  new-thin <dev id> <dev size in sectors>
  new-snap <dev id> <origin id>
  del      <dev id>
+
  trans-id <dev id> <current id> <new id>
+
+   Fails if 'current id' is incorrect.
 
 ** multisnap target
 
@@ -165,3 +181,7 @@ Always teardown the pool last.
 
  pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  dev id: the internal device identifier (32bit value)
+
+*** Status
+
+ <nr mapped blocks>
