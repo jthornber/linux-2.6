@@ -179,7 +179,9 @@ int dm_tm_alloc_block(struct dm_transaction_manager *tm, dm_block_t *new_block)
 }
 EXPORT_SYMBOL_GPL(dm_tm_alloc_block);
 
-int dm_tm_new_block(struct dm_transaction_manager *tm, struct dm_block **result)
+int dm_tm_new_block(struct dm_transaction_manager *tm,
+		    struct dm_block_validator *v,
+		    struct dm_block **result)
 {
 	int r;
 	dm_block_t new_block;
@@ -191,7 +193,7 @@ int dm_tm_new_block(struct dm_transaction_manager *tm, struct dm_block **result)
 	if (r < 0)
 		return r;
 
-	r = dm_bm_write_lock_zero(tm->bm, new_block, result);
+	r = dm_bm_write_lock_zero(tm->bm, new_block, v, result);
 	if (r < 0) {
 		dm_sm_dec_block(tm->sm, new_block);
 		return r;
@@ -208,6 +210,7 @@ int dm_tm_new_block(struct dm_transaction_manager *tm, struct dm_block **result)
 EXPORT_SYMBOL_GPL(dm_tm_new_block);
 
 static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
+			  struct dm_block_validator *v,
 			  struct dm_block **result, int *inc_children)
 {
 	int r;
@@ -221,14 +224,14 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		return r;
 	}
 
-	r = dm_bm_write_lock_zero(tm->bm, new, result);
+	r = dm_bm_write_lock_zero(tm->bm, new, v, result);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow 2");
 		dm_sm_dec_block(tm->sm, new);
 		return r;
 	}
 
-	r = dm_bm_read_lock(tm->bm, orig, &orig_block);
+	r = dm_bm_read_lock(tm->bm, orig, v, &orig_block);
 	if (r < 0) {
 		dm_sm_dec_block(tm->sm, new);
 		return r;
@@ -264,6 +267,7 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 int
 dm_tm_shadow_block(struct dm_transaction_manager *tm,
 		   dm_block_t orig,
+		   struct dm_block_validator *v,
 		   struct dm_block **result,
 		   int *inc_children)
 {
@@ -280,14 +284,14 @@ dm_tm_shadow_block(struct dm_transaction_manager *tm,
 			return r;
 		if (count < 2) {
 			*inc_children = 0;
-			return dm_bm_write_lock(tm->bm, orig, result);
+			return dm_bm_write_lock(tm->bm, orig, v, result);
 		}
 		/* fall through */
 	}
 
 	// putting a printk here reveals a bug
 	//printk(KERN_ALERT "shadows = %u", ++shadows);
-	r = __shadow_block(tm, orig, result, inc_children);
+	r = __shadow_block(tm, orig, v, result, inc_children);
 	if (r < 0)
 		return r;
 	tm->shadow_count++;
@@ -298,12 +302,13 @@ dm_tm_shadow_block(struct dm_transaction_manager *tm,
 EXPORT_SYMBOL_GPL(dm_tm_shadow_block);
 
 int dm_tm_read_lock(struct dm_transaction_manager *tm, dm_block_t b,
+		    struct dm_block_validator *v,
 		    struct dm_block **blk)
 {
 	if (tm->is_clone)
-		return dm_bm_read_try_lock(tm->real->bm, b, blk);
+		return dm_bm_read_try_lock(tm->real->bm, b, v, blk);
 
-	return dm_bm_read_lock(tm->bm, b, blk);
+	return dm_bm_read_lock(tm->bm, b, v, blk);
 }
 EXPORT_SYMBOL_GPL(dm_tm_read_lock);
 
@@ -347,6 +352,7 @@ EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 /*----------------------------------------------------------------*/
 
 int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
+			 struct dm_block_validator *sb_validator,
 			 struct dm_transaction_manager **tm,
 			 struct dm_space_map **sm, struct dm_block **sblock)
 {
@@ -376,7 +382,7 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		return r;
 	}
 
-	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sblock);
+	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
 		return r;
@@ -403,6 +409,7 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 EXPORT_SYMBOL_GPL(dm_tm_create_with_sm);
 
 int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
+		       struct dm_block_validator *sb_validator,
 		       size_t root_offset, size_t root_max_len,
 		       struct dm_transaction_manager **tm,
 		       struct dm_space_map **sm, struct dm_block **sblock)
@@ -437,7 +444,7 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		goto fail_tm;
 	}
 
-	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sblock);
+	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
 		goto fail_tm;
