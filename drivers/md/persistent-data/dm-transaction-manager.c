@@ -264,12 +264,9 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 	return 0;
 }
 
-int
-dm_tm_shadow_block(struct dm_transaction_manager *tm,
-		   dm_block_t orig,
-		   struct dm_block_validator *v,
-		   struct dm_block **result,
-		   int *inc_children)
+int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
+		       struct dm_block_validator *v, struct dm_block **result,
+		       int *inc_children)
 {
 	int r;
 	uint32_t count;
