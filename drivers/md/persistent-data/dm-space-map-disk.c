@@ -5,14 +5,18 @@
 #include "dm-space-map-disk.h"
 #include "dm-btree-internal.h"
 
-/*----------------------------------------------------------------
- * Low level disk format
- *
- * We hold 2 bits per block, which represent UNUSED = 0, REF_COUNT = 1,
- * REF_COUNT = 2 and REF_COUNT = many.  A separate btree holds ref counts
- * for blocks that are over 2.
- *--------------------------------------------------------------*/
-struct ll_disk {
+/*----------------------------------------------------------------*/
+
+/* on disk data */
+struct sm_root {
+	__le64 nr_blocks;
+	__le64 nr_allocated;
+	__le64 bitmap_root;
+	__le64 ref_count_root;
+};
+
+/* FIXME: add a spinlock to protect the in core structure */
+struct sm_disk {
 	struct dm_transaction_manager *tm;
 
 	struct dm_btree_info bitmap_info;
@@ -32,15 +36,7 @@ struct index_entry {
         __le32 none_free_before;
 };
 
-struct sm_root {
-	__le64 nr_blocks;
-	__le64 nr_allocated;
-	__le64 bitmap_root;
-	__le64 ref_count_root;
-};
-
 #define ENTRIES_PER_BYTE 4
-#define ENTRIES_PER_WORD 32
 
 /*----------------------------------------------------------------*/
 
@@ -56,11 +52,19 @@ static uint64_t mod64(uint64_t n, uint64_t d)
 	return do_div(n, d);
 }
 
+/*
+ * On disk format
+ *
+ * We hold 2 bits per block, which represent UNUSED = 0, REF_COUNT = 1,
+ * REF_COUNT = 2 and REF_COUNT = many.  A separate btree holds ref counts
+ * for blocks that are over 2.
+ */
+#define ENTRIES_PER_WORD 32
 static unsigned __lookup_bitmap(void *addr, dm_block_t b)
 {
 	unsigned val = 0;
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+	__le64 *w = words + (b / ENTRIES_PER_WORD);
 	b %= ENTRIES_PER_WORD;
 
 	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
@@ -72,7 +76,7 @@ static unsigned __lookup_bitmap(void *addr, dm_block_t b)
 static void __set_bitmap(void *addr, dm_block_t b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: use shift */
+	__le64 *w = words + (b / ENTRIES_PER_WORD);
 	b %= ENTRIES_PER_WORD;
 
 	if (val & 2)
@@ -86,13 +90,13 @@ static void __set_bitmap(void *addr, dm_block_t b, unsigned val)
 		__clear_bit_le(b * 2 + 1, (void *) w);
 }
 
-static int ie_find_free(void *addr, unsigned begin, unsigned end,
-			unsigned *result)
+static int __find_free(void *addr, unsigned begin, unsigned end,
+		       unsigned *position)
 {
 	/* FIXME: slow, find a quicker way in Hackers Delight */
 	while (begin < end) {
 		if (!__lookup_bitmap(addr, begin)) {
-			*result = begin;
+			*position = begin;
 			return 0;
 		}
 		begin++;
@@ -101,7 +105,22 @@ static int ie_find_free(void *addr, unsigned begin, unsigned end,
 	return -ENOSPC;
 }
 
-static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
+static inline dm_block_t min_block(dm_block_t b1, dm_block_t b2)
+{
+	return (b1 <= b2) ? b1 : b2;
+}
+
+static inline dm_block_t max_block(dm_block_t b1, dm_block_t b2)
+{
+	return (b1 >= b2) ? b1 : b2;
+}
+
+static struct sm_disk *alloc_smd(struct dm_transaction_manager *tm)
+{
+	return kmalloc(sizeof(struct sm_disk), GFP_KERNEL);
+}
+
+static int io_init(struct sm_disk *io, struct dm_transaction_manager *tm)
 {
 	io->tm = tm;
 	io->bitmap_info.tm = tm;
@@ -131,7 +150,7 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 		printk(KERN_ALERT "block size too big to hold bitmaps");
 		return -EINVAL;
 	}
-	io->entries_per_block = io->block_size * ENTRIES_PER_BYTE;
+	io->entries_per_block = io->block_size * 4;
 	io->nr_blocks = 0;
 	io->bitmap_root = 0;
 	io->ref_count_root = 0;
@@ -139,14 +158,14 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 	return 0;
 }
 
-static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm,
+static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm,
 		  dm_block_t nr_blocks)
 {
 	int r;
 	dm_block_t i;
 	unsigned blocks;
 
-	r = ll_init(io, tm);
+	r = io_init(io, tm);
 	if (r < 0)
 		return r;
 
@@ -188,7 +207,7 @@ static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm,
 	return 0;
 }
 
-static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
+static int io_open(struct sm_disk *io, struct dm_transaction_manager *tm,
 		   void *root, size_t len)
 {
 	int r;
@@ -199,24 +218,23 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		return -ENOMEM;
 	}
 
-	r = ll_init(ll, tm);
+	r = io_init(io, tm);
 	if (r < 0)
 		return r;
 
-	ll->nr_blocks = __le64_to_cpu(smr->nr_blocks);
-	ll->nr_allocated = __le64_to_cpu(smr->nr_allocated);
-	ll->bitmap_root = __le64_to_cpu(smr->bitmap_root);
-	ll->ref_count_root = __le64_to_cpu(smr->ref_count_root);
+	io->nr_blocks = __le64_to_cpu(smr->nr_blocks);
+	io->nr_allocated = __le64_to_cpu(smr->nr_allocated);
+	io->bitmap_root = __le64_to_cpu(smr->bitmap_root);
+	io->ref_count_root = __le64_to_cpu(smr->ref_count_root);
 
 	return 0;
 }
 
-static int ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
+static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 {
 	int r;
 	dm_block_t index = b;
 	struct index_entry ie;
-	struct dm_block *blk;
 
 	do_div(index, io->entries_per_block);
 
@@ -224,15 +242,19 @@ static int ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
-	if (r < 0)
-		return r;
+	{
+		struct dm_block *blk;
+		r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
+		if (r < 0)
+			return r;
 
-	*result = __lookup_bitmap(dm_block_data(blk),
-				  mod64(b, io->entries_per_block));
-	r = dm_tm_unlock(io->tm, blk);
-	if (r < 0)
-		return r;
+		*result = __lookup_bitmap(dm_block_data(blk),
+					  mod64(b, io->entries_per_block));
+		r = dm_tm_unlock(io->tm, blk);
+		if (r < 0) {
+			return r;
+		}
+	}
 
 	if (*result == 3) {
 		__le32 le_rc;
@@ -247,8 +269,8 @@ static int ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	return 0;
 }
 
-static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
-			      dm_block_t end, dm_block_t *result)
+static int io_find_unused(struct sm_disk *io, dm_block_t begin,
+			  dm_block_t end, dm_block_t *result)
 {
 	int r;
 	struct index_entry ie;
@@ -264,6 +286,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 		if (__le32_to_cpu(ie.nr_free) > 0) {
 			struct dm_block *blk;
 			unsigned position;
+
 			uint32_t bit_end = (i == index_end - 1) ?
 				mod64(end, io->entries_per_block) :
 				io->entries_per_block;
@@ -272,19 +295,21 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = ie_find_free(dm_block_data(blk),
-					 mod64(begin, io->entries_per_block),
-					 bit_end, &position);
+			r = __find_free(dm_block_data(blk),
+					mod64(begin, io->entries_per_block),
+					bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(io->tm, blk);
 				return r;
 			}
 
+			*result = i * io->entries_per_block + position;
+
 			r = dm_tm_unlock(io->tm, blk);
 			if (r < 0)
 				return r;
 
-			*result += i * io->entries_per_block + (dm_block_t) position;
+			BUG_ON(*result >= io->nr_blocks);
 			return 0;
 		}
 	}
@@ -292,7 +317,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 	return -ENOSPC;
 }
 
-static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
+static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 {
 	int r;
 	uint32_t bit, old;
@@ -331,7 +356,6 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
 		__set_bitmap(bm, bit, 3);
-		printk(KERN_ALERT "ref_count_root = %llu", (unsigned long long) io->ref_count_root);
 		r = dm_btree_insert(&io->ref_count_info, io->ref_count_root,
 				    &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
@@ -355,7 +379,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	} else if (old && !ref_count) {
 		io->nr_allocated--;
 		ie.nr_free = __cpu_to_le32(__le32_to_cpu(ie.nr_free) + 1);
-		ie.none_free_before = __cpu_to_le32(min((dm_block_t) __le32_to_cpu(ie.none_free_before), b));
+		ie.none_free_before = __cpu_to_le32(min_block(__le32_to_cpu(ie.none_free_before), b));
 	}
 
 	/*
@@ -371,217 +395,97 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	return 0;
 }
 
-static int ll_inc(struct ll_disk *ll, dm_block_t b)
-{
-	int r;
-	uint32_t rc;
-
-	r = ll_lookup(ll, b, &rc);
-	if (r)
-		return r;
-
-	return ll_insert(ll, b, rc + 1);
-}
-
-static int ll_dec(struct ll_disk *ll, dm_block_t b)
-{
-	int r;
-	uint32_t rc;
-
-	r = ll_lookup(ll, b, &rc);
-	if (r)
-		return r;
-
-	BUG_ON(!rc);
-	return ll_insert(ll, b, rc - 1);
-}
-
-/*----------------------------------------------------------------
- * Space map interface.
- *
- * The low level disk format is written using the standard btree and
- * transaction manager.  This means that performing disk operations may
- * cause us to recurse into the space map in order to allocate new blocks.
- * For this reason we have a pool of pre-allocated blocks large enough to
- * service any ll_disk operation.
- *--------------------------------------------------------------*/
-
-/*
- * FIXME: we should calculate this based on the size of the device.
- * Only the metadata space map needs this functionality.
- */
-#define MAX_RECURSIVE_ALLOCATIONS 1024
-
-struct sm_disk {
-	struct dm_space_map sm;
-
-	struct ll_disk ll;
-	struct ll_disk old_ll;
-
-	dm_block_t begin, end;
-
-	unsigned recursion_count;
-	unsigned nr_uncommitted;
-	dm_block_t uncommitted[MAX_RECURSIVE_ALLOCATIONS];
-};
-
-static void in(struct sm_disk *smd)
-{
-	smd->recursion_count++;
-}
-
-static void out(struct sm_disk *smd)
-{
-	BUG_ON(!smd->recursion_count);
-	smd->recursion_count--;
-}
-
-static void no_recurse(struct sm_disk *smd)
-{
-	BUG_ON(smd->recursion_count);
-}
-
-static int recursing(struct sm_disk *smd)
-{
-	return smd->recursion_count;
-}
+/*----------------------------------------------------------------*/
 
 static void sm_disk_destroy(struct dm_space_map *sm)
 {
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	kfree(smd);
+	kfree(sm->context);
+	kfree(sm);
 }
 
-static int sm_disk_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
+static int sm_disk_get_nr_blocks(void *context, dm_block_t *count)
 {
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	*count = smd->ll.nr_blocks;
+	struct sm_disk *smd = (struct sm_disk *) context;
+
+	*count = smd->nr_blocks;
 	return 0;
 }
 
-static int sm_disk_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
+static int sm_disk_get_nr_free(void *context, dm_block_t *count)
 {
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+	struct sm_disk *smd = (struct sm_disk *) context;
 
-	*count = (smd->old_ll.nr_blocks - smd->old_ll.nr_allocated) + smd->nr_uncommitted;
+	*count = smd->nr_blocks - smd->nr_allocated;
 	return 0;
 }
 
-static int sm_disk_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
+static int sm_disk_get_count(void *context, dm_block_t b, uint32_t *result)
 {
-	int i;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	/* FIXME: remove */
-	for (i = 0; i < smd->nr_uncommitted; i++)
-		BUG_ON(smd->uncommitted[i] == b);
-
-	return ll_lookup(&smd->ll, b, result);
+	struct sm_disk *smd = (struct sm_disk *) context;
+	return io_lookup(smd, b, result);
 }
 
-static int sm_disk_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
+static int sm_disk_set_count(void *context, dm_block_t b, uint32_t count)
 {
-	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	in(smd);
-	no_recurse(smd);
-	r = ll_insert(&smd->ll, b, count);
-	out(smd);
-	return r;
+	struct sm_disk *smd = (struct sm_disk *) context;
+	return io_insert(smd, b, count);
 }
 
-static int sm_disk_inc_block(struct dm_space_map *sm, dm_block_t b)
+static int __get_free(void *context, dm_block_t low, dm_block_t high,
+		      dm_block_t *b)
 {
+	struct sm_disk *smd = (struct sm_disk *) context;
 	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
-	in(smd);
-	no_recurse(smd);
-	r = ll_inc(&smd->ll, b);
-	out(smd);
-	return r;
-}
+	high = min(high, smd->nr_blocks);
+	if (low >= high)
+		return -ENOSPC;
 
-static int sm_disk_dec_block(struct dm_space_map *sm, dm_block_t b)
-{
-	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	in(smd);
-	no_recurse(smd);
-	r = ll_dec(&smd->ll, b);
-	out(smd);
-	return r;
-}
-
-static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
-{
-	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	r = ll_find_free_block(&smd->old_ll, smd->begin, smd->end, b);
-	if (r)
+	r = io_find_unused(smd, low, high, b);
+	if (r == -ENODATA)
+		return -ENOSPC;
+	else if (r < 0)
 		return r;
 
-	if (recursing(smd)) {
-		BUG_ON(smd->nr_uncommitted == MAX_RECURSIVE_ALLOCATIONS);
-		smd->uncommitted[smd->nr_uncommitted++] = *b;
-
-	} else {
-		in(smd);
-		r = ll_inc(&smd->ll, *b);
-		out(smd);
-	}
-
-	return r;
-}
-
-static int sm_disk_begin(struct dm_space_map *sm)
-{
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	if(smd->nr_uncommitted) {
-		printk(KERN_ALERT "space map transaction already open");
-		return -EBUSY;
-	}
-
-	memcpy(&smd->old_ll, &smd->ll, sizeof(smd->old_ll));
-	smd->begin = 0;
-	smd->end = smd->ll.nr_blocks;
 	return 0;
 }
 
-static int sm_disk_commit(struct dm_space_map *sm)
+static int sm_disk_get_free(void *context, dm_block_t *b)
 {
-	int r = 0;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	in(smd);
-	while (smd->nr_uncommitted && !r)
-		r = ll_inc(&smd->ll, smd->uncommitted[smd->nr_uncommitted--]);
-	out(smd);
-
-	return r;
+	struct sm_disk *smd = (struct sm_disk *) context;
+	return __get_free(context, 0, smd->nr_blocks, b);
 }
 
-static int sm_disk_root_size(struct dm_space_map *sm, size_t *result)
+static int sm_disk_get_free_in_range(void *context, dm_block_t low,
+				     dm_block_t high, dm_block_t *b)
+{
+	return __get_free(context, low, high, b);
+}
+
+static int sm_disk_commit(void *context)
+{
+	/*
+	 * We don't need to do anything here other than drop all held block
+	 * locks.
+	 */
+	return 0;
+}
+
+static int sm_disk_root_size(void *context, size_t *result)
 {
 	*result = sizeof(struct sm_root);
 	return 0;
 }
 
-static int sm_disk_copy_root(struct dm_space_map *sm, void *where, size_t max)
+static int sm_disk_copy_root(void *context, void *where, size_t max)
 {
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+	struct sm_disk *smd = (struct sm_disk *) context;
 	struct sm_root root;
 
-	printk(KERN_ALERT "smd copy_root");
-
-	root.nr_blocks = __cpu_to_le64(smd->ll.nr_blocks);
-	root.nr_allocated = __cpu_to_le64(smd->ll.nr_allocated);
-	root.bitmap_root = __cpu_to_le64(smd->ll.bitmap_root);
-	root.ref_count_root = __cpu_to_le64(smd->ll.ref_count_root);
+	root.nr_blocks = __cpu_to_le64(smd->nr_blocks);
+	root.nr_allocated = __cpu_to_le64(smd->nr_allocated);
+	root.bitmap_root = __cpu_to_le64(smd->bitmap_root);
+	root.ref_count_root = __cpu_to_le64(smd->ref_count_root);
 
 	if (max < sizeof(root))
 		return -ENOSPC;
@@ -593,16 +497,14 @@ static int sm_disk_copy_root(struct dm_space_map *sm, void *where, size_t max)
 
 /*----------------------------------------------------------------*/
 
-static struct dm_space_map ops_ = {
+static struct dm_space_map_ops ops_ = {
 	.destroy = sm_disk_destroy,
 	.get_nr_blocks = sm_disk_get_nr_blocks,
 	.get_nr_free = sm_disk_get_nr_free,
 	.get_count = sm_disk_get_count,
 	.set_count = sm_disk_set_count,
-	.inc_block = sm_disk_inc_block,
-	.dec_block = sm_disk_dec_block,
-	.new_block = sm_disk_new_block,
-	.begin = sm_disk_begin,
+	.get_free = sm_disk_get_free,
+	.get_free_in_range = sm_disk_get_free_in_range,
 	.commit = sm_disk_commit,
 	.root_size = sm_disk_root_size,
 	.copy_root = sm_disk_copy_root
@@ -612,20 +514,28 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 				       dm_block_t nr_blocks)
 {
 	int r;
+	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd;
 
-	smd = kmalloc(sizeof(*smd), GFP_KERNEL);
+	smd = alloc_smd(tm);
 	if (!smd)
 		return ERR_PTR(-ENOMEM);
 
-	r = ll_new(&smd->ll, tm, nr_blocks);
+	r = io_new(smd, tm, nr_blocks);
 	if (r < 0) {
 		kfree(smd);
 		return ERR_PTR(r);
 	}
 
-	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
-	return &smd->sm;
+	sm = kmalloc(sizeof(*sm), GFP_KERNEL);
+	if (!sm) {
+		kfree(smd);
+		return ERR_PTR(-ENOMEM);
+	}
+	sm->ops = &ops_;
+	sm->context = smd;
+
+	return sm;
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
@@ -633,19 +543,27 @@ struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 				     void *root, size_t len)
 {
 	int r;
+	struct dm_space_map *sm = NULL;
 	struct sm_disk *smd;
 
-	smd = kmalloc(sizeof(*smd), GFP_KERNEL);
+	smd = alloc_smd(tm);
 	if (!smd)
 		return ERR_PTR(-ENOMEM);
 
-	r = ll_open(&smd->ll, tm, root, len);
+	r = io_open(smd, tm, root, len);
 	if (r < 0) {
 		kfree(smd);
 		return ERR_PTR(r);
 	}
 
-	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
-	return &smd->sm;
+	sm = kmalloc(sizeof(*sm), GFP_KERNEL);
+	if (!sm) {
+		kfree(smd);
+		return ERR_PTR(-ENOMEM);
+	}
+	sm->ops = &ops_;
+	sm->context = smd;
+
+	return sm;
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_open);
