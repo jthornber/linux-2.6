@@ -30,15 +30,30 @@ dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
  */
 
 /*
+ * The validator allows the caller to verify newly read data, and modify
+ * the data just before writing.  eg, to calculate checksums.  It's
+ * important to be consistent with your use of validators.  The only time
+ * you can change validators is if you call dm_bm_write_lock_zero.
+ */
+struct dm_block_validator {
+	void (*prepare_for_write)(struct dm_block_validator *v, struct dm_block *b);
+
+	/* return 0 if valid, < 0 on error */
+	int (*check)(struct dm_block_validator *v, struct dm_block *b);
+};
+
+/*
  * dm_bm_lock() locks a block, and returns via |data| a pointer to memory that
  * holds a copy of that block.  If you have write locked the block then any
  * changes you make to memory pointed to by |data| will be written back to
  * the disk sometime after dm_bm_unlock is called.
  */
 int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
+		    struct dm_block_validator *v,
 		    struct dm_block **result);
 
 int dm_bm_write_lock(struct dm_block_manager *bm, dm_block_t b,
+		     struct dm_block_validator *v,
 		     struct dm_block **result);
 
 /*
@@ -46,6 +61,7 @@ int dm_bm_write_lock(struct dm_block_manager *bm, dm_block_t b,
  * immediately available.
  */
 int dm_bm_read_try_lock(struct dm_block_manager *bm, dm_block_t b,
+			struct dm_block_validator *v,
 			struct dm_block **result);
 
 /*
@@ -53,6 +69,7 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm, dm_block_t b,
  * overwrite the block.  It saves a disk read.
  */
 int dm_bm_write_lock_zero(struct dm_block_manager *bm, dm_block_t b,
+			  struct dm_block_validator *v,
 			  struct dm_block **result);
 
 int dm_bm_unlock(struct dm_block *b);

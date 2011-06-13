@@ -27,6 +27,7 @@ struct dm_block {
 	struct hlist_node hlist;
 
 	dm_block_t where;
+	struct dm_block_validator *validator;
 	void *data_actual;
 	void *data;
 	wait_queue_head_t io_q;
@@ -154,6 +155,7 @@ static void __transition(struct dm_block *b, enum dm_block_state new_state)
 		b->write_lock_pending = 0;
 		b->read_lock_count = 0;
 		b->io_flags = 0;
+		b->validator = NULL;
 
 		if (b->state == BS_ERROR)
 			bm->available_count++;
@@ -310,6 +312,9 @@ static void read_block(struct dm_block *b)
 
 static void write_block(struct dm_block *b)
 {
+	if (b->validator)
+		b->validator->prepare_for_write(b->validator, b);
+
 	submit_io(b, WRITE | b->io_flags, complete_io);
 }
 
@@ -495,6 +500,11 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 			__transition(b, BS_EMPTY);
 			ret = -EIO;
 		}
+
+		if (b->validator && b->validator->check(b->validator, b)) {
+			__transition(b, BS_EMPTY);
+			ret = -EILSEQ;
+		}
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
 
@@ -540,6 +550,7 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 		kfree(b);
 		return NULL;
 	}
+	b->validator = NULL;
 	b->data = align(b->data_actual, SECTOR_SIZE);
 	b->state = BS_EMPTY;
 	init_waitqueue_head(&b->io_q);
@@ -679,6 +690,7 @@ EXPORT_SYMBOL_GPL(dm_bm_nr_blocks);
 
 static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 			 int how, int need_read, int can_block,
+			 struct dm_block_validator *v,
 			 struct dm_block **result)
 {
 	int ret = 0;
@@ -689,6 +701,12 @@ static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 retry:
 	b = __find_block(bm, block);
 	if (b) {
+		if (b->validator && need_read && (v != b->validator)) {
+			printk(KERN_ALERT "validator mismatch");
+			spin_unlock_irqrestore(&bm->lock, flags);
+			return -EINVAL;
+		}
+
 		switch (how) {
 		case READ:
 			if (b->write_lock_pending || (b->state != BS_CLEAN &&
@@ -766,31 +784,35 @@ retry:
 	return ret;
 }
 
-int dm_bm_read_lock(struct dm_block_manager *bm,
-		    dm_block_t b, struct dm_block **result)
+int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
+		    struct dm_block_validator *v,
+		    struct dm_block **result)
 {
-	return lock_internal(bm, b, READ, 1, 1, result);
+	return lock_internal(bm, b, READ, 1, 1, v, result);
 }
 EXPORT_SYMBOL_GPL(dm_bm_read_lock);
 
 int dm_bm_write_lock(struct dm_block_manager *bm,
-		     dm_block_t b, struct dm_block **result)
+		     dm_block_t b, struct dm_block_validator *v,
+		     struct dm_block **result)
 {
-	return lock_internal(bm, b, WRITE, 1, 1, result);
+	return lock_internal(bm, b, WRITE, 1, 1, v, result);
 }
 EXPORT_SYMBOL_GPL(dm_bm_write_lock);
 
 int dm_bm_read_try_lock(struct dm_block_manager *bm,
-			dm_block_t b, struct dm_block **result)
+			dm_block_t b, struct dm_block_validator *v,
+			struct dm_block **result)
 {
-	return lock_internal(bm, b, READ, 1, 0, result);
+	return lock_internal(bm, b, READ, 1, 0, v, result);
 }
 EXPORT_SYMBOL_GPL(dm_bm_read_try_lock);
 
 int dm_bm_write_lock_zero(struct dm_block_manager *bm,
-			  dm_block_t b, struct dm_block **result)
+			  dm_block_t b, struct dm_block_validator *v,
+			  struct dm_block **result)
 {
-	return lock_internal(bm, b, WRITE, 0, 1, result);
+	return lock_internal(bm, b, WRITE, 0, 1, v, result);
 }
 EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
