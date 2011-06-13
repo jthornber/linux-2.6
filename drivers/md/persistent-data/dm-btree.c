@@ -113,7 +113,6 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root)
 	n->header.flags = __cpu_to_le32(LEAF_NODE);
 	n->header.nr_entries = __cpu_to_le32(0);
 	n->header.max_entries =	__cpu_to_le32(max_entries);
-	n->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
 
 	*root = dm_block_location(b);
 	return bn_unlock(info, b);
@@ -179,7 +178,7 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 			return r;
 		}
 
-		f->n = to_node(f->b);
+		f->n = dm_block_data(f->b);
 		f->level = level;
 		f->nr_children = __le32_to_cpu(f->n->header.nr_entries);
 		f->current_child = 0;
@@ -455,7 +454,7 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	if (ret < 0)
 		return ret;
 
-	l = to_node(left);
+	l = dm_block_data(left);
 	r = (struct node *) dm_block_data(right);
 
 	nr_left = __le32_to_cpu(l->header.nr_entries) / 2;
@@ -466,7 +465,6 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	r->header.flags = l->header.flags;
 	r->header.nr_entries = __cpu_to_le32(nr_right);
 	r->header.max_entries = l->header.max_entries;
-	r->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
 	memcpy(r->keys, l->keys + nr_left, nr_right * sizeof(r->keys[0]));
 
 	size = __le32_to_cpu(l->header.flags) & INTERNAL_NODE ?
@@ -478,7 +476,7 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	parent = shadow_parent(s);
 	BUG_ON(!parent);
 
-	p = to_node(parent);
+	p = dm_block_data(parent);
 	location = __cpu_to_le64(dm_block_location(left));
 	memcpy(value_ptr(p, parent_index, sizeof(__le64)),
 	       &location, sizeof(__le64));
@@ -541,7 +539,7 @@ static int btree_split_beneath(struct shadow_spine *s, dm_block_t root, uint64_t
 		return ret;
 	}
 
-	p = to_node(new_parent);
+	p = dm_block_data(new_parent);
 	l = (struct node *) dm_block_data(left);
 	r = (struct node *) dm_block_data(right);
 
@@ -551,12 +549,10 @@ static int btree_split_beneath(struct shadow_spine *s, dm_block_t root, uint64_t
 	l->header.flags = p->header.flags;
 	l->header.nr_entries = __cpu_to_le32(nr_left);
 	l->header.max_entries = p->header.max_entries;
-	l->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
 
 	r->header.flags = p->header.flags;
 	r->header.nr_entries = __cpu_to_le32(nr_right);
 	r->header.max_entries = p->header.max_entries;
-	r->header.magic = __cpu_to_le32(BTREE_NODE_MAGIC);
 
 	memcpy(l->keys, p->keys, nr_left * sizeof(p->keys[0]));
 	memcpy(r->keys, p->keys + nr_left, nr_right * sizeof(p->keys[0]));
@@ -616,12 +612,12 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 		 */
 		if (shadow_parent(s) && i >= 0) { /* FIXME: second clause unness. */
 			__le64 location = __cpu_to_le64(dm_block_location(shadow_current(s)));
-			memcpy(value_ptr(to_node(shadow_parent(s)), i, sizeof(uint64_t)),
+			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
 			       &location, sizeof(__le64));
 		}
 
 		BUG_ON(!shadow_current(s));
-		node = to_node(shadow_current(s));
+		node = dm_block_data(shadow_current(s));
 #if 0
 		/* FIXME: put this in */
 		if (inc)
@@ -641,7 +637,7 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 		}
 
 		BUG_ON(!shadow_current(s));
-		node = to_node(shadow_current(s));
+		node = dm_block_data(shadow_current(s));
 
 		i = lower_bound(node, key);
 
@@ -702,7 +698,7 @@ int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 		}
 
 		BUG_ON(!shadow_current(&spine));
-		n = to_node(shadow_current(&spine));
+		n = dm_block_data(shadow_current(&spine));
 		need_insert = ((index >= __le32_to_cpu(n->header.nr_entries)) ||
 			       (__le64_to_cpu(n->keys[index]) != keys[level]));
 
@@ -773,7 +769,7 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 
 	*clone = dm_block_location(b);
 	b_node = (struct node *) dm_block_data(b);
-	orig_node = to_node(orig_b);
+	orig_node = dm_block_data(orig_b);
 
 	memcpy(b_node, orig_node,
 	       dm_bm_block_size(dm_tm_get_bm(info->tm)));

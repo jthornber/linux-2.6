@@ -34,7 +34,7 @@ int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 
 	r = dm_tm_shadow_block(info->tm, orig, &btree_node_validator, result, inc);
 	if (r == 0 && *inc)
-		inc_children(info->tm, to_node(*result), vt);
+		inc_children(info->tm, dm_block_data(*result), vt);
 
 	return r;
 }
@@ -96,7 +96,7 @@ struct node *ro_node(struct ro_spine *s)
 	struct dm_block *n;
 	BUG_ON(!s->count);
 	n = s->nodes[s->count - 1];
-	return to_node(n);
+	return dm_block_data(n);
 }
 
 /*----------------------------------------------------------------*/

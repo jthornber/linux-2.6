@@ -150,7 +150,7 @@ static int init_child(struct dm_btree_info *info, struct node *parent,
 	if (r)
 		return r;
 
-	result->n = to_node(result->block);
+	result->n = dm_block_data(result->block);
 	if (inc)
 		inc_children(info->tm, result->n, &internal_type_);
 	return 0;
@@ -223,7 +223,7 @@ static int rebalance2(struct shadow_spine *s, struct dm_btree_info *info,
 	struct node *parent;
 	struct child left, right;
 
-	parent = to_node(shadow_current(s));
+	parent = dm_block_data(shadow_current(s));
 
 	r = init_child(info, parent, left_index, &left);
 	if (r)
@@ -320,7 +320,7 @@ static int rebalance3(struct shadow_spine *s, struct dm_btree_info *info,
 		      unsigned left_index)
 {
 	int r;
-	struct node *parent = to_node(shadow_current(s));
+	struct node *parent = dm_block_data(shadow_current(s));
 	struct child left, center, right;
 
 	/* FIXME: fill out an array? */
@@ -374,7 +374,7 @@ static int get_nr_entries(struct dm_transaction_manager *tm,
 	if (r)
 		return r;
 
-	c = to_node(block);
+	c = dm_block_data(block);
 	*result = __le32_to_cpu(c->header.nr_entries);
 
 	return dm_tm_unlock(tm, block);
@@ -387,7 +387,7 @@ static int rebalance_children(struct shadow_spine *s,
 	uint32_t child_entries;
 	struct node *n;
 
-	n = to_node(shadow_current(s));
+	n = dm_block_data(shadow_current(s));
 
 	if (__le32_to_cpu(n->header.nr_entries) == 1) {
 		struct dm_block *child;
@@ -466,11 +466,11 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		 * op. */
 		if (shadow_parent(s)) {
 			__le64 location = __cpu_to_le64(dm_block_location(shadow_current(s)));
-			memcpy(value_ptr(to_node(shadow_parent(s)), i, sizeof(uint64_t)),
+			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
 			       &location, sizeof(__le64));
 		}
 
-		n = to_node(shadow_current(s));
+		n = dm_block_data(shadow_current(s));
 		if (inc)
 			inc_children(info->tm, n, &info->value_type);
 
@@ -482,7 +482,7 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 			if (r)
 				break;
 
-			n = to_node(shadow_current(s));
+			n = dm_block_data(shadow_current(s));
 			if (__le32_to_cpu(n->header.flags) & LEAF_NODE)
 				return do_leaf(n, key, index);
 
@@ -523,7 +523,7 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 		if (r < 0)
 			break;
 
-		n = to_node(shadow_current(&spine));
+		n = dm_block_data(shadow_current(&spine));
 		if (level == last_level) {
 			BUG_ON(index < 0 ||
 			       index >= __le32_to_cpu(n->header.nr_entries));

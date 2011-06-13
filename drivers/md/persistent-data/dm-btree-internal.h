@@ -22,10 +22,7 @@ struct node_header {
         __le32 flags;
         __le32 nr_entries;
 	__le32 max_entries;
-	__le32 magic;
 };
-
-#define BTREE_NODE_MAGIC 160774
 
 struct node {
 	struct node_header header;
@@ -41,14 +38,6 @@ struct node {
 
 void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt);
-
-static inline struct node *to_node(struct dm_block *b)
-{
-	/* FIXME: this function should fail, rather than fall over */
-	struct node *n = (struct node *) dm_block_data(b);
-	BUG_ON(__le32_to_cpu(n->header.magic) != BTREE_NODE_MAGIC);
-	return n;
-}
 
 // FIXME: I don't like the bn_ prefix for these, refers to an old struct block_node
 int bn_read_lock(struct dm_btree_info *info, dm_block_t b, struct dm_block **result);
