@@ -52,6 +52,28 @@ static uint64_t mod64(uint64_t n, uint64_t d)
 	return do_div(n, d);
 }
 
+/*----------------------------------------------------------------
+ * bitmap validator
+ *--------------------------------------------------------------*/
+
+static void bitmap_prepare_for_write(struct dm_block_validator *v,
+				     struct dm_block *b)
+{
+}
+
+static int bitmap_check(struct dm_block_validator *v,
+			struct dm_block *b)
+{
+	return 0;
+}
+
+static struct dm_block_validator bitmap_validator_ = {
+	.prepare_for_write = bitmap_prepare_for_write,
+	.check = bitmap_check
+};
+
+/*----------------------------------------------------------------*/
+
 /*
  * On disk format
  *
@@ -180,7 +202,7 @@ static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm,
 		struct dm_block *b;
 		struct index_entry idx;
 
-		r = dm_tm_new_block(tm, &b);
+		r = dm_tm_new_block(tm, &bitmap_validator_, &b);
 		if (r < 0)
 			return r;
 		idx.b = __cpu_to_le64(dm_block_location(b));
@@ -244,7 +266,7 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 
 	{
 		struct dm_block *blk;
-		r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
+		r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &blk);
 		if (r < 0)
 			return r;
 
@@ -291,7 +313,7 @@ static int io_find_unused(struct sm_disk *io, dm_block_t begin,
 				mod64(end, io->entries_per_block) :
 				io->entries_per_block;
 
-			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &blk);
+			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &blk);
 			if (r < 0)
 				return r;
 
@@ -332,7 +354,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.b), &nb, &inc);
+	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &nb, &inc);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow failed");
 		return r;
