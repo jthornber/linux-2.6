@@ -132,8 +132,8 @@ static void __insert_block(struct dm_block_manager *bm, struct dm_block *b)
  * __transition() handles transition of a block between different states.
  * Study this to understand the state machine.
  *
- * Alternatively run:
- *     grep DOT block-manager.c |
+ * Alternatively install graphviz and run:
+ *     grep DOT dm-block-manager.c | grep -v '  ' |
  *       sed -e 's/.*DOT: //' -e 's/\*\///' |
  *       dot -Tps -o states.ps
  *
