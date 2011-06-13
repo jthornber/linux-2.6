@@ -2,10 +2,28 @@
 
 /*----------------------------------------------------------------*/
 
+static void node_prepare_for_write(struct dm_block_validator *v,
+				   struct dm_block *b)
+{
+}
+
+static int node_check(struct dm_block_validator *v,
+		      struct dm_block *b)
+{
+	return 0;
+}
+
+struct dm_block_validator btree_node_validator = {
+	.prepare_for_write = node_prepare_for_write,
+	.check = node_check
+};
+
+/*----------------------------------------------------------------*/
+
 int bn_read_lock(struct dm_btree_info *info, dm_block_t b,
 		 struct dm_block **result)
 {
-	return dm_tm_read_lock(info->tm, b, result);
+	return dm_tm_read_lock(info->tm, b, &btree_node_validator, result);
 }
 
 int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
@@ -14,7 +32,7 @@ int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 {
 	int r;
 
-	r = dm_tm_shadow_block(info->tm, orig, result, inc);
+	r = dm_tm_shadow_block(info->tm, orig, &btree_node_validator, result, inc);
 	if (r == 0 && *inc)
 		inc_children(info->tm, to_node(*result), vt);
 
@@ -23,7 +41,7 @@ int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 
 int bn_new_block(struct dm_btree_info *info, struct dm_block **result)
 {
-	return dm_tm_new_block(info->tm, result);
+	return dm_tm_new_block(info->tm, &btree_node_validator, result);
 }
 
 int bn_unlock(struct dm_btree_info *info, struct dm_block *b)

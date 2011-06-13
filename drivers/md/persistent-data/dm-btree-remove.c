@@ -146,7 +146,7 @@ static int init_child(struct dm_btree_info *info, struct node *parent,
 	result->index = index;
 	root = value64(parent, index);
 
-	r = dm_tm_shadow_block(info->tm, root, &result->block, &inc);
+	r = dm_tm_shadow_block(info->tm, root, &btree_node_validator, &result->block, &inc);
 	if (r)
 		return r;
 
@@ -370,7 +370,7 @@ static int get_nr_entries(struct dm_transaction_manager *tm,
 	struct dm_block *block;
 	struct node *c;
 
-	r = dm_tm_read_lock(tm, b, &block);
+	r = dm_tm_read_lock(tm, b, &btree_node_validator, &block);
 	if (r)
 		return r;
 
@@ -393,7 +393,7 @@ static int rebalance_children(struct shadow_spine *s,
 		struct dm_block *child;
 		dm_block_t b = value64(n, 0);
 
-		r = dm_tm_read_lock(info->tm, b, &child);
+		r = dm_tm_read_lock(info->tm, b, &btree_node_validator, &child);
 		if (r)
 			return r;
 

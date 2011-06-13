@@ -137,6 +137,8 @@ void insert_at(size_t value_size, struct node *node,
 int dm_btree_merge(struct shadow_spine *s, unsigned parent_index,
 		   size_t value_size);
 
+extern struct dm_block_validator btree_node_validator;
+
 /*----------------------------------------------------------------*/
 
 #endif

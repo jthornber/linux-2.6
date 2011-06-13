@@ -173,7 +173,7 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 	} else {
 		struct frame *f = s->spine + ++s->top;
 
-		r = dm_tm_read_lock(s->tm, b, &f->b);
+		r = dm_tm_read_lock(s->tm, b, &btree_node_validator, &f->b);
 		if (!r) {
 			s->top--;
 			return r;
@@ -763,7 +763,7 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 	if (r < 0)
 		return r;
 
-	r = dm_tm_read_lock(info->tm, root, &orig_b);
+	r = dm_tm_read_lock(info->tm, root, &btree_node_validator, &orig_b);
 	if (r < 0) {
 		dm_block_t location = dm_block_location(b);
 
