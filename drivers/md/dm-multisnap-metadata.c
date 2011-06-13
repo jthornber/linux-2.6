@@ -119,6 +119,25 @@ struct dm_ms_device {
 	uint32_t snapshotted_time;
 };
 
+/*----------------------------------------------------------------
+ * superblock validator
+ *--------------------------------------------------------------*/
+
+static void sb_prepare_for_write(struct dm_block_validator *v,
+				 struct dm_block *b)
+{
+}
+
+static int sb_check(struct dm_block_validator *v, struct dm_block *b)
+{
+	return 0;
+}
+
+static struct dm_block_validator sb_validator_ = {
+	.prepare_for_write = sb_prepare_for_write,
+	.check = sb_check
+};
+
 /*----------------------------------------------------------------*/
 
 static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
@@ -128,7 +147,8 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	uint64_t *data;
 	unsigned block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
 
-	r = dm_bm_read_lock(bm, MULTISNAP_SUPERBLOCK_LOCATION, &b);
+	r = dm_bm_read_lock(bm, MULTISNAP_SUPERBLOCK_LOCATION,
+			    &sb_validator_, &b);
 	if (r)
 		return r;
 
@@ -155,7 +175,7 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 
 	if (create) {
 		r = dm_tm_create_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
-					 &tm, &sm, &sblock);
+					 &sb_validator_, &tm, &sm, &sblock);
 		if (r < 0) {
 			printk(KERN_ALERT "tm_create_with_sm failed");
 			dm_block_manager_destroy(bm);
@@ -184,7 +204,7 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 		size_t space_map_root_offset =
 			offsetof(struct multisnap_super_block, metadata_space_map_root);
 
-		r = dm_tm_open_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION,
+		r = dm_tm_open_with_sm(bm, MULTISNAP_SUPERBLOCK_LOCATION, &sb_validator_,
 				       space_map_root_offset, SPACE_MAP_ROOT_SIZE,
 				       &tm, &sm, &sblock);
 		if (r < 0) {
@@ -291,7 +311,8 @@ static int begin(struct dm_multisnap_metadata *mmd)
 
 	BUG_ON(mmd->sblock);
 	mmd->need_commit = 0;
-	r = dm_bm_write_lock(mmd->bm, MULTISNAP_SUPERBLOCK_LOCATION, &mmd->sblock);
+	r = dm_bm_write_lock(mmd->bm, MULTISNAP_SUPERBLOCK_LOCATION,
+			     &sb_validator_, &mmd->sblock);
 	if (r)
 		return r;
 
