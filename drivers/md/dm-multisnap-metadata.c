@@ -29,7 +29,7 @@
 #define SPACE_MAP_ROOT_SIZE 128
 
 struct multisnap_super_block {
-	__u8 csum[PERSISTENT_DATA_CSUM_SIZE];
+	__le32 csum;
 	__le32 flags;
 	__le64 blocknr; /* this block number, dm_block_t */
 
@@ -122,10 +122,33 @@ struct dm_ms_device {
 static void sb_prepare_for_write(struct dm_block_validator *v,
 				 struct dm_block *b)
 {
+	struct multisnap_super_block *sb = dm_block_data(b);
+	u32 crc = ~(u32)0;
+
+	sb->blocknr = dm_block_location(b);
+
+	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
+				 (sizeof(struct multisnap_super_block) -
+				  PERSISTENT_DATA_CSUM_SIZE));
+	dm_block_csum_final(crc, (char *)&sb->csum);
 }
 
 static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 {
+	struct multisnap_super_block *sb = dm_block_data(b);
+	u32 crc = ~(u32)0;
+
+	if (dm_block_location(b) != sb->blocknr)
+		return 1;
+
+	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
+				 (sizeof(struct multisnap_super_block) -
+				  PERSISTENT_DATA_CSUM_SIZE));
+	dm_block_csum_final(crc, (char *)&crc);
+
+	if (crc != sb->csum)
+		return 1;
+
 	return 0;
 }
 

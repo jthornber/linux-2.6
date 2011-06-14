@@ -3,6 +3,8 @@
 #include <linux/dm-io.h>
 #include <linux/slab.h>
 #include <linux/device-mapper.h> /* For SECTOR_SHIFT */
+#include <linux/crc32c.h>
+#include <asm/unaligned.h>
 
 #define DEBUG
 
@@ -96,6 +98,18 @@ void *dm_block_data(struct dm_block *b)
 	return b->data;
 }
 EXPORT_SYMBOL_GPL(dm_block_data);
+
+u32 dm_block_csum_data(char *data, u32 seed, size_t len)
+{
+	return crc32c(seed, data, len);
+}
+EXPORT_SYMBOL_GPL(dm_block_csum_data);
+
+void dm_block_csum_final(u32 crc, char *result)
+{
+	put_unaligned_le32(~crc, result);
+}
+EXPORT_SYMBOL_GPL(dm_block_csum_final);
 
 /*----------------------------------------------------------------
  * Hash table
