@@ -461,7 +461,7 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 			return r;
 	}
 
-	*msd = kmalloc(sizeof(**msd), GFP_KERNEL);
+	*msd = kmalloc(sizeof(**msd), GFP_NOIO);
 	if (!*msd)
 		return -ENOMEM;
 
