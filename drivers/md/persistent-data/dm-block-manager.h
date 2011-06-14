@@ -24,10 +24,10 @@ void dm_block_manager_destroy(struct dm_block_manager *bm);
 unsigned dm_bm_block_size(struct dm_block_manager *bm);
 dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
 
-/*
- * You can have multiple concurrent readers, or a single writer holding a
- * block lock.
- */
+/*----------------------------------------------------------------*/
+
+/* 4 bytes for CRC32c */
+#define PERSISTENT_DATA_CSUM_SIZE 4
 
 /*
  * The validator allows the caller to verify newly read data, and modify
@@ -41,6 +41,13 @@ struct dm_block_validator {
 	/* return 0 if valid, < 0 on error */
 	int (*check)(struct dm_block_validator *v, struct dm_block *b);
 };
+
+/*----------------------------------------------------------------*/
+
+/*
+ * You can have multiple concurrent readers, or a single writer holding a
+ * block lock.
+ */
 
 /*
  * dm_bm_lock() locks a block, and returns via |data| a pointer to memory that

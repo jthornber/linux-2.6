@@ -19,8 +19,11 @@ enum node_flags {
  * structure.  We can optimise later.
  */
 struct node_header {
-        __le32 flags;
-        __le32 nr_entries;
+	__u8 csum[PERSISTENT_DATA_CSUM_SIZE];
+	__le32 flags;
+	__le64 blocknr; /* which block this node is supposed to live in */
+
+	__le32 nr_entries;
 	__le32 max_entries;
 };
 
