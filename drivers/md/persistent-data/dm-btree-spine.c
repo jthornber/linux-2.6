@@ -22,16 +22,22 @@ static int node_check(struct dm_block_validator *v,
 	struct node_header *node = dm_block_data(b);
 	u32 crc = ~(u32)0;
 
-	if (dm_block_location(b) != node->blocknr)
+	if (dm_block_location(b) != node->blocknr) {
+		printk(KERN_ERR "multisnap node_check failed blocknr %llu "
+		       "wanted %llu\n", node->blocknr, dm_block_location(b));
 		return 1;
+	}
 
 	crc = dm_block_csum_data((char *)node + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct node_header) -
 				  PERSISTENT_DATA_CSUM_SIZE));
 	dm_block_csum_final(crc, (char *)&crc);
 
-	if (crc != node->csum)
+	if (crc != node->csum) {
+		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
+		       crc, node->csum);
 		return 1;
+	}
 
 	return 0;
 }
