@@ -182,9 +182,16 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 			return NULL;
 		}
 
-		data_sm = dm_sm_disk_create(tm, nr_blocks);
+		data_sm = dm_sm_disk_init();
 		if (IS_ERR(data_sm)) {
 			printk(KERN_ALERT "sm_disk_create");
+			goto bad;
+		}
+
+		r = dm_sm_disk_create(data_sm, tm, nr_blocks);
+		if (r) {
+			printk(KERN_ALERT "dm_sm_disk_create failed for data disk");
+			dm_sm_destroy(data_sm);
 			goto bad;
 		}
 
@@ -220,10 +227,17 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 			goto bad;
 		}
 
-		data_sm = dm_sm_disk_open(tm, sb->data_space_map_root,
-					  sizeof(sb->data_space_map_root));
-		if (!data_sm) {
+		data_sm = dm_sm_disk_init();
+		if (IS_ERR(data_sm)) {
+			printk(KERN_ALERT "sm_disk_create");
+			goto bad;
+		}
+
+		r = dm_sm_disk_open(data_sm, tm, sb->data_space_map_root,
+				    sizeof(sb->data_space_map_root));
+		if (r) {
 			printk(KERN_ALERT "sm_disk_open failed");
+			dm_sm_destroy(data_sm);
 			goto bad;
 		}
 

@@ -16,10 +16,11 @@ struct dm_space_map {
 
 	int (*get_nr_blocks)(struct dm_space_map *sm, dm_block_t *count);
 	int (*get_nr_free)(struct dm_space_map *sm, dm_block_t *count);
+
 	int (*get_count)(struct dm_space_map *sm, dm_block_t b, uint32_t *result);
+	int (*count_is_more_than_one)(struct dm_space_map *sm, dm_block_t b, int *result);
 	int (*set_count)(struct dm_space_map *sm, dm_block_t b, uint32_t count);
 
-	int (*begin)(struct dm_space_map *sm);
 	int (*commit)(struct dm_space_map *sm);
 
 	int (*inc_block)(struct dm_space_map *sm, dm_block_t b);
@@ -59,15 +60,15 @@ static inline int dm_sm_get_count(struct dm_space_map *sm, dm_block_t b,
 	return sm->get_count(sm, b, result);
 }
 
+static inline int dm_sm_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
+{
+	return sm->count_is_more_than_one(sm, b, result);
+}
+
 static inline int dm_sm_set_count(struct dm_space_map *sm, dm_block_t b,
 				  uint32_t count)
 {
 	return sm->set_count(sm, b, count);
-}
-
-static inline int dm_sm_begin(struct dm_space_map *sm)
-{
-	return sm->commit(sm);
 }
 
 static inline int dm_sm_commit(struct dm_space_map *sm)

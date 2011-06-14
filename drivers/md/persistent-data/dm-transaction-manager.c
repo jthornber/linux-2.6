@@ -140,7 +140,7 @@ EXPORT_SYMBOL_GPL(dm_tm_reserve_block);
 
 int dm_tm_begin(struct dm_transaction_manager *tm)
 {
-	return dm_sm_begin(tm->sm);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_tm_begin);
 
@@ -269,26 +269,25 @@ int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		       struct dm_block_validator *v, struct dm_block **result,
 		       int *inc_children)
 {
-	int r;
-	uint32_t count;
-	//static unsigned shadows = 0;
+	int r, more_than_one;
 
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
 	if (is_shadow(tm, orig)) {
-		r = dm_sm_get_count(tm->sm, orig, &count);
+		printk(KERN_ALERT "mto in");
+		r = dm_sm_count_is_more_than_one(tm->sm, orig, &more_than_one);
 		if (r < 0)
 			return r;
-		if (count < 2) {
+		printk(KERN_ALERT "mto out: %d", more_than_one);
+
+		if (!more_than_one) {
 			*inc_children = 0;
 			return dm_bm_write_lock(tm->bm, orig, v, result);
 		}
 		/* fall through */
 	}
 
-	// putting a printk here reveals a bug
-	//printk(KERN_ALERT "shadows = %u", ++shadows);
 	printk(KERN_ALERT "shadowing %llu", (unsigned long long) orig);
 	r = __shadow_block(tm, orig, v, result, inc_children);
 	if (r < 0) {
@@ -354,18 +353,18 @@ EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 
 /*----------------------------------------------------------------*/
 
-int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
-			 struct dm_block_validator *sb_validator,
-			 struct dm_transaction_manager **tm,
-			 struct dm_space_map **sm, struct dm_block **sblock)
+static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_location,
+				 struct dm_block_validator *sb_validator,
+				 size_t root_offset, size_t root_max_len,
+				 struct dm_transaction_manager **tm,
+				 struct dm_space_map **sm, struct dm_block **sblock,
+				 int create)
 {
 	int r;
 
-	*sm = dm_sm_disk_create(*tm, dm_bm_nr_blocks(bm));
-	if (IS_ERR(*sm)) {
-		printk(KERN_ALERT "couldn't create disk space map");
+	*sm = dm_sm_disk_init();
+	if (IS_ERR(*sm))
 		return PTR_ERR(*sm);
-	}
 
 	*tm = dm_tm_create(bm, *sm);
 	if (IS_ERR(*tm)) {
@@ -375,26 +374,63 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 
 	r = dm_tm_begin(*tm);
 	if (r < 0)
-		goto bad;
+		goto bad1;
 
 	r = dm_tm_reserve_block(*tm, sb_location);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't reserve superblock");
-		goto bad;
+		goto bad1;
 	}
 
 	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
-		goto bad;
+		goto bad1;
 	}
+
+	if (create) {
+		r = dm_sm_disk_create_recursive(*sm, *tm, dm_bm_nr_blocks(bm));
+		if (r) {
+			printk(KERN_ALERT "couldn't create disk space map");
+			goto bad2;
+		}
+		printk(KERN_ALERT "disk create completed");
+
+		r = dm_tm_reserve_block(*tm, sb_location);
+		if (r < 0) {
+			printk(KERN_ALERT "couldn't reserve superblock");
+			goto bad2;
+		}
+
+	} else {
+		r = dm_sm_disk_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
+				      root_max_len);
+		if (IS_ERR(*sm)) {
+			printk(KERN_ALERT "couldn't create disk space map");
+			goto bad2;
+		}
+	}
+
+	r = dm_tm_begin(*tm);
+	if (r < 0)
+		goto bad2;
 
 	return 0;
 
-bad:
+bad2:
+	dm_tm_unlock(*tm, *sblock);
+bad1:
 	dm_tm_destroy(*tm);
 	dm_sm_destroy(*sm);
 	return r;
+}
+
+int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
+			 struct dm_block_validator *sb_validator,
+			 struct dm_transaction_manager **tm,
+			 struct dm_space_map **sm, struct dm_block **sblock)
+{
+	return dm_tm_create_internal(bm, sb_location, sb_validator, 0, 0, tm, sm, sblock, 1);
 }
 EXPORT_SYMBOL_GPL(dm_tm_create_with_sm);
 
@@ -404,43 +440,7 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		       struct dm_transaction_manager **tm,
 		       struct dm_space_map **sm, struct dm_block **sblock)
 {
-	int r;
-
-	*sm = dm_sm_disk_open(*tm, dm_block_data(*sblock) + root_offset,
-			      root_max_len);
-	if (IS_ERR(*sm)) {
-		printk(KERN_ALERT "couldn't create disk space map");
-		return PTR_ERR(*sm);
-	}
-
-	*tm = dm_tm_create(bm, *sm);
-	if (IS_ERR(*tm)) {
-		dm_sm_destroy(*sm);
-		return PTR_ERR(*tm);
-	}
-
-	r = dm_tm_begin(*tm);
-	if (r < 0)
-		goto bad;
-
-	r = dm_tm_reserve_block(*tm, sb_location);
-	if (r < 0) {
-		printk(KERN_ALERT "couldn't reserve superblock");
-		goto bad;
-	}
-
-	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
-	if (r < 0) {
-		printk(KERN_ALERT "couldn't lock superblock");
-		goto bad;
-	}
-
-	return 0;
-
-bad:
-	dm_tm_destroy(*tm);
-	dm_sm_destroy(*sm);
-	return r;
+	return dm_tm_create_internal(bm, sb_location, sb_validator, root_offset, root_max_len, tm, sm, sblock, 0);
 }
 EXPORT_SYMBOL_GPL(dm_tm_open_with_sm);
 
