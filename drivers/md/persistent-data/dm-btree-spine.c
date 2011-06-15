@@ -8,7 +8,7 @@ static void node_prepare_for_write(struct dm_block_validator *v,
 	struct node_header *node = dm_block_data(b);
 	u32 crc = ~(u32)0;
 
-	node->blocknr = dm_block_location(b);
+	node->blocknr = __cpu_to_le64(dm_block_location(b));
 
 	crc = dm_block_csum_data((char *)node + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct node_header) -
@@ -21,21 +21,22 @@ static int node_check(struct dm_block_validator *v,
 {
 	struct node_header *node = dm_block_data(b);
 	u32 crc = ~(u32)0;
+	__le32 result;
 
-	if (dm_block_location(b) != node->blocknr) {
+	if (dm_block_location(b) != __le64_to_cpu(node->blocknr)) {
 		printk(KERN_ERR "multisnap node_check failed blocknr %llu "
-		       "wanted %llu\n", node->blocknr, dm_block_location(b));
+		       "wanted %llu\n", __le64_to_cpu(node->blocknr), dm_block_location(b));
 		return 1;
 	}
 
 	crc = dm_block_csum_data((char *)node + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct node_header) -
 				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, (char *)&crc);
+	dm_block_csum_final(crc, (char *)&result);
 
-	if (crc != node->csum) {
+	if (result != node->csum) {
 		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
-		       crc, node->csum);
+		       __le32_to_cpu(result), __le32_to_cpu(node->csum));
 		return 1;
 	}
 
