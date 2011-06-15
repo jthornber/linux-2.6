@@ -31,7 +31,7 @@ struct sm_disk {
 };
 
 struct index_entry {
-	__le64 b;
+	__le64 blocknr;
 	__le32 nr_free;
         __le32 none_free_before;
 };
@@ -205,7 +205,7 @@ static int io_new(struct sm_disk *io, struct dm_transaction_manager *tm,
 		r = dm_tm_new_block(tm, &bitmap_validator_, &b);
 		if (r < 0)
 			return r;
-		idx.b = __cpu_to_le64(dm_block_location(b));
+		idx.blocknr = __cpu_to_le64(dm_block_location(b));
 
 		r = dm_tm_unlock(tm, b);
 		if (r < 0)
@@ -266,7 +266,8 @@ static int io_lookup(struct sm_disk *io, dm_block_t b, uint32_t *result)
 
 	{
 		struct dm_block *blk;
-		r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &blk);
+		r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
+				    &bitmap_validator_, &blk);
 		if (r < 0)
 			return r;
 
@@ -313,7 +314,8 @@ static int io_find_unused(struct sm_disk *io, dm_block_t begin,
 				mod64(end, io->entries_per_block) :
 				io->entries_per_block;
 
-			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &blk);
+			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
+					    &bitmap_validator_, &blk);
 			if (r < 0)
 				return r;
 
@@ -354,7 +356,8 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &nb, &inc);
+	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.blocknr),
+			       &bitmap_validator_, &nb, &inc);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow failed");
 		return r;
@@ -408,7 +411,7 @@ static int io_insert(struct sm_disk *io, dm_block_t b, uint32_t ref_count)
 	 * FIXME: we have a race here, since another thread may have
 	 * altered |ie| in the meantime.  Not important yet.
 	 */
-	ie.b = __cpu_to_le64(dm_block_location(nb));
+	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
 	r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
 			    &index, &ie, &io->bitmap_root);
 	if (r < 0)
