@@ -43,7 +43,7 @@ struct dm_block_validator {
 };
 
 u32 dm_block_csum_data(char *data, u32 seed, size_t len);
-void dm_block_csum_final(u32 crc, char *result);
+void dm_block_csum_final(u32 crc, __le32 *result);
 
 /*----------------------------------------------------------------*/
 

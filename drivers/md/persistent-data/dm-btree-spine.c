@@ -13,7 +13,7 @@ static void node_prepare_for_write(struct dm_block_validator *v,
 	crc = dm_block_csum_data((char *)node + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct node_header) -
 				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, (char *)&node->csum);
+	dm_block_csum_final(crc, &node->csum);
 }
 
 static int node_check(struct dm_block_validator *v,
@@ -32,7 +32,7 @@ static int node_check(struct dm_block_validator *v,
 	crc = dm_block_csum_data((char *)node + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct node_header) -
 				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, (char *)&result);
+	dm_block_csum_final(crc, &result);
 
 	if (result != node->csum) {
 		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",

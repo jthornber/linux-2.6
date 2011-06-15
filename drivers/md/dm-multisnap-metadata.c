@@ -130,7 +130,7 @@ static void sb_prepare_for_write(struct dm_block_validator *v,
 	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct multisnap_super_block) -
 				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, (char *)&sb->csum);
+	dm_block_csum_final(crc, &sb->csum);
 }
 
 static int sb_check(struct dm_block_validator *v, struct dm_block *b)
@@ -148,7 +148,7 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
 				 (sizeof(struct multisnap_super_block) -
 				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, (char *)&result);
+	dm_block_csum_final(crc, &result);
 
 	if (result != sb->csum) {
 		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
