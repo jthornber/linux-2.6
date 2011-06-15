@@ -757,6 +757,7 @@ retry:
 
 	} else if (!can_block) {
 		ret = -EWOULDBLOCK;
+		goto out;
 
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
@@ -767,6 +768,9 @@ retry:
 #endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
+	
+	if (v && !b->validator)
+		b->validator = v;
 
 	if (ret == 0) {
 		switch (how) {
@@ -795,6 +799,7 @@ retry:
 		bm->locks_held++;
 #endif
 
+out:
 	spin_unlock_irqrestore(&bm->lock, flags);
 	return ret;
 }
