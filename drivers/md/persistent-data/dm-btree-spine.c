@@ -24,7 +24,7 @@ static int node_check(struct dm_block_validator *v,
 	__le32 result;
 
 	if (dm_block_location(b) != __le64_to_cpu(node->blocknr)) {
-		printk(KERN_ERR "multisnap node_check failed blocknr %llu "
+		printk(KERN_ERR "btree node_check failed blocknr %llu "
 		       "wanted %llu\n", __le64_to_cpu(node->blocknr), dm_block_location(b));
 		return 1;
 	}
@@ -35,7 +35,7 @@ static int node_check(struct dm_block_validator *v,
 	dm_block_csum_final(crc, &result);
 
 	if (result != node->csum) {
-		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
+		printk(KERN_ERR "btree node_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(result), __le32_to_cpu(node->csum));
 		return 1;
 	}
