@@ -1426,7 +1426,7 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 	return r;
 }
 
-struct block_device *get_target_bdev(struct dm_target *ti)
+static struct block_device *get_target_bdev(struct dm_target *ti)
 {
 	return dm_table_get_bdev(ti->table);
 }

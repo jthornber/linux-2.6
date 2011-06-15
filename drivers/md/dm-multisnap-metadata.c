@@ -18,7 +18,6 @@
 
 #define DEBUG 1
 
-#define MULTISNAP_CSUM_SIZE 32
 #define MULTISNAP_SUPERBLOCK_MAGIC 27022010
 #define MULTISNAP_SUPERBLOCK_LOCATION 0
 #define MULTISNAP_VERSION 1
@@ -30,13 +29,18 @@
 #define SPACE_MAP_ROOT_SIZE 128
 
 struct multisnap_super_block {
-	__u8 csum[MULTISNAP_CSUM_SIZE];
+	__le32 csum;
+	__le32 flags;
 	__le64 blocknr; /* this block number, dm_block_t */
-	__le64 flags;
 
+	__u8 uuid[16]; /* uuid_t */
 	__le64 magic;
+	__le32 version;
+	__le32 time;
 
 	__le64 userspace_transaction_id;
+	/* root for userspace's transaction (for migration and friends) */
+	__le64 held_root;
 
 	__u8 data_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
@@ -47,21 +51,13 @@ struct multisnap_super_block {
 	/* device detail root mapping dev_id -> device_details */
 	__le64 device_details_root;
 
-	/* root for userspace's transaction (for migration and friends) */
-	__le64 held_root;
-
-	__u8 uuid[16]; /* uuid_t */
-
-	__le32 version;
-	__le32 time;
-
 	__le32 data_block_size;	/* in 512-byte sectors */
 
 	__le32 metadata_block_size; /* in 512-byte sectors */
 	__le64 metadata_nr_blocks;
 
-	__le64 compat_flags;
-	__le64 incompat_flags;
+	__le32 compat_flags;
+	__le32 incompat_flags;
 } __attribute__ ((packed));
 
 struct device_details {
@@ -126,10 +122,40 @@ struct dm_ms_device {
 static void sb_prepare_for_write(struct dm_block_validator *v,
 				 struct dm_block *b)
 {
+	struct multisnap_super_block *sb = dm_block_data(b);
+	u32 crc = ~(u32)0;
+
+	sb->blocknr = __cpu_to_le64(dm_block_location(b));
+
+	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
+				 (sizeof(struct multisnap_super_block) -
+				  PERSISTENT_DATA_CSUM_SIZE));
+	dm_block_csum_final(crc, &sb->csum);
 }
 
 static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 {
+	struct multisnap_super_block *sb = dm_block_data(b);
+	u32 crc = ~(u32)0;
+	__le32 result;
+
+	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
+		printk(KERN_ERR "multisnap sb_check failed blocknr %llu "
+		       "wanted %llu\n", __le64_to_cpu(sb->blocknr), dm_block_location(b));
+		return 1;
+	}
+
+	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
+				 (sizeof(struct multisnap_super_block) -
+				  PERSISTENT_DATA_CSUM_SIZE));
+	dm_block_csum_final(crc, &result);
+
+	if (result != sb->csum) {
+		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
+		       __le32_to_cpu(result), __le32_to_cpu(sb->csum));
+		return 1;
+	}
+
 	return 0;
 }
 
@@ -383,7 +409,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 
 	sb = dm_block_data(mmd->sblock);
 	sb->magic = __cpu_to_le64(MULTISNAP_SUPERBLOCK_MAGIC);
-	sb->version = __cpu_to_le64(MULTISNAP_VERSION);
+	sb->version = __cpu_to_le32(MULTISNAP_VERSION);
 	sb->time = 0;
 	sb->metadata_block_size = __cpu_to_le32(MULTISNAP_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	sb->metadata_nr_blocks = __cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
@@ -475,7 +501,7 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 			return r;
 	}
 
-	*msd = kmalloc(sizeof(**msd), GFP_KERNEL);
+	*msd = kmalloc(sizeof(**msd), GFP_NOIO);
 	if (!*msd)
 		return -ENOMEM;
 
@@ -485,7 +511,7 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 	(*msd)->changed = changed;
 	(*msd)->dev_size = __le64_to_cpu(details.dev_size);
 	(*msd)->mapped_blocks = __le64_to_cpu(details.mapped_blocks);
-	(*msd)->snapshotted_time = __le64_to_cpu(details.snapshotted_time);
+	(*msd)->snapshotted_time = __le32_to_cpu(details.snapshotted_time);
 
 	list_add(&(*msd)->list, &mmd->ms_devices);
 
@@ -788,8 +814,8 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 	return r;
 }
 
-int __insert(struct dm_ms_device *msd,
-	     dm_block_t block, dm_block_t data_block)
+static int __insert(struct dm_ms_device *msd,
+		    dm_block_t block, dm_block_t data_block)
 {
 	dm_block_t keys[2];
 	__le64 value;
