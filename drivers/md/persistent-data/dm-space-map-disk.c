@@ -62,20 +62,15 @@ static void bitmap_prepare_for_write(struct dm_block_validator *v,
 				     struct dm_block *b)
 {
 	struct index_entry *ie = dm_block_data(b);
-	u32 crc = ~(u32)0;
 
-	crc = dm_block_csum_data((char *)ie + PERSISTENT_DATA_CSUM_SIZE, crc,
-				 (sizeof(struct index_entry) -
-				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, &ie->csum);
+	dm_block_calc_csum(ie, struct index_entry, &ie->csum);
 }
 
 static int bitmap_check(struct dm_block_validator *v,
 			struct dm_block *b)
 {
 	struct index_entry *ie = dm_block_data(b);
-	u32 crc = ~(u32)0;
-	__le32 result;
+	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(ie->blocknr)) {
 		printk(KERN_ERR "disk space map bitmap_check failed blocknr %llu "
@@ -83,14 +78,10 @@ static int bitmap_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	crc = dm_block_csum_data((char *)ie + PERSISTENT_DATA_CSUM_SIZE, crc,
-				 (sizeof(struct index_entry) -
-				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, &result);
-
-	if (result != ie->csum) {
+	dm_block_calc_csum(ie, struct index_entry, &csum);
+	if (csum != ie->csum) {
 		printk(KERN_ERR "disk space map bitmap_check failed csum %u wanted %u\n",
-		       __le32_to_cpu(result), __le32_to_cpu(ie->csum));
+		       __le32_to_cpu(csum), __le32_to_cpu(ie->csum));
 		return -EILSEQ;
 	}
 

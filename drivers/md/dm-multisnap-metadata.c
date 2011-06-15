@@ -123,21 +123,15 @@ static void sb_prepare_for_write(struct dm_block_validator *v,
 				 struct dm_block *b)
 {
 	struct multisnap_super_block *sb = dm_block_data(b);
-	u32 crc = ~(u32)0;
 
 	sb->blocknr = __cpu_to_le64(dm_block_location(b));
-
-	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
-				 (sizeof(struct multisnap_super_block) -
-				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, &sb->csum);
+	dm_block_calc_csum(sb, struct multisnap_super_block, &sb->csum);
 }
 
 static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 {
 	struct multisnap_super_block *sb = dm_block_data(b);
-	u32 crc = ~(u32)0;
-	__le32 result;
+	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
 		printk(KERN_ERR "multisnap sb_check failed blocknr %llu "
@@ -145,14 +139,10 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 		return -ENOTBLK;
 	}
 
-	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
-				 (sizeof(struct multisnap_super_block) -
-				  PERSISTENT_DATA_CSUM_SIZE));
-	dm_block_csum_final(crc, &result);
-
-	if (result != sb->csum) {
+	dm_block_calc_csum(sb, struct multisnap_super_block, &csum);
+	if (csum != sb->csum) {
 		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
-		       __le32_to_cpu(result), __le32_to_cpu(sb->csum));
+		       __le32_to_cpu(csum), __le32_to_cpu(sb->csum));
 		return -EILSEQ;
 	}
 
