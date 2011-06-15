@@ -80,7 +80,7 @@ static int bitmap_check(struct dm_block_validator *v,
 	if (dm_block_location(b) != __le64_to_cpu(ie->blocknr)) {
 		printk(KERN_ERR "disk space map bitmap_check failed blocknr %llu "
 		       "wanted %llu\n", __le64_to_cpu(ie->blocknr), dm_block_location(b));
-		return 1;
+		return -ENOTBLK;
 	}
 
 	crc = dm_block_csum_data((char *)ie + PERSISTENT_DATA_CSUM_SIZE, crc,
@@ -91,7 +91,7 @@ static int bitmap_check(struct dm_block_validator *v,
 	if (result != ie->csum) {
 		printk(KERN_ERR "disk space map bitmap_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(result), __le32_to_cpu(ie->csum));
-		return 1;
+		return -EILSEQ;
 	}
 
 	return 0;

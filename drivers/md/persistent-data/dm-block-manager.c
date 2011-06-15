@@ -515,9 +515,10 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 			ret = -EIO;
 		}
 
-		if (b->validator && b->validator->check(b->validator, b)) {
-			__transition(b, BS_EMPTY);
-			ret = -EILSEQ;
+		if (b->validator) {
+			ret = b->validator->check(b->validator, b);
+			if (ret)
+				__transition(b, BS_EMPTY);
 		}
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);

@@ -26,7 +26,7 @@ static int node_check(struct dm_block_validator *v,
 	if (dm_block_location(b) != __le64_to_cpu(node->blocknr)) {
 		printk(KERN_ERR "btree node_check failed blocknr %llu "
 		       "wanted %llu\n", __le64_to_cpu(node->blocknr), dm_block_location(b));
-		return 1;
+		return -ENOTBLK;
 	}
 
 	crc = dm_block_csum_data((char *)node + PERSISTENT_DATA_CSUM_SIZE, crc,
@@ -37,7 +37,7 @@ static int node_check(struct dm_block_validator *v,
 	if (result != node->csum) {
 		printk(KERN_ERR "btree node_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(result), __le32_to_cpu(node->csum));
-		return 1;
+		return -EILSEQ;
 	}
 
 	return 0;

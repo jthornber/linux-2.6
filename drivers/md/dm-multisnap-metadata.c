@@ -142,7 +142,7 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
 		printk(KERN_ERR "multisnap sb_check failed blocknr %llu "
 		       "wanted %llu\n", __le64_to_cpu(sb->blocknr), dm_block_location(b));
-		return 1;
+		return -ENOTBLK;
 	}
 
 	crc = dm_block_csum_data((char *)sb + PERSISTENT_DATA_CSUM_SIZE, crc,
@@ -153,7 +153,7 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 	if (result != sb->csum) {
 		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(result), __le32_to_cpu(sb->csum));
-		return 1;
+		return -EILSEQ;
 	}
 
 	return 0;
