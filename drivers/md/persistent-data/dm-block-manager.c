@@ -768,7 +768,7 @@ retry:
 #endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
-	
+
 	if (v && !b->validator)
 		b->validator = v;
 
