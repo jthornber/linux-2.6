@@ -501,12 +501,15 @@ struct pool {
 
 	mempool_t *mapping_pool;
 	mempool_t *endio_hook_pool;
+
+	atomic_t ref_count;
 };
 
 /*
  * Target context for a pool.
  */
 struct pool_c {
+	struct dm_target *ti;
 	struct pool *pool;
 };
 
@@ -1261,6 +1264,7 @@ static void requeue_all_bios(struct pool *pool)
  *--------------------------------------------------------------*/
 static void pool_destroy(struct pool *pool, struct dm_target *ti)
 {
+	printk(KERN_ALERT "destroying pool");
 	dm_multisnap_metadata_close(pool->mmd);
 	dm_put_device(ti, pool->metadata_dev);
 	dm_put_device(ti, pool->data_dev);
@@ -1350,8 +1354,20 @@ static struct pool *pool_create(struct dm_dev *metadata_dev,
 	ds_init(&pool->ds);
 	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers, error handling */
 	pool->endio_hook_pool = mempool_create_kmalloc_pool(10240, sizeof(struct endio_hook)); /* FIXME: magic numbers, error handling */
+	atomic_set(&pool->ref_count, 1);
 
 	return pool;
+}
+
+static void pool_inc(struct pool *pool)
+{
+	atomic_inc(&pool->ref_count);
+}
+
+static void pool_dec(struct pool *pool)
+{
+	if (atomic_dec_and_test(&pool->ref_count))
+		pool_destroy(pool, pool->ti); /* FIXME: what it pool->ti isn't set? */
 }
 
 /*----------------------------------------------------------------
@@ -1361,7 +1377,7 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
 
-	pool_destroy(pt->pool, ti);
+	pool_dec(pt->pool);
 	kfree(pt);
 }
 
@@ -1441,7 +1457,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -ENOMEM;
 	}
 	pt->pool = pool;
-	pool->ti = ti;
+	pt->ti = ti;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
 	ti->private = pt;
@@ -1494,6 +1510,9 @@ static int pool_preresume(struct dm_target *ti)
 	struct pool *pool = pt->pool;
 	dm_block_t data_size, sb_data_size;
 	unsigned long flags;
+
+	/* take control of the pool object */
+	pool->ti = ti;
 
 	spin_lock_irqsave(&pool->lock, flags);
 	pool->bouncing = 0;
