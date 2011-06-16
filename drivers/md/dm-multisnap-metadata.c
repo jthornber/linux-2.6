@@ -163,8 +163,10 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	uint64_t *data;
 	unsigned block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
 
-	r = dm_bm_read_lock(bm, MULTISNAP_SUPERBLOCK_LOCATION,
-			    &sb_validator_, &b);
+	/*
+	 * We can't use a validator here, it may be all zeroes.
+	 */
+	r = dm_bm_read_lock(bm, MULTISNAP_SUPERBLOCK_LOCATION, NULL, &b);
 	if (r)
 		return r;
 
