@@ -1224,9 +1224,9 @@ static int is_congested(void *congested_data, int bdi_bits)
 	return r;
 }
 
-static void set_congestion_fn(struct pool *pool)
+static void set_congestion_fn(struct dm_target *ti, struct pool *pool)
 {
-	struct mapped_device *md = dm_table_get_md(pool->ti->table);
+	struct mapped_device *md = dm_table_get_md(ti->table);
 	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
 
 	/* Set congested function and data. */
@@ -1256,9 +1256,10 @@ static void requeue_all_bios(struct pool *pool)
 	requeue_bios(&pool->retry_list, &pool->lock);
 }
 
-/*----------------------------------------------------------------*/
-
-static void pool_dtr_(struct pool *pool, struct dm_target *ti)
+/*----------------------------------------------------------------
+ * Pool creation
+ *--------------------------------------------------------------*/
+static void pool_destroy(struct pool *pool, struct dm_target *ti)
 {
 	dm_multisnap_metadata_close(pool->mmd);
 	dm_put_device(ti, pool->metadata_dev);
@@ -1278,26 +1279,12 @@ static void pool_dtr_(struct pool *pool, struct dm_target *ti)
 	kfree(pool);
 }
 
-static void pool_dtr(struct dm_target *ti)
-{
-	struct pool_c *pt = ti->private;
-
-	pool_dtr_(pt->pool, ti);
-	kfree(pt);
-}
-
-/*
- * multisnap-pool <metadata dev>
- *                <data dev>
- *                <data block size in sectors>
- *                <low water mark (sectors)>
- */
-static struct pool *pool_ctr_(struct dm_target *ti,
-			      struct dm_dev *metadata_dev,
-			      struct dm_dev *data_dev,
-			      dm_block_t data_size,
-			      unsigned long block_size,
-			      dm_block_t low_water)
+static struct pool *pool_create(struct dm_dev *metadata_dev,
+				struct dm_dev *data_dev,
+				dm_block_t data_size,
+				unsigned long block_size,
+				dm_block_t low_water,
+				char **error)
 {
 	int r;
 	struct pool *pool;
@@ -1305,18 +1292,14 @@ static struct pool *pool_ctr_(struct dm_target *ti,
 
 	mmd = dm_multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
-		ti->error = "Error opening metadata device";
-		dm_put_device(ti, metadata_dev);
-		dm_put_device(ti, data_dev);
+		*error = "Error opening metadata device";
 		return ERR_PTR(-ENOMEM);
 	}
 
 	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
 	if (!pool) {
-		ti->error = "Error allocating memory";
+		*error = "Error allocating memory";
 		dm_multisnap_metadata_close(mmd);
-		dm_put_device(ti, metadata_dev);
-		dm_put_device(ti, data_dev);
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -1367,14 +1350,27 @@ static struct pool *pool_ctr_(struct dm_target *ti,
 	ds_init(&pool->ds);
 	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers, error handling */
 	pool->endio_hook_pool = mempool_create_kmalloc_pool(10240, sizeof(struct endio_hook)); /* FIXME: magic numbers, error handling */
-	pool->ti = ti;
-	set_congestion_fn(pool);
-	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
 
 	return pool;
 }
 
+/*----------------------------------------------------------------
+ * Pool target methods
+ *--------------------------------------------------------------*/
+static void pool_dtr(struct dm_target *ti)
+{
+	struct pool_c *pt = ti->private;
+
+	pool_destroy(pt->pool, ti);
+	kfree(pt);
+}
+
+/*
+ * multisnap-pool <metadata dev>
+ *                <data dev>
+ *                <data block size in sectors>
+ *                <low water mark (sectors)>
+ */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
@@ -1432,17 +1428,24 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	pool = pool_ctr_(ti, metadata_dev, data_dev, data_size, block_size, low_water);
-	if (IS_ERR(pool))
+	pool = pool_create(metadata_dev, data_dev, data_size, block_size, low_water, &ti->error);
+	if (IS_ERR(pool)) {
+		dm_put_device(ti, metadata_dev);
+		dm_put_device(ti, data_dev);
 		return PTR_ERR(pool);
+	}
 
 	pt = kmalloc(sizeof(*pt), GFP_KERNEL);
 	if (!pt) {
-		pool_dtr_(pool, ti);
+		pool_destroy(pool, ti);
 		return -ENOMEM;
 	}
 	pt->pool = pool;
+	pool->ti = ti;
+	ti->num_flush_requests = 1;
+	ti->num_discard_requests = 1;
 	ti->private = pt;
+	set_congestion_fn(ti, pool);
 
 	return 0;
 }
