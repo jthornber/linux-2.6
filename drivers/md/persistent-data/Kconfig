@@ -1,6 +1,7 @@
 config DM_PERSISTENT_DATA
        tristate "Persistent data library"
-       depends on BLK_DEV_DM
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       select LIBCRC32C
        ---help---
          Library of code for metadata support for dm targets.  The
          term persistent isn't referring to the fact that the data is
