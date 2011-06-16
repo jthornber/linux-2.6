@@ -457,7 +457,8 @@ static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
  * Finding a free block to recycle
  *--------------------------------------------------------------*/
 static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
-			 int need_read, struct dm_block **result)
+			 int need_read, struct dm_block_validator *v,
+			 struct dm_block **result)
 {
 	int ret = 0;
 	struct dm_block *b;
@@ -492,6 +493,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 	}
 
 	b->where = where;
+	b->validator = v;
 	__transition(b, BS_READING);
 
 	if (!need_read) {
@@ -530,13 +532,14 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 
 #ifdef USE_PLUGGING
 static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t where,
-				       int need_read, struct dm_block **result)
+				       int need_read, struct dm_block_validator *v,
+				       struct dm_block **result)
 {
 	int r;
 	struct blk_plug plug;
 
 	blk_start_plug(&plug);
-	r = recycle_block(bm, where, need_read, result);
+	r = recycle_block(bm, where, need_read, v, result);
 	blk_finish_plug(&plug);
 
 	return r;
@@ -762,15 +765,12 @@ retry:
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
 #ifdef USE_PLUGGING
-		ret = recycle_block_with_plugging(bm, block, need_read, &b);
+		ret = recycle_block_with_plugging(bm, block, need_read, v, &b);
 #else
-		ret = recycle_block(bm, block, need_read, &b);
+		ret = recycle_block(bm, block, need_read, v, &b);
 #endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
-
-	if (v && !b->validator)
-		b->validator = v;
 
 	if (ret == 0) {
 		switch (how) {
