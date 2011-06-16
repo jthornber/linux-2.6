@@ -171,7 +171,7 @@ where,
  new-snap <dev id> <origin id>
  del      <dev id>
 
- trans-id <dev id> <current id> <new id>
+ trans-id <current id> <new id>
 
    Fails if 'current id' is incorrect.
 
