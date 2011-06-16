@@ -38,7 +38,7 @@ struct multisnap_super_block {
 	__le32 version;
 	__le32 time;
 
-	__le64 userspace_transaction_id;
+	__le64 trans_id;
 	/* root for userspace's transaction (for migration and friends) */
 	__le64 held_root;
 
@@ -101,6 +101,7 @@ struct dm_multisnap_metadata {
 	dm_block_t root;
 	dm_block_t details_root;
 	struct list_head ms_devices;
+	uint64_t trans_id;
 };
 
 struct dm_ms_device {
@@ -338,6 +339,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	mmd->time = __le32_to_cpu(sb->time);
 	mmd->root = __le64_to_cpu(sb->data_mapping_root);
 	mmd->details_root = __le64_to_cpu(sb->device_details_root);
+	mmd->trans_id = __le64_to_cpu(sb->trans_id);
 
 	return 0;
 }
@@ -653,17 +655,14 @@ int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
 					     uint64_t current_id,
 					     uint64_t new_id)
 {
-	struct multisnap_super_block *sb;
-
 	down_write(&mmd->root_lock);
-	sb = dm_block_data(mmd->sblock);
-	if (__le64_to_cpu(sb->userspace_transaction_id) != current_id) {
+	if (mmd->trans_id != current_id) {
 		up_write(&mmd->root_lock);
 		printk(KERN_ALERT "mismatched transaction id");
 		return -EINVAL;
 	}
 
-	sb->userspace_transaction_id = __cpu_to_le64(current_id);
+	mmd->trans_id = new_id;
 	mmd->need_commit = 1;
 	up_write(&mmd->root_lock);
 
@@ -673,11 +672,8 @@ int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
 					     uint64_t *result)
 {
-	struct multisnap_super_block *sb;
-
 	down_read(&mmd->root_lock);
-	sb = dm_block_data(mmd->sblock);
-	*result = __le64_to_cpu(sb->userspace_transaction_id);
+	*result = mmd->trans_id;
 	up_read(&mmd->root_lock);
 
 	return 0;
@@ -938,6 +934,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	sb->time = __cpu_to_le32(mmd->time);
 	sb->data_mapping_root = __cpu_to_le64(mmd->root);
 	sb->device_details_root = __cpu_to_le64(mmd->details_root);
+	sb->trans_id = __cpu_to_le64(mmd->trans_id);
 	r = dm_sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
 	if (r < 0)
 		goto out;
