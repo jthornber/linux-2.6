@@ -31,12 +31,10 @@ struct sm_disk {
 };
 
 struct index_entry {
-	__le32 csum;
-	/* 4 byte hole */
 	__le64 blocknr;
 	__le32 nr_free;
 	__le32 none_free_before;
-} __attribute__ ((packed));
+}  __attribute__ ((packed));
 
 #define ENTRIES_PER_BYTE 4
 
@@ -61,30 +59,11 @@ static uint64_t mod64(uint64_t n, uint64_t d)
 static void bitmap_prepare_for_write(struct dm_block_validator *v,
 				     struct dm_block *b)
 {
-	struct index_entry *ie = dm_block_data(b);
-
-	dm_block_calc_csum(ie, struct index_entry, &ie->csum);
 }
 
 static int bitmap_check(struct dm_block_validator *v,
 			struct dm_block *b)
 {
-	struct index_entry *ie = dm_block_data(b);
-	__le32 csum;
-
-	if (dm_block_location(b) != __le64_to_cpu(ie->blocknr)) {
-		printk(KERN_ERR "disk space map bitmap_check failed blocknr %llu "
-		       "wanted %llu\n", __le64_to_cpu(ie->blocknr), dm_block_location(b));
-		return -ENOTBLK;
-	}
-
-	dm_block_calc_csum(ie, struct index_entry, &csum);
-	if (csum != ie->csum) {
-		printk(KERN_ERR "disk space map bitmap_check failed csum %u wanted %u\n",
-		       __le32_to_cpu(csum), __le32_to_cpu(ie->csum));
-		return -EILSEQ;
-	}
-
 	return 0;
 }
 
