@@ -1292,62 +1292,16 @@ static void pool_dtr(struct dm_target *ti)
  *                <data block size in sectors>
  *                <low water mark (sectors)>
  */
-static struct pool *pool_ctr_(struct dm_target *ti, unsigned argc, char **argv)
+static struct pool *pool_ctr_(struct dm_target *ti,
+			      struct dm_dev *metadata_dev,
+			      struct dm_dev *data_dev,
+			      dm_block_t data_size,
+			      unsigned long block_size,
+			      dm_block_t low_water)
 {
 	int r;
-	unsigned long block_size;
 	struct pool *pool;
 	struct dm_multisnap_metadata *mmd;
-	struct dm_dev *metadata_dev, *data_dev;
-	dm_block_t data_size;
-	dm_block_t low_water;
-	char *end;
-
-	if (argc != 4) {
-		ti->error = "Invalid argument count";
-		return ERR_PTR(-EINVAL);
-	}
-
-	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
-	if (r) {
-		ti->error = "Error getting metadata device";
-		return ERR_PTR(r);
-	}
-
-	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
-	if (r) {
-		ti->error = "Error getting data device";
-		dm_put_device(ti, metadata_dev);
-		return ERR_PTR(r);
-	}
-
-	/*
-	 * The pool device and data device must have the same size.
-	 */
-	data_size = get_dev_size(data_dev);
-	if (ti->len > data_size) {
-		ti->error = "Pool device bigger than data device";
-		dm_put_device(ti, metadata_dev);
-		dm_put_device(ti, data_dev);
-		return ERR_PTR(-EINVAL);
-	}
-
-	block_size = simple_strtoul(argv[2], &end, 10);
-	if (!block_size || *end) {
-		ti->error = "Invalid block size";
-		dm_put_device(ti, metadata_dev);
-		dm_put_device(ti, data_dev);
-		return ERR_PTR(-EINVAL);
-	}
-	do_div(data_size, block_size);
-
-	low_water = simple_strtoull(argv[3], &end, 10);
-	if (!low_water || *end) {
-		ti->error = "Invalid low water mark";
-		dm_put_device(ti, metadata_dev);
-		dm_put_device(ti, data_dev);
-		return ERR_PTR(-EINVAL);
-	}
 
 	mmd = dm_multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
 	if (!mmd) {
@@ -1423,8 +1377,62 @@ static struct pool *pool_ctr_(struct dm_target *ti, unsigned argc, char **argv)
 
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
+	int r;
 	struct pool_c *pt;
-	struct pool *pool = pool_ctr_(ti, argc, argv);
+	struct pool *pool;
+	struct dm_dev *metadata_dev, *data_dev;
+	dm_block_t data_size;
+	unsigned long block_size;
+	dm_block_t low_water;
+	char *end;
+
+	if (argc != 4) {
+		ti->error = "Invalid argument count";
+		return -EINVAL;
+	}
+
+	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
+	if (r) {
+		ti->error = "Error getting metadata device";
+		return r;
+	}
+
+	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
+	if (r) {
+		ti->error = "Error getting data device";
+		dm_put_device(ti, metadata_dev);
+		return r;
+	}
+
+	/*
+	 * The pool device and data device must have the same size.
+	 */
+	data_size = get_dev_size(data_dev);
+	if (ti->len > data_size) {
+		ti->error = "Pool device bigger than data device";
+		dm_put_device(ti, metadata_dev);
+		dm_put_device(ti, data_dev);
+		return -EINVAL;
+	}
+
+	block_size = simple_strtoul(argv[2], &end, 10);
+	if (!block_size || *end) {
+		ti->error = "Invalid block size";
+		dm_put_device(ti, metadata_dev);
+		dm_put_device(ti, data_dev);
+		return -EINVAL;
+	}
+	do_div(data_size, block_size);
+
+	low_water = simple_strtoull(argv[3], &end, 10);
+	if (!low_water || *end) {
+		ti->error = "Invalid low water mark";
+		dm_put_device(ti, metadata_dev);
+		dm_put_device(ti, data_dev);
+		return -EINVAL;
+	}
+
+	pool = pool_ctr_(ti, metadata_dev, data_dev, data_size, block_size, low_water);
 	if (IS_ERR(pool))
 		return PTR_ERR(pool);
 
