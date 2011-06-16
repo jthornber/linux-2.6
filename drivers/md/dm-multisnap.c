@@ -467,8 +467,7 @@ struct pool {
 	struct dm_target *ti;	/* only set if a pool target is bound */
 
 	struct block_device *pool_dev;
-	struct dm_dev *metadata_dev;
-	struct dm_dev *data_dev;
+	struct block_device *metadata_dev;
 	struct dm_multisnap_metadata *mmd;
 
 	sector_t data_size;
@@ -511,6 +510,7 @@ struct pool {
 struct pool_c {
 	struct dm_target *ti;
 	struct pool *pool;
+	struct dm_dev *data_dev;
 };
 
 /*
@@ -750,11 +750,11 @@ static void schedule_copy(struct pool *pool, struct dm_ms_device *msd,
 		/* use kcopyd */
 		struct dm_io_region from, to;
 
-		from.bdev = pool->data_dev->bdev;
+		from.bdev = pool->pool_dev;
 		from.sector = data_origin * pool->sectors_per_block;
 		from.count = pool->sectors_per_block;
 
-		to.bdev = pool->data_dev->bdev;
+		to.bdev = pool->pool_dev;
 		to.sector = data_dest * pool->sectors_per_block;
 		to.count = pool->sectors_per_block;
 
@@ -1212,29 +1212,29 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 static int is_congested(void *congested_data, int bdi_bits)
 {
 	int r;
-	struct pool *pool = congested_data;
+	struct pool_c *pt = congested_data;
 	unsigned long flags;
 
-	spin_lock_irqsave(&pool->lock, flags);
-	r = !bio_list_empty(&pool->retry_list);
-	spin_unlock_irqrestore(&pool->lock, flags);
+	spin_lock_irqsave(&pt->pool->lock, flags);
+	r = !bio_list_empty(&pt->pool->retry_list);
+	spin_unlock_irqrestore(&pt->pool->lock, flags);
 
 	if (!r) {
-		struct request_queue *q = bdev_get_queue(pool->data_dev->bdev);
+		struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
 		r = bdi_congested(&q->backing_dev_info, bdi_bits);
 	}
 
 	return r;
 }
 
-static void set_congestion_fn(struct dm_target *ti, struct pool *pool)
+static void set_congestion_fn(struct dm_target *ti, struct pool_c *pt)
 {
 	struct mapped_device *md = dm_table_get_md(ti->table);
 	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
 
 	/* Set congested function and data. */
 	bdi->congested_fn = is_congested;
-	bdi->congested_data = pool;
+	bdi->congested_data = pt;
 }
 
 static void requeue_bios(struct bio_list *bl, spinlock_t *lock)
@@ -1260,14 +1260,33 @@ static void requeue_all_bios(struct pool *pool)
 }
 
 /*----------------------------------------------------------------
+ * Binding of control targets to a pool object
+ *--------------------------------------------------------------*/
+/* FIXME: add locking */
+static int bind_control_target(struct pool *pool,
+			       struct dm_target *ti)
+{
+	pool->ti = ti;
+	return 0;
+}
+
+static void unbind_control_target(struct pool *pool,
+				  struct dm_target *ti)
+{
+	if (pool->ti == ti) {
+		pool->ti = NULL;
+	}
+}
+
+/*----------------------------------------------------------------
  * Pool creation
  *--------------------------------------------------------------*/
-static void pool_destroy(struct pool *pool, struct dm_target *ti)
+static void pool_destroy(struct pool *pool)
 {
 	printk(KERN_ALERT "destroying pool");
+
 	dm_multisnap_metadata_close(pool->mmd);
-	dm_put_device(ti, pool->metadata_dev);
-	dm_put_device(ti, pool->data_dev);
+	blkdev_put(pool->metadata_dev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 
 	prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
@@ -1283,8 +1302,7 @@ static void pool_destroy(struct pool *pool, struct dm_target *ti)
 	kfree(pool);
 }
 
-static struct pool *pool_create(struct dm_dev *metadata_dev,
-				struct dm_dev *data_dev,
+static struct pool *pool_create(const char *metadata_path,
 				dm_block_t data_size,
 				unsigned long block_size,
 				dm_block_t low_water,
@@ -1293,10 +1311,21 @@ static struct pool *pool_create(struct dm_dev *metadata_dev,
 	int r;
 	struct pool *pool;
 	struct dm_multisnap_metadata *mmd;
+	struct block_device *metadata_dev;
 
-	mmd = dm_multisnap_metadata_open(metadata_dev->bdev, block_size, data_size);
+	/* FIXME: this doesn't handle major:minor devs */
+	metadata_dev = blkdev_get_by_path(metadata_path,
+					  FMODE_READ | FMODE_WRITE | FMODE_EXCL,
+					  &pool_create);
+	if (!metadata_dev) {
+		*error = "Error opening metadata block device";
+		return ERR_PTR(-EINVAL);
+	}
+	printk(KERN_ALERT "md opened");
+
+	mmd = dm_multisnap_metadata_open(metadata_dev, block_size, data_size);
 	if (!mmd) {
-		*error = "Error opening metadata device";
+		*error = "Error creating metadata object";
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -1308,7 +1337,6 @@ static struct pool *pool_create(struct dm_dev *metadata_dev,
 	}
 
 	pool->metadata_dev = metadata_dev;
-	pool->data_dev = data_dev;
 	pool->mmd = mmd;
 	pool->data_size = data_size;
 	pool->sectors_per_block = block_size;
@@ -1367,7 +1395,7 @@ static void pool_inc(struct pool *pool)
 static void pool_dec(struct pool *pool)
 {
 	if (atomic_dec_and_test(&pool->ref_count))
-		pool_destroy(pool, pool->ti); /* FIXME: what it pool->ti isn't set? */
+		pool_destroy(pool);
 }
 
 /*----------------------------------------------------------------
@@ -1377,6 +1405,8 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
 
+	dm_put_device(ti, pt->data_dev);
+	unbind_control_target(pt->pool, ti);
 	pool_dec(pt->pool);
 	kfree(pt);
 }
@@ -1392,7 +1422,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	struct pool_c *pt;
 	struct pool *pool;
-	struct dm_dev *metadata_dev, *data_dev;
+	struct dm_dev *data_dev;
 	dm_block_t data_size;
 	unsigned long block_size;
 	dm_block_t low_water;
@@ -1403,16 +1433,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
-	if (r) {
-		ti->error = "Error getting metadata device";
-		return r;
-	}
-
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
 		ti->error = "Error getting data device";
-		dm_put_device(ti, metadata_dev);
 		return r;
 	}
 
@@ -1422,7 +1445,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	data_size = get_dev_size(data_dev);
 	if (ti->len > data_size) {
 		ti->error = "Pool device bigger than data device";
-		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
@@ -1430,7 +1452,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	block_size = simple_strtoul(argv[2], &end, 10);
 	if (!block_size || *end) {
 		ti->error = "Invalid block size";
-		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
@@ -1439,29 +1460,28 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	low_water = simple_strtoull(argv[3], &end, 10);
 	if (!low_water || *end) {
 		ti->error = "Invalid low water mark";
-		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
 
-	pool = pool_create(metadata_dev, data_dev, data_size, block_size, low_water, &ti->error);
+	pool = pool_create(argv[0], data_size, block_size, low_water, &ti->error);
 	if (IS_ERR(pool)) {
-		dm_put_device(ti, metadata_dev);
 		dm_put_device(ti, data_dev);
 		return PTR_ERR(pool);
 	}
 
 	pt = kmalloc(sizeof(*pt), GFP_KERNEL);
 	if (!pt) {
-		pool_destroy(pool, ti);
+		pool_destroy(pool);
 		return -ENOMEM;
 	}
 	pt->pool = pool;
 	pt->ti = ti;
+	pt->data_dev = data_dev;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
 	ti->private = pt;
-	set_congestion_fn(ti, pool);
+	set_congestion_fn(ti, pt);
 
 	return 0;
 }
@@ -1479,7 +1499,7 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 		bio_list_add(&pool->retry_list, bio);
 		r = DM_MAPIO_SUBMITTED;
 	} else {
-		bio->bi_bdev = pool->data_dev->bdev;
+		bio->bi_bdev = pt->data_dev->bdev;
 		r = DM_MAPIO_REMAPPED;
 	}
 	spin_unlock_irqrestore(&pool->lock, flags);
@@ -1512,13 +1532,15 @@ static int pool_preresume(struct dm_target *ti)
 	unsigned long flags;
 
 	/* take control of the pool object */
-	pool->ti = ti;
+	r = bind_control_target(pool, ti);
+	if (r)
+		return r;
 
 	spin_lock_irqsave(&pool->lock, flags);
 	pool->bouncing = 0;
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	data_size = get_dev_size(pool->data_dev) >> pool->block_shift;
+	data_size = get_dev_size(pt->data_dev) >> pool->block_shift;
 	r = dm_multisnap_metadata_get_data_dev_size(pool->mmd, &sb_data_size);
 	if (r) {
 		DMERR("failed to retrieve data device size");
@@ -1742,8 +1764,8 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %lu %lu",
-		       format_dev_t(buf, pool->metadata_dev->bdev->bd_dev),
-		       format_dev_t(buf2, pool->data_dev->bdev->bd_dev),
+		       format_dev_t(buf, pool->metadata_dev->bd_dev),
+		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long) pool->sectors_per_block,
 		       (unsigned long) pool->low_water_mark);
 		break;
@@ -1757,20 +1779,19 @@ static int pool_iterate_devices(struct dm_target *ti,
 {
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	return fn(ti, pool->data_dev, 0, pool->data_size * pool->sectors_per_block, data);
+	return fn(ti, pt->data_dev, 0, pool->data_size * pool->sectors_per_block, data);
 }
 
 static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 		      struct bio_vec *biovec, int max_size)
 {
 	struct pool_c *pt = ti->private;
-	struct pool *pool = pt->pool;
-	struct request_queue *q = bdev_get_queue(pool->data_dev->bdev);
+	struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
 
 	if (!q->merge_bvec_fn)
 		return max_size;
 
-	bvm->bi_bdev = pool->data_dev->bdev;
+	bvm->bi_bdev = pt->data_dev->bdev;
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
