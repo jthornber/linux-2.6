@@ -140,6 +140,9 @@ int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
 int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
 					  dm_block_t new_size);
 
+int dm_multisnap_metadata_resize_virt_dev(struct dm_ms_device *msd,
+					  dm_block_t new_size);
+
 /*----------------------------------------------------------------*/
 
 #endif

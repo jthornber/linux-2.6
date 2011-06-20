@@ -167,7 +167,7 @@ where,
 
 *** Messages
 
- new-thin <dev id> <dev size in sectors>
+ new-thin <dev id>
  new-snap <dev id> <origin id>
  del      <dev id>
 
@@ -181,6 +181,11 @@ where,
 
  pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  dev id: the internal device identifier (32bit value)
+
+ The device is always implicitly resized to the size of the target.
+ If you truncate then provisioned blocks past the new end of device
+ will be lost immediately (A pool scope 'do not truncate' flag is
+ planned).
 
 *** Status
 

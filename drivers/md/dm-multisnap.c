@@ -1612,7 +1612,7 @@ static void pool_presuspend(struct dm_target *ti)
 
 /*
  * Messages supported:
- *   new-thin <dev id> <dev size in sectors>
+ *   new-thin <dev id>
  *   new-snap <dev id> <origin id>
  *   del      <dev id>
  *   trans-id <dev id> <current trans id> <new trans id>
@@ -1629,9 +1629,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	char *end;
 
 	if (!strcmp(argv[0], "new-thin")) {
-		dm_block_t dev_size;
-
-		if (argc != 3) {
+		if (argc != 2) {
 			ti->error = invalid_args;
 			return -EINVAL;
 		}
@@ -1642,14 +1640,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		dev_size = simple_strtoull(argv[2], &end, 10);
-		if (!dev_size || *end) {
-			ti->error = "Invalid dev size";
-			return -EINVAL;
-		}
-
-		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id,
-						      dev_size >> pool->block_shift);
+		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id, 0);
 		if (r) {
 			ti->error = "Creation of thin provisioned device failed";
 			return r;

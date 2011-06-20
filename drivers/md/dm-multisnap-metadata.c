@@ -1021,12 +1021,29 @@ int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
 int dm_multisnap_metadata_resize_virt_dev(struct dm_ms_device *msd,
 					  dm_block_t new_size)
 {
+	int r = 0;
+	dm_block_t old_size;
+	struct dm_multisnap_metadata *mmd = msd->mmd;
+
 	down_write(&msd->mmd->root_lock);
+	old_size = msd->dev_size;
 	msd->dev_size = new_size;
 	msd->changed = 1;
+
+	if (old_size > new_size) {
+		uint64_t key[2] = { msd->id, old_size - 1 };
+
+		/*
+		 * We need to truncate all the extraneous mappings.
+		 *
+		 * FIXME: We have to be careful to do this atomically.
+		 * Perhaps clone the bottom layer first so we can revert?
+		 */
+		r = dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
+	}
 	up_write(&msd->mmd->root_lock);
 
-	return 0;
+	return r;
 }
 
 int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
