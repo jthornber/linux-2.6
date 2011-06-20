@@ -620,6 +620,11 @@ static struct dm_target *get_ti(struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
+static dm_block_t sectors_to_blocks(struct pool *pool, sector_t sectors)
+{
+	return (sectors >> pool->block_shift) + ((sectors & pool->offset_mask) ? 1 : 0);
+}
+
 static dm_block_t get_bio_block(struct pool *pool, struct bio *bio)
 {
 	return bio->bi_sector >> pool->block_shift;
@@ -1887,6 +1892,16 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
 		printk(KERN_ALERT "Couldn't open multisnap internal device");
+		dm_put_device(ti, mc->pool_dev);
+		kfree(mc);
+		return r;
+	}
+
+	r = dm_multisnap_metadata_resize_thin_dev(mc->msd,
+						  sectors_to_blocks(mc->pool, ti->len));
+	if (r) {
+		printk(KERN_ALERT "Couldn't resize thin device");
+		dm_multisnap_metadata_close_device(mc->msd);
 		dm_put_device(ti, mc->pool_dev);
 		kfree(mc);
 		return r;
