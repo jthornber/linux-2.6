@@ -1829,9 +1829,7 @@ static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
 
-	BUG_ON(mc->pool);
-	BUG_ON(mc->msd);
-
+	dm_multisnap_metadata_close_device(mc->msd);
 	dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
 }
@@ -1873,46 +1871,32 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	mc->dev_id = simple_strtoull(argv[1], &end, 10);
 	if (*end) {
 		ti->error = "Invalid device id";
-		multisnap_dtr(ti);
+		dm_put_device(ti, mc->pool_dev);
+		kfree(mc);
 		return -EINVAL;
 	}
-
-	ti->split_io = 0;
-	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
-
-	return 0;
-}
-
-static int multisnap_preresume(struct dm_target *ti)
-{
-	int r;
-	struct multisnap_c *mc = ti->private;
 
 	mc->pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!mc->pool) {
 		printk(KERN_ALERT "Couldn't find pool object");
+		dm_put_device(ti, mc->pool_dev);
+		kfree(mc);
 		return -EINVAL;
 	}
 
 	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
 		printk(KERN_ALERT "Couldn't open multisnap internal device");
+		dm_put_device(ti, mc->pool_dev);
+		kfree(mc);
 		return r;
 	}
 
-	/* FIXME: check this gets picked up */
 	ti->split_io = mc->pool->sectors_per_block;
+	ti->num_flush_requests = 1;
+	ti->num_discard_requests = 1;
+
 	return 0;
-}
-
-static void multisnap_postsuspend(struct dm_target *ti)
-{
-	struct multisnap_c *mc = ti->private;
-
-	mc->pool = NULL;
-	dm_multisnap_metadata_close_device(mc->msd);
-	mc->msd = NULL;
 }
 
 static int multisnap_map(struct dm_target *ti, struct bio *bio,
@@ -2016,8 +2000,6 @@ static struct target_type multisnap_target = {
 	.module	= THIS_MODULE,
 	.ctr = multisnap_ctr,
 	.dtr = multisnap_dtr,
-	.preresume = multisnap_preresume,
-	.postsuspend = multisnap_postsuspend,
 	.map = multisnap_map,
 	.status = multisnap_status,
 	.merge = multisnap_bvec_merge,
