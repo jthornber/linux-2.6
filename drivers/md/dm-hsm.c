@@ -63,6 +63,11 @@ struct migration {
 struct policy {
 	void (*destructor)(struct policy *p);
 	void (*notify)(struct policy *p, struct bio *bio);
+
+	/*
+	 * This should return -ENODATA if there is no currently suggested
+	 * migration.
+	 */
 	int (*suggest_migration)(struct policy *p, struct migration *result);
 };
 
@@ -95,7 +100,89 @@ struct hsm_c {
 	struct work_struct worker;
 };
 
-/*----------------------------------------------------------------*/
+/*----------------------------------------------------------------
+ * Stochastic policy.  The simplest, and worst performing policy I can
+ * think of.  If you can't write a better one than this then you're not
+ * trying.
+ *--------------------------------------------------------------*/
+struct stochastic_policy {
+	struct policy policy;
+
+	/* every nth bio gets mapped into a random cache slot */
+	spinlock_t lock;
+	unsigned interval;
+	unsigned n;
+	int suggested_set;
+	dm_block_t suggested_block;
+};
+
+static void stochastic_dtr(struct policy *p)
+{
+	struct stochastic_policy *sp = container_of(p, struct stochastic_policy, policy);
+	kfree(sp);
+}
+
+static void stochastic_notify(struct policy *p, struct bio *bio)
+{
+	unsigned long flags;
+	struct stochastic_policy *sp = container_of(p, struct stochastic_policy, policy);
+
+	spin_lock_irqsave(&sp->lock, flags);
+	if (sp->n++ >= sp->interval) {
+		suggested_block = get_bio_block(hsm, bio);
+		suggested_set = 1;
+		sp->n = 0;
+	}
+	spin_lock_irqrestore(&sp->lock, flags);
+}
+
+static int stochastic_migration(struct policy *p, struct migration *result)
+{
+	int r;
+	unsigned long flags;
+	struct stochastic_policy *sp = container_of(p, struct stochastic_policy, policy);
+
+	spin_lock_irqsave(&sp->lock, flags);
+	if (sp->suggested_block) {
+
+		if (there_are_unused_cache_blocks(hsm)) {
+			result->to_cache = 1;
+			result->origin_block = sp->suggested_block;
+			result->cache_block = random_unused_block;
+
+		} else if (there_are_clean_cache_blocks(hsm)) {
+
+			// demote a random cache entry
+
+			// promote a random cache entry
+
+		} else {
+
+		}
+
+		sp->suggested_set = 0;
+	}
+	spin_lock_irqrestore(&sp->lock, flags);
+
+	return r;
+}
+
+static stochastic_create(unsigned interval)
+{
+	struct stochastic_policy *sp = kmalloc(sizeof(*sp), GFP_MALLOC);
+	if (sp) {
+		sp->policy.destructor = stochastic_dtr;
+		sp->policy.notify = stochastic_notify;
+		sp->policy.suggest_migration = stochastic_migration;
+		sp->interval = interval;
+	}
+
+	return &sp->policy;
+}
+
+/*----------------------------------------------------------------
+ * Tracking of in flight bios
+ *--------------------------------------------------------------*/
 
 static void track_bio(struct hsm_c *hsm, union map_info *info, struct bio *bio)
 {
@@ -120,22 +207,9 @@ static int untrack_bio(struct hsm_c *hsm, union map_info *info, struct bio *bio)
 	return 0;
 }
 
-/*----------------------------------------------------------------*/
-
-/* Return size of device in sectors. */
-static sector_t get_dev_size(struct dm_dev *dev)
-{
-	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
-}
-
-static void build_key(dm_block_t block, struct cell_key *key)
-{
-	key->virtual = 0;
-	key->dev = 0;
-	key->block = block;
-}
-
-/*----------------------------------------------------------------*/
+/*----------------------------------------------------------------
+ * Migration processing
+ *--------------------------------------------------------------*/
 
 static void process_unquiesced_migrations(struct hsm_c *hsm)
 {
@@ -216,7 +290,7 @@ static void process_quiesced_migrations(struct hsm_c *hsm)
 
 static void process_copied_migrations(struct hsm_c *hsm)
 {
-	int need_wake = 0, r;
+	int r;
 	unsigned long flags;
 	struct migration *m, *tmp;
 	struct list_head head;
@@ -230,11 +304,10 @@ static void process_copied_migrations(struct hsm_c *hsm)
 
 	/* update the metadata */
 	list_for_each_entry_safe (m, tmp, &head, list) {
-		need_wake = 1;
 		if (!m->err) {
-			if (m->to_cache)
+			if (m->to_cache) {
 				r = hsm_metadata_insert(hsm->hmd, m->origin_block, m->cache_block);
-			else
+			} else
 				r = hsm_metadata_remove(hsm->hmd, m->origin_block);
 		}
 
@@ -251,12 +324,18 @@ static void process_copied_migrations(struct hsm_c *hsm)
 
 		mempool_free(m, hsm->migration_pool);
 	}
-
-	if (need_wake)
-		queue_work(hsm->wq, &hsm->worker);
 }
 
-/*----------------------------------------------------------------*/
+/*----------------------------------------------------------------
+ * bio processing
+ *--------------------------------------------------------------*/
+
+static void build_key(dm_block_t block, struct cell_key *key)
+{
+	key->virtual = 0;
+	key->dev = 0;
+	key->block = block;
+}
 
 static void defer_bio(struct hsm_c *hsm, struct bio *bio)
 {
@@ -344,8 +423,6 @@ static int map_bio(struct hsm_c *hsm, struct bio *bio)
 	return r;
 }
 
-/*----------------------------------------------------------------*/
-
 static void process_discard(struct hsm_c *hsm, struct bio *bio)
 {
 	/* FIXME: finish */
@@ -390,13 +467,28 @@ static void process_bios(struct hsm_c *hsm)
 	}
 }
 
+/*----------------------------------------------------------------
+ * Main worker loop
+ *--------------------------------------------------------------*/
+static int more_work(struct hsm_c *hsm)
+{
+	return !bio_list_empty(&hsm->deferred_bios) ||
+		!list_empty(&hsm->unquiesced_migrations) ||
+		!list_empty(&hsm->quiesced_migrations) ||
+		!list_empty(&hsm->copied_migrations);
+}
+
 static void do_work(struct work_struct *ws)
 {
 	struct hsm_c *hsm = container_of(ws, struct hsm_c, worker);
-	process_bios(hsm);
-	process_unquiesced_migrations(hsm);
-	process_quiesced_migrations(hsm);
-	process_copied_migrations(hsm);
+
+	do {
+		process_bios(hsm);
+		process_unquiesced_migrations(hsm);
+		process_quiesced_migrations(hsm);
+		process_copied_migrations(hsm);
+
+	} while (more_work(hsm));
 }
 
 /*----------------------------------------------------------------*/
@@ -426,7 +518,9 @@ static void set_congestion_fn(struct hsm_c *hsm)
 	bdi->congested_data = hsm;
 }
 
-/*----------------------------------------------------------------*/
+/*----------------------------------------------------------------
+ * Target methods
+ *--------------------------------------------------------------*/
 
 static void hsm_dtr(struct dm_target *ti)
 {
@@ -451,6 +545,11 @@ static int get_device_(struct dm_target *ti, char *arg, struct dm_dev **dev,
 		ti->error = errstr;
 
 	return r;
+}
+
+static sector_t get_dev_size(struct dm_dev *dev)
+{
+	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
 }
 
 /*

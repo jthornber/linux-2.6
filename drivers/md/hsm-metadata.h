@@ -40,7 +40,6 @@ int hsm_metadata_lookup_reverse(struct hsm_metadata *hsm,
 
 /*
  * Returns -ENOSPC if the data volume is used up.
- * May be called concurrently with lookup.
  */
 int hsm_metadata_insert(struct hsm_metadata *hsm,
 			dm_block_t origin_block,
