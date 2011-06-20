@@ -542,6 +542,8 @@ struct endio_hook {
  * A global table that uses a struct block_device as a key.
  */
 #define TABLE_SIZE 32
+#define TABLE_PRIME 27 /* Largest prime smaller than table size. */
+#define	TABLE_SHIFT 5  /* Shift fitting prime. */
 struct bdev_table {
 	spinlock_t lock;
 	struct hlist_head buckets[TABLE_SIZE];
@@ -557,9 +559,10 @@ static void bdev_table_init(struct bdev_table *t)
 
 static unsigned hash_bdev(struct block_device *bdev)
 {
-	/* FIXME: finish */
-	/* bdev -> dev_t -> unsigned */
-	return 0;
+	unsigned long p = (unsigned long) bdev;
+
+	do_div(p, cache_line_size());
+	return ((p * TABLE_PRIME) >> TABLE_SHIFT) & (TABLE_SIZE - 1);
 }
 
 static void bdev_table_insert(struct bdev_table *t, struct pool *pool)
