@@ -102,6 +102,7 @@ struct dm_multisnap_metadata {
 	dm_block_t details_root;
 	struct list_head ms_devices;
 	uint64_t trans_id;
+	unsigned long flags;
 };
 
 struct dm_ms_device {
@@ -340,6 +341,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	mmd->root = __le64_to_cpu(sb->data_mapping_root);
 	mmd->details_root = __le64_to_cpu(sb->device_details_root);
 	mmd->trans_id = __le64_to_cpu(sb->trans_id);
+	mmd->flags = __le32_to_cpu(sb->flags);
 
 	return 0;
 }
@@ -449,6 +451,24 @@ int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd)
 	kfree(mmd);
 
 	return 0;
+}
+
+void dm_multisnap_metadata_set_flag(struct dm_multisnap_metadata *mmd,
+				    enum multisnap_flags flag)
+{
+	down_write(&mmd->root_lock);
+	set_bit(flag, &mmd->flags);
+	mmd->need_commit = 1;
+	up_write(&mmd->root_lock);
+}
+
+void dm_multisnap_metadata_clear_flag(struct dm_multisnap_metadata *mmd,
+				      enum multisnap_flags flag)
+{
+	down_write(&mmd->root_lock);
+	clear_bit(flag, &mmd->flags);
+	mmd->need_commit = 1;
+	up_write(&mmd->root_lock);
 }
 
 static int __open_device(struct dm_multisnap_metadata *mmd,
@@ -935,6 +955,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	sb->data_mapping_root = __cpu_to_le64(mmd->root);
 	sb->device_details_root = __cpu_to_le64(mmd->details_root);
 	sb->trans_id = __cpu_to_le64(mmd->trans_id);
+	sb->flags = __cpu_to_le32(mmd->flags);
 	r = dm_sm_copy_root(mmd->metadata_sm, &sb->metadata_space_map_root, len);
 	if (r < 0)
 		goto out;
@@ -1018,35 +1039,49 @@ int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
 	return 0;
 }
 
-int dm_multisnap_metadata_resize_thin_dev(struct dm_ms_device *msd,
-					  dm_block_t new_size)
+static int __resize_thin_dev(struct dm_ms_device *msd, dm_block_t new_size)
 {
-	int r = 0;
 	dm_block_t old_size;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
 
-	down_write(&msd->mmd->root_lock);
 	old_size = msd->dev_size;
-	if (new_size != old_size) {
-		msd->dev_size = new_size;
-		msd->changed = 1;
+	if (new_size == old_size)
+		return 0;
 
-		if (old_size > new_size) {
-			uint64_t key[2] = { msd->id, old_size - 1 };
+	if (test_bit(MULTISNAP_NEVER_TRUNCATE, &mmd->flags) &&
+	    new_size < old_size)
+		return -EINVAL;
 
-			/*
-			 * We need to truncate all the extraneous mappings.
-			 *
-			 * FIXME: We have to be careful to do this atomically.
-			 * Perhaps clone the bottom layer first so we can revert?
-			 */
-			r = dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
-		}
+	msd->dev_size = new_size;
+	msd->changed = 1;
+
+	if (old_size > new_size) {
+		uint64_t key[2] = { msd->id, old_size - 1 };
+
+		/*
+		 * We need to truncate all the extraneous mappings.
+		 *
+		 * FIXME: We have to be careful to do this atomically.
+		 * Perhaps clone the bottom layer first so we can revert?
+		 */
+		return dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
 	}
-	up_write(&msd->mmd->root_lock);
+
+	return 0;
+}
+
+int dm_multisnap_metadata_resize_thin_dev(struct dm_ms_device *msd,
+					  dm_block_t new_size)
+{
+	int r;
+	struct dm_multisnap_metadata *mmd = msd->mmd;
+	down_write(&mmd->root_lock);
+	r = __resize_thin_dev(msd, new_size);
+	up_write(&mmd->root_lock);
 
 	return r;
 }
+
 
 int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
 					  dm_block_t new_size)

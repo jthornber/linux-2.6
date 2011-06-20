@@ -175,6 +175,15 @@ where,
 
    Fails if 'current id' is incorrect.
 
+ set-flag <flag>
+ clear-flag <flag>
+
+ where <flag> is one of:
+
+   - never-truncate: Fail construction of multisnap targets that would
+                     truncate the device.
+
+
 ** multisnap target
 
  multisnap <pool dev> <metadata dev> <dev id>
