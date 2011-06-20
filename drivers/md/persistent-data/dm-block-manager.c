@@ -552,7 +552,22 @@ static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t w
 static void *align(void *ptr, size_t amount)
 {
 	size_t offset = (uint64_t) ptr & (amount - 1);
-	return ((unsigned char *) ptr) + (amount - offset);
+	return offset ? ((unsigned char *) ptr) + (amount - offset) : ptr;
+}
+
+/* Alloc a page if block_size equals PAGE_SIZE or kmalloc it. */
+static void *_alloc_block(struct dm_block_manager *bm)
+{
+	void *r;
+
+	if (bm->block_size == PAGE_SIZE) {
+		struct page *p = alloc_page(GFP_KERNEL);
+		r = p ? page_address(p) : NULL;
+
+	} else
+		r = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL);
+
+	return r;
 }
 
 static struct dm_block *alloc_block(struct dm_block_manager *bm)
@@ -564,10 +579,12 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 	INIT_LIST_HEAD(&b->list);
 	INIT_HLIST_NODE(&b->hlist);
 
-	if (!(b->data_actual = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL))) {
+	b->data_actual = _alloc_block(bm);
+	if (!b->data_actual) {
 		kfree(b);
 		return NULL;
 	}
+
 	b->validator = NULL;
 	b->data = align(b->data_actual, SECTOR_SIZE);
 	b->state = BS_EMPTY;
@@ -582,7 +599,11 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 
 static void free_block(struct dm_block *b)
 {
-	kfree(b->data_actual);
+	if (b->bm->block_size == PAGE_SIZE)
+		free_page((unsigned long) b->data_actual);
+	else
+		kfree(b->data_actual);
+
 	kfree(b);
 }
 
