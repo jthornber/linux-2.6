@@ -1643,6 +1643,16 @@ static void pool_presuspend(struct dm_target *ti)
  *   del      <dev id>
  *   trans-id <dev id> <current trans id> <new trans id>
  */
+static int decode_flag(const char *str, unsigned *flag)
+{
+	if (!strcmp(str, "never-truncate"))
+		*flag = MULTISNAP_NEVER_TRUNCATE;
+	else
+		return -EINVAL;
+
+	return 0;
+}
+
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
 	/* ti->error doesn't have a const qualifier :( */
@@ -1738,6 +1748,38 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			ti->error = "Setting userspace transaction id failed";
 			return r;
 		}
+	} else if (!strcmp(argv[0], "set-flag")) {
+		unsigned flag;
+
+		if (argc != 2) {
+			ti->error = invalid_args;
+			return -EINVAL;
+		}
+
+		r = decode_flag(argv[1], &flag);
+		if (r) {
+			ti->error = "Unknown multisnap flag";
+			return -EINVAL;
+		}
+
+		dm_multisnap_metadata_set_flag(pool->mmd, flag);
+
+	} else if (!strcmp(argv[0], "clear-flag")) {
+		/* FIXME: factor out common code with set-flag */
+		unsigned flag;
+
+		if (argc != 2) {
+			ti->error = invalid_args;
+			return -EINVAL;
+		}
+
+		r = decode_flag(argv[1], &flag);
+		if (r) {
+			ti->error = "Unknown multisnap flag";
+			return -EINVAL;
+		}
+
+		dm_multisnap_metadata_clear_flag(pool->mmd, flag);
 
 	} else
 		return -EINVAL;
