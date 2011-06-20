@@ -793,7 +793,8 @@ static void schedule_zero(struct pool *pool, struct dm_ms_device *msd,
 	m->err = 0;
 	m->bio = NULL;
 
-	if (io_covers_block(pool, bio)) {
+	if (!dm_multisnap_metadata_get_flag(pool->mmd, MULTISNAP_ZERO_NEW_BLOCKS) ||
+	    io_covers_block(pool, bio)) {
 		/* no copy needed, since all data is going to change */
 		m->bio = bio;
 		m->bi_end_io = bio->bi_end_io;
@@ -803,9 +804,20 @@ static void schedule_zero(struct pool *pool, struct dm_ms_device *msd,
 		remap_and_issue(pool, bio, data_block);
 
 	} else {
-		/* FIXME: zeroing not implemented yet, extend kcopyd */
+		int r;
+		struct dm_io_region to;
 
-		copy_complete(0, 0, m);
+		printk(KERN_ALERT "zeroing new block");
+		to.bdev = pool->pool_dev;
+		to.sector = data_block * pool->sectors_per_block;
+		to.count = pool->sectors_per_block;
+
+		r = dm_kcopyd_zero(pool->copier, 1, &to, 0, copy_complete, m);
+		if (r < 0) {
+			mempool_free(m, pool->mapping_pool);
+			printk(KERN_ALERT "dm_kcopyd_zero() failed");
+			cell_error(cell);
+		}
 	}
 }
 
@@ -1650,6 +1662,8 @@ static int decode_flag(const char *str, unsigned *flag)
 {
 	if (!strcmp(str, "never-truncate"))
 		*flag = MULTISNAP_NEVER_TRUNCATE;
+	else if (!strcmp(str, "zero-new-blocks"))
+		*flag = MULTISNAP_ZERO_NEW_BLOCKS;
 	else
 		return -EINVAL;
 

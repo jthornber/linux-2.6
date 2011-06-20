@@ -183,6 +183,7 @@ where,
    - never-truncate: Fail construction of multisnap targets that would
                      truncate the device.
 
+   - zero-new-blocks: All newly provisioned blocks will be zeroed
 
 ** multisnap target
 

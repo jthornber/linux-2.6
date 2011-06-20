@@ -407,6 +407,9 @@ dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
 		goto bad;
 	}
 
+	mmd->flags = 0;
+	dm_multisnap_metadata_clear_flag(mmd, MULTISNAP_NEVER_TRUNCATE);
+	dm_multisnap_metadata_set_flag(mmd, MULTISNAP_ZERO_NEW_BLOCKS);
 	mmd->need_commit = 1;
 	r = dm_multisnap_metadata_commit(mmd);
 	if (r < 0)
@@ -451,6 +454,18 @@ int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd)
 	kfree(mmd);
 
 	return 0;
+}
+
+int dm_multisnap_metadata_get_flag(struct dm_multisnap_metadata *mmd,
+				   enum multisnap_flags flag)
+{
+	int r;
+
+	down_write(&mmd->root_lock);
+	r = test_bit(flag, &mmd->flags);
+	up_write(&mmd->root_lock);
+
+	return r;
 }
 
 void dm_multisnap_metadata_set_flag(struct dm_multisnap_metadata *mmd,
