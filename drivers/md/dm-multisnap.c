@@ -755,6 +755,7 @@ static void schedule_copy(struct pool *pool, struct dm_ms_device *msd,
 		/* use kcopyd */
 		struct dm_io_region from, to;
 
+		/* IO to pool->pool_dev remaps to the pool target's data_dev */
 		from.bdev = pool->pool_dev;
 		from.sector = data_origin * pool->sectors_per_block;
 		from.count = pool->sectors_per_block;
@@ -903,7 +904,7 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 				// FIXME: this should be handled by the value_type ops
 				r = dm_multisnap_metadata_free_data_block(msd, lookup_result.block);
 				if (r) {
-					printk(KERN_ALERT "dm_multiisnap_metadata_free_data_block failed");
+					printk(KERN_ALERT "dm_multisnap_metadata_free_data_block failed");
 					/* carry on regardless, we've lost an unused data block */
 				}
 
@@ -943,8 +944,7 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 	r = alloc_data_block(pool, msd, &data_block);
 	switch (r) {
 	case 0:
-		schedule_copy(pool, msd, block,
-			      lookup_result->block,
+		schedule_copy(pool, msd, block, lookup_result->block,
 			      data_block, cell, bio);
 		break;
 
@@ -961,10 +961,8 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 	}
 }
 
-static void process_shared_bio(struct pool *pool,
-			       struct dm_ms_device *msd,
-			       struct bio *bio,
-			       dm_block_t block,
+static void process_shared_bio(struct pool *pool, struct dm_ms_device *msd,
+			       struct bio *bio, dm_block_t block,
 			       struct dm_multisnap_lookup_result *lookup_result)
 {
 	struct cell *cell;
@@ -1268,19 +1266,16 @@ static void requeue_all_bios(struct pool *pool)
  * Binding of control targets to a pool object
  *--------------------------------------------------------------*/
 /* FIXME: add locking */
-static int bind_control_target(struct pool *pool,
-			       struct dm_target *ti)
+static int bind_control_target(struct pool *pool, struct dm_target *ti)
 {
 	pool->ti = ti;
 	return 0;
 }
 
-static void unbind_control_target(struct pool *pool,
-				  struct dm_target *ti)
+static void unbind_control_target(struct pool *pool, struct dm_target *ti)
 {
-	if (pool->ti == ti) {
+	if (pool->ti == ti)
 		pool->ti = NULL;
-	}
 }
 
 /*----------------------------------------------------------------
@@ -1307,6 +1302,33 @@ static void pool_destroy(struct pool *pool)
 	kfree(pool);
 }
 
+/*
+ * The lifetime of the pool object is potentially longer than that of the
+ * pool target.  multisnap_get_device() is very similar to
+ * dm_get_device() except it doesn't associate the device with the target,
+ * which would prevent the target to be destroyed.
+ */
+static struct block_device *multisnap_get_device(const char *path, fmode_t mode)
+{
+	dev_t uninitialized_var(dev);
+	unsigned int major, minor;
+	struct block_device *bdev;
+
+	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
+		/* Extract the major/minor numbers */
+		dev = MKDEV(major, minor);
+		if (MAJOR(dev) != major || MINOR(dev) != minor)
+			return ERR_PTR(-EOVERFLOW);
+		bdev = blkdev_get_by_dev(dev, mode, &multisnap_get_device);
+	} else
+		bdev = blkdev_get_by_path(path, mode, &multisnap_get_device);
+
+	if (!bdev)
+		return ERR_PTR(-EINVAL);
+
+	return bdev;
+}
+
 static struct pool *pool_create(const char *metadata_path,
 				dm_block_t data_size,
 				unsigned long block_size,
@@ -1317,14 +1339,13 @@ static struct pool *pool_create(const char *metadata_path,
 	struct pool *pool;
 	struct dm_multisnap_metadata *mmd;
 	struct block_device *metadata_dev;
+	fmode_t metadata_dev_mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 
-	/* FIXME: this doesn't handle major:minor devs */
-	metadata_dev = blkdev_get_by_path(metadata_path,
-					  FMODE_READ | FMODE_WRITE | FMODE_EXCL,
-					  &pool_create);
-	if (!metadata_dev) {
+	metadata_dev = multisnap_get_device(metadata_path, metadata_dev_mode);
+	if (IS_ERR(metadata_dev)) {
+		r = PTR_ERR(metadata_dev);
 		*error = "Error opening metadata block device";
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(r);
 	}
 
 	mmd = dm_multisnap_metadata_open(metadata_dev, block_size, data_size);
