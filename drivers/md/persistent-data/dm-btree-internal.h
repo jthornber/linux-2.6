@@ -7,7 +7,11 @@
 
 /*----------------------------------------------------------------*/
 
-/* FIXME: move all this into btree.c */
+/* TODO: move all this into btree.c */
+/*
+ * We'll need 2 accessor functions for n->csum and n->blocknr
+ * to support dm-btree-spine.c in that case.
+ */
 
 enum node_flags {
         INTERNAL_NODE = 1,
