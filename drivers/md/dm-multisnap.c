@@ -807,7 +807,6 @@ static void schedule_zero(struct pool *pool, struct dm_ms_device *msd,
 		int r;
 		struct dm_io_region to;
 
-		printk(KERN_ALERT "zeroing new block");
 		to.bdev = pool->pool_dev;
 		to.sector = data_block * pool->sectors_per_block;
 		to.count = pool->sectors_per_block;
