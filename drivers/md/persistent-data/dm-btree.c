@@ -258,6 +258,7 @@ int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
 	/* FIXME: implement */
 	return 0;
 }
+EXPORT_SYMBOL_GPL(dm_btree_del_gt);
 
 /*----------------------------------------------------------------*/
 
