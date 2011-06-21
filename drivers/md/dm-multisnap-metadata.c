@@ -63,6 +63,8 @@ struct multisnap_super_block {
 struct device_details {
 	__le64 dev_size;
 	__le64 mapped_blocks;
+	__le64 transaction_id;	/* when created */
+	__le32 creation_time;
 	__le32 snapshotted_time;
 } __attribute__ ((packed));
 
@@ -114,6 +116,8 @@ struct dm_ms_device {
 	int changed;
 	uint64_t dev_size;
 	uint64_t mapped_blocks;
+	uint64_t transaction_id;
+	uint32_t creation_time;
 	uint32_t snapshotted_time;
 };
 
@@ -510,6 +514,8 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 			changed = 1;
 			details.dev_size = 0;
 			details.mapped_blocks = 0;
+			details.transaction_id = __cpu_to_le64(mmd->trans_id);
+			details.creation_time = __cpu_to_le32(mmd->time);
 			details.snapshotted_time = __cpu_to_le32(mmd->time);
 
 		} else
@@ -526,6 +532,8 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 	(*msd)->changed = changed;
 	(*msd)->dev_size = __le64_to_cpu(details.dev_size);
 	(*msd)->mapped_blocks = __le64_to_cpu(details.mapped_blocks);
+	(*msd)->transaction_id = __le64_to_cpu(details.transaction_id);
+	(*msd)->creation_time = __le32_to_cpu(details.creation_time);
 	(*msd)->snapshotted_time = __le32_to_cpu(details.snapshotted_time);
 
 	list_add(&(*msd)->list, &mmd->ms_devices);
@@ -918,6 +926,8 @@ static int __write_changed_details(struct dm_multisnap_metadata *mmd)
 
 			dd.dev_size = __cpu_to_le64(msd->dev_size);
 			dd.mapped_blocks = __cpu_to_le64(msd->mapped_blocks);
+			dd.transaction_id = __cpu_to_le64(msd->transaction_id);
+			dd.creation_time = __cpu_to_le32(msd->creation_time);
 			dd.snapshotted_time = __cpu_to_le32(msd->snapshotted_time);
 
 			r = dm_btree_insert(&mmd->details_info, mmd->details_root,
