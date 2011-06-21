@@ -1913,7 +1913,8 @@ static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
 
-	dm_multisnap_metadata_close_device(mc->msd);
+	if (mc->msd)
+		dm_multisnap_metadata_close_device(mc->msd);
 	dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
 }
@@ -1968,24 +1969,6 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
-	if (r) {
-		printk(KERN_ALERT "Couldn't open multisnap internal device");
-		dm_put_device(ti, mc->pool_dev);
-		kfree(mc);
-		return r;
-	}
-
-	r = dm_multisnap_metadata_resize_thin_dev(mc->msd,
-						  sectors_to_blocks(mc->pool, ti->len));
-	if (r) {
-		printk(KERN_ALERT "Couldn't resize thin device");
-		dm_multisnap_metadata_close_device(mc->msd);
-		dm_put_device(ti, mc->pool_dev);
-		kfree(mc);
-		return r;
-	}
-
 	ti->split_io = mc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
@@ -2033,6 +2016,36 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 	}
 
 	return 0;
+}
+
+static int multisnap_preresume(struct dm_target *ti)
+{
+	int r;
+	struct multisnap_c *mc = ti->private;
+
+	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
+	if (r) {
+		printk(KERN_ALERT "Couldn't open multisnap internal device");
+		return r;
+	}
+
+	r = dm_multisnap_metadata_resize_thin_dev(mc->msd,
+						  sectors_to_blocks(mc->pool, ti->len));
+	if (r) {
+		printk(KERN_ALERT "Couldn't resize thin device");
+		dm_multisnap_metadata_close_device(mc->msd);
+	}
+
+	return r;
+}
+
+static void multisnap_postsuspend(struct dm_target *ti)
+{
+	struct multisnap_c *mc = ti->private;
+	if (mc->msd) {
+		dm_multisnap_metadata_close_device(mc->msd);
+		mc->msd = NULL;
+	}
 }
 
 /* bvec merge method. */
@@ -2095,6 +2108,8 @@ static struct target_type multisnap_target = {
 	.ctr = multisnap_ctr,
 	.dtr = multisnap_dtr,
 	.map = multisnap_map,
+	.preresume = multisnap_preresume,
+	.postsuspend = multisnap_postsuspend,
 	.status = multisnap_status,
 	.merge = multisnap_bvec_merge,
 	.iterate_devices = multisnap_iterate_devices,
