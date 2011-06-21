@@ -1655,9 +1655,7 @@ static void pool_presuspend(struct dm_target *ti)
  */
 static int decode_flag(const char *str, unsigned *flag)
 {
-	if (!strcmp(str, "never-truncate"))
-		*flag = MULTISNAP_NEVER_TRUNCATE;
-	else if (!strcmp(str, "zero-new-blocks"))
+	if (!strcmp(str, "zero-new-blocks"))
 		*flag = MULTISNAP_ZERO_NEW_BLOCKS;
 	else
 		return -EINVAL;

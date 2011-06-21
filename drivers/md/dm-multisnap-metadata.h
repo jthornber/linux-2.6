@@ -29,7 +29,6 @@ int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd);
  * Flags are set for the whole metadata, not per thin device.
  */
 enum multisnap_flags {
-	MULTISNAP_NEVER_TRUNCATE,
 	MULTISNAP_ZERO_NEW_BLOCKS
 };
 

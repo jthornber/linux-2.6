@@ -414,7 +414,6 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 	}
 
 	mmd->flags = 0;
-	dm_multisnap_metadata_clear_flag(mmd, MULTISNAP_NEVER_TRUNCATE);
 	dm_multisnap_metadata_set_flag(mmd, MULTISNAP_ZERO_NEW_BLOCKS);
 	mmd->need_commit = 1;
 	r = dm_multisnap_metadata_commit(mmd);
@@ -716,12 +715,6 @@ static int __resize_thin_dev(struct dm_ms_device *msd, sector_t new_size)
 	old_size = msd->dev_size;
 	if (new_size == old_size)
 		return 0;
-
-	if (test_bit(MULTISNAP_NEVER_TRUNCATE, &mmd->flags) &&
-	    new_size < old_size) {
-		printk(KERN_ALERT "truncation is forbidden");
-		return -EINVAL;
-	}
 
 	msd->dev_size = new_size;
 	msd->changed = 1;
