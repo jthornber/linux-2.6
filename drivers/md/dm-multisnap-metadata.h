@@ -65,6 +65,11 @@ int dm_multisnap_metadata_create_snap(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 					dm_multisnap_dev_t dev);
 
+
+int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
+					  dm_multisnap_dev_t dev,
+					  dm_block_t new_size);
+
 /*
  * Commits _all_ metadata changes: device creation, deletion, mapping
  * updates.
@@ -153,9 +158,6 @@ int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
  * blocks would be lost.
  */
 int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
-					  dm_block_t new_size);
-
-int dm_multisnap_metadata_resize_thin_dev(struct dm_ms_device *msd,
 					  dm_block_t new_size);
 
 /*----------------------------------------------------------------*/

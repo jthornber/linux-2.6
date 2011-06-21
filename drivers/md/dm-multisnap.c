@@ -1655,6 +1655,7 @@ static void pool_presuspend(struct dm_target *ti)
  *   new-thin <dev id>
  *   new-snap <dev id> <origin id>
  *   del      <dev id>
+ *   resize   <dev id> <size in sectors>
  *   trans-id <dev id> <current trans id> <new trans id>
  */
 static int decode_flag(const char *str, unsigned *flag)
@@ -1737,6 +1738,33 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		}
 
 		r = dm_multisnap_metadata_delete_device(pool->mmd, dev_id);
+
+	} else if (!strcmp(argv[0], "resize")) {
+		sector_t new_size;
+
+		if (argc != 3) {
+			ti->error = invalid_args;
+			return -EINVAL;
+		}
+
+		dev_id = simple_strtoull(argv[1], &end, 10);
+		if (*end) {
+			ti->error = "Invalid device id";
+			return -EINVAL;
+		}
+
+		new_size = simple_strtoull(argv[1], &end, 10);
+		if (*end) {
+			ti->error = "Invalid size";
+			return -EINVAL;
+		}
+
+		r = dm_multisnap_metadata_resize_thin_dev(pool->mmd, dev_id,
+				  sectors_to_blocks(pool, new_size));
+		if (r) {
+			ti->error = "Couldn't resize thin device";
+			return r;
+		}
 
 	} else if (!strcmp(argv[0], "trans-id")) {
 		uint64_t old_id, new_id;
@@ -1913,8 +1941,7 @@ static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
 
-	if (mc->msd)
-		dm_multisnap_metadata_close_device(mc->msd);
+	dm_multisnap_metadata_close_device(mc->msd);
 	dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
 }
@@ -1969,6 +1996,14 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
+	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
+	if (r) {
+		printk(KERN_ALERT "Couldn't open multisnap internal device");
+		dm_put_device(ti, mc->pool_dev);
+		kfree(mc);
+		return r;
+	}
+
 	ti->split_io = mc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
@@ -2016,36 +2051,6 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 	}
 
 	return 0;
-}
-
-static int multisnap_preresume(struct dm_target *ti)
-{
-	int r;
-	struct multisnap_c *mc = ti->private;
-
-	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
-	if (r) {
-		printk(KERN_ALERT "Couldn't open multisnap internal device");
-		return r;
-	}
-
-	r = dm_multisnap_metadata_resize_thin_dev(mc->msd,
-						  sectors_to_blocks(mc->pool, ti->len));
-	if (r) {
-		printk(KERN_ALERT "Couldn't resize thin device");
-		dm_multisnap_metadata_close_device(mc->msd);
-	}
-
-	return r;
-}
-
-static void multisnap_postsuspend(struct dm_target *ti)
-{
-	struct multisnap_c *mc = ti->private;
-	if (mc->msd) {
-		dm_multisnap_metadata_close_device(mc->msd);
-		mc->msd = NULL;
-	}
 }
 
 /* bvec merge method. */
@@ -2108,8 +2113,6 @@ static struct target_type multisnap_target = {
 	.ctr = multisnap_ctr,
 	.dtr = multisnap_dtr,
 	.map = multisnap_map,
-	.preresume = multisnap_preresume,
-	.postsuspend = multisnap_postsuspend,
 	.status = multisnap_status,
 	.merge = multisnap_bvec_merge,
 	.iterate_devices = multisnap_iterate_devices,

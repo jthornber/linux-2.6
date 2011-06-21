@@ -694,6 +694,59 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 	return r;
 }
 
+static int __resize_thin_dev(struct dm_multisnap_metadata *mmd,
+			     dm_multisnap_dev_t dev, dm_block_t new_size)
+{
+	int r;
+	dm_block_t old_size;
+	struct dm_ms_device *msd;
+
+	r = __open_device(mmd, dev, 1, &msd);
+	if (r) {
+		printk(KERN_ALERT "couldn't open virtual device");
+		return r;
+	}
+
+	old_size = msd->dev_size;
+	if (new_size == old_size)
+		return 0;
+
+	if (test_bit(MULTISNAP_NEVER_TRUNCATE, &mmd->flags) &&
+	    new_size < old_size) {
+		printk(KERN_ALERT "truncation is forbidden");
+		return -EINVAL;
+	}
+
+	msd->dev_size = new_size;
+	msd->changed = 1;
+
+	if (old_size > new_size) {
+		uint64_t key[2] = { msd->id, old_size - 1 };
+
+		/*
+		 * We need to truncate all the extraneous mappings.
+		 *
+		 * FIXME: We have to be careful to do this atomically.
+		 * Perhaps clone the bottom layer first so we can revert?
+		 */
+		return dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
+	}
+
+	return 0;
+}
+
+int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
+					  dm_multisnap_dev_t dev,
+					  dm_block_t new_size)
+{
+	int r;
+	down_write(&mmd->root_lock);
+	r = __resize_thin_dev(mmd, dev, new_size);
+	up_write(&mmd->root_lock);
+
+	return r;
+}
+
 int dm_multisnap_metadata_set_transaction_id(struct dm_multisnap_metadata *mmd,
 					     uint64_t current_id,
 					     uint64_t new_id)
@@ -1063,50 +1116,6 @@ int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
 
 	return 0;
 }
-
-static int __resize_thin_dev(struct dm_ms_device *msd, dm_block_t new_size)
-{
-	dm_block_t old_size;
-	struct dm_multisnap_metadata *mmd = msd->mmd;
-
-	old_size = msd->dev_size;
-	if (new_size == old_size)
-		return 0;
-
-	if (test_bit(MULTISNAP_NEVER_TRUNCATE, &mmd->flags) &&
-	    new_size < old_size)
-		return -EINVAL;
-
-	msd->dev_size = new_size;
-	msd->changed = 1;
-
-	if (old_size > new_size) {
-		uint64_t key[2] = { msd->id, old_size - 1 };
-
-		/*
-		 * We need to truncate all the extraneous mappings.
-		 *
-		 * FIXME: We have to be careful to do this atomically.
-		 * Perhaps clone the bottom layer first so we can revert?
-		 */
-		return dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
-	}
-
-	return 0;
-}
-
-int dm_multisnap_metadata_resize_thin_dev(struct dm_ms_device *msd,
-					  dm_block_t new_size)
-{
-	int r;
-	struct dm_multisnap_metadata *mmd = msd->mmd;
-	down_write(&mmd->root_lock);
-	r = __resize_thin_dev(msd, new_size);
-	up_write(&mmd->root_lock);
-
-	return r;
-}
-
 
 int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
 					  dm_block_t new_size)
