@@ -623,11 +623,6 @@ static struct dm_target *get_ti(struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
-static dm_block_t sectors_to_blocks(struct pool *pool, sector_t sectors)
-{
-	return (sectors >> pool->block_shift) + ((sectors & pool->offset_mask) ? 1 : 0);
-}
-
 static dm_block_t get_bio_block(struct pool *pool, struct bio *bio)
 {
 	return bio->bi_sector >> pool->block_shift;
@@ -1682,7 +1677,9 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	char *end;
 
 	if (!strcmp(argv[0], "new-thin")) {
-		if (argc != 2) {
+		sector_t new_size;
+
+		if (argc != 3) {
 			ti->error = invalid_args;
 			return -EINVAL;
 		}
@@ -1693,7 +1690,13 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id, 0);
+		new_size = simple_strtoull(argv[2], &end, 10);
+		if (*end) {
+			ti->error = "Invalid size";
+			return -EINVAL;
+		}
+
+		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id, new_size);
 		if (r) {
 			ti->error = "Creation of thin provisioned device failed";
 			return r;
@@ -1753,14 +1756,14 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		new_size = simple_strtoull(argv[1], &end, 10);
+		new_size = simple_strtoull(argv[2], &end, 10);
 		if (*end) {
 			ti->error = "Invalid size";
 			return -EINVAL;
 		}
 
 		r = dm_multisnap_metadata_resize_thin_dev(pool->mmd, dev_id,
-				  sectors_to_blocks(pool, new_size));
+							  new_size);
 		if (r) {
 			ti->error = "Couldn't resize thin device";
 			return r;
@@ -1839,7 +1842,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 	uint64_t transaction_id;
 	dm_block_t nr_free_blocks_data;
 	dm_block_t nr_free_blocks_metadata;
-	void *held_root = NULL;
+	dm_block_t held_root;
 	char buf[BDEVNAME_SIZE];
 	char buf2[BDEVNAME_SIZE];
 	struct pool_c *pt = ti->private;
@@ -1862,7 +1865,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		r = dm_multisnap_metadata_get_held_root(pool->mmd, held_root);
+		r = dm_multisnap_metadata_get_held_root(pool->mmd, &held_root);
 		if (r)
 			return r;
 
@@ -1871,7 +1874,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       nr_free_blocks_metadata * pool->sectors_per_block);
 
 		if (held_root)
-			DMEMIT("%p", held_root);
+			DMEMIT("%llu", held_root);
 		else
 			DMEMIT("-");
 

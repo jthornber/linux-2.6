@@ -167,10 +167,10 @@ where,
 
 *** Messages
 
- new-thin <dev id>
+ new-thin <dev id> <size in sectors>
  new-snap <dev id> <origin id>
  del      <dev id>
-
+ resize   <dev id> <new size in sectors>
  trans-id <current id> <new id>
 
    Fails if 'current id' is incorrect.

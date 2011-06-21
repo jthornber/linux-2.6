@@ -105,6 +105,7 @@ struct dm_multisnap_metadata {
 	struct list_head ms_devices;
 	uint64_t trans_id;
 	unsigned long flags;
+	sector_t data_block_size;
 };
 
 struct dm_ms_device {
@@ -346,12 +347,13 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	mmd->details_root = __le64_to_cpu(sb->device_details_root);
 	mmd->trans_id = __le64_to_cpu(sb->trans_id);
 	mmd->flags = __le32_to_cpu(sb->flags);
+	mmd->data_block_size = __le32_to_cpu(sb->data_block_size);
 
 	return 0;
 }
 
 struct dm_multisnap_metadata *
-dm_multisnap_metadata_open(struct block_device *bdev, unsigned data_block_size,
+dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 			   dm_block_t data_dev_size)
 {
 	int r;
@@ -548,7 +550,7 @@ static void __close_device(struct dm_ms_device *msd)
 }
 
 static int __create_thin(struct dm_multisnap_metadata *mmd,
-			 dm_multisnap_dev_t dev, dm_block_t dev_size)
+			 dm_multisnap_dev_t dev, sector_t dev_size)
 {
 	int r;
 	dm_block_t dev_root;
@@ -582,6 +584,7 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 		return r;
 	}
 	msd->dev_size = dev_size;
+	msd->changed = 1;
 	__close_device(msd);
 
 	return r;
@@ -589,7 +592,7 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 
 int dm_multisnap_metadata_create_thin(struct dm_multisnap_metadata *mmd,
 				      dm_multisnap_dev_t dev,
-				      dm_block_t dev_size)
+				      sector_t dev_size)
 {
 	int r;
 
@@ -705,7 +708,7 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 	return r;
 }
 
-static int __resize_thin_dev(struct dm_ms_device *msd, dm_block_t new_size)
+static int __resize_thin_dev(struct dm_ms_device *msd, sector_t new_size)
 {
 	dm_block_t old_size;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
@@ -740,20 +743,19 @@ static int __resize_thin_dev(struct dm_ms_device *msd, dm_block_t new_size)
 
 int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
 					  dm_multisnap_dev_t dev,
-					  dm_block_t new_size)
+					  sector_t new_size)
 {
 	int r;
 	struct dm_ms_device *msd;
+
 	down_write(&mmd->root_lock);
-
 	r = __open_device(mmd, dev, 1, &msd);
-	if (r) {
+	if (r)
 		printk(KERN_ALERT "couldn't open virtual device");
-		return r;
+	else {
+		r = __resize_thin_dev(msd, new_size);
+		__close_device(msd);
 	}
-
-	r = __resize_thin_dev(msd, new_size);
-	__close_device(msd);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -795,13 +797,13 @@ int dm_multisnap_metadata_hold_root(struct dm_multisnap_metadata *mmd)
 }
 
 int dm_multisnap_metadata_get_held_root(struct dm_multisnap_metadata *mmd,
-					void *result)
+					dm_block_t *result)
 {
 	struct multisnap_super_block *sb;
 
 	down_read(&mmd->root_lock);
 	sb = dm_block_data(mmd->sblock);
-	result = (void *)__le64_to_cpu(sb->held_root);
+	*result = __le64_to_cpu(sb->held_root);
 	up_read(&mmd->root_lock);
 
 	return 0;
@@ -850,6 +852,18 @@ static int __snapshotted_since(struct dm_ms_device *msd, uint32_t time)
 	return msd->snapshotted_time > time;
 }
 
+static dm_block_t __nr_blocks(struct dm_ms_device *msd)
+{
+	dm_block_t r, m;
+
+	/* FIXME: this can be done more efficiently with shifts */
+	r = msd->dev_size;
+	m = do_div(r, msd->mmd->data_block_size);
+	if (m)
+		r++;
+	return r;
+}
+
 int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 				 dm_block_t block, int can_block,
 				 struct dm_multisnap_lookup_result *result)
@@ -864,15 +878,23 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 
 	if (can_block) {
 		down_read(&mmd->root_lock);
-		r = dm_btree_lookup(&mmd->info, mmd->root, keys, &value);
-		if (!r)
-			dm_block_time = __le64_to_cpu(value);
+		if (block >= __nr_blocks(msd))
+			r = -EIO;
+		else {
+			r = dm_btree_lookup(&mmd->info, mmd->root, keys, &value);
+			if (!r)
+				dm_block_time = __le64_to_cpu(value);
+		}
 		up_read(&mmd->root_lock);
 
 	} else if (down_read_trylock(&mmd->root_lock)) {
-		r = dm_btree_lookup(&mmd->nb_info, mmd->root, keys, &value);
-		if (!r)
-			dm_block_time = __le64_to_cpu(value);
+		if (block >= __nr_blocks(msd))
+			r = -EIO;
+		else {
+			r = dm_btree_lookup(&mmd->nb_info, mmd->root, keys, &value);
+			if (!r)
+				dm_block_time = __le64_to_cpu(value);
+		}
 		up_read(&mmd->root_lock);
 
 	} else
@@ -1087,13 +1109,10 @@ dm_multisnap_metadata_get_free_blocks_metadata(struct dm_multisnap_metadata *mmd
 }
 
 int dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
-					      unsigned *result)
+					      sector_t *result)
 {
-	struct multisnap_super_block *sb;
-
 	down_read(&mmd->root_lock);
-	sb = dm_block_data(mmd->sblock);
-	*result = __le32_to_cpu(sb->data_block_size);
+	*result = mmd->data_block_size;
 	up_read(&mmd->root_lock);
 
 	return 0;

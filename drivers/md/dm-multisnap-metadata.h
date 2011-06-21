@@ -20,7 +20,7 @@ typedef uint64_t dm_multisnap_dev_t;
  */
 struct dm_multisnap_metadata *
 dm_multisnap_metadata_open(struct block_device *bdev,
-			   unsigned data_block_size,
+			   sector_t data_block_size,
 			   dm_block_t data_dev_size);
 
 int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd);
@@ -45,7 +45,7 @@ void dm_multisnap_metadata_clear_flag(struct dm_multisnap_metadata *mmd,
  */
 int dm_multisnap_metadata_create_thin(struct dm_multisnap_metadata *mmd,
 				      dm_multisnap_dev_t dev,
-				      dm_block_t dev_size);
+				      sector_t dev_size);
 
 /*
  * An internal snapshot.
@@ -68,7 +68,7 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 
 int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
 					  dm_multisnap_dev_t dev,
-					  dm_block_t new_size);
+					  sector_t new_size);
 
 /*
  * Commits _all_ metadata changes: device creation, deletion, mapping
@@ -92,7 +92,7 @@ int dm_multisnap_metadata_get_transaction_id(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_hold_root(struct dm_multisnap_metadata *mmd);
 
 int dm_multisnap_metadata_get_held_root(struct dm_multisnap_metadata *mmd,
-					void *result);
+					dm_block_t *result);
 
 /*
  * Actions on a single virtual device.
@@ -145,7 +145,7 @@ dm_multisnap_metadata_get_free_blocks_metadata(struct dm_multisnap_metadata *mmd
 					       dm_block_t *result);
 
 int dm_multisnap_metadata_get_data_block_size(struct dm_multisnap_metadata *mmd,
-					      unsigned *result);
+					      sector_t *result);
 
 int dm_multisnap_metadata_get_data_dev_size(struct dm_multisnap_metadata *mmd,
 					    dm_block_t *result);
