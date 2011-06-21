@@ -112,7 +112,7 @@ struct dm_ms_device {
 	struct dm_multisnap_metadata *mmd;
 	dm_multisnap_dev_t id;
 
-	int is_open;
+	int open_count;
 	int changed;
 	uint64_t dev_size;
 	uint64_t mapped_blocks;
@@ -432,7 +432,7 @@ int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd)
 
 	down_read(&mmd->root_lock);
 	list_for_each_entry_safe (msd, tmp, &mmd->ms_devices, list) {
-		if (msd->is_open)
+		if (msd->open_count)
 			open_devices++;
 		else {
 			list_del(&msd->list);
@@ -502,6 +502,7 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 	/* check the device isn't already open */
 	list_for_each_entry (msd2, &mmd->ms_devices, list)
 		if (msd2->id == dev) {
+			msd2->open_count++;
 			*msd = msd2;
 			return 0;
 		}
@@ -528,7 +529,7 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 
 	(*msd)->mmd = mmd;
 	(*msd)->id = dev;
-	(*msd)->is_open = 0;
+	(*msd)->open_count = 1;
 	(*msd)->changed = changed;
 	(*msd)->dev_size = __le64_to_cpu(details.dev_size);
 	(*msd)->mapped_blocks = __le64_to_cpu(details.mapped_blocks);
@@ -539,6 +540,11 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 	list_add(&(*msd)->list, &mmd->ms_devices);
 
 	return 0;
+}
+
+static void __close_device(struct dm_ms_device *msd)
+{
+	--msd->open_count;
 }
 
 static int __create_thin(struct dm_multisnap_metadata *mmd,
@@ -570,11 +576,13 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 
 	r = __open_device(mmd, dev, 1, &msd);
 	if (r) {
+		__close_device(msd);
 		dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 		dm_btree_del(&mmd->bl_info, dev_root);
 		return r;
 	}
 	msd->dev_size = dev_size;
+	__close_device(msd);
 
 	return r;
 }
@@ -609,6 +617,7 @@ static int __set_snapshot_details(struct dm_multisnap_metadata *mmd,
 	snap->dev_size = msd->dev_size;
 	snap->mapped_blocks = msd->mapped_blocks;
 	snap->snapshotted_time = time;
+	__close_device(msd);
 
 	return 0;
 }
@@ -652,9 +661,11 @@ static int __create_snap(struct dm_multisnap_metadata *mmd,
 	if (r)
 		goto bad;
 
+	__close_device(msd);
 	return 0;
 
 bad:
+	__close_device(msd);
 	dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 	dm_btree_remove(&mmd->details_info, mmd->details_root,
 			&key, &mmd->details_root);
@@ -694,18 +705,10 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 	return r;
 }
 
-static int __resize_thin_dev(struct dm_multisnap_metadata *mmd,
-			     dm_multisnap_dev_t dev, dm_block_t new_size)
+static int __resize_thin_dev(struct dm_ms_device *msd, dm_block_t new_size)
 {
-	int r;
 	dm_block_t old_size;
-	struct dm_ms_device *msd;
-
-	r = __open_device(mmd, dev, 1, &msd);
-	if (r) {
-		printk(KERN_ALERT "couldn't open virtual device");
-		return r;
-	}
+	struct dm_multisnap_metadata *mmd = msd->mmd;
 
 	old_size = msd->dev_size;
 	if (new_size == old_size)
@@ -740,8 +743,17 @@ int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
 					  dm_block_t new_size)
 {
 	int r;
+	struct dm_ms_device *msd;
 	down_write(&mmd->root_lock);
-	r = __resize_thin_dev(mmd, dev, new_size);
+
+	r = __open_device(mmd, dev, 1, &msd);
+	if (r) {
+		printk(KERN_ALERT "couldn't open virtual device");
+		return r;
+	}
+
+	r = __resize_thin_dev(msd, new_size);
+	__close_device(msd);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -803,12 +815,6 @@ int dm_multisnap_metadata_open_device(struct dm_multisnap_metadata *mmd,
 
 	down_write(&mmd->root_lock);
 	r = __open_device(mmd, dev, 0, msd);
-	if (!r) {
-		if ((*msd)->is_open)
-			r = -EBUSY;
-		else
-			(*msd)->is_open = 1;
-	}
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -817,7 +823,7 @@ int dm_multisnap_metadata_open_device(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_close_device(struct dm_ms_device *msd)
 {
 	down_write(&msd->mmd->root_lock);
-	msd->is_open = 0;
+	__close_device(msd);
 	up_write(&msd->mmd->root_lock);
 
 	return 0;
@@ -988,7 +994,7 @@ static int __write_changed_details(struct dm_multisnap_metadata *mmd)
 			if (r)
 				return r;
 
-			if (msd->is_open)
+			if (msd->open_count)
 				msd->changed = 0;
 			else {
 				list_del(&msd->list);
