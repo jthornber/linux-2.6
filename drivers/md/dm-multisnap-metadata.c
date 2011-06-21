@@ -332,10 +332,12 @@ bad:
 static int begin(struct dm_multisnap_metadata *mmd)
 {
 	int r;
+	u32 features;
 	struct multisnap_super_block *sb;
 
 	BUG_ON(mmd->sblock);
 	mmd->need_commit = 0;
+	/* FIXME: superblock is never unlocked? */
 	r = dm_bm_write_lock(mmd->bm, MULTISNAP_SUPERBLOCK_LOCATION,
 			     &sb_validator_, &mmd->sblock);
 	if (r)
@@ -348,6 +350,15 @@ static int begin(struct dm_multisnap_metadata *mmd)
 	mmd->trans_id = __le64_to_cpu(sb->trans_id);
 	mmd->flags = __le32_to_cpu(sb->flags);
 	mmd->data_block_size = __le32_to_cpu(sb->data_block_size);
+
+	features = __le32_to_cpu(sb->incompat_flags) &
+		~MULTISNAP_FEATURE_INCOMPAT_SUPP;
+	if (features) {
+		printk(KERN_ERR "could not access metadata due to "
+		       "unsupported optional features (%lx).\n",
+		       (unsigned long)features);
+		return -EINVAL;
+	}
 
 	return 0;
 }

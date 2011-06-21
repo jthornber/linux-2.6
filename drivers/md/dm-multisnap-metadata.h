@@ -40,6 +40,13 @@ void dm_multisnap_metadata_clear_flag(struct dm_multisnap_metadata *mmd,
 				      enum multisnap_flags flag);
 
 /*
+ * Compat feature flags.  Any incompat flags beyond the ones
+ * specified below will prevent use of the multisnap metadata.
+ */
+#define MULTISNAP_FEATURE_COMPAT_SUPP	  0UL
+#define MULTISNAP_FEATURE_INCOMPAT_SUPP	  0UL
+
+/*
  * Device creation/deletion.
  */
 int dm_multisnap_metadata_create_thin(struct dm_multisnap_metadata *mmd,
