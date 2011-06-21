@@ -912,6 +912,11 @@ static int __insert(struct dm_ms_device *msd,
 	__le64 value;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
 
+	if (block >= __nr_blocks(msd)) {
+		printk(KERN_ALERT "insert out of bounds");
+		return -EIO;
+	}
+
 	keys[0] = msd->id;
 	keys[1] = block;
 
