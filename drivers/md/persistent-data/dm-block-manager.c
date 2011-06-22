@@ -72,12 +72,6 @@ struct dm_block_manager {
 	unsigned reading_count;
 	unsigned writing_count;
 
-#ifdef DEBUG
-	/* FIXME: debug only */
-	unsigned locks_held;
-	unsigned shared_read_count;
-#endif
-
 	/*
 	 * Hash table of cached blocks, holds everything that isn't in the
 	 * BS_EMPTY state.
@@ -688,10 +682,6 @@ dm_block_manager_create(struct block_device *bdev,
 		return NULL;
 	}
 
-#ifdef DEBUG
-	bm->locks_held = 0;
-	bm->shared_read_count = 0;
-#endif
 	return bm;
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
@@ -815,11 +805,6 @@ retry:
 		*result = b;
 	}
 
-#ifdef DEBUG
-	if (ret == 0 && how == WRITE)
-		bm->locks_held++;
-#endif
-
 out:
 	spin_unlock_irqrestore(&bm->lock, flags);
 	return ret;
@@ -863,11 +848,6 @@ int dm_bm_unlock(struct dm_block *b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->bm->lock, flags);
-
-#ifdef DEBUG
-	if (ret == 0 && b->state == BS_WRITE_LOCKED)
-		b->bm->locks_held--;
-#endif
 
 	switch (b->state) {
 	case BS_WRITE_LOCKED:
@@ -938,20 +918,5 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	return __wait_flush(bm);
 }
 EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
-
-#ifdef DEBUG
-unsigned dm_bm_locks_held(struct dm_block_manager *bm)
-{
-	unsigned r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&bm->lock, flags);
-	r = bm->locks_held;
-	spin_unlock_irqrestore(&bm->lock, flags);
-
-	return r;
-}
-EXPORT_SYMBOL_GPL(dm_bm_locks_held);
-#endif
 
 /*----------------------------------------------------------------*/
