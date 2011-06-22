@@ -787,10 +787,7 @@ retry:
 		switch (how) {
 		case READ:
 			b->read_lock_count++;
-#ifdef DEBUG
-			if (b->read_lock_count > 1)
-				bm->shared_read_count++;
-#endif
+
 			if (b->state == BS_DIRTY)
 				__transition(b, BS_READ_LOCKED_DIRTY);
 			else if (b->state == BS_CLEAN)
