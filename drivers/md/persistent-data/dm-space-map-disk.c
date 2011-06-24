@@ -351,11 +351,12 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		BUG_ON(__lookup_bitmap(bm, bit) != ref_count);
 
 		if (old > 2) {
-#if 0
-			if (!btree_remove(&io->ref_count_info, io->ref_count_root,
-					  &b, &io->ref_count_root))
-				abort();
-#endif
+			r = dm_btree_remove(&io->ref_count_info, io->ref_count_root,
+					    &b, &io->ref_count_root);
+			if (r) {
+				dm_tm_unlock(io->tm, nb);
+				return r;
+			}
 		}
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
@@ -364,7 +365,6 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 				    &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
 			dm_tm_unlock(io->tm, nb);
-			/* FIXME: release shadow? or assume the whole transaction will be ditched */
 			printk(KERN_ALERT "ref count insert failed");
 			return r;
 		}
