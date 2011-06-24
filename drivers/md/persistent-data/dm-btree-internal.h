@@ -29,12 +29,12 @@ struct node_header {
 
 	__le32 nr_entries;
 	__le32 max_entries;
-};
+} __attribute__((packed));
 
 struct node {
 	struct node_header header;
 	__le64 keys[0];
-};
+} __attribute__((packed));
 
 
 /*
