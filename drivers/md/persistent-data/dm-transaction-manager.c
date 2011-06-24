@@ -1,5 +1,6 @@
 #include "dm-transaction-manager.h"
 #include "dm-space-map-disk.h"
+#include "dm-space-map-metadata.h"
 
 #include <linux/slab.h>
 
@@ -218,16 +219,11 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 	struct dm_block *orig_block;
 
 	r = dm_sm_new_block(tm->sm, &new);
-	if (r < 0) {
-		printk(KERN_ALERT "shadow 1");
+	if (r < 0)
 		return r;
-	}
-
-	printk(KERN_ALERT "trying to write lock zero new block %llu", (unsigned long long) new);
 
 	r = dm_bm_write_lock_zero(tm->bm, new, v, result);
 	if (r < 0) {
-		printk(KERN_ALERT "shadow 2");
 		dm_sm_dec_block(tm->sm, new);
 		return r;
 	}
@@ -247,7 +243,6 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 
 	r = dm_sm_get_count(tm->sm, orig, &count);
 	if (r < 0) {
-		printk(KERN_ALERT "shadow 3");
 		dm_sm_dec_block(tm->sm, new);
 		dm_bm_unlock(*result);
 		return r;
@@ -255,7 +250,6 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 
 	r = dm_sm_dec_block(tm->sm, orig);
 	if (r < 0) {
-		printk(KERN_ALERT "shadow 4");
 		dm_sm_dec_block(tm->sm, new);
 		dm_bm_unlock(*result);
 		return r;
@@ -275,11 +269,9 @@ int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		return -EWOULDBLOCK;
 
 	if (is_shadow(tm, orig)) {
-		printk(KERN_ALERT "mto in");
 		r = dm_sm_count_is_more_than_one(tm->sm, orig, &more_than_one);
 		if (r < 0)
 			return r;
-		printk(KERN_ALERT "mto out: %d", more_than_one);
 
 		if (!more_than_one) {
 			*inc_children = 0;
@@ -288,14 +280,9 @@ int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		/* fall through */
 	}
 
-	printk(KERN_ALERT "shadowing %llu", (unsigned long long) orig);
 	r = __shadow_block(tm, orig, v, result, inc_children);
-	if (r < 0) {
-		printk(KERN_ALERT "failed");
+	if (r < 0)
 		return r;
-	}
-	printk(KERN_ALERT "succeeded (%llu)",
-	       (unsigned long long) dm_block_location(*result));
 	tm->shadow_count++;
 	insert_shadow(tm, dm_block_location(*result));
 
@@ -362,7 +349,7 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 {
 	int r;
 
-	*sm = dm_sm_disk_init();
+	*sm = dm_sm_metadata_init();
 	if (IS_ERR(*sm))
 		return PTR_ERR(*sm);
 
@@ -376,12 +363,6 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 	if (r < 0)
 		goto bad1;
 
-	r = dm_tm_reserve_block(*tm, sb_location);
-	if (r < 0) {
-		printk(KERN_ALERT "couldn't reserve superblock");
-		goto bad1;
-	}
-
 	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
 	if (r < 0) {
 		printk(KERN_ALERT "couldn't lock superblock");
@@ -389,24 +370,18 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 	}
 
 	if (create) {
-		r = dm_sm_disk_create_recursive(*sm, *tm, dm_bm_nr_blocks(bm));
+		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm), sb_location);
 		if (r) {
-			printk(KERN_ALERT "couldn't create disk space map");
+			printk(KERN_ALERT "couldn't create metadata space map");
 			goto bad2;
 		}
-		printk(KERN_ALERT "disk create completed");
-
-		r = dm_tm_reserve_block(*tm, sb_location);
-		if (r < 0) {
-			printk(KERN_ALERT "couldn't reserve superblock");
-			goto bad2;
-		}
+		printk(KERN_ALERT "metadata space map create completed");
 
 	} else {
-		r = dm_sm_disk_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
-				      root_max_len);
+		r = dm_sm_metadata_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
+					root_max_len);
 		if (IS_ERR(*sm)) {
-			printk(KERN_ALERT "couldn't create disk space map");
+			printk(KERN_ALERT "couldn't open metadata space map");
 			goto bad2;
 		}
 	}
