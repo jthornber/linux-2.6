@@ -33,29 +33,9 @@ static int index_check(struct dm_block_validator *v,
 	return 0;
 }
 
-static struct dm_block_validator index_validator_ = {
+struct dm_block_validator index_validator_ = {
 	.prepare_for_write = index_prepare_for_write,
 	.check = index_check
-};
-
-/*----------------------------------------------------------------
- * bitmap validator
- *--------------------------------------------------------------*/
-
-static void bitmap_prepare_for_write(struct dm_block_validator *v,
-				     struct dm_block *b)
-{
-}
-
-static int bitmap_check(struct dm_block_validator *v,
-			struct dm_block *b)
-{
-	return 0;
-}
-
-static struct dm_block_validator bitmap_validator_ = {
-	.prepare_for_write = bitmap_prepare_for_write,
-	.check = bitmap_check
 };
 
 /*----------------------------------------------------------------
@@ -105,7 +85,7 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		struct dm_block *b;
 		struct index_entry *idx = ll->index + i;
 
-		r = dm_tm_new_block(tm, &bitmap_validator_, &b);
+		r = dm_tm_new_block(tm, &dm_sm_bitmap_validator, &b);
 		if (r < 0)
 			return r;
 		idx->blocknr = __cpu_to_le64(dm_block_location(b));
@@ -173,7 +153,7 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	b = do_div(index, ll->entries_per_block);
 	ie = ll->index + index;
 
-	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &bitmap_validator_, &blk);
+	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
 	*result = sm__lookup_bitmap(dm_block_data(blk), b);
@@ -220,7 +200,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			unsigned position;
 			uint32_t bit_end = (i == index_end - 1) ? end : ll->entries_per_block;
 
-			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &bitmap_validator_, &blk);
+			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &blk);
 			if (r < 0)
 				return r;
 
@@ -255,7 +235,7 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	bit = do_div(index, ll->entries_per_block);
 	ie = ll->index + index;
 
-	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr), &bitmap_validator_, &nb, &inc);
+	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &nb, &inc);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow failed");
 		return r;

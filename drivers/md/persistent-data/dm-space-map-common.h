@@ -59,6 +59,8 @@ void sm__set_bitmap(void *addr, dm_block_t b, unsigned val);
 int sm__find_free(void *addr, unsigned begin, unsigned end,
 		  unsigned *result);
 
+extern struct dm_block_validator dm_sm_bitmap_validator;
+
 //----------------------------------------------------------------
 
 #endif
