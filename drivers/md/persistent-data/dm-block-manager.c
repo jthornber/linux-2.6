@@ -513,8 +513,11 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 
 		if (b->validator) {
 			ret = b->validator->check(b->validator, b);
-			if (ret)
+			if (ret) {
+				printk(KERN_ALERT "validator check failed for block %llu",
+				       (unsigned long long) b->where);
 				__transition(b, BS_EMPTY);
+			}
 		}
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
@@ -730,11 +733,16 @@ static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 retry:
 	b = __find_block(bm, block);
 	if (b) {
-		if (b->validator && need_read && (v != b->validator)) {
-			printk(KERN_ALERT "validator mismatch");
-			spin_unlock_irqrestore(&bm->lock, flags);
-			return -EINVAL;
-		}
+		if (need_read) {
+			if (b->validator && (v != b->validator)) {
+				printk(KERN_ALERT "mismatched validators for block %llu",
+				       (unsigned long long) b->where);
+				BUG_ON(1); /* FIXME: remove */
+				spin_unlock_irqrestore(&bm->lock, flags);
+				return -EINVAL;
+			}
+		} else
+			b->validator = v;
 
 		switch (how) {
 		case READ:
@@ -746,7 +754,6 @@ retry:
 					return -EWOULDBLOCK;
 				}
 
-				printk(KERN_ALERT "waiting for block %llu", (unsigned long long) block);
 				__wait_read_lockable(b, &flags);
 
 				if (b->where != block)
