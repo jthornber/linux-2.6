@@ -7,7 +7,11 @@
 
 /*----------------------------------------------------------------*/
 
-/* FIXME: move all this into btree.c */
+/* TODO: move all this into btree.c */
+/*
+ * We'll need 2 accessor functions for n->csum and n->blocknr
+ * to support dm-btree-spine.c in that case.
+ */
 
 enum node_flags {
         INTERNAL_NODE = 1,
@@ -25,12 +29,12 @@ struct node_header {
 
 	__le32 nr_entries;
 	__le32 max_entries;
-};
+} __attribute__((packed));
 
 struct node {
 	struct node_header header;
 	__le64 keys[0];
-};
+} __attribute__((packed));
 
 
 /*

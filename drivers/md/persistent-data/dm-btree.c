@@ -252,6 +252,14 @@ bad:
 }
 EXPORT_SYMBOL_GPL(dm_btree_del);
 
+int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
+		    dm_block_t *new_root)
+{
+	/* FIXME: implement */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dm_btree_del_gt);
+
 /*----------------------------------------------------------------*/
 
 static int btree_lookup_raw(struct ro_spine *s, dm_block_t block, uint64_t key,

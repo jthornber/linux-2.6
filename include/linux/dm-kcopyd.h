@@ -42,5 +42,9 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 		   unsigned num_dests, struct dm_io_region *dests,
 		   unsigned flags, dm_kcopyd_notify_fn fn, void *context);
 
+int dm_kcopyd_zero(struct dm_kcopyd_client *kc,
+		   unsigned num_dests, struct dm_io_region *dests,
+		   unsigned flags, dm_kcopyd_notify_fn fn, void *context);
+
 #endif	/* __KERNEL__ */
 #endif	/* _LINUX_DM_KCOPYD_H */

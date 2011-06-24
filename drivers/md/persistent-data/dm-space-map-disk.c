@@ -28,10 +28,10 @@ struct ll_disk {
 };
 
 struct index_entry {
-	__le64 b;
+	__le64 blocknr;
 	__le32 nr_free;
-        __le32 none_free_before;
-};
+	__le32 none_free_before;
+}  __attribute__ ((packed));
 
 struct sm_root {
 	__le64 nr_blocks;
@@ -187,7 +187,8 @@ static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm,
 		r = dm_tm_new_block(tm, &bitmap_validator_, &b);
 		if (r < 0)
 			return r;
-		idx.b = __cpu_to_le64(dm_block_location(b));
+		printk(KERN_ALERT "sm-disk allocated bitmap at: %u", (unsigned) dm_block_location(b));
+		idx.blocknr = __cpu_to_le64(dm_block_location(b));
 
 		r = dm_tm_unlock(tm, b);
 		if (r < 0)
@@ -247,7 +248,7 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &blk);
+	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr), &bitmap_validator_, &blk);
 	if (r < 0)
 		return r;
 	*result = __lookup_bitmap(dm_block_data(blk),
@@ -296,7 +297,8 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 				mod64(end, io->entries_per_block) :
 				io->entries_per_block;
 
-			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &blk);
+			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
+					    &bitmap_validator_, &blk);
 			if (r < 0)
 				return r;
 
@@ -335,7 +337,8 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.b), &bitmap_validator_, &nb, &inc);
+	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.blocknr),
+			       &bitmap_validator_, &nb, &inc);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow failed");
 		return r;
@@ -385,7 +388,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		ie.none_free_before = __cpu_to_le32(min((dm_block_t) __le32_to_cpu(ie.none_free_before), b));
 	}
 
-	ie.b = __cpu_to_le64(dm_block_location(nb));
+	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
 	r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
 			    &index, &ie, &io->bitmap_root);
 	if (r < 0)
@@ -399,12 +402,10 @@ static int ll_inc(struct ll_disk *ll, dm_block_t b)
 	int r;
 	uint32_t rc;
 
-	printk(KERN_ALERT "ll_lookup");
 	r = ll_lookup(ll, b, &rc);
 	if (r)
 		return r;
 
-	printk(KERN_ALERT "ll_insert");
 	return ll_insert(ll, b, rc + 1);
 }
 
@@ -416,7 +417,6 @@ static int ll_dec(struct ll_disk *ll, dm_block_t b)
 	r = ll_lookup(ll, b, &rc);
 	if (r)
 		return r;
-	printk(KERN_ALERT "looked up %u = %u", (unsigned) b, (unsigned) rc);
 
 	if (!rc)
 		return -EINVAL;
@@ -890,13 +890,14 @@ EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
 int dm_sm_disk_create_recursive(struct dm_space_map *sm,
 				struct dm_transaction_manager *tm,
-				dm_block_t nr_blocks)
+				dm_block_t nr_blocks,
+				dm_block_t superblock)
 {
 	int r;
 	dm_block_t i;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
-	smd->begin = 0;
+	smd->begin = superblock + 1;
 	smd->end = nr_blocks;
 	smd->recursion_count = 0;
 	smd->allocated_this_transaction = 0;
@@ -915,6 +916,13 @@ int dm_sm_disk_create_recursive(struct dm_space_map *sm,
 	for (i = 0; !r && i < smd->begin; i++)
 		r = ll_inc(&smd->ll, i);
 
+	if (r)
+		return r;
+
+	/*
+	 * Finally we increment the superblock to reserve it.
+	 */
+	r = ll_inc(&smd->ll, superblock);
 	if (r)
 		return r;
 

@@ -72,12 +72,6 @@ struct dm_block_manager {
 	unsigned reading_count;
 	unsigned writing_count;
 
-#ifdef DEBUG
-	/* FIXME: debug only */
-	unsigned locks_held;
-	unsigned shared_read_count;
-#endif
-
 	/*
 	 * Hash table of cached blocks, holds everything that isn't in the
 	 * BS_EMPTY state.
@@ -457,7 +451,8 @@ static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
  * Finding a free block to recycle
  *--------------------------------------------------------------*/
 static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
-			 int need_read, struct dm_block **result)
+			 int need_read, struct dm_block_validator *v,
+			 struct dm_block **result)
 {
 	int ret = 0;
 	struct dm_block *b;
@@ -492,6 +487,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 	}
 
 	b->where = where;
+	b->validator = v;
 	__transition(b, BS_READING);
 
 	if (!need_read) {
@@ -515,9 +511,10 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 			ret = -EIO;
 		}
 
-		if (b->validator && b->validator->check(b->validator, b)) {
-			__transition(b, BS_EMPTY);
-			ret = -EILSEQ;
+		if (b->validator) {
+			ret = b->validator->check(b->validator, b);
+			if (ret)
+				__transition(b, BS_EMPTY);
 		}
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
@@ -529,13 +526,14 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 
 #ifdef USE_PLUGGING
 static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t where,
-				       int need_read, struct dm_block **result)
+				       int need_read, struct dm_block_validator *v,
+				       struct dm_block **result)
 {
 	int r;
 	struct blk_plug plug;
 
 	blk_start_plug(&plug);
-	r = recycle_block(bm, where, need_read, result);
+	r = recycle_block(bm, where, need_read, v, result);
 	blk_finish_plug(&plug);
 
 	return r;
@@ -548,7 +546,22 @@ static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t w
 static void *align(void *ptr, size_t amount)
 {
 	size_t offset = (uint64_t) ptr & (amount - 1);
-	return ((unsigned char *) ptr) + (amount - offset);
+	return offset ? ((unsigned char *) ptr) + (amount - offset) : ptr;
+}
+
+/* Alloc a page if block_size equals PAGE_SIZE or kmalloc it. */
+static void *_alloc_block(struct dm_block_manager *bm)
+{
+	void *r;
+
+	if (bm->block_size == PAGE_SIZE) {
+		struct page *p = alloc_page(GFP_KERNEL);
+		r = p ? page_address(p) : NULL;
+
+	} else
+		r = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL);
+
+	return r;
 }
 
 static struct dm_block *alloc_block(struct dm_block_manager *bm)
@@ -560,10 +573,12 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 	INIT_LIST_HEAD(&b->list);
 	INIT_HLIST_NODE(&b->hlist);
 
-	if (!(b->data_actual = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL))) {
+	b->data_actual = _alloc_block(bm);
+	if (!b->data_actual) {
 		kfree(b);
 		return NULL;
 	}
+
 	b->validator = NULL;
 	b->data = align(b->data_actual, SECTOR_SIZE);
 	b->state = BS_EMPTY;
@@ -578,7 +593,11 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 
 static void free_block(struct dm_block *b)
 {
-	kfree(b->data_actual);
+	if (b->bm->block_size == PAGE_SIZE)
+		free_page((unsigned long) b->data_actual);
+	else
+		kfree(b->data_actual);
+
 	kfree(b);
 }
 
@@ -663,10 +682,6 @@ dm_block_manager_create(struct block_device *bdev,
 		return NULL;
 	}
 
-#ifdef DEBUG
-	bm->locks_held = 0;
-	bm->shared_read_count = 0;
-#endif
 	return bm;
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
@@ -757,13 +772,14 @@ retry:
 
 	} else if (!can_block) {
 		ret = -EWOULDBLOCK;
+		goto out;
 
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
 #ifdef USE_PLUGGING
-		ret = recycle_block_with_plugging(bm, block, need_read, &b);
+		ret = recycle_block_with_plugging(bm, block, need_read, v, &b);
 #else
-		ret = recycle_block(bm, block, need_read, &b);
+		ret = recycle_block(bm, block, need_read, v, &b);
 #endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
@@ -772,10 +788,7 @@ retry:
 		switch (how) {
 		case READ:
 			b->read_lock_count++;
-#ifdef DEBUG
-			if (b->read_lock_count > 1)
-				bm->shared_read_count++;
-#endif
+
 			if (b->state == BS_DIRTY)
 				__transition(b, BS_READ_LOCKED_DIRTY);
 			else if (b->state == BS_CLEAN)
@@ -790,11 +803,7 @@ retry:
 		*result = b;
 	}
 
-#ifdef DEBUG
-	if (ret == 0 && how == WRITE)
-		bm->locks_held++;
-#endif
-
+out:
 	spin_unlock_irqrestore(&bm->lock, flags);
 	return ret;
 }
@@ -837,11 +846,6 @@ int dm_bm_unlock(struct dm_block *b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->bm->lock, flags);
-
-#ifdef DEBUG
-	if (ret == 0 && b->state == BS_WRITE_LOCKED)
-		b->bm->locks_held--;
-#endif
 
 	switch (b->state) {
 	case BS_WRITE_LOCKED:
@@ -912,20 +916,5 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	return __wait_flush(bm);
 }
 EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
-
-#ifdef DEBUG
-unsigned dm_bm_locks_held(struct dm_block_manager *bm)
-{
-	unsigned r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&bm->lock, flags);
-	r = bm->locks_held;
-	spin_unlock_irqrestore(&bm->lock, flags);
-
-	return r;
-}
-EXPORT_SYMBOL_GPL(dm_bm_locks_held);
-#endif
 
 /*----------------------------------------------------------------*/

@@ -32,6 +32,8 @@
 #define MIN_JOBS	1
 #define RESERVE_PAGES	DIV_ROUND_UP(SUB_JOB_SIZE << SECTOR_SHIFT, PAGE_SIZE)
 
+static struct page_list zero_page_list;
+
 /*-----------------------------------------------------------------
  * Each kcopyd client has its own little pool of preallocated
  * pages for kcopyd io.
@@ -236,6 +238,9 @@ int __init dm_kcopyd_init(void)
 	if (!_job_cache)
 		return -ENOMEM;
 
+	zero_page_list.next = &zero_page_list;
+	zero_page_list.page = ZERO_PAGE(0);
+
 	return 0;
 }
 
@@ -304,7 +309,7 @@ static int run_complete_job(struct kcopyd_job *job)
 	dm_kcopyd_notify_fn fn = job->fn;
 	struct dm_kcopyd_client *kc = job->kc;
 
-	if (job->pages)
+	if (job->pages && job->pages != &zero_page_list)
 		kcopyd_put_pages(kc, job->pages);
 
 	/* Do not free sub-jobs */
@@ -465,6 +470,8 @@ static void dispatch_job(struct kcopyd_job *job)
 	atomic_inc(&kc->nr_jobs);
 	if (unlikely(!job->source.count))
 		push(&kc->complete_jobs, job);
+	else if (job->pages == &zero_page_list)
+		push(&kc->io_jobs, job);
 	else
 		push(&kc->pages_jobs, job);
 	wake(kc);
@@ -598,6 +605,50 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 	return 0;
 }
 EXPORT_SYMBOL(dm_kcopyd_copy);
+
+int dm_kcopyd_zero(struct dm_kcopyd_client *kc,
+		   unsigned int num_dests, struct dm_io_region *dests,
+		   unsigned int flags, dm_kcopyd_notify_fn fn, void *context)
+{
+	struct kcopyd_job *job;
+
+	/*
+	 * Allocate a new job.
+	 */
+	job = mempool_alloc(kc->job_pool, GFP_NOIO);
+
+	/*
+	 * set up for the write.
+	 */
+	job->kc = kc;
+	job->flags = flags;
+	job->read_err = 0;
+	job->write_err = 0;
+	job->rw = WRITE;
+
+	memset(&job->source, 0, sizeof job->source);
+	job->source.count = dests[0].count;
+
+	job->num_dests = num_dests;
+	memcpy(&job->dests, dests, sizeof(*dests) * num_dests);
+
+	job->pages = &zero_page_list;
+
+	job->fn = fn;
+	job->context = context;
+
+	if (job->source.count <= SUB_JOB_SIZE)
+		dispatch_job(job);
+
+	else {
+		mutex_init(&job->lock);
+		job->progress = 0;
+		split_job(job);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(dm_kcopyd_zero);
 
 /*
  * Cancels a kcopyd job, eg. someone might be deactivating a
