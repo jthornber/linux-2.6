@@ -4,8 +4,9 @@
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
 
-#include "dm-space-map-disk.h"
-#include "dm-btree-internal.h"
+#include "dm-space-map-common.h"
+#include "dm-space-map-metadata.h"
+#include "dm-btree.h"
 
 /*
  * FIXME: Lots in common with the plain disk format.  Refactor later when
@@ -103,54 +104,6 @@ static struct dm_block_validator bitmap_validator_ = {
 	.prepare_for_write = bitmap_prepare_for_write,
 	.check = bitmap_check
 };
-
-/*----------------------------------------------------------------
- * index entry ops
- *--------------------------------------------------------------*/
-static unsigned ie_lookup(void *addr, dm_block_t b)
-{
-	unsigned val = 0;
-	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
-	b %= ENTRIES_PER_WORD;
-
-	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
-	val <<= 1;
-	val |= test_bit_le(b * 2 + 1, (void *) w) ? 1 : 0;
-	return val;
-}
-
-static void ie_set(void *addr, dm_block_t b, unsigned val)
-{
-	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: use shift */
-	b %= ENTRIES_PER_WORD;
-
-	if (val & 2)
-		__set_bit_le(b * 2, (void *) w);
-	else
-		__clear_bit_le(b * 2, (void *) w);
-
-	if (val & 1)
-		__set_bit_le(b * 2 + 1, (void *) w);
-	else
-		__clear_bit_le(b * 2 + 1, (void *) w);
-}
-
-static int ie_find_free(void *addr, unsigned begin, unsigned end,
-			unsigned *result)
-{
-	/* FIXME: slow, find a quicker way in Hackers Delight */
-	while (begin < end) {
-		if (!ie_lookup(addr, begin)) {
-			*result = begin;
-			return 0;
-		}
-		begin++;
-	}
-
-	return -ENOSPC;
-}
 
 /*----------------------------------------------------------------
  * low level disk ops
@@ -270,7 +223,7 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->b), &bitmap_validator_, &blk);
 	if (r < 0)
 		return r;
-	*result = ie_lookup(dm_block_data(blk), b);
+	*result = sm__lookup_bitmap(dm_block_data(blk), b);
 	return dm_tm_unlock(ll->tm, blk);
 }
 
@@ -318,7 +271,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = ie_find_free(dm_block_data(blk), begin, bit_end, &position);
+			r = sm__find_free(dm_block_data(blk), begin, bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(ll->tm, blk);
 				return r;
@@ -357,10 +310,10 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	ie->b = __cpu_to_le64(dm_block_location(nb));
 
 	bm = dm_block_data(nb);
-	old = ie_lookup(bm, bit);
+	old = sm__lookup_bitmap(bm, bit);
 
 	if (ref_count <= 2) {
-		ie_set(bm, bit, ref_count);
+		sm__set_bitmap(bm, bit, ref_count);
 
 		r = dm_tm_unlock(ll->tm, nb);
 		if (r < 0)
@@ -371,13 +324,13 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 					    &b, &ll->ref_count_root);
 
 			if (r) {
-				ie_set(bm, bit, old);
+				sm__set_bitmap(bm, bit, old);
 				return r;
 			}
 		}
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
-		ie_set(bm, bit, 3);
+		sm__set_bitmap(bm, bit, 3);
 		r = dm_tm_unlock(ll->tm, nb);
 		if (r < 0)
 			return r;
