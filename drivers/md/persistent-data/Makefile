@@ -3,6 +3,7 @@ dm-persistent-data-objs := \
 	dm-block-manager.o \
 	dm-pd-module.o \
 	dm-space-map-disk.o \
+	dm-space-map-metadata.o \
 	dm-transaction-manager.o \
 	dm-btree.o \
 	dm-btree-remove.o \

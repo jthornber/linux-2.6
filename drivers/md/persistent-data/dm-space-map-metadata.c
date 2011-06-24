@@ -318,7 +318,6 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			printk(KERN_ALERT "io_find_free (%u, %u)", (unsigned) begin, (unsigned) bit_end);
 			r = ie_find_free(dm_block_data(blk), begin, bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(ll->tm, blk);
@@ -459,7 +458,7 @@ static int ll_commit(struct ll_disk *ll)
  * FIXME: we should calculate this based on the size of the device.
  * Only the metadata space map needs this functionality.
  */
-#define MAX_RECURSIVE_ALLOCATIONS 32
+#define MAX_RECURSIVE_ALLOCATIONS 1024
 
 enum block_op_type {
 	BOP_INC,
@@ -528,7 +527,6 @@ static void out(struct sm_metadata *smm)
 	BUG_ON(!smm->recursion_count);
 
 	if (smm->recursion_count == 1 && smm->nr_uncommitted) {
-		printk(KERN_ALERT "committing %u bops", (unsigned) smm->nr_uncommitted);
 		while (smm->nr_uncommitted && !r)
 			r = commit_bop(smm, smm->uncommitted + --smm->nr_uncommitted);
 	}
@@ -686,7 +684,7 @@ static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 	return r;
 }
 
-static int sm_metadata_new_block_(struct dm_space_map *sm, dm_block_t *b)
+static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
 	int r;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -708,15 +706,6 @@ static int sm_metadata_new_block_(struct dm_space_map *sm, dm_block_t *b)
 
 	if (!r)
 		smm->allocated_this_transaction++;
-	return r;
-}
-
-static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
-{
-	int r = sm_metadata_new_block_(sm, b);
-	if (!r)
-		printk(KERN_ALERT "new block returned %u", (unsigned) *b);
-	printk(KERN_ALERT "metadata allocated new block %u", (unsigned) b);
 	return r;
 }
 
@@ -829,7 +818,6 @@ static int sm_bootstrap_new_block(struct dm_space_map *sm, dm_block_t *b)
 		return -ENOSPC;
 
 	*b = smm->begin++;
-	printk(KERN_ALERT "bootstrap_new_block %u", (unsigned) *b);
 	return 0;
 }
 
@@ -922,10 +910,7 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 	if (r)
 		return r;
 
-	r = sm_metadata_commit(sm);
-	printk(KERN_ALERT "metadata committed");
-
-	return r;
+	return sm_metadata_commit(sm);
 }
 EXPORT_SYMBOL_GPL(dm_sm_metadata_create);
 
