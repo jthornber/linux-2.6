@@ -187,7 +187,6 @@ static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm,
 		r = dm_tm_new_block(tm, &bitmap_validator_, &b);
 		if (r < 0)
 			return r;
-		printk(KERN_ALERT "sm-disk allocated bitmap at: %u", (unsigned) dm_block_location(b));
 		idx.blocknr = __cpu_to_le64(dm_block_location(b));
 
 		r = dm_tm_unlock(tm, b);
@@ -426,105 +425,12 @@ static int ll_dec(struct ll_disk *ll, dm_block_t b)
 
 /*----------------------------------------------------------------
  * Space map interface.
- *
- * The low level disk format is written using the standard btree and
- * transaction manager.  This means that performing disk operations may
- * cause us to recurse into the space map in order to allocate new blocks.
- * For this reason we have a pool of pre-allocated blocks large enough to
- * service any ll_disk operation.
  *--------------------------------------------------------------*/
-
-/*
- * FIXME: we should calculate this based on the size of the device.
- * Only the metadata space map needs this functionality.
- */
-#define MAX_RECURSIVE_ALLOCATIONS 32
-
-enum block_op_type {
-	BOP_INC,
-	BOP_DEC
-};
-
-struct block_op {
-	enum block_op_type type;
-	dm_block_t block;
-};
-
 struct sm_disk {
 	struct dm_space_map sm;
 
 	struct ll_disk ll;
-	struct ll_disk old_ll;
-
-	dm_block_t begin, end;
-
-	unsigned recursion_count;
-	unsigned allocated_this_transaction;
-	unsigned nr_uncommitted;
-	struct block_op uncommitted[MAX_RECURSIVE_ALLOCATIONS];
 };
-
-static int add_bop(struct sm_disk *smd, enum block_op_type type, dm_block_t b)
-{
-	struct block_op *op;
-
-	printk(KERN_ALERT "adding bop %d %u", (int) type, (unsigned) b);
-	if (smd->nr_uncommitted == MAX_RECURSIVE_ALLOCATIONS) {
-		BUG_ON(1);
-		return -1;
-	}
-
-	op = smd->uncommitted + smd->nr_uncommitted++;
-	op->type = type;
-	op->block = b;
-	return 0;
-}
-
-static int commit_bop(struct sm_disk *smd, struct block_op *op)
-{
-	int r = 0;
-
-	switch (op->type) {
-	case BOP_INC:
-		r = ll_inc(&smd->ll, op->block);
-		break;
-
-	case BOP_DEC:
-		r = ll_dec(&smd->ll, op->block);
-		break;
-	}
-
-	return r;
-}
-
-static void in(struct sm_disk *smd)
-{
-	smd->recursion_count++;
-}
-
-static void out(struct sm_disk *smd)
-{
-	int r = 0;
-	BUG_ON(!smd->recursion_count);
-
-	if (smd->recursion_count == 1 && smd->nr_uncommitted) {
-		printk(KERN_ALERT "committing %u bops", (unsigned) smd->nr_uncommitted);
-		while (smd->nr_uncommitted && !r)
-			r = commit_bop(smd, smd->uncommitted + --smd->nr_uncommitted);
-	}
-
-	smd->recursion_count--;
-}
-
-static void no_recurse(struct sm_disk *smd)
-{
-	BUG_ON(smd->recursion_count);
-}
-
-static int recursing(struct sm_disk *smd)
-{
-	return smd->recursion_count;
-}
 
 static void sm_disk_destroy(struct dm_space_map *sm)
 {
@@ -543,170 +449,62 @@ static int sm_disk_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
-	*count = smd->old_ll.nr_blocks - smd->old_ll.nr_allocated - smd->allocated_this_transaction;
+	*count = smd->ll.nr_blocks;
 	return 0;
 }
 
 static int sm_disk_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
 {
-	int r, i;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	unsigned adjustment = 0;
-
-	/*
-	 * we may have some uncommitted adjustments to add.  This list
-	 * should always be really short.
-	 */
-	for (i = 0; i < smd->nr_uncommitted; i++) {
-		struct block_op *op = smd->uncommitted + i;
-		if (op->block == b)
-			switch (op->type) {
-			case BOP_INC:
-				adjustment++;
-				break;
-
-			case BOP_DEC:
-				adjustment--;
-				break;
-			}
-	}
-
-	r = ll_lookup(&smd->ll, b, result);
-	if (r)
-		return r;
-	*result += adjustment;
-
-	return 0;
+	return ll_lookup(&smd->ll, b, result);
 }
 
 static int sm_disk_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
 {
-	int r, i, adjustment = 0;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	uint32_t rc;
+	int r;
+	uint32_t count;
 
-	/*
-	 * we may have some uncommitted adjustments to add.  This list
-	 * should always be really short.
-	 */
-	for (i = 0; i < smd->nr_uncommitted; i++) {
-		struct block_op *op = smd->uncommitted + i;
-		if (op->block == b)
-			switch (op->type) {
-			case BOP_INC:
-				adjustment++;
-				break;
-
-			case BOP_DEC:
-				adjustment--;
-				break;
-			}
-	}
-
-	if (adjustment > 1) {
-		*result = 1;
-		return 0;
-	}
-
-	r = ll_lookup_bitmap(&smd->ll, b, &rc);
+	r = sm_disk_get_count(sm, b, &count);
 	if (r)
 		return r;
 
-	if (rc == 3)
-		/* we err on the side of caution, and always return true */
-		*result = 1;
-	else
-		*result = rc + adjustment > 1;
-
-	return 0;
+	return count > 1;
 }
 
 static int sm_disk_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
 {
-	int r;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	no_recurse(smd);
-
-	in(smd);
-	r = ll_insert(&smd->ll, b, count);
-	out(smd);
-	return r;
+	return ll_insert(&smd->ll, b, count);
 }
 
 static int sm_disk_inc_block(struct dm_space_map *sm, dm_block_t b)
 {
-	int r;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	if (recursing(smd))
-		r = add_bop(smd, BOP_INC, b);
-
-	else {
-		in(smd);
-		r = ll_inc(&smd->ll, b);
-		out(smd);
-	}
-	return r;
+	return ll_inc(&smd->ll, b);
 }
 
 static int sm_disk_dec_block(struct dm_space_map *sm, dm_block_t b)
 {
-	int r;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	if (recursing(smd))
-		r = add_bop(smd, BOP_DEC, b);
-
-	else {
-		in(smd);
-		r = ll_dec(&smd->ll, b);
-		out(smd);
-	}
-	return r;
-}
-
-static int sm_disk_new_block_(struct dm_space_map *sm, dm_block_t *b)
-{
-	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	r = ll_find_free_block(&smd->old_ll, smd->begin, smd->end, b);
-	if (r)
-		return r;
-
-	smd->begin = *b + 1;
-
-	if (recursing(smd))
-		r = add_bop(smd, BOP_INC, *b);
-
-	else {
-		in(smd);
-		r = ll_inc(&smd->ll, *b);
-		out(smd);
-	}
-
-	if (!r)
-		smd->allocated_this_transaction++;
-	return r;
+	return ll_dec(&smd->ll, b);
 }
 
 static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
-	int r = sm_disk_new_block_(sm, b);
-	if (!r)
-		printk(KERN_ALERT "new block returned %u", (unsigned) *b);
-	return r;
+	int r;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+
+
+	/* FIXME: we should start the search where we left off */
+	r = ll_find_free_block(&smd->ll, 0, smd->ll.nr_blocks, b);
+	if (r)
+		return r;
+
+	return ll_inc(&smd->ll, *b);
 }
 
 static int sm_disk_commit(struct dm_space_map *sm)
 {
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	memcpy(&smd->old_ll, &smd->ll, sizeof(smd->old_ll));
-	smd->begin = 0;
-	smd->end = smd->ll.nr_blocks;
-	smd->allocated_this_transaction = 0;
 	return 0;
 }
 
@@ -730,96 +528,7 @@ static int sm_disk_copy_root(struct dm_space_map *sm, void *where, size_t max)
 		return -ENOSPC;
 
 	memcpy(where, &root, sizeof(root));
-
 	return 0;
-}
-
-/*----------------------------------------------------------------*/
-
-/*
- * When a new space map is created, that manages it's own space.  We use
- * this tiny bootstrap allocator.
- */
-
-static void sm_bootstrap_destroy(struct dm_space_map *sm)
-{
-	BUG_ON(1);
-}
-
-static int sm_bootstrap_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
-{
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return smd->end;
-}
-
-static int sm_bootstrap_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
-{
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	*count = smd->end - smd->begin;
-	return 0;
-}
-
-static int sm_bootstrap_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
-{
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return b < smd->begin ? 1 : 0;
-}
-
-static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
-{
-	*result = 0;
-	return 0;
-}
-
-static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
-{
-	BUG_ON(1);
-	return -1;
-}
-
-static int sm_bootstrap_new_block(struct dm_space_map *sm, dm_block_t *b)
-{
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	/*
-	 * We know the entire device is unused.
-	 */
-	if (smd->begin == smd->end)
-		return -ENOSPC;
-
-	*b = smd->begin++;
-	printk(KERN_ALERT "bootstrap_new_block %u", (unsigned) *b);
-	return 0;
-}
-
-static int sm_bootstrap_inc_block(struct dm_space_map *sm, dm_block_t b)
-{
-	BUG_ON(1);
-	return -1;
-}
-
-static int sm_bootstrap_dec_block(struct dm_space_map *sm, dm_block_t b)
-{
-	/* FIXME: resolve this */
-	printk(KERN_ALERT "leaked %u", (unsigned) b);
-	return 0;
-}
-
-static int sm_bootstrap_commit(struct dm_space_map *sm)
-{
-	return 0;
-}
-
-static int sm_bootstrap_root_size(struct dm_space_map *sm, size_t *result)
-{
-	BUG_ON(1);
-	return -1;
-}
-
-static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where, size_t max)
-{
-	BUG_ON(1);
-	return -1;
 }
 
 /*----------------------------------------------------------------*/
@@ -839,23 +548,10 @@ static struct dm_space_map ops_ = {
 	.copy_root = sm_disk_copy_root
 };
 
-static struct dm_space_map bootstrap_ops_ = {
-	.destroy = sm_bootstrap_destroy,
-	.get_nr_blocks = sm_bootstrap_get_nr_blocks,
-	.get_nr_free = sm_bootstrap_get_nr_free,
-	.get_count = sm_bootstrap_get_count,
-	.count_is_more_than_one = sm_bootstrap_count_is_more_than_one,
-	.set_count = sm_bootstrap_set_count,
-	.inc_block = sm_bootstrap_inc_block,
-	.dec_block = sm_bootstrap_dec_block,
-	.new_block = sm_bootstrap_new_block,
-	.commit = sm_bootstrap_commit,
-	.root_size = sm_bootstrap_root_size,
-	.copy_root = sm_bootstrap_copy_root
-};
-
-struct dm_space_map *dm_sm_disk_init(void)
+struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
+				       dm_block_t nr_blocks)
 {
+	int r;
 	struct sm_disk *smd;
 
 	smd = kmalloc(sizeof(*smd), GFP_KERNEL);
@@ -863,90 +559,39 @@ struct dm_space_map *dm_sm_disk_init(void)
 		return ERR_PTR(-ENOMEM);
 
 	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
-	return &smd->sm;
-}
-EXPORT_SYMBOL_GPL(dm_sm_disk_init);
-
-int dm_sm_disk_create(struct dm_space_map *sm,
-		      struct dm_transaction_manager *tm,
-		      dm_block_t nr_blocks)
-{
-	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
-	smd->begin = 0;
-	smd->end = nr_blocks;
-	smd->recursion_count = 0;
-	smd->allocated_this_transaction = 0;
-	smd->nr_uncommitted = 0;
 
 	r = ll_new(&smd->ll, tm, nr_blocks);
 	if (r)
-		return r;
+		return ERR_PTR(r);
 
-	return sm_disk_commit(sm);
+	r = sm_disk_commit(&smd->sm);
+	if (r)
+		return ERR_PTR(r);
+
+	return &smd->sm;
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
-int dm_sm_disk_create_recursive(struct dm_space_map *sm,
-				struct dm_transaction_manager *tm,
-				dm_block_t nr_blocks,
-				dm_block_t superblock)
+struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
+				     void *root, size_t len)
 {
 	int r;
-	dm_block_t i;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+	struct sm_disk *smd;
 
-	smd->begin = superblock + 1;
-	smd->end = nr_blocks;
-	smd->recursion_count = 0;
-	smd->allocated_this_transaction = 0;
-	smd->nr_uncommitted = 0;
+	smd = kmalloc(sizeof(*smd), GFP_KERNEL);
+	if (!smd)
+		return ERR_PTR(-ENOMEM);
 
-	memcpy(&smd->sm, &bootstrap_ops_, sizeof(smd->sm));
-	r = ll_new(&smd->ll, tm, nr_blocks);
-	if (r)
-		return r;
 	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
-
-	/*
-	 * Now we need to update the newly created data structures with the
-	 * allocated blocks that they were built from.
-	 */
-	for (i = 0; !r && i < smd->begin; i++)
-		r = ll_inc(&smd->ll, i);
-
-	if (r)
-		return r;
-
-	/*
-	 * Finally we increment the superblock to reserve it.
-	 */
-	r = ll_inc(&smd->ll, superblock);
-	if (r)
-		return r;
-
-	return sm_disk_commit(sm);
-}
-EXPORT_SYMBOL_GPL(dm_sm_disk_create_recursive);
-
-int dm_sm_disk_open(struct dm_space_map *sm,
-		    struct dm_transaction_manager *tm,
-		    void *root, size_t len)
-{
-	int r;
-	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	r = ll_open(&smd->ll, tm, root, len);
 	if (r)
-		return r;
+		return ERR_PTR(r);
 
-	smd->begin = 0;
-	smd->end = smd->ll.nr_blocks;
-	smd->recursion_count = 0;
-	smd->allocated_this_transaction = 0;
-	smd->nr_uncommitted = 0;
+	r = sm_disk_commit(&smd->sm);
+	if (r)
+		return ERR_PTR(r);
 
-	return sm_disk_commit(sm);
+	return &smd->sm;
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_open);
