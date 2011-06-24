@@ -6,53 +6,6 @@
 
 #include "dm-space-map-common.h"
 #include "dm-space-map-metadata.h"
-#include "dm-btree.h"
-
-/*
- * FIXME: Lots in common with the plain disk format.  Refactor later when
- * they're both working.
- */
-
-/*----------------------------------------------------------------
- * Low level disk format
- *
- * We hold 2 bits per block, which represent UNUSED = 0, REF_COUNT = 1,
- * REF_COUNT = 2 and REF_COUNT = many.  A separate btree holds ref counts
- * for blocks that are over 2.
- *--------------------------------------------------------------*/
-
-/*
- * There's a limit of 16G for a metadata device.  Plenty.
- */
-struct index_entry {
-	__le64 b;
-	__le32 nr_free;
-        __le32 none_free_before;
-} __attribute__ ((packed));
-
-struct ll_disk {
-	struct dm_transaction_manager *tm;
-	struct dm_btree_info ref_count_info;
-
-	uint32_t block_size;
-	uint32_t entries_per_block;
-	dm_block_t nr_blocks;
-	dm_block_t nr_allocated;
-	dm_block_t bitmap_index;
-	dm_block_t ref_count_root;
-
-	struct index_entry index[256];
-};
-
-struct sm_root {
-	__le64 nr_blocks;
-	__le64 nr_allocated;
-	__le64 bitmap_index;
-	__le64 ref_count_root;
-} __attribute__ ((packed));
-
-#define ENTRIES_PER_BYTE 4
-#define ENTRIES_PER_WORD 32
 
 /*----------------------------------------------------------------
  * Useful maths that should probably be somewhere else
@@ -127,7 +80,7 @@ static int ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	}
 	ll->entries_per_block = ll->block_size * ENTRIES_PER_BYTE;
 	ll->nr_blocks = 0;
-	ll->bitmap_index = 0;
+	ll->bitmap_root = 0;
 	ll->ref_count_root = 0;
 
 	return 0;
@@ -155,7 +108,7 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		r = dm_tm_new_block(tm, &bitmap_validator_, &b);
 		if (r < 0)
 			return r;
-		idx->b = __cpu_to_le64(dm_block_location(b));
+		idx->blocknr = __cpu_to_le64(dm_block_location(b));
 
 		r = dm_tm_unlock(tm, b);
 		if (r < 0)
@@ -165,13 +118,13 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		idx->none_free_before = 0;
 	}
 
-	r = dm_tm_alloc_block(tm, &ll->bitmap_index);
+	r = dm_tm_alloc_block(tm, &ll->bitmap_root);
 	if (r)
 		return r;
 
 	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root);
 	if (r < 0) {
-		dm_tm_dec(tm, ll->bitmap_index);
+		dm_tm_dec(tm, ll->bitmap_root);
 		return r;
 	}
 
@@ -197,9 +150,9 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	ll->nr_blocks = __le64_to_cpu(smr->nr_blocks);
 	ll->nr_allocated = __le64_to_cpu(smr->nr_allocated);
 
-	ll->bitmap_index = __le64_to_cpu(smr->bitmap_index);
+	ll->bitmap_root = __le64_to_cpu(smr->bitmap_root);
 
-	r = dm_tm_read_lock(tm, __le64_to_cpu(smr->bitmap_index),
+	r = dm_tm_read_lock(tm, __le64_to_cpu(smr->bitmap_root),
 			    &index_validator_, &block);
 	if (r)
 		return r;
@@ -220,7 +173,7 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	b = do_div(index, ll->entries_per_block);
 	ie = ll->index + index;
 
-	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->b), &bitmap_validator_, &blk);
+	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &bitmap_validator_, &blk);
 	if (r < 0)
 		return r;
 	*result = sm__lookup_bitmap(dm_block_data(blk), b);
@@ -267,7 +220,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			unsigned position;
 			uint32_t bit_end = (i == index_end - 1) ? end : ll->entries_per_block;
 
-			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->b), &bitmap_validator_, &blk);
+			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &bitmap_validator_, &blk);
 			if (r < 0)
 				return r;
 
@@ -302,12 +255,12 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	bit = do_div(index, ll->entries_per_block);
 	ie = ll->index + index;
 
-	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->b), &bitmap_validator_, &nb, &inc);
+	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr), &bitmap_validator_, &nb, &inc);
 	if (r < 0) {
 		printk(KERN_ALERT "shadow failed");
 		return r;
 	}
-	ie->b = __cpu_to_le64(dm_block_location(nb));
+	ie->blocknr = __cpu_to_le64(dm_block_location(nb));
 
 	bm = dm_block_data(nb);
 	old = sm__lookup_bitmap(bm, bit);
@@ -388,12 +341,12 @@ static int ll_commit(struct ll_disk *ll)
 	int r, inc;
 	struct dm_block *b;
 
-	r = dm_tm_shadow_block(ll->tm, ll->bitmap_index, &index_validator_, &b, &inc);
+	r = dm_tm_shadow_block(ll->tm, ll->bitmap_root, &index_validator_, &b, &inc);
 	if (r)
 		return r;
 
 	memcpy(dm_block_data(b), ll->index, sizeof(ll->index));
-	ll->bitmap_index = dm_block_location(b);
+	ll->bitmap_root = dm_block_location(b);
 	return dm_tm_unlock(ll->tm, b);
 }
 
@@ -692,7 +645,7 @@ static int sm_metadata_copy_root(struct dm_space_map *sm, void *where, size_t ma
 
 	root.nr_blocks = __cpu_to_le64(smm->ll.nr_blocks);
 	root.nr_allocated = __cpu_to_le64(smm->ll.nr_allocated);
-	root.bitmap_index = __cpu_to_le64(smm->ll.bitmap_index);
+	root.bitmap_root = __cpu_to_le64(smm->ll.bitmap_root);
 	root.ref_count_root = __cpu_to_le64(smm->ll.ref_count_root);
 
 	if (max < sizeof(root))
