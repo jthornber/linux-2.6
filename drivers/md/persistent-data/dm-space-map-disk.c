@@ -23,8 +23,6 @@ struct ll_disk {
 	dm_block_t nr_allocated;
 	dm_block_t bitmap_root;
 	dm_block_t ref_count_root;
-
-	dm_block_t bitmap_index[4096]; /* FIXME: magic number */
 };
 
 struct index_entry {
@@ -38,10 +36,11 @@ struct sm_root {
 	__le64 nr_allocated;
 	__le64 bitmap_root;
 	__le64 ref_count_root;
-};
+} __attribute__ ((packed));
 
 #define ENTRIES_PER_BYTE 4
-#define ENTRIES_PER_WORD 32
+#define SHIFT_PER_WORD 5
+#define MASK_PER_WORD 31
 
 /*----------------------------------------------------------------*/
 
@@ -83,8 +82,8 @@ static unsigned __lookup_bitmap(void *addr, dm_block_t b)
 {
 	unsigned val = 0;
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
-	b %= ENTRIES_PER_WORD;
+	__le64 *w = words + (b >> SHIFT_PER_WORD);
+	b &= MASK_PER_WORD;
 
 	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
 	val <<= 1;
@@ -95,8 +94,8 @@ static unsigned __lookup_bitmap(void *addr, dm_block_t b)
 static void __set_bitmap(void *addr, dm_block_t b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: use shift */
-	b %= ENTRIES_PER_WORD;
+	__le64 *w = words + (b >> SHIFT_PER_WORD);
+	b &= MASK_PER_WORD;
 
 	if (val & 2)
 		__set_bit_le(b * 2, (void *) w);
