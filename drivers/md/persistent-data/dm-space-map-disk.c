@@ -8,9 +8,19 @@
 /*----------------------------------------------------------------
  * Low level disk format
  *
- * We hold 2 bits per block, which represent UNUSED = 0, REF_COUNT = 1,
- * REF_COUNT = 2 and REF_COUNT = many.  A separate btree holds ref counts
- * for blocks that are over 2.
+ * Bitmap btree
+ * ------------
+ *
+ * Each value stored in the btree is an index_entry.  This points to a
+ * block that is used as a bitmap.  Within the bitmap hold 2 bits per
+ * entry, which represent UNUSED = 0, REF_COUNT = 1, REF_COUNT = 2 and
+ * REF_COUNT = many.
+ *
+ * Refcount btree
+ * --------------
+ *
+ * Any entry that has a ref count higher than 2 gets entered in the ref
+ * count tree.  The leaf values for this tree is the 32bit ref count.
  *--------------------------------------------------------------*/
 struct ll_disk {
 	struct dm_transaction_manager *tm;
