@@ -375,7 +375,6 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 			printk(KERN_ALERT "couldn't create metadata space map");
 			goto bad2;
 		}
-		printk(KERN_ALERT "metadata space map create completed");
 
 	} else {
 		r = dm_sm_metadata_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
