@@ -514,8 +514,8 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		if (b->validator) {
 			ret = b->validator->check(b->validator, b);
 			if (ret) {
-				printk(KERN_ALERT "validator check failed for block %llu",
-				       (unsigned long long) b->where);
+				printk(KERN_ALERT "%s validator check failed for block %llu\n",
+				       b->validator->name, (unsigned long long)b->where);
 				__transition(b, BS_EMPTY);
 			}
 		}
@@ -735,8 +735,8 @@ retry:
 	if (b) {
 		if (need_read) {
 			if (b->validator && (v != b->validator)) {
-				printk(KERN_ALERT "mismatched validators for block %llu",
-				       (unsigned long long) b->where);
+				printk(KERN_ALERT "validator mismatch (old=%s vs new=%s) for block %llu\n",
+				       b->validator->name, v->name, (unsigned long long)b->where);
 				BUG_ON(1); /* FIXME: remove */
 				spin_unlock_irqrestore(&bm->lock, flags);
 				return -EINVAL;
@@ -745,8 +745,8 @@ retry:
 				b->validator = v;
 				r = b->validator->check(b->validator, b);
 				if (r) {
-					printk(KERN_ALERT "validator check failed for block %llu",
-					       (unsigned long long) b->where);
+					printk(KERN_ALERT "%s validator check failed for block %llu\n",
+					       b->validator->name, (unsigned long long)b->where);
 					spin_unlock_irqrestore(&bm->lock, flags);
 					return r;
 				}

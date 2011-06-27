@@ -157,6 +157,7 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 }
 
 static struct dm_block_validator sb_validator_ = {
+	.name = "superblock",
 	.prepare_for_write = sb_prepare_for_write,
 	.check = sb_check
 };

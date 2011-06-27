@@ -34,6 +34,7 @@ static int index_check(struct dm_block_validator *v,
 }
 
 struct dm_block_validator index_validator_ = {
+	.name = "index",
 	.prepare_for_write = index_prepare_for_write,
 	.check = index_check
 };

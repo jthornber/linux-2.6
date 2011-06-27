@@ -35,6 +35,7 @@ static int bitmap_check(struct dm_block_validator *v,
 }
 
 struct dm_block_validator dm_sm_bitmap_validator = {
+	.name = "sm_bitmap",
 	.prepare_for_write = bitmap_prepare_for_write,
 	.check = bitmap_check
 };

@@ -34,6 +34,7 @@ static int node_check(struct dm_block_validator *v,
 }
 
 struct dm_block_validator btree_node_validator = {
+	.name = "btree_node",
 	.prepare_for_write = node_prepare_for_write,
 	.check = node_check
 };

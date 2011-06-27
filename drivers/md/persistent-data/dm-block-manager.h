@@ -36,6 +36,7 @@ dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
  * you can change validators is if you call dm_bm_write_lock_zero.
  */
 struct dm_block_validator {
+	const char *name;
 	void (*prepare_for_write)(struct dm_block_validator *v, struct dm_block *b);
 
 	/* return 0 if valid, < 0 on error */
