@@ -202,6 +202,24 @@ struct dm_target_callbacks {
 int dm_register_target(struct target_type *t);
 void dm_unregister_target(struct target_type *t);
 
+/*
+ * Target argument parsing
+ */
+struct dm_arg_set {
+	unsigned argc;
+	char **argv;
+};
+
+struct dm_arg {
+	unsigned min;
+	unsigned max;
+	char *error;
+};
+
+int dm_read_arg(struct dm_arg *arg, char *str, unsigned *v, char **error);
+char *dm_shift_arg(struct dm_arg_set *as);
+void dm_consume_args(struct dm_arg_set *as, unsigned n);
+
 /*-----------------------------------------------------------------
  * Functions for creating and manipulating mapped devices.
  * Drop the reference with dm_put when you finish with the object.

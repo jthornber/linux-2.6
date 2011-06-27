@@ -785,6 +785,46 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 	return r;
 }
 
+/*
+ * Target argument parsing helpers.
+ */
+int dm_read_arg(struct dm_arg *arg, char *str, unsigned *v, char **error)
+{
+	if (!str ||
+	    (sscanf(str, "%u", v) != 1) ||
+	    (*v < arg->min) ||
+	    (*v > arg->max)) {
+		*error = arg->error;
+		return -EINVAL;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(dm_read_arg);
+
+char *dm_shift_arg(struct dm_arg_set *as)
+{
+	char *r;
+
+	if (as->argc) {
+		as->argc--;
+		r = *as->argv;
+		as->argv++;
+		return r;
+	}
+
+	return NULL;
+}
+EXPORT_SYMBOL(dm_shift_arg);
+
+void dm_consume_args(struct dm_arg_set *as, unsigned n)
+{
+	BUG_ON (as->argc < n);
+	as->argc -= n;
+	as->argv += n;
+}
+EXPORT_SYMBOL(dm_consume_args);
+
 static int dm_table_set_type(struct dm_table *t)
 {
 	unsigned i;
