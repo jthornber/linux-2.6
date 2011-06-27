@@ -748,7 +748,7 @@ retry:
 					printk(KERN_ALERT "validator check failed for block %llu",
 					       (unsigned long long) b->where);
 					spin_unlock_irqrestore(&bm->lock, flags);
-					return -EINVAL;
+					return ret;
 				}
 			}
 		} else
