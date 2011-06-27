@@ -725,7 +725,7 @@ static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 			 struct dm_block_validator *v,
 			 struct dm_block **result)
 {
-	int ret = 0;
+	int r = 0;
 	struct dm_block *b;
 	unsigned long flags;
 
@@ -743,12 +743,12 @@ retry:
 
 			} else if (!b->validator && v) {
 				b->validator = v;
-				ret = b->validator->check(b->validator, b);
-				if (ret) {
+				r = b->validator->check(b->validator, b);
+				if (r) {
 					printk(KERN_ALERT "validator check failed for block %llu",
 					       (unsigned long long) b->where);
 					spin_unlock_irqrestore(&bm->lock, flags);
-					return ret;
+					return r;
 				}
 			}
 		} else
@@ -788,20 +788,20 @@ retry:
 		}
 
 	} else if (!can_block) {
-		ret = -EWOULDBLOCK;
+		r = -EWOULDBLOCK;
 		goto out;
 
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
 #ifdef USE_PLUGGING
-		ret = recycle_block_with_plugging(bm, block, need_read, v, &b);
+		r = recycle_block_with_plugging(bm, block, need_read, v, &b);
 #else
-		ret = recycle_block(bm, block, need_read, v, &b);
+		r = recycle_block(bm, block, need_read, v, &b);
 #endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
 
-	if (ret == 0) {
+	if (r == 0) {
 		switch (how) {
 		case READ:
 			b->read_lock_count++;
@@ -822,7 +822,7 @@ retry:
 
 out:
 	spin_unlock_irqrestore(&bm->lock, flags);
-	return ret;
+	return r;
 }
 
 int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
