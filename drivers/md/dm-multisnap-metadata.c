@@ -142,8 +142,16 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 
 	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
 		printk(KERN_ERR "multisnap sb_check failed blocknr %llu "
-		       "wanted %llu\n", __le64_to_cpu(sb->blocknr), dm_block_location(b));
+		       "wanted %llu\n", __le64_to_cpu(sb->blocknr),
+		       dm_block_location(b));
 		return -ENOTBLK;
+	}
+
+	if (__le64_to_cpu(sb->magic) != MULTISNAP_SUPERBLOCK_MAGIC) {
+		printk(KERN_ERR "multisnap sb_check failed magic %llu "
+		       "wanted %llu\n", __le64_to_cpu(sb->magic),
+		       (unsigned long long)MULTISNAP_SUPERBLOCK_MAGIC);
+		return -EILSEQ;
 	}
 
 	dm_block_calc_csum(sb, struct multisnap_super_block, &csum);
@@ -238,15 +246,6 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 			printk(KERN_ALERT "tm_open_with_sm failed");
 			dm_block_manager_destroy(bm);
 			return ERR_PTR(r);
-		}
-
-		/* FIXME: move to sb_check() */
-		sb = dm_block_data(sblock);
-		if (__le64_to_cpu(sb->magic) != MULTISNAP_SUPERBLOCK_MAGIC) {
-			printk(KERN_ALERT "multisnap-metadata superblock is invalid (was %llu)",
-			       __le64_to_cpu(sb->magic));
-			r = -EILSEQ;
-			goto bad;
 		}
 
 		data_sm = dm_sm_disk_open(tm, sb->data_space_map_root,
