@@ -363,13 +363,13 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 	if (r < 0)
 		goto bad1;
 
-	r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
-	if (r < 0) {
-		printk(KERN_ALERT "couldn't lock superblock");
-		goto bad1;
-	}
-
 	if (create) {
+		r = dm_bm_write_lock_zero(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
+		if (r < 0) {
+			printk(KERN_ALERT "couldn't lock superblock");
+			goto bad1;
+		}
+
 		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm), sb_location);
 		if (r) {
 			printk(KERN_ALERT "couldn't create metadata space map");
@@ -377,6 +377,12 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 		}
 
 	} else {
+		r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
+		if (r < 0) {
+			printk(KERN_ALERT "couldn't lock superblock");
+			goto bad1;
+		}
+
 		r = dm_sm_metadata_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
 					root_max_len);
 		if (IS_ERR(*sm)) {
