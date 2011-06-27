@@ -27,6 +27,7 @@ struct flakey_c {
 	unsigned up_interval;
 	unsigned down_interval;
 	unsigned long flags;
+	unsigned corrupt_bio_byte;
 };
 
 enum feature_flag_bits {
@@ -41,7 +42,8 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "invalid number of feature args"},
+		{0, 3, "invalid number of feature args"},
+		{1, UINT_MAX, "invalid corrupt bio byte value"},
 	};
 
 	r = dm_read_arg(_args, dm_shift_arg(as), &argc, &ti->error);
@@ -54,6 +56,15 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 	while (argc && !r) {
 		arg_name = dm_shift_arg(as);
 		argc--;
+
+		/* corrupt_bio_byte <Nth byte> */
+		if (!strnicmp(arg_name, MESG_STR("corrupt_bio_byte")) &&
+		    (argc >= 1)) {
+			r = dm_read_arg(_args + 1, dm_shift_arg(as),
+					&fc->corrupt_bio_byte, &ti->error);
+			argc--;
+			continue;
+		}
 
 		if (!strnicmp(arg_name, MESG_STR("drop_writes"))) {
 			set_bit(DROP_WRITES, &fc->flags);
@@ -172,6 +183,16 @@ static void flakey_map_bio(struct dm_target *ti, struct bio *bio)
 		bio->bi_sector = flakey_map_sector(ti, bio->bi_sector);
 }
 
+static void corrupt_bio_data(struct bio *bio, struct flakey_c *fc)
+{
+	unsigned bio_bytes = bio_cur_bytes(bio);
+	char *data = bio_data(bio);
+
+	/* write 0 to the specified Nth byte of the bio */
+	if (data && bio_bytes >= fc->corrupt_bio_byte)
+		data[fc->corrupt_bio_byte-1] = 0;
+}
+
 static int flakey_map(struct dm_target *ti, struct bio *bio,
 		      union map_info *map_context)
 {
@@ -182,6 +203,12 @@ static int flakey_map(struct dm_target *ti, struct bio *bio,
 	elapsed = (jiffies - fc->start_time) / HZ;
 	if (elapsed % (fc->up_interval + fc->down_interval) >= fc->up_interval) {
 		unsigned rw = bio_data_dir(bio);
+		if (fc->corrupt_bio_byte) {
+			/* corrupt writes but don't touch reads */
+			if (rw == WRITE)
+				corrupt_bio_data(bio, fc);
+			goto map_bio;
+		}
 		if (test_bit(DROP_WRITES, &fc->flags)) {
 			/* drop writes but don't error reads */
 			if (rw == WRITE) {
@@ -218,7 +245,11 @@ static int flakey_status(struct dm_target *ti, status_type_t type,
 		       fc->down_interval);
 
 		drop_writes = test_bit(DROP_WRITES, &fc->flags);
-		DMEMIT("%u ", drop_writes);
+		DMEMIT("%u ", drop_writes +
+		              (fc->corrupt_bio_byte > 0) * 2);
+
+		if (fc->corrupt_bio_byte)
+			DMEMIT("corrupt_bio_byte %u ", fc->corrupt_bio_byte);
 		if (drop_writes)
 			DMEMIT("drop_writes ");
 		break;
