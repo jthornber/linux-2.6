@@ -1345,6 +1345,7 @@ static struct pool *pool_create(const char *metadata_path,
 				char **error)
 {
 	int r;
+	void *err_p;
 	struct pool *pool;
 	struct dm_multisnap_metadata *mmd;
 	struct block_device *metadata_dev;
@@ -1360,14 +1361,15 @@ static struct pool *pool_create(const char *metadata_path,
 	mmd = dm_multisnap_metadata_open(metadata_dev, block_size, data_size);
 	if (!mmd) {
 		*error = "Error creating metadata object";
-		return ERR_PTR(-ENOMEM);
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_mmd_open;
 	}
 
 	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
 	if (!pool) {
-		*error = "Error allocating memory";
-		dm_multisnap_metadata_close(mmd);
-		return ERR_PTR(-ENOMEM);
+		*error = "Error allocating memory for pool";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_pool;
 	}
 
 	pool->metadata_dev = metadata_dev;
@@ -1379,18 +1381,17 @@ static struct pool *pool_create(const char *metadata_path,
 	pool->low_water_mark = low_water;
 	pool->prison = prison_create(1024); /* FIXME: magic number */
 	if (!pool->prison) {
-		*error = "Error creating bio prison";
-		dm_multisnap_metadata_close(mmd);
-		return ERR_PTR(-ENOMEM);
+		*error = "Error creating pool's bio prison";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_prison;
 	}
 
 	pool->copier = dm_kcopyd_client_create();
 	if (IS_ERR(pool->copier)) {
 		r = PTR_ERR(pool->copier);
-		*error = "Error creating kcopyd client";
-		prison_destroy(pool->prison);
-		dm_multisnap_metadata_close(mmd);
-		return ERR_PTR(r);
+		*error = "Error creating pool's kcopyd client";
+		err_p = ERR_PTR(r);
+		goto bad_kcopyd_client;
 	}
 
 	/* Create singlethreaded workqueue that will service all devices
@@ -1399,23 +1400,17 @@ static struct pool *pool_create(const char *metadata_path,
 	pool->producer_wq = alloc_ordered_workqueue(DM_MSG_PREFIX "-producer",
 						    WQ_MEM_RECLAIM);
 	if (!pool->producer_wq) {
-		*error = "Couldn't create workqueue";
-		dm_kcopyd_client_destroy(pool->copier);
-		prison_destroy(pool->prison);
-		dm_multisnap_metadata_close(mmd);
-		return ERR_PTR(-ENOMEM);
+		*error = "Error creating pool's producer workqueue";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_producer_wq;
 	}
 
 	pool->consumer_wq = alloc_ordered_workqueue(DM_MSG_PREFIX "-consumer",
 						    WQ_MEM_RECLAIM);
 	if (!pool->consumer_wq) {
-		*error = "Couldn't create workqueue";
-		destroy_workqueue(pool->producer_wq);
-		dm_kcopyd_client_destroy(pool->copier);
-		prison_destroy(pool->prison);
-		dm_multisnap_metadata_close(mmd);
-		return ERR_PTR(-ENOMEM);
-
+		*error = "Error creating pool's consumer workqueue";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_consumer_wq;
 	}
 
 	INIT_WORK(&pool->producer, do_producer);
@@ -1428,10 +1423,39 @@ static struct pool *pool_create(const char *metadata_path,
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
 	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers, error handling */
+	if (!pool->mapping_pool) {
+		*error = "Error creating pool's mapping mempool";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_mapping_pool;
+	}
 	pool->endio_hook_pool = mempool_create_kmalloc_pool(10240, sizeof(struct endio_hook)); /* FIXME: magic numbers, error handling */
+	if (!pool->endio_hook_pool) {
+		*error = "Error creating pool's endio_hook mempool";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_endio_hook_pool;
+	}
 	atomic_set(&pool->ref_count, 1);
 
 	return pool;
+
+bad_endio_hook_pool:
+	mempool_destroy(pool->mapping_pool);
+bad_mapping_pool:
+	destroy_workqueue(pool->consumer_wq);
+bad_consumer_wq:
+	destroy_workqueue(pool->producer_wq);
+bad_producer_wq:
+	dm_kcopyd_client_destroy(pool->copier);
+bad_kcopyd_client:
+	prison_destroy(pool->prison);
+bad_prison:
+	kfree(pool);
+bad_pool:
+	dm_multisnap_metadata_close(mmd);
+bad_mmd_open:
+	blkdev_put(metadata_dev, metadata_dev_mode);
+
+	return err_p;
 }
 
 static void pool_inc(struct pool *pool)
