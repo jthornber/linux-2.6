@@ -525,7 +525,7 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
  * | B +++ |	 | C +++ |
  * +-------+ 	 +-------+
  */
-static int btree_split_beneath(struct shadow_spine *s, dm_block_t root, uint64_t key)
+static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 {
 	int ret;
 	size_t size;
@@ -634,7 +634,7 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 
 		if (node->header.nr_entries == node->header.max_entries) {
 			if (top)
-				r = btree_split_beneath(s, root, key);
+				r = btree_split_beneath(s, key);
 			else
 				r = btree_split_sibling(s, root, i, key);
 
