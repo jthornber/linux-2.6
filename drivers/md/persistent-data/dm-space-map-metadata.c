@@ -137,9 +137,11 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	if (r)
 		return r;
 	memcpy(&ll->index, dm_block_data(block), sizeof(ll->index));
+	r = dm_tm_unlock(tm, block);
+	if (r)
+		return r;
 
 	ll->ref_count_root = __le64_to_cpu(smr->ref_count_root);
-
 	return 0;
 }
 
