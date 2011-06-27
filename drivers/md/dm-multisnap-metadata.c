@@ -205,12 +205,13 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 		if (r < 0) {
 			printk(KERN_ALERT "tm_create_with_sm failed");
 			dm_block_manager_destroy(bm);
-			return NULL;
+			return ERR_PTR(r);
 		}
 
 		data_sm = dm_sm_disk_create(tm, nr_blocks);
 		if (IS_ERR(data_sm)) {
-			printk(KERN_ALERT "sm_disk_create");
+			printk(KERN_ALERT "sm_disk_create failed");
+			r = PTR_ERR(data_sm);
 			goto bad;
 		}
 
@@ -236,21 +237,23 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 		if (r < 0) {
 			printk(KERN_ALERT "tm_open_with_sm failed");
 			dm_block_manager_destroy(bm);
-			return NULL;
+			return ERR_PTR(r);
 		}
 
+		/* FIXME: move to sb_check() */
 		sb = dm_block_data(sblock);
 		if (__le64_to_cpu(sb->magic) != MULTISNAP_SUPERBLOCK_MAGIC) {
 			printk(KERN_ALERT "multisnap-metadata superblock is invalid (was %llu)",
 			       __le64_to_cpu(sb->magic));
+			r = -EILSEQ;
 			goto bad;
 		}
 
 		data_sm = dm_sm_disk_open(tm, sb->data_space_map_root,
 					  sizeof(sb->data_space_map_root));
-		if (r) {
+		if (IS_ERR(data_sm)) {
 			printk(KERN_ALERT "sm_disk_open failed");
-			dm_sm_destroy(data_sm);
+			r = PTR_ERR(data_sm);
 			goto bad;
 		}
 
@@ -260,6 +263,7 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd = kmalloc(sizeof(*mmd), GFP_KERNEL);
 	if (!mmd) {
 		printk(KERN_ALERT "multisnap-metadata could not allocate metadata struct");
+		r = -ENOMEM;
 		goto bad;
 	}
 
@@ -270,6 +274,7 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->nb_tm = dm_tm_create_non_blocking_clone(tm);
 	if (!mmd->nb_tm) {
 		printk(KERN_ALERT "multisnap-metadata could not create clone tm");
+		r = -ENOMEM;
 		goto bad;
 	}
 
@@ -328,7 +333,7 @@ bad:
 	dm_sm_destroy(sm);
 	dm_block_manager_destroy(bm);
 
-	return NULL;
+	return ERR_PTR(r);
 }
 
 static int begin(struct dm_multisnap_metadata *mmd)
@@ -339,7 +344,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 
 	BUG_ON(mmd->sblock);
 	mmd->need_commit = 0;
-	/* FIXME: superblock is never unlocked? */
+	/* superblock is unlocked via dm_tm_commit() */
 	r = dm_bm_write_lock(mmd->bm, MULTISNAP_SUPERBLOCK_LOCATION,
 			     &sb_validator_, &mmd->sblock);
 	if (r)
@@ -380,18 +385,20 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 				     MULTISNAP_METADATA_CACHE_SIZE);
 	if (!bm) {
 		printk(KERN_ALERT "multisnap-metadata could not create block manager");
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	r = superblock_all_zeroes(bm, &create);
 	if (r) {
 		dm_block_manager_destroy(bm);
-		return NULL;
+		return ERR_PTR(r);
 	}
 
 	mmd = alloc_mmd(bm, data_dev_size, create);
-	if (!mmd)
-		return NULL;
+	if (IS_ERR(mmd)) {
+		/* alloc_mmd() destroys the block manager on failure */
+		return mmd; /* already an ERR_PTR */
+	}
 	mmd->bdev = bdev;
 
 	if (!create) {
@@ -436,7 +443,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 	return mmd;
 bad:
 	dm_multisnap_metadata_close(mmd);
-	return NULL;
+	return ERR_PTR(r);
 }
 
 int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd)

@@ -1359,9 +1359,9 @@ static struct pool *pool_create(const char *metadata_path,
 	}
 
 	mmd = dm_multisnap_metadata_open(metadata_dev, block_size, data_size);
-	if (!mmd) {
+	if (IS_ERR(mmd)) {
 		*error = "Error creating metadata object";
-		err_p = ERR_PTR(-ENOMEM);
+		err_p = mmd; /* already an ERR_PTR */
 		goto bad_mmd_open;
 	}
 
