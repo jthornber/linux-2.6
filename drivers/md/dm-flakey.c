@@ -33,7 +33,8 @@ struct flakey_c {
 };
 
 enum feature_flag_bits {
-	DROP_WRITES
+	DROP_WRITES,
+	FLAKEY_DEBUG
 };
 
 static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
@@ -44,7 +45,7 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 5, "invalid number of feature args"},
+		{0, 6, "invalid number of feature args"},
 		{1, UINT_MAX, "invalid corrupt bio byte value"},
 		{0, UINT_MAX, "invalid corrupt bio flags mask"},
 		{0, 1, "invalid value to corrupt bio"},
@@ -85,6 +86,11 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 
 		if (!strnicmp(arg_name, MESG_STR("drop_writes"))) {
 			set_bit(DROP_WRITES, &fc->flags);
+			continue;
+		}
+
+		if (!strnicmp(arg_name, MESG_STR("debug"))) {
+			set_bit(FLAKEY_DEBUG, &fc->flags);
 			continue;
 		}
 
@@ -213,10 +219,12 @@ static void corrupt_bio_data(struct bio *bio, struct flakey_c *fc)
 	if (data && bio_bytes >= fc->corrupt_bio_byte) {
 		data[fc->corrupt_bio_byte-1] = fc->corrupt_bio_value;
 
-		printk("corrupting data bio=%p by writing %u to byte %u "
-		       "(rw=%lu flags=%lu bi_sector=%lu cur_bytes=%u)\n",
-		       bio, fc->corrupt_bio_value, fc->corrupt_bio_byte,
-		       bio_data_dir(bio), bio->bi_rw, bio->bi_sector, bio_bytes);
+		if (test_bit(FLAKEY_DEBUG, &fc->flags))
+			printk("corrupting data bio=%p by writing %u to byte %u "
+			       "(rw=%lu flags=%lu bi_sector=%lu cur_bytes=%u)\n",
+			       bio, fc->corrupt_bio_value, fc->corrupt_bio_byte,
+			       bio_data_dir(bio), bio->bi_rw, bio->bi_sector,
+			       bio_bytes);
 	}
 }
 
@@ -278,7 +286,7 @@ static int flakey_status(struct dm_target *ti, status_type_t type,
 {
 	unsigned sz = 0;
 	struct flakey_c *fc = ti->private;
-	unsigned drop_writes;
+	unsigned drop_writes, flakey_debug;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
@@ -291,14 +299,18 @@ static int flakey_status(struct dm_target *ti, status_type_t type,
 		       fc->down_interval);
 
 		drop_writes = test_bit(DROP_WRITES, &fc->flags);
+		flakey_debug = test_bit(FLAKEY_DEBUG, &fc->flags);
 		DMEMIT("%u ", drop_writes +
-		              (fc->corrupt_bio_byte > 0) * 4);
+		              (fc->corrupt_bio_byte > 0) * 4 +
+		              flakey_debug);
 
 		if (fc->corrupt_bio_byte)
 			DMEMIT("corrupt_bio_byte %u %u %u ", fc->corrupt_bio_byte,
 			       fc->corrupt_bio_flags, fc->corrupt_bio_value);
 		if (drop_writes)
 			DMEMIT("drop_writes ");
+		if (flakey_debug)
+			DMEMIT("debug ");
 		break;
 	}
 	return 0;
