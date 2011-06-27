@@ -740,6 +740,16 @@ retry:
 				BUG_ON(1); /* FIXME: remove */
 				spin_unlock_irqrestore(&bm->lock, flags);
 				return -EINVAL;
+
+			} else if (!b->validator && v) {
+				b->validator = v;
+				ret = b->validator->check(b->validator, b);
+				if (ret) {
+					printk(KERN_ALERT "validator check failed for block %llu",
+					       (unsigned long long) b->where);
+					spin_unlock_irqrestore(&bm->lock, flags);
+					return -EINVAL;
+				}
 			}
 		} else
 			b->validator = v;
@@ -853,7 +863,6 @@ int dm_bm_unlock(struct dm_block *b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->bm->lock, flags);
-
 	switch (b->state) {
 	case BS_WRITE_LOCKED:
 		__transition(b, BS_DIRTY);
