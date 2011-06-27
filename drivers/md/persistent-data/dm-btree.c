@@ -638,10 +638,8 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 			else
 				r = btree_split_sibling(s, root, i, key);
 
-			if (r < 0) {
-				/* FIXME: back out allocations */
+			if (r < 0)
 				return r;
-			}
 		}
 
 		BUG_ON(!shadow_current(s));
