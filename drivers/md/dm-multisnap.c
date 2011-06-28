@@ -1671,11 +1671,11 @@ static void pool_presuspend(struct dm_target *ti)
 
 /*
  * Messages supported:
- *   new-thin <dev id>
- *   new-snap <dev id> <origin id>
- *   del      <dev id>
- *   resize   <dev id> <size in sectors>
- *   trans-id <dev id> <current trans id> <new trans id>
+ *   new-thin        <dev id>
+ *   new-snap        <dev id> <origin id>
+ *   del             <dev id>
+ *   trim            <dev id> <size in sectors>
+ *   trans-id        <dev id> <current trans id> <new trans id>
  */
 static int decode_flag(const char *str, unsigned *flag)
 {
@@ -1764,7 +1764,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 
 		r = dm_multisnap_metadata_delete_device(pool->mmd, dev_id);
 
-	} else if (!strcmp(argv[0], "resize")) {
+	} else if (!strcmp(argv[0], "trim")) {
 		sector_t new_size;
 
 		if (argc != 3) {
@@ -1784,10 +1784,9 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_resize_thin_dev(pool->mmd, dev_id,
-							  new_size);
+		r = dm_multisnap_metadata_trim_thin_dev(pool->mmd, dev_id, new_size);
 		if (r) {
-			ti->error = "Couldn't resize thin device";
+			ti->error = "Couldn't trim thin device";
 			return r;
 		}
 

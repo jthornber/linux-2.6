@@ -71,10 +71,14 @@ int dm_multisnap_metadata_create_snap(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 					dm_multisnap_dev_t dev);
 
-
-int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
-					  dm_multisnap_dev_t dev,
-					  sector_t new_size);
+/*
+ * Thin devices don't have a size, however they do keep track of the
+ * highest mapped block.  This trimming function allows the user to remove
+ * mappings above a certain virtual block.
+ */
+int dm_multisnap_metadata_trim_thin_dev(struct dm_multisnap_metadata *mmd,
+					dm_multisnap_dev_t dev,
+					sector_t new_size);
 
 /*
  * Commits _all_ metadata changes: device creation, deletion, mapping
@@ -137,6 +141,10 @@ int dm_multisnap_metadata_insert(struct dm_ms_device *msd, dm_block_t block,
 int dm_multisnap_metadata_remove(struct dm_ms_device *msd,
 				 dm_block_t block);
 
+int dm_multisnap_metadata_thin_highest_mapped_block(struct dm_ms_device *msd,
+						    dm_block_t *highest_mapped);
+
+/* FIXME: why are these passed an msd, rather than an mmd ? */
 int dm_multisnap_metadata_alloc_data_block(struct dm_ms_device *msd,
 					   dm_block_t *result);
 

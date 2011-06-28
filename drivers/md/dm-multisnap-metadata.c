@@ -726,36 +726,28 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 	return r;
 }
 
-static int __resize_thin_dev(struct dm_ms_device *msd, sector_t new_size)
+static int __trim_thin_dev(struct dm_ms_device *msd, sector_t new_size)
 {
-	dm_block_t old_size;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
+	uint64_t key[2] = { msd->id, msd->dev_size - 1 };
 
-	old_size = msd->dev_size;
-	if (new_size == old_size)
-		return 0;
-
-	msd->dev_size = new_size;
+	msd->dev_size = new_size; /* FIXME: we should set this to the
+				   * actual highest mapped, need new
+				   * btree_highest_key method */
 	msd->changed = 1;
 
-	if (old_size > new_size) {
-		uint64_t key[2] = { msd->id, old_size - 1 };
-
-		/*
-		 * We need to truncate all the extraneous mappings.
-		 *
-		 * FIXME: We have to be careful to do this atomically.
-		 * Perhaps clone the bottom layer first so we can revert?
-		 */
-		return dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
-	}
-
-	return 0;
+	/*
+	 * We need to truncate all the extraneous mappings.
+	 *
+	 * FIXME: We have to be careful to do this atomically.
+	 * Perhaps clone the bottom layer first so we can revert?
+	 */
+	return dm_btree_del_gt(&mmd->info, mmd->root, key, &mmd->root);
 }
 
-int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
-					  dm_multisnap_dev_t dev,
-					  sector_t new_size)
+int dm_multisnap_metadata_trim_thin_dev(struct dm_multisnap_metadata *mmd,
+					dm_multisnap_dev_t dev,
+					sector_t new_size)
 {
 	int r;
 	struct dm_ms_device *msd;
@@ -765,7 +757,7 @@ int dm_multisnap_metadata_resize_thin_dev(struct dm_multisnap_metadata *mmd,
 	if (r)
 		printk(KERN_ALERT "couldn't open virtual device");
 	else {
-		r = __resize_thin_dev(msd, new_size);
+		r = __trim_thin_dev(msd, new_size);
 		__close_device(msd);
 	}
 	up_write(&mmd->root_lock);
