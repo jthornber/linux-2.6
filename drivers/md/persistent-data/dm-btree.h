@@ -124,6 +124,11 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 		   dm_block_t *clone);
 
+/*
+ * Returns < 0 on failure.  Otherwise the number of key entries that have
+ * been filled out.  Remember trees can have zero entries, and as such have
+ * no highest key.
+ */
 int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 			      uint64_t *result_keys);
 

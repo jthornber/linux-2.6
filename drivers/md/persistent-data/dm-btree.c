@@ -789,14 +789,56 @@ EXPORT_SYMBOL_GPL(dm_btree_clone);
 
 /*----------------------------------------------------------------*/
 
+static int find_highest_key(struct ro_spine *s, dm_block_t block,
+			    uint64_t *result_key, dm_block_t *next_block)
+{
+	int i, r;
+	uint32_t flags;
+
+	do {
+		r = ro_step(s, block);
+		if (r < 0)
+			return r;
+
+		flags = __le32_to_cpu(ro_node(s)->header.flags);
+		i = __le32_to_cpu(ro_node(s)->header.nr_entries);
+		if (i == 0)
+			return -ENODATA;
+		else
+			i--;
+
+		*result_key = __le64_to_cpu(ro_node(s)->keys[i]);
+		if (next_block || flags & INTERNAL_NODE)
+			block = value64(ro_node(s), i);
+
+	} while (flags & INTERNAL_NODE);
+
+	if (next_block)
+		*next_block = block;
+	return 0;
+}
+
 int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 			      uint64_t *result_keys)
 {
-	/* FIXME: implement */
-	unsigned i;
-	for (i = 0; i < info->levels; i++)
-		result_keys[i] = 0;
+	int r = 0, count = 0, level;
+	struct ro_spine spine;
 
-	return 0;
+	init_ro_spine(&spine, info);
+	for (level = 0; level < info->levels; level++) {
+		r = find_highest_key(&spine, root, result_keys + level,
+				     level == info->levels - 1 ? NULL : &root);
+		if (r == -ENODATA) {
+			r = 0;
+			break;
+
+		} else if (r)
+			break;
+
+		count++;
+	}
+	exit_ro_spine(&spine);
+
+	return r ? r : count;
 }
 EXPORT_SYMBOL_GPL(dm_btree_find_highest_key);
