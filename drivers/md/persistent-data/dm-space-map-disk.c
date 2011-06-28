@@ -1,9 +1,10 @@
+#include "dm-space-map-common.h"
+#include "dm-space-map-disk.h"
+
+#include <linux/crc32c.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
-
-#include "dm-space-map-common.h"
-#include "dm-space-map-disk.h"
 
 /*----------------------------------------------------------------*/
 
@@ -22,29 +23,21 @@ static uint64_t mod64(uint64_t n, uint64_t d)
 /*----------------------------------------------------------------
  * bitmap validator
  *--------------------------------------------------------------*/
-static __le32 checksum_bitmap(struct bitmap_header *header)
-{
-	u32 crc = ~(u32) 0;
-	__le32 result;
-
-	/* FIXME: hard coded block size */
-	crc = dm_block_csum_data((char *) &header->not_used, crc, 4092);
-	dm_block_csum_final(crc, &result);
-
-	return result;
-}
-
 static void bitmap_prepare_for_write(struct dm_block_validator *v,
-				     struct dm_block *b)
+				     struct dm_block *b,
+				     size_t block_size)
 {
 	struct bitmap_header *header = dm_block_data(b);
 
 	header->blocknr = __cpu_to_le64(dm_block_location(b));
-	header->csum = checksum_bitmap(header);
+	header->csum = __cpu_to_le32(crc32c(~ ((u32) 0),
+					    &header->not_used,
+					    block_size - sizeof(u32)));
 }
 
 static int bitmap_check(struct dm_block_validator *v,
-			struct dm_block *b)
+			struct dm_block *b,
+			size_t block_size)
 {
 	struct bitmap_header *header = dm_block_data(b);
 	__le32 csum;
@@ -56,7 +49,9 @@ static int bitmap_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	csum = checksum_bitmap(header);
+	csum = __cpu_to_le32(crc32c(~ ((u32) 0),
+				    (void *) &header->not_used,
+				    block_size - sizeof(u32)));
 	if (csum != header->csum) {
 		printk(KERN_ERR "space-map bitmap check failed csum %u wanted %u\n",
 		       __le32_to_cpu(csum), __le32_to_cpu(header->csum));

@@ -8,6 +8,7 @@
 #include "persistent-data/dm-transaction-manager.h"
 #include "persistent-data/dm-space-map-disk.h"
 
+#include <linux/crc32c.h>
 #include <linux/list.h>
 #include <linux/device-mapper.h>
 #include <linux/workqueue.h>
@@ -125,15 +126,17 @@ struct dm_ms_device {
  *--------------------------------------------------------------*/
 
 static void sb_prepare_for_write(struct dm_block_validator *v,
-				 struct dm_block *b)
+				 struct dm_block *b,
+				 size_t block_size)
 {
 	struct multisnap_super_block *sb = dm_block_data(b);
-
 	sb->blocknr = __cpu_to_le64(dm_block_location(b));
-	dm_block_calc_csum(sb, struct multisnap_super_block, &sb->csum);
+	sb->csum = __cpu_to_le32(crc32c(~ ((u32) 0), &sb->flags, sizeof(*sb) - sizeof(u32)));
 }
 
-static int sb_check(struct dm_block_validator *v, struct dm_block *b)
+static int sb_check(struct dm_block_validator *v,
+		    struct dm_block *b,
+		    size_t block_size)
 {
 	struct multisnap_super_block *sb = dm_block_data(b);
 	__le32 csum;
@@ -152,7 +155,7 @@ static int sb_check(struct dm_block_validator *v, struct dm_block *b)
 		return -EILSEQ;
 	}
 
-	dm_block_calc_csum(sb, struct multisnap_super_block, &csum);
+	csum = __cpu_to_le32(crc32c(~ ((u32) 0), &sb->flags, sizeof(*sb) - sizeof(u32)));
 	if (csum != sb->csum) {
 		printk(KERN_ERR "multisnap sb_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(csum), __le32_to_cpu(sb->csum));

@@ -1,18 +1,23 @@
 #include "dm-btree-internal.h"
 
+#include <linux/crc32c.h>
+
 /*----------------------------------------------------------------*/
 
 static void node_prepare_for_write(struct dm_block_validator *v,
-				   struct dm_block *b)
+				   struct dm_block *b,
+				   size_t block_size)
 {
 	struct node_header *node = dm_block_data(b);
-
 	node->blocknr = __cpu_to_le64(dm_block_location(b));
-	dm_block_calc_csum(node, struct node_header, &node->csum);
+	node->csum = __cpu_to_le32(crc32c(~ ((u32) 0),
+					  &node->flags,
+					  block_size - sizeof(u32)));
 }
 
 static int node_check(struct dm_block_validator *v,
-		      struct dm_block *b)
+		      struct dm_block *b,
+		      size_t block_size)
 {
 	struct node_header *node = dm_block_data(b);
 	__le32 csum;
@@ -23,7 +28,9 @@ static int node_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	dm_block_calc_csum(node, struct node_header, &csum);
+	csum = __cpu_to_le32(crc32c(~ ((u32) 0),
+				    &node->flags,
+				    block_size - sizeof(u32)));
 	if (csum != node->csum) {
 		printk(KERN_ERR "btree node_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(csum), __le32_to_cpu(node->csum));
