@@ -1,8 +1,8 @@
 * First release
 
-** Kernel [2/11]
+** Kernel [3/11]
 
-  - [ ] CRC bitmaps 						       :mike:
+  - [X] CRC bitmaps 						        :ejt:
   - [ ] pool_destroy ref counting isn't right 				:ejt:
         This should be done as part of the data resizing work.
   - [ ] Test and complete pool resizing work 				:ejt:
