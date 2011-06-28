@@ -2027,11 +2027,14 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 
 			r = dm_multisnap_metadata_get_highest_mapped_block(mc->msd,
 									   &highest);
-			if (r)
+			if (r < 0)
 				return r;
 
-			DMEMIT("%llu %llu", mapped * mc->pool->sectors_per_block,
-			       ((highest + 1) * mc->pool->sectors_per_block) - 1);
+			DMEMIT("%llu ", mapped * mc->pool->sectors_per_block);
+			if (r)
+				DMEMIT("%llu", ((highest + 1) * mc->pool->sectors_per_block) - 1);
+			else
+				DMEMIT("-");
 			break;
 
 		case STATUSTYPE_TABLE:
