@@ -1701,7 +1701,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	if (!strcmp(argv[0], "new-thin")) {
 		sector_t new_size;
 
-		if (argc != 3) {
+		if (argc != 2) {
 			ti->error = invalid_args;
 			return -EINVAL;
 		}
@@ -1712,13 +1712,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		new_size = simple_strtoull(argv[2], &end, 10);
-		if (*end) {
-			ti->error = "Invalid size";
-			return -EINVAL;
-		}
-
-		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id, new_size);
+		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id);
 		if (r) {
 			ti->error = "Creation of thin provisioned device failed";
 			return r;

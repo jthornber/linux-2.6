@@ -50,8 +50,7 @@ void dm_multisnap_metadata_clear_flag(struct dm_multisnap_metadata *mmd,
  * Device creation/deletion.
  */
 int dm_multisnap_metadata_create_thin(struct dm_multisnap_metadata *mmd,
-				      dm_multisnap_dev_t dev,
-				      sector_t dev_size);
+				      dm_multisnap_dev_t dev);
 
 /*
  * An internal snapshot.

@@ -167,7 +167,7 @@ where,
 
 *** Messages
 
- new-thin <dev id> <size in sectors>
+ new-thin <dev id>
  new-snap <dev id> <origin id>
  del      <dev id>
  trim     <dev id> <new size in sectors>

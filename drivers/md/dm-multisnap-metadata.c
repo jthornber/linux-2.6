@@ -568,7 +568,7 @@ static void __close_device(struct dm_ms_device *msd)
 }
 
 static int __create_thin(struct dm_multisnap_metadata *mmd,
-			 dm_multisnap_dev_t dev, sector_t dev_size)
+			 dm_multisnap_dev_t dev)
 {
 	int r;
 	dm_block_t dev_root;
@@ -601,7 +601,7 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 		dm_btree_del(&mmd->bl_info, dev_root);
 		return r;
 	}
-	msd->dev_size = dev_size;
+	msd->dev_size = 0;
 	msd->changed = 1;
 	__close_device(msd);
 
@@ -609,13 +609,12 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 }
 
 int dm_multisnap_metadata_create_thin(struct dm_multisnap_metadata *mmd,
-				      dm_multisnap_dev_t dev,
-				      sector_t dev_size)
+				      dm_multisnap_dev_t dev)
 {
 	int r;
 
 	down_write(&mmd->root_lock);
-	r = __create_thin(mmd, dev, dev_size);
+	r = __create_thin(mmd, dev);
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -729,7 +728,7 @@ int dm_multisnap_metadata_delete_device(struct dm_multisnap_metadata *mmd,
 static int __trim_thin_dev(struct dm_ms_device *msd, sector_t new_size)
 {
 	struct dm_multisnap_metadata *mmd = msd->mmd;
-	uint64_t key[2] = { msd->id, msd->dev_size - 1 };
+	uint64_t key[2] = { msd->id, new_size - 1 }; /* FIXME: convert new size to blocks */
 
 	msd->dev_size = new_size; /* FIXME: we should set this to the
 				   * actual highest mapped, need new
