@@ -475,6 +475,7 @@ struct pool {
 	unsigned block_shift;
 	dm_block_t offset_mask;
 	sector_t low_water_mark;
+	int zero_new_blocks;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -788,8 +789,7 @@ static void schedule_zero(struct pool *pool, struct dm_ms_device *msd,
 	m->err = 0;
 	m->bio = NULL;
 
-	if (!dm_multisnap_metadata_get_flag(pool->mmd, MULTISNAP_ZERO_NEW_BLOCKS) ||
-	    io_covers_block(pool, bio)) {
+	if (!pool->zero_new_blocks || io_covers_block(pool, bio)) {
 		/* no copy needed, since all data is going to change */
 		m->bio = bio;
 		m->bi_end_io = bio->bi_end_io;
@@ -1379,6 +1379,7 @@ static struct pool *pool_create(const char *metadata_path,
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
 	pool->low_water_mark = low_water;
+	pool->zero_new_blocks = 1;
 	pool->prison = prison_create(1024); /* FIXME: magic number */
 	if (!pool->prison) {
 		*error = "Error creating pool's bio prison";
@@ -1677,16 +1678,6 @@ static void pool_presuspend(struct dm_target *ti)
  *   trim            <dev id> <size in sectors>
  *   trans-id        <dev id> <current trans id> <new trans id>
  */
-static int decode_flag(const char *str, unsigned *flag)
-{
-	if (!strcmp(str, "zero-new-blocks"))
-		*flag = MULTISNAP_ZERO_NEW_BLOCKS;
-	else
-		return -EINVAL;
-
-	return 0;
-}
-
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
 	/* ti->error doesn't have a const qualifier :( */
@@ -1810,39 +1801,6 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			ti->error = "Setting userspace transaction id failed";
 			return r;
 		}
-	} else if (!strcmp(argv[0], "set-flag")) {
-		unsigned flag;
-
-		if (argc != 2) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
-
-		r = decode_flag(argv[1], &flag);
-		if (r) {
-			ti->error = "Unknown multisnap flag";
-			return -EINVAL;
-		}
-
-		dm_multisnap_metadata_set_flag(pool->mmd, flag);
-
-	} else if (!strcmp(argv[0], "clear-flag")) {
-		/* FIXME: factor out common code with set-flag */
-		unsigned flag;
-
-		if (argc != 2) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
-
-		r = decode_flag(argv[1], &flag);
-		if (r) {
-			ti->error = "Unknown multisnap flag";
-			return -EINVAL;
-		}
-
-		dm_multisnap_metadata_clear_flag(pool->mmd, flag);
-
 	} else
 		return -EINVAL;
 

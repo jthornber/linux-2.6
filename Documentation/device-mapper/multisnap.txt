@@ -175,13 +175,6 @@ where,
 
    Fails if 'current id' is incorrect.
 
- set-flag <flag>
- clear-flag <flag>
-
- where <flag> is one of:
-
-   - zero-new-blocks: All newly provisioned blocks will be zeroed
-
 ** multisnap target
 
  multisnap <pool dev> <metadata dev> <dev id>

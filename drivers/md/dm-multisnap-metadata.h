@@ -26,20 +26,6 @@ dm_multisnap_metadata_open(struct block_device *bdev,
 int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd);
 
 /*
- * Flags are set for the whole metadata, not per thin device.
- */
-enum multisnap_flags {
-	MULTISNAP_ZERO_NEW_BLOCKS
-};
-
-int dm_multisnap_metadata_get_flag(struct dm_multisnap_metadata *mmd,
-				   enum multisnap_flags flag);
-void dm_multisnap_metadata_set_flag(struct dm_multisnap_metadata *mmd,
-				    enum multisnap_flags flag);
-void dm_multisnap_metadata_clear_flag(struct dm_multisnap_metadata *mmd,
-				      enum multisnap_flags flag);
-
-/*
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the multisnap metadata.
  */
