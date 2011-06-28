@@ -321,7 +321,7 @@ static void read_block(struct dm_block *b)
 static void write_block(struct dm_block *b)
 {
 	if (b->validator)
-		b->validator->prepare_for_write(b->validator, b);
+		b->validator->prepare_for_write(b->validator, b, b->bm->block_size);
 
 	submit_io(b, WRITE | b->io_flags, complete_io);
 }
@@ -512,7 +512,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		}
 
 		if (b->validator) {
-			ret = b->validator->check(b->validator, b);
+			ret = b->validator->check(b->validator, b, bm->block_size);
 			if (ret) {
 				printk(KERN_ALERT "%s validator check failed for block %llu\n",
 				       b->validator->name, (unsigned long long)b->where);
@@ -743,7 +743,7 @@ retry:
 
 			} else if (!b->validator && v) {
 				b->validator = v;
-				r = b->validator->check(b->validator, b);
+				r = b->validator->check(b->validator, b, bm->block_size);
 				if (r) {
 					printk(KERN_ALERT "%s validator check failed for block %llu\n",
 					       b->validator->name, (unsigned long long)b->where);

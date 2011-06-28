@@ -37,10 +37,10 @@ dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm);
  */
 struct dm_block_validator {
 	const char *name;
-	void (*prepare_for_write)(struct dm_block_validator *v, struct dm_block *b);
+	void (*prepare_for_write)(struct dm_block_validator *v, struct dm_block *b, size_t block_size);
 
 	/* return 0 if valid, < 0 on error */
-	int (*check)(struct dm_block_validator *v, struct dm_block *b);
+	int (*check)(struct dm_block_validator *v, struct dm_block *b, size_t block_size);
 };
 
 u32 dm_block_csum_data(char *data, u32 seed, size_t len);
