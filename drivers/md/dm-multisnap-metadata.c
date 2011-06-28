@@ -246,6 +246,7 @@ static struct dm_multisnap_metadata *alloc_mmd(struct dm_block_manager *bm,
 			return ERR_PTR(r);
 		}
 
+		sb = dm_block_data(sblock);
 		data_sm = dm_sm_disk_open(tm, sb->data_space_map_root,
 					  sizeof(sb->data_space_map_root));
 		if (IS_ERR(data_sm)) {
