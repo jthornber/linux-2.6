@@ -111,6 +111,15 @@ int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value, dm_block_t *new_root);
 
 /*
+ * A variant of insert that indicates whether it actually inserted or just
+ * overwrote.  Useful if you're keeping track of the number of entries in a
+ * tree.
+ */
+int dm_btree_insert_notify(struct dm_btree_info *info, dm_block_t root,
+			   uint64_t *keys, void *value, dm_block_t *new_root,
+			   int *inserted);
+
+/*
  * Remove a key if present.  This doesn't remove empty sub trees.  Normally
  * subtrees represent a separate entity, like a snapshot map, so this is
  * correct behaviour.

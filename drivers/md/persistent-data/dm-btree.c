@@ -674,8 +674,9 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 	return 0;
 }
 
-int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
-		    uint64_t *keys, void *value, dm_block_t *new_root)
+static int insert(struct dm_btree_info *info, dm_block_t root,
+		  uint64_t *keys, void *value, dm_block_t *new_root,
+		  int *inserted)
 {
 	int r, need_insert;
 	unsigned level, index = -1, last_level = info->levels - 1;
@@ -709,10 +710,16 @@ int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 			       (__le64_to_cpu(n->keys[index]) != keys[level]));
 
 		if (level == last_level) {
-			if (need_insert)
+			if (need_insert) {
+				if (inserted)
+					*inserted = 1;
+
 				insert_at(info->value_type.size, n, index,
 					  keys[level], value);
-			else {
+			} else {
+				if (inserted)
+					*inserted = 0;
+
 				if (info->value_type.del &&
 				    (!info->value_type.equal ||
 				     !info->value_type.equal(
@@ -749,7 +756,22 @@ int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 
 	return 0;
 }
+
+
+int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
+		    uint64_t *keys, void *value, dm_block_t *new_root)
+{
+	return insert(info, root, keys, value, new_root, NULL);
+}
 EXPORT_SYMBOL_GPL(dm_btree_insert);
+
+int dm_btree_insert_notify(struct dm_btree_info *info, dm_block_t root,
+			   uint64_t *keys, void *value, dm_block_t *new_root,
+			   int *inserted)
+{
+	return insert(info, root, keys, value, new_root, inserted);
+}
+EXPORT_SYMBOL_GPL(dm_btree_insert_notify);
 
 /*----------------------------------------------------------------*/
 
