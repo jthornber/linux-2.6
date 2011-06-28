@@ -19,15 +19,20 @@
 *** TODO wire up btree value_types					:ejt:
 
 *** TODO printks						       :mike:
-    
+
     These need an audit.  Spurious ones removing, most converting to
     DMWARNS etc.
 
 *** TODO symbolic flag field on pool target param		       :mike:
 
-*** TODO implement btree highest key					:ejt:
+*** DONE implement btree highest key					:ejt:
+
+*** DONE mapped blocks count isn't being set				:ejt:
+
 
 ** Userland tools
+
+All tools run offline for first release.
 
 *** TODO multisnap_format						:ejt:
 
@@ -35,11 +40,11 @@
 
 *** TODO multisnap_calc_metadata_size					:ejt:
 
+*** TODO multisnap_display						:ejt:
+
 *** TODO multisnap lib							:ejt:
 
     C library to wrap multisnap tools
-
-*** TODO mapped blocks count isn't being set				:ejt:
 
 
 * Subsequent release
@@ -52,3 +57,10 @@
 *** TODO resize metadata device
 
 *** TODO implement the btree trimming
+
+
+** Userland tools
+
+*** TODO multisnap_display
+
+    That uses the held_root to do this online
