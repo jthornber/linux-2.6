@@ -1699,8 +1699,6 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	char *end;
 
 	if (!strcmp(argv[0], "new-thin")) {
-		sector_t new_size;
-
 		if (argc != 2) {
 			ti->error = invalid_args;
 			return -EINVAL;
@@ -1778,7 +1776,9 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_trim_thin_dev(pool->mmd, dev_id, new_size);
+		r = dm_multisnap_metadata_trim_thin_dev(
+			pool->mmd, dev_id,
+			dm_div_up(new_size, pool->sectors_per_block));
 		if (r) {
 			ti->error = "Couldn't trim thin device";
 			return r;
@@ -2043,7 +2043,7 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 {
 	int r;
 	ssize_t sz = 0;
-	dm_block_t mapped;
+	dm_block_t mapped, highest;
 	char buf[BDEVNAME_SIZE];
 	struct multisnap_c *mc = ti->private;
 
@@ -2055,7 +2055,13 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 			if (r)
 				return r;
 
-			DMEMIT("%llu", mapped * mc->pool->sectors_per_block);
+			r = dm_multisnap_metadata_get_highest_mapped_block(mc->msd,
+									   &highest);
+			if (r)
+				return r;
+
+			DMEMIT("%llu %llu", mapped * mc->pool->sectors_per_block,
+			       ((highest + 1) * mc->pool->sectors_per_block) - 1);
 			break;
 
 		case STATUSTYPE_TABLE:

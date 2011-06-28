@@ -196,4 +196,4 @@ where,
 
 *** Status
 
- <nr mapped blocks>
+ <nr mapped sectors> <highest mapped sector>

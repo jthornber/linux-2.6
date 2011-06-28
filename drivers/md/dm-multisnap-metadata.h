@@ -166,6 +166,9 @@ int dm_multisnap_metadata_get_data_dev_size(struct dm_multisnap_metadata *mmd,
 int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
 					   dm_block_t *result);
 
+int dm_multisnap_metadata_get_highest_mapped_block(struct dm_ms_device *msd,
+						   dm_block_t *result);
+
 /*
  * Returns -ENOSPC if the new size is too small and already allocated
  * blocks would be lost.

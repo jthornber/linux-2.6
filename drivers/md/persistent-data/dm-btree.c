@@ -788,3 +788,15 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 EXPORT_SYMBOL_GPL(dm_btree_clone);
 
 /*----------------------------------------------------------------*/
+
+int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
+			      uint64_t *result_keys)
+{
+	/* FIXME: implement */
+	unsigned i;
+	for (i = 0; i < info->levels; i++)
+		result_keys[i] = 0;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dm_btree_find_highest_key);

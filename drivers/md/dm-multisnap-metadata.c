@@ -1115,6 +1115,32 @@ int dm_multisnap_metadata_get_mapped_count(struct dm_ms_device *msd,
 	return 0;
 }
 
+static int __highest_block(struct dm_ms_device *msd, dm_block_t *result)
+{
+	int r;
+	dm_block_t thin_root;
+	struct dm_multisnap_metadata *mmd = msd->mmd;
+
+	r = dm_btree_lookup(&mmd->tl_info, mmd->root, &msd->id, &thin_root);
+	if (r)
+		return r;
+
+	return dm_btree_find_highest_key(&mmd->bl_info, thin_root, result);
+}
+
+int dm_multisnap_metadata_get_highest_mapped_block(struct dm_ms_device *msd,
+						   dm_block_t *result)
+{
+	int r;
+	struct dm_multisnap_metadata *mmd = msd->mmd;
+
+	down_read(&mmd->root_lock);
+	r = __highest_block(msd, result);
+	up_read(&mmd->root_lock);
+
+	return r;
+}
+
 int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
 					  dm_block_t new_size)
 {
