@@ -41,15 +41,20 @@ struct dm_block_validator dm_sm_bitmap_validator = {
 };
 
 /*----------------------------------------------------------------*/
-#define SHIFT_PER_WORD 5
-#define MASK_PER_WORD 31
+
+#define ENTRIES_PER_WORD 32
+
+void *dm_bitmap_data(struct dm_block *b)
+{
+	return dm_block_data(b) + sizeof(struct bitmap_header);
+}
 
 unsigned sm__lookup_bitmap(void *addr, dm_block_t b)
 {
 	unsigned val = 0;
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b >> SHIFT_PER_WORD);
-	b &= MASK_PER_WORD;
+	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+	b %= ENTRIES_PER_WORD;
 
 	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
 	val <<= 1;
@@ -60,8 +65,8 @@ unsigned sm__lookup_bitmap(void *addr, dm_block_t b)
 void sm__set_bitmap(void *addr, dm_block_t b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b >> SHIFT_PER_WORD);
-	b &= MASK_PER_WORD;
+	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: use shift */
+	b %= ENTRIES_PER_WORD;
 
 	if (val & 2)
 		__set_bit_le(b * 2, (void *) w);
@@ -119,7 +124,8 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 		printk(KERN_ALERT "block size too big to hold bitmaps");
 		return -EINVAL;
 	}
-	io->entries_per_block = io->block_size * ENTRIES_PER_BYTE;
+	io->entries_per_block = (io->block_size - sizeof(struct bitmap_header)) *
+		ENTRIES_PER_BYTE;
 	io->nr_blocks = 0;
 	io->bitmap_root = 0;
 	io->ref_count_root = 0;
@@ -215,7 +221,7 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr), &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
-	*result = sm__lookup_bitmap(dm_block_data(blk),
+	*result = sm__lookup_bitmap(dm_bitmap_data(blk),
 				     mod64(b, io->entries_per_block));
 	return dm_tm_unlock(io->tm, blk);
 }
@@ -266,7 +272,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = sm__find_free(dm_block_data(blk),
+			r = sm__find_free(dm_bitmap_data(blk),
 					  mod64(begin, io->entries_per_block),
 					  bit_end, &position);
 			if (r < 0) {
@@ -308,7 +314,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		return r;
 	}
 
-	bm = dm_block_data(nb);
+	bm = dm_bitmap_data(nb);
 	bit = mod64(b, io->entries_per_block);
 	old = sm__lookup_bitmap(bm, bit);
 

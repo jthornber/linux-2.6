@@ -59,7 +59,8 @@ static int ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 		printk(KERN_ALERT "block size too big to hold bitmaps");
 		return -EINVAL;
 	}
-	ll->entries_per_block = ll->block_size * ENTRIES_PER_BYTE;
+	ll->entries_per_block = (ll->block_size - sizeof(struct bitmap_header)) *
+		ENTRIES_PER_BYTE;
 	ll->nr_blocks = 0;
 	ll->bitmap_root = 0;
 	ll->ref_count_root = 0;
@@ -159,7 +160,7 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
-	*result = sm__lookup_bitmap(dm_block_data(blk), b);
+	*result = sm__lookup_bitmap(dm_bitmap_data(blk), b);
 	return dm_tm_unlock(ll->tm, blk);
 }
 
@@ -207,7 +208,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = sm__find_free(dm_block_data(blk), begin, bit_end, &position);
+			r = sm__find_free(dm_bitmap_data(blk), begin, bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(ll->tm, blk);
 				return r;
@@ -245,7 +246,7 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	}
 	ie->blocknr = __cpu_to_le64(dm_block_location(nb));
 
-	bm = dm_block_data(nb);
+	bm = dm_bitmap_data(nb);
 	old = sm__lookup_bitmap(bm, bit);
 
 	if (ref_count <= 2) {

@@ -51,6 +51,12 @@ struct sm_root {
 
 #define ENTRIES_PER_BYTE 4
 
+struct bitmap_header {
+	__le32 csum;
+	__le32 not_used;
+	__le64 blocknr;
+} __attribute__ ((packed));
+
 /*
  * These bitops work on a blocks worth of bits.
  */
@@ -58,6 +64,8 @@ unsigned sm__lookup_bitmap(void *addr, dm_block_t b);
 void sm__set_bitmap(void *addr, dm_block_t b, unsigned val);
 int sm__find_free(void *addr, unsigned begin, unsigned end,
 		  unsigned *result);
+
+void *dm_bitmap_data(struct dm_block *b);
 
 extern struct dm_block_validator dm_sm_bitmap_validator;
 
