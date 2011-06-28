@@ -1,66 +1,43 @@
 * First release
 
-** Kernel
+** Kernel [2/11]
 
-*** TODO CRC bitmaps						       :mike:
+  - [ ] CRC bitmaps 						       :mike:
+  - [ ] pool_destroy ref counting isn't right 				:ejt:
+        This should be done as part of the data resizing work.
+  - [ ] Test and complete pool resizing work 				:ejt:
+  - [ ] Test device deletion					       :mike:
+  - [ ] Test creation/removal of large numbers of devices	       :mike:
+  - [ ] Check reference counts are correct somehow.			:ejt:
+  - [ ] wire up btree value_types					:ejt:
+  - [ ] printks						       :mike:
+        These need an audit.  Spurious ones removing, most converting to
+        DMWARNS etc.
 
-*** TODO pool_destroy ref counting isn't right				:ejt:
-
-   This should be done as part of the data resizing work.
-
-*** TODO Test and complete pool resizing work				:ejt:
-
-*** TODO Test device deletion					       :mike:
-
-*** TODO Test creation/removal of large numbers of devices	       :mike:
-
-*** TODO Check reference counts are correct somehow.			:ejt:
-
-*** TODO wire up btree value_types					:ejt:
-
-*** TODO printks						       :mike:
-
-    These need an audit.  Spurious ones removing, most converting to
-    DMWARNS etc.
-
-*** TODO symbolic flag field on pool target param		       :mike:
-
-*** DONE implement btree highest key					:ejt:
-
-*** DONE mapped blocks count isn't being set				:ejt:
-
+  - [ ] symbolic flag field on pool target param		       :mike:
+  - [X] implement btree highest key 					:ejt:
+  - [X] mapped blocks count isn't being set				:ejt:
 
 ** Userland tools
 
 All tools run offline for first release.
 
-*** TODO multisnap_format						:ejt:
-
-*** TODO multisnap_repair						:ejt:
-
-*** TODO multisnap_calc_metadata_size					:ejt:
-
-*** TODO multisnap_display						:ejt:
-
-*** TODO multisnap lib							:ejt:
-
-    C library to wrap multisnap tools
-
+  - [ ] multisnap_format						:ejt:
+  - [ ] multisnap_repair						:ejt:
+  - [ ] multisnap_calc_metadata_size					:ejt:
+  - [ ] multisnap_display						:ejt:
+  - [ ] multisnap lib							:ejt:
+        C library to wrap multisnap tools
 
 * Subsequent release
 
 ** Kernel
 
-*** TODO factor common code in space map
-
-
-*** TODO resize metadata device
-
-*** TODO implement the btree trimming
-
+  - [ ] factor common code in space map
+  - [ ] resize metadata device
+  - [ ] implement the btree trimming
 
 ** Userland tools
 
-*** TODO multisnap_display
-
-    That uses the held_root to do this online
+  - [ ] multisnap_display
+        That uses the held_root to do this for an online pool
