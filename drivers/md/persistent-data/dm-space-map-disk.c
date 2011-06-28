@@ -22,15 +22,47 @@ static uint64_t mod64(uint64_t n, uint64_t d)
 /*----------------------------------------------------------------
  * bitmap validator
  *--------------------------------------------------------------*/
+static __le32 checksum_bitmap(struct bitmap_header *header)
+{
+	u32 crc = ~(u32) 0;
+	__le32 result;
+
+	/* FIXME: hard coded block size */
+	crc = dm_block_csum_data((char *) &header->not_used, crc, 4092);
+	dm_block_csum_final(crc, &result);
+
+	return result;
+}
 
 static void bitmap_prepare_for_write(struct dm_block_validator *v,
 				     struct dm_block *b)
 {
+	struct bitmap_header *header = dm_block_data(b);
+
+	header->blocknr = __cpu_to_le64(dm_block_location(b));
+	header->csum = checksum_bitmap(header);
 }
 
 static int bitmap_check(struct dm_block_validator *v,
 			struct dm_block *b)
 {
+	struct bitmap_header *header = dm_block_data(b);
+	__le32 csum;
+
+	if (dm_block_location(b) != __le64_to_cpu(header->blocknr)) {
+		printk(KERN_ERR "space map bitmap check failed blocknr %llu "
+		       "wanted %llu\n",
+		       __le64_to_cpu(header->blocknr), dm_block_location(b));
+		return -ENOTBLK;
+	}
+
+	csum = checksum_bitmap(header);
+	if (csum != header->csum) {
+		printk(KERN_ERR "space-map bitmap check failed csum %u wanted %u\n",
+		       __le32_to_cpu(csum), __le32_to_cpu(header->csum));
+		return -EILSEQ;
+	}
+
 	return 0;
 }
 
