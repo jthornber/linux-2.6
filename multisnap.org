@@ -39,6 +39,7 @@
 
     C library to wrap multisnap tools
 
+*** TODO mapped blocks count isn't being set				:ejt:
 
 
 * Subsequent release
