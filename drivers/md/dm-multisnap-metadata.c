@@ -720,6 +720,9 @@ int dm_multisnap_metadata_trim_thin_dev(struct dm_multisnap_metadata *mmd,
 		r = __trim_thin_dev(msd, new_size);
 		__close_device(msd);
 	}
+
+	// FIXME: update mapped_blocks
+
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -859,6 +862,7 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 static int __insert(struct dm_ms_device *msd,
 		    dm_block_t block, dm_block_t data_block)
 {
+	int r, inserted;
 	dm_block_t keys[2];
 	__le64 value;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
@@ -869,7 +873,17 @@ static int __insert(struct dm_ms_device *msd,
 	mmd->need_commit = 1;
 	value = __cpu_to_le64(pack_dm_block_time(data_block, mmd->time));
 
-	return dm_btree_insert(&mmd->info, mmd->root, keys, &value, &mmd->root);
+	r = dm_btree_insert_notify(&mmd->info, mmd->root, keys, &value,
+				   &mmd->root, &inserted);
+	if (r)
+		return r;
+
+	if (inserted) {
+		msd->mapped_blocks++;
+		msd->changed = 1;
+	}
+
+	return 0;
 }
 
 int dm_multisnap_metadata_insert(struct dm_ms_device *msd,
