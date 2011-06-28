@@ -61,7 +61,6 @@ struct multisnap_super_block {
 } __attribute__ ((packed));
 
 struct device_details {
-	__le64 dev_size;
 	__le64 mapped_blocks;
 	__le64 transaction_id;	/* when created */
 	__le32 creation_time;
@@ -115,7 +114,6 @@ struct dm_ms_device {
 
 	int open_count;
 	int changed;
-	uint64_t dev_size;
 	uint64_t mapped_blocks;
 	uint64_t transaction_id;
 	uint32_t creation_time;
@@ -533,7 +531,6 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 	if (r) {
 		if (r == -ENODATA && create) {
 			changed = 1;
-			details.dev_size = 0;
 			details.mapped_blocks = 0;
 			details.transaction_id = __cpu_to_le64(mmd->trans_id);
 			details.creation_time = __cpu_to_le32(mmd->time);
@@ -551,7 +548,6 @@ static int __open_device(struct dm_multisnap_metadata *mmd,
 	(*msd)->id = dev;
 	(*msd)->open_count = 1;
 	(*msd)->changed = changed;
-	(*msd)->dev_size = __le64_to_cpu(details.dev_size);
 	(*msd)->mapped_blocks = __le64_to_cpu(details.mapped_blocks);
 	(*msd)->transaction_id = __le64_to_cpu(details.transaction_id);
 	(*msd)->creation_time = __le32_to_cpu(details.creation_time);
@@ -601,7 +597,6 @@ static int __create_thin(struct dm_multisnap_metadata *mmd,
 		dm_btree_del(&mmd->bl_info, dev_root);
 		return r;
 	}
-	msd->dev_size = 0;
 	msd->changed = 1;
 	__close_device(msd);
 
@@ -634,7 +629,6 @@ static int __set_snapshot_details(struct dm_multisnap_metadata *mmd,
 	msd->changed = 1;
 	msd->snapshotted_time = time;
 
-	snap->dev_size = msd->dev_size;
 	snap->mapped_blocks = msd->mapped_blocks;
 	snap->snapshotted_time = time;
 	__close_device(msd);
@@ -730,9 +724,6 @@ static int __trim_thin_dev(struct dm_ms_device *msd, sector_t new_size)
 	struct dm_multisnap_metadata *mmd = msd->mmd;
 	uint64_t key[2] = { msd->id, new_size - 1 }; /* FIXME: convert new size to blocks */
 
-	msd->dev_size = new_size; /* FIXME: we should set this to the
-				   * actual highest mapped, need new
-				   * btree_highest_key method */
 	msd->changed = 1;
 
 	/*
@@ -855,18 +846,6 @@ static int __snapshotted_since(struct dm_ms_device *msd, uint32_t time)
 	return msd->snapshotted_time > time;
 }
 
-static dm_block_t __nr_blocks(struct dm_ms_device *msd)
-{
-	dm_block_t r, m;
-
-	/* FIXME: this can be done more efficiently with shifts */
-	r = msd->dev_size;
-	m = do_div(r, msd->mmd->data_block_size);
-	if (m)
-		r++;
-	return r;
-}
-
 int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 				 dm_block_t block, int can_block,
 				 struct dm_multisnap_lookup_result *result)
@@ -881,23 +860,15 @@ int dm_multisnap_metadata_lookup(struct dm_ms_device *msd,
 
 	if (can_block) {
 		down_read(&mmd->root_lock);
-		if (block >= __nr_blocks(msd))
-			r = -EIO;
-		else {
-			r = dm_btree_lookup(&mmd->info, mmd->root, keys, &value);
-			if (!r)
-				dm_block_time = __le64_to_cpu(value);
-		}
+		r = dm_btree_lookup(&mmd->info, mmd->root, keys, &value);
+		if (!r)
+			dm_block_time = __le64_to_cpu(value);
 		up_read(&mmd->root_lock);
 
 	} else if (down_read_trylock(&mmd->root_lock)) {
-		if (block >= __nr_blocks(msd))
-			r = -EIO;
-		else {
-			r = dm_btree_lookup(&mmd->nb_info, mmd->root, keys, &value);
-			if (!r)
-				dm_block_time = __le64_to_cpu(value);
-		}
+		r = dm_btree_lookup(&mmd->nb_info, mmd->root, keys, &value);
+		if (!r)
+			dm_block_time = __le64_to_cpu(value);
 		up_read(&mmd->root_lock);
 
 	} else
@@ -921,11 +892,6 @@ static int __insert(struct dm_ms_device *msd,
 	dm_block_t keys[2];
 	__le64 value;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
-
-	if (block >= __nr_blocks(msd)) {
-		printk(KERN_ALERT "insert out of bounds");
-		return -EIO;
-	}
 
 	keys[0] = msd->id;
 	keys[1] = block;
@@ -1013,7 +979,6 @@ static int __write_changed_details(struct dm_multisnap_metadata *mmd)
 			struct device_details dd;
 			uint64_t key = msd->id;
 
-			dd.dev_size = __cpu_to_le64(msd->dev_size);
 			dd.mapped_blocks = __cpu_to_le64(msd->mapped_blocks);
 			dd.transaction_id = __cpu_to_le64(msd->transaction_id);
 			dd.creation_time = __cpu_to_le32(msd->creation_time);
