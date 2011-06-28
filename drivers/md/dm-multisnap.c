@@ -1342,6 +1342,7 @@ static struct pool *pool_create(const char *metadata_path,
 				dm_block_t data_size,
 				unsigned long block_size,
 				dm_block_t low_water,
+				int zero,
 				char **error)
 {
 	int r;
@@ -1379,7 +1380,7 @@ static struct pool *pool_create(const char *metadata_path,
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
 	pool->low_water_mark = low_water;
-	pool->zero_new_blocks = 1;
+	pool->zero_new_blocks = zero;
 	pool->prison = prison_create(1024); /* FIXME: magic number */
 	if (!pool->prison) {
 		*error = "Error creating pool's bio prison";
@@ -1488,10 +1489,11 @@ static void pool_dtr(struct dm_target *ti)
  *                <data dev>
  *                <data block size in sectors>
  *                <low water mark (sectors)>
+ *                <zero new blocks (0|1)>
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r;
+	int r, zero;
 	struct pool_c *pt;
 	struct pool *pool;
 	struct dm_dev *data_dev;
@@ -1500,7 +1502,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	dm_block_t low_water;
 	char *end;
 
-	if (argc != 4) {
+	if (argc != 5) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -1536,7 +1538,17 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	pool = pool_create(argv[0], data_size, block_size, low_water, &ti->error);
+	if (!strcmp(argv[4], "0"))
+		zero = 0;
+	else if (!strcmp(argv[4], "1"))
+		zero = 1;
+	else {
+		ti->error = "Invalid 'zero new blocks' option";
+		dm_put_device(ti, data_dev);
+		return -EINVAL;
+	}
+
+	pool = pool_create(argv[0], data_size, block_size, low_water, zero, &ti->error);
 	if (IS_ERR(pool)) {
 		dm_put_device(ti, data_dev);
 		return PTR_ERR(pool);
