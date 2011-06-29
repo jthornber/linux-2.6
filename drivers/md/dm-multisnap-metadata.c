@@ -1128,15 +1128,37 @@ int dm_multisnap_metadata_get_highest_mapped_block(struct dm_ms_device *msd,
 	return r;
 }
 
-int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
-					  dm_block_t new_size)
+static int __resize_data_dev(struct dm_multisnap_metadata *mmd,
+			     dm_block_t new_count)
 {
-	down_write(&mmd->root_lock);
-	/* FIXME: finish */
+	int r;
+	dm_block_t old_count;
 
+	r = dm_sm_get_nr_blocks(mmd->data_sm, &old_count);
+	if (r)
+		return r;
+
+	if (new_count < old_count) {
+		printk(KERN_ALERT "cannot reduce size of data device\n");
+		return -EINVAL;
+	}
+
+	if (new_count > old_count)
+		return dm_sm_extend(mmd->data_sm, new_count - old_count);
+	else
+		return 0;
+}
+
+int dm_multisnap_metadata_resize_data_dev(struct dm_multisnap_metadata *mmd,
+					  dm_block_t new_count)
+{
+	int r;
+
+	down_write(&mmd->root_lock);
+	r = __resize_data_dev(mmd, new_count);
 	up_write(&mmd->root_lock);
 
-	return 0;
+	return r;
 }
 
 /*----------------------------------------------------------------*/
