@@ -474,7 +474,7 @@ struct pool {
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	dm_block_t offset_mask;
-	sector_t low_water_mark;
+	dm_block_t low_water_mark;
 	int zero_new_blocks;
 
 	struct bio_prison *prison;
@@ -512,6 +512,9 @@ struct pool_c {
 	struct dm_target *ti;
 	struct pool *pool;
 	struct dm_dev *data_dev;
+
+	sector_t low_water_mark;
+	int zero_new_blocks;
 };
 
 /*
@@ -875,7 +878,7 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 		return r;
 	}
 
-	if ((free_blocks * pool->sectors_per_block) <= pool->low_water_mark) {
+	if (free_blocks <= pool->low_water_mark) {
 		spin_lock_irqsave(&pool->lock, flags);
 		pool->triggered = 1;
 		spin_unlock_irqrestore(&pool->lock, flags);
@@ -1277,7 +1280,11 @@ static void requeue_all_bios(struct pool *pool)
 /* FIXME: add locking */
 static int bind_control_target(struct pool *pool, struct dm_target *ti)
 {
+	struct pool_c *pt = ti->private;
+
 	pool->ti = ti;
+	pool->low_water_mark = dm_div_up(pt->low_water_mark, pool->sectors_per_block);
+	pool->zero_new_blocks = pt->zero_new_blocks;
 	return 0;
 }
 
@@ -1341,8 +1348,6 @@ static struct block_device *multisnap_get_device(const char *path, fmode_t mode)
 static struct pool *pool_create(const char *metadata_path,
 				dm_block_t data_size,
 				unsigned long block_size,
-				dm_block_t low_water,
-				int zero,
 				char **error)
 {
 	int r;
@@ -1379,8 +1384,8 @@ static struct pool *pool_create(const char *metadata_path,
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
-	pool->low_water_mark = low_water;
-	pool->zero_new_blocks = zero;
+	pool->low_water_mark = 0;
+	pool->zero_new_blocks = 1;
 	pool->prison = prison_create(1024); /* FIXME: magic number */
 	if (!pool->prison) {
 		*error = "Error creating pool's bio prison";
@@ -1475,21 +1480,15 @@ static struct pool *pool_find(struct block_device *pool_bdev,
 			      const char *metadata_path,
 			      dm_block_t data_size,
 			      unsigned long block_size,
-			      dm_block_t low_water,
-			      int zero,
 			      char **error)
 {
 	struct pool *pool;
 
-	/*
-	 * FIXME: low_water and zero should be held in the pool_c, and set
-	 * in the pool as part of the bind operation.
-	 */
 	pool = bdev_table_lookup(&bdev_table_, pool_bdev);
 	if (pool)
 		pool_inc(pool);
 	else
-		pool = pool_create(metadata_path, data_size, block_size, low_water, zero, error);
+		pool = pool_create(metadata_path, data_size, block_size, error);
 
 	return pool;
 }
@@ -1571,8 +1570,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	pool = pool_find(ti_to_bdev(ti), argv[0], data_size,
-			 block_size, low_water, zero, &ti->error);
+	pool = pool_find(ti_to_bdev(ti), argv[0], data_size, block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		dm_put_device(ti, data_dev);
 		return PTR_ERR(pool);
@@ -1586,6 +1584,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->data_dev = data_dev;
+	pt->low_water_mark = low_water;
+	pt->zero_new_blocks = zero;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
 	ti->private = pt;
@@ -1901,7 +1901,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       format_dev_t(buf, pool->metadata_dev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long) pool->sectors_per_block,
-		       (unsigned long) pool->low_water_mark);
+		       (unsigned long) pt->low_water_mark);
 		break;
 	}
 
