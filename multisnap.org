@@ -39,6 +39,7 @@ All tools run offline for first release.
   - [ ] factor common code in space map
   - [ ] resize metadata device
   - [ ] implement the btree trimming
+  - [ ] external origin (read-only)
 
 ** Userland tools
 
