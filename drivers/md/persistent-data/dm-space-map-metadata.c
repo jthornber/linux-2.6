@@ -23,12 +23,14 @@ static uint64_t div_up(uint64_t v, uint64_t n)
  *--------------------------------------------------------------*/
 
 static void index_prepare_for_write(struct dm_block_validator *v,
-				    struct dm_block *b)
+				    struct dm_block *b,
+				    size_t block_size)
 {
 }
 
 static int index_check(struct dm_block_validator *v,
-			struct dm_block *b)
+		       struct dm_block *b,
+		       size_t block_size)
 {
 	return 0;
 }
