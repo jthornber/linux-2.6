@@ -489,11 +489,6 @@ struct pool {
 	struct bio_list deferred_bios;
 	struct list_head prepared_mappings;
 
-	/*
-	 * When bouncing mode is set, all bios go straight onto the retry
-	 * list.
-	 */
-	int bouncing;
 	int triggered;		/* a dm event has been sent */
 	struct bio_list retry_list;
 
@@ -1268,12 +1263,6 @@ static void requeue_bios(struct bio_list *bl, spinlock_t *lock)
 		bio_endio(bio, DM_ENDIO_REQUEUE);
 }
 
-static void requeue_all_bios(struct pool *pool)
-{
-	requeue_bios(&pool->deferred_bios, &pool->lock);
-	requeue_bios(&pool->retry_list, &pool->lock);
-}
-
 /*----------------------------------------------------------------
  * Binding of control targets to a pool object
  *--------------------------------------------------------------*/
@@ -1425,7 +1414,6 @@ static struct pool *pool_create(const char *metadata_path,
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
-	pool->bouncing = 0;
 	pool->triggered = 0;
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
@@ -1603,13 +1591,8 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 	unsigned long flags;
 
 	spin_lock_irqsave(&pool->lock, flags);
-	if (pool->bouncing) {
-		bio_list_add(&pool->retry_list, bio);
-		r = DM_MAPIO_SUBMITTED;
-	} else {
-		bio->bi_bdev = pt->data_dev->bdev;
-		r = DM_MAPIO_REMAPPED;
-	}
+	bio->bi_bdev = pt->data_dev->bdev;
+	r = DM_MAPIO_REMAPPED;
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	return r;
@@ -1644,10 +1627,6 @@ static int pool_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	spin_lock_irqsave(&pool->lock, flags);
-	pool->bouncing = 0;
-	spin_unlock_irqrestore(&pool->lock, flags);
-
 	data_size = get_dev_size(pt->data_dev) >> pool->block_shift;
 	r = dm_multisnap_metadata_get_data_dev_size(pool->mmd, &sb_data_size);
 	if (r) {
@@ -1672,6 +1651,7 @@ static int pool_preresume(struct dm_target *ti)
 	pool->triggered = 0;
 	spin_unlock_irqrestore(&pool->lock, flags);
 
+	requeue_bios(&pool->retry_list, &pool->lock);
 	wake_producer(pool);
 
 	/* The pool object is only present if the pool is active */
@@ -1683,25 +1663,13 @@ static int pool_preresume(struct dm_target *ti)
 
 static void pool_presuspend(struct dm_target *ti)
 {
-#if 0
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	unsigned long flags;
 
-	spin_lock_irqsave(&pool->lock, flags);
-	pool->bouncing = 1;
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	/* Wait until all io has been processed. */
-	flush_workqueue(pool->producer_wq);
-	flush_workqueue(pool->consumer_wq);
 	if (dm_multisnap_metadata_commit(pool->mmd) < 0) {
 		printk(KERN_ALERT "multisnap metadata write failed.");
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
-
-	requeue_all_bios(pool);
-#endif
 }
 
 static void pool_postsuspend(struct dm_target *ti)

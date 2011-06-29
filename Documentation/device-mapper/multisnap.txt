@@ -59,6 +59,12 @@ make one by zeroing the first 4k to indicate empty metadata.
 
     dd if=/dev/zero of=$metadata_dev bs=4096 count=1
 
+** reloading a pool table
+
+You may reload a pools table, indeed this is how the pool is resized.
+Its advisable that you reload with a pool target that points to the
+same metadata area.
+
 ** Using an existing pool device
 
 The pool device must have the same size as the data device, since it
