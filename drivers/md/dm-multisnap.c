@@ -1471,6 +1471,29 @@ static void pool_dec(struct pool *pool)
 		pool_destroy(pool);
 }
 
+static struct pool *pool_find(struct block_device *pool_bdev,
+			      const char *metadata_path,
+			      dm_block_t data_size,
+			      unsigned long block_size,
+			      dm_block_t low_water,
+			      int zero,
+			      char **error)
+{
+	struct pool *pool;
+
+	/*
+	 * FIXME: low_water and zero should be held in the pool_c, and set
+	 * in the pool as part of the bind operation.
+	 */
+	pool = bdev_table_lookup(&bdev_table_, pool_bdev);
+	if (pool)
+		pool_inc(pool);
+	else
+		pool = pool_create(metadata_path, data_size, block_size, low_water, zero, error);
+
+	return pool;
+}
+
 /*----------------------------------------------------------------
  * Pool target methods
  *--------------------------------------------------------------*/
@@ -1548,7 +1571,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	pool = pool_create(argv[0], data_size, block_size, low_water, zero, &ti->error);
+	pool = pool_find(ti_to_bdev(ti), argv[0], data_size,
+			 block_size, low_water, zero, &ti->error);
 	if (IS_ERR(pool)) {
 		dm_put_device(ti, data_dev);
 		return PTR_ERR(pool);
@@ -1659,13 +1683,10 @@ static int pool_preresume(struct dm_target *ti)
 
 static void pool_presuspend(struct dm_target *ti)
 {
+#if 0
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 	unsigned long flags;
-
-	/* FIXME: we should fail if there are any msd's open */
-	bdev_table_remove(&bdev_table_, pool);
-	pool->pool_dev = NULL;
 
 	spin_lock_irqsave(&pool->lock, flags);
 	pool->bouncing = 1;
@@ -1680,6 +1701,16 @@ static void pool_presuspend(struct dm_target *ti)
 	}
 
 	requeue_all_bios(pool);
+#endif
+}
+
+static void pool_postsuspend(struct dm_target *ti)
+{
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+
+	bdev_table_remove(&bdev_table_, pool);
+	pool->pool_dev = NULL;
 }
 
 /*
@@ -1915,6 +1946,7 @@ static struct target_type pool_target = {
 	.dtr = pool_dtr,
 	.map = pool_map,
 	.presuspend = pool_presuspend,
+	.postsuspend = pool_postsuspend,
 	.preresume = pool_preresume,
 	.message = pool_message,
 	.status = pool_status,
