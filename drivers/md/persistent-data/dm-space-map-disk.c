@@ -436,6 +436,12 @@ static void sm_disk_destroy(struct dm_space_map *sm)
 	kfree(smd);
 }
 
+static int sm_disk_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
+{
+	BUG_ON(1);
+	return -1;
+}
+
 static int sm_disk_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
@@ -533,6 +539,7 @@ static int sm_disk_copy_root(struct dm_space_map *sm, void *where, size_t max)
 
 static struct dm_space_map ops_ = {
 	.destroy = sm_disk_destroy,
+	.extend = sm_disk_extend,
 	.get_nr_blocks = sm_disk_get_nr_blocks,
 	.get_nr_free = sm_disk_get_nr_free,
 	.get_count = sm_disk_get_count,

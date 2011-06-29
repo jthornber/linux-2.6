@@ -442,6 +442,12 @@ static void sm_metadata_destroy(struct dm_space_map *sm)
 	kfree(smm);
 }
 
+static int sm_metadata_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
+{
+	BUG_ON(1);
+	return -1;
+}
+
 static int sm_metadata_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
 {
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -644,6 +650,7 @@ static int sm_metadata_copy_root(struct dm_space_map *sm, void *where, size_t ma
 
 static struct dm_space_map ops_ = {
 	.destroy = sm_metadata_destroy,
+	.extend = sm_metadata_extend,
 	.get_nr_blocks = sm_metadata_get_nr_blocks,
 	.get_nr_free = sm_metadata_get_nr_free,
 	.get_count = sm_metadata_get_count,
@@ -666,6 +673,12 @@ static struct dm_space_map ops_ = {
 static void sm_bootstrap_destroy(struct dm_space_map *sm)
 {
 	BUG_ON(1);
+}
+
+static int sm_bootstrap_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
+{
+	BUG_ON(1);
+	return -1;
 }
 
 static int sm_bootstrap_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
@@ -744,6 +757,7 @@ static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where, size_t m
 
 static struct dm_space_map bootstrap_ops_ = {
 	.destroy = sm_bootstrap_destroy,
+	.extend = sm_bootstrap_extend,
 	.get_nr_blocks = sm_bootstrap_get_nr_blocks,
 	.get_nr_free = sm_bootstrap_get_nr_free,
 	.get_count = sm_bootstrap_get_count,
