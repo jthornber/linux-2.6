@@ -1929,6 +1929,7 @@ static void multisnap_dtr(struct dm_target *ti)
 {
 	struct multisnap_c *mc = ti->private;
 
+	pool_dec(mc->pool);
 	dm_multisnap_metadata_close_device(mc->msd);
 	dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
@@ -1983,6 +1984,7 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		kfree(mc);
 		return -EINVAL;
 	}
+	pool_inc(mc->pool);
 
 	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
