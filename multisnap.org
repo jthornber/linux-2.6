@@ -1,9 +1,9 @@
 * First release
 
-** Kernel [3/11]
+** Kernel [4/12]
 
   - [X] CRC bitmaps 						        :ejt:
-  - [ ] pool_destroy ref counting isn't right 				:ejt:
+  - [X] pool_destroy ref counting isn't right 				:ejt:
         This should be done as part of the data resizing work.
   - [ ] Test and complete pool resizing work 				:ejt:
   - [ ] Test device deletion					       :mike:
@@ -17,8 +17,11 @@
   - [ ] symbolic flag field on pool target param		       :mike:
   - [X] implement btree highest key 					:ejt:
   - [X] mapped blocks count isn't being set				:ejt:
+  - [ ] extend method for space maps (needed for resizing)              :ejt:
+  - [ ] rename multisnap -> thin. Rebranding exercise           :ejt:, :mike:
+  - [ ] make sure retry io is errored if the thin dev is deactivated    :ejt:
 
-** Userland tools
+** Userland tools [0/5]
 
 All tools run offline for first release.
 
