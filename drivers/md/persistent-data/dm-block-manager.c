@@ -839,7 +839,10 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 			  dm_block_t b, struct dm_block_validator *v,
 			  struct dm_block **result)
 {
-	return lock_internal(bm, b, WRITE, 0, 1, v, result);
+	int r = lock_internal(bm, b, WRITE, 0, 1, v, result);
+	if (!r)
+		memset((*result)->data, 0, bm->block_size);
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
