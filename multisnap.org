@@ -14,7 +14,7 @@
         These need an audit.  Spurious ones removing, most converting to
         DMWARNS etc.
 
-  - [ ] symbolic flag field on pool target param		       :mike:
+  - [X] symbolic flag field on pool target param		       :mike:
   - [X] implement btree highest key 					:ejt:
   - [X] mapped blocks count isn't being set				:ejt:
   - [ ] extend method for space maps (needed for resizing)              :ejt:

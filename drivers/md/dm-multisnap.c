@@ -468,7 +468,7 @@ struct pool {
 	unsigned block_shift;
 	dm_block_t offset_mask;
 	dm_block_t low_water_mark;
-	int zero_new_blocks;
+	unsigned zero_new_blocks;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -502,7 +502,7 @@ struct pool_c {
 	struct dm_dev *data_dev;
 
 	sector_t low_water_mark;
-	int zero_new_blocks;
+	unsigned zero_new_blocks;
 };
 
 /*
@@ -573,7 +573,7 @@ static void bdev_table_remove(struct bdev_table *t, struct pool *pool)
 }
 
 static struct pool *bdev_table_lookup(struct bdev_table *t,
-					struct block_device *bdev)
+				      struct block_device *bdev)
 {
 	unsigned bucket = hash_bdev(bdev);
 	struct hlist_node *n;
@@ -1328,8 +1328,7 @@ static struct block_device *multisnap_get_device(const char *path, fmode_t mode)
 }
 
 static struct pool *pool_create(const char *metadata_path,
-				unsigned long block_size,
-				char **error)
+				unsigned long block_size, char **error)
 {
 	int r;
 	void *err_p;
@@ -1484,27 +1483,78 @@ static void pool_dtr(struct dm_target *ti)
 	kfree(pt);
 }
 
+struct pool_features {
+	unsigned zero_new_blocks;
+};
+
+static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
+			       struct dm_target *ti)
+{
+	int r;
+	unsigned argc;
+	const char *arg_name;
+
+	static struct dm_arg _args[] = {
+		{0, 1, "invalid number of pool feature args"},
+	};
+
+	/* No feature arguments supplied. */
+	if (!as->argc)
+		return 0;
+
+	r = dm_read_arg(_args, as, &argc, &ti->error);
+	if (r)
+		return -EINVAL;
+
+	if (argc > as->argc) {
+		ti->error = "not enough arguments for pool features";
+		return -EINVAL;
+	}
+
+	while (argc && !r) {
+		arg_name = dm_shift_arg(as);
+		argc--;
+
+		if (!strcasecmp(arg_name, "skip_block_zeroing")) {
+			pf->zero_new_blocks = 0;
+			continue;
+		}
+
+		ti->error = "Unrecognised pool feature request";
+		r = -EINVAL;
+	}
+
+	return r;
+}
+
 /*
  * multisnap-pool <metadata dev>
  *                <data dev>
  *                <data block size in sectors>
  *                <low water mark (sectors)>
- *                <zero new blocks (0|1)>
+ *                [<#feature args> [<arg>]*]
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r, zero;
+	int r;
 	struct pool_c *pt;
 	struct pool *pool;
+	struct pool_features pf;
+	struct dm_arg_set as;
 	struct dm_dev *data_dev;
 	unsigned long block_size;
 	dm_block_t low_water;
+	const char *metadata_devname;
 	char *end;
 
-	if (argc != 5) {
+	if (argc < 4) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
+	as.argc = argc;
+	as.argv = argv;
+
+	metadata_devname = argv[0];
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -1515,49 +1565,53 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	block_size = simple_strtoul(argv[2], &end, 10);
 	if (!block_size || *end) {
 		ti->error = "Invalid block size";
-		dm_put_device(ti, data_dev);
-		return -EINVAL;
+		r = -EINVAL;
+		goto out;
 	}
 
 	low_water = simple_strtoull(argv[3], &end, 10);
 	if (!low_water || *end) {
 		ti->error = "Invalid low water mark";
-		dm_put_device(ti, data_dev);
-		return -EINVAL;
+		r = -EINVAL;
+		goto out;
 	}
 
-	if (!strcmp(argv[4], "0"))
-		zero = 0;
-	else if (!strcmp(argv[4], "1"))
-		zero = 1;
-	else {
-		ti->error = "Invalid 'zero new blocks' option";
-		dm_put_device(ti, data_dev);
-		return -EINVAL;
-	}
+	/* set pool feature defaults */
+	memset(&pf, 0, sizeof(pf));
+	pf.zero_new_blocks = 1;
 
-	pool = pool_find(ti_to_bdev(ti), argv[0], block_size, &ti->error);
+	dm_consume_args(&as, 4);
+	r = parse_pool_features(&as, &pf, ti);
+	if (r)
+		goto out;
+
+	pool = pool_find(ti_to_bdev(ti), metadata_devname,
+			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
-		dm_put_device(ti, data_dev);
-		return PTR_ERR(pool);
+		r = PTR_ERR(pool);
+		goto out;
 	}
 
 	pt = kmalloc(sizeof(*pt), GFP_KERNEL);
 	if (!pt) {
 		pool_destroy(pool);
-		return -ENOMEM;
+		r = -ENOMEM;
+		goto out;
 	}
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->data_dev = data_dev;
 	pt->low_water_mark = low_water;
-	pt->zero_new_blocks = zero;
+	pt->zero_new_blocks = pf.zero_new_blocks;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
 	ti->private = pt;
 	set_congestion_fn(ti, pt);
 
 	return 0;
+out:
+	dm_put_device(ti, data_dev);
+	return r;
 }
 
 static int pool_map(struct dm_target *ti, struct bio *bio,
@@ -1849,11 +1903,16 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %lu %lu",
+		DMEMIT("%s %s %lu %lu ",
 		       format_dev_t(buf, pool->metadata_dev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long) pool->sectors_per_block,
 		       (unsigned long) pt->low_water_mark);
+
+		DMEMIT("%u ", !pool->zero_new_blocks);
+
+		if (!pool->zero_new_blocks)
+			DMEMIT("skip_block_zeroing ");
 		break;
 	}
 

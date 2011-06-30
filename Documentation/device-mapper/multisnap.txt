@@ -157,6 +157,10 @@ Always teardown the pool last.
                 <data dev>
                 <data block size in sectors>
                 <low water mark (sectors)>
+		[<#feature args> [<arg>]*]
+
+ optional feature args:
+   - skip_block_zeroing: skips the zeroing of new blocks
 
 *** Status
 
