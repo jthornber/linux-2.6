@@ -76,18 +76,41 @@ void *dm_bitmap_data(struct dm_block *b)
 	return dm_block_data(b) + sizeof(struct bitmap_header);
 }
 
-unsigned sm__lookup_bitmap(void *addr, unsigned b)
+static unsigned _sm__lookup_bitmap(__le64 *w, unsigned b)
 {
-	unsigned val = 0;
-	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD);
-	b %= ENTRIES_PER_WORD;
+	unsigned val;
 
-	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
+	b %= ENTRIES_PER_WORD;
+	val = test_bit_le(b * 2, (void*) w) ? 1 : 0;
 	val <<= 1;
 	val |= test_bit_le(b * 2 + 1, (void *) w) ? 1 : 0;
-	return val;
+
+        return val;
 }
+
+#define WORD_MASK_LOW 0x5555555555555555
+#define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAA
+#define WORD_MASK_ALL 0xFFFFFFFFFFFFFFFF
+
+static unsigned bitmap_word_used(void *addr, unsigned b, __le64 **w_ret)
+{
+	__le64 *words = (__le64 *) addr;
+        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+
+	*w_ret = w;
+	return ((*w & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
+		(*w & WORD_MASK_LOW) == WORD_MASK_LOW ||
+		(*w & WORD_MASK_ALL) == WORD_MASK_ALL);
+}
+
+unsigned sm__lookup_bitmap(void *addr, unsigned b)
+{
+	__le64 *words = (__le64 *) addr;
+        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+
+	return _sm__lookup_bitmap(w, b);
+}
+
 
 void sm__set_bitmap(void *addr, unsigned b, unsigned val)
 {
@@ -109,13 +132,21 @@ void sm__set_bitmap(void *addr, unsigned b, unsigned val)
 int sm__find_free(void *addr, unsigned begin, unsigned end,
 		  unsigned *result)
 {
-	/* FIXME: slow, find a quicker way in Hackers Delight */
 	while (begin < end) {
-		if (!sm__lookup_bitmap(addr, begin)) {
-			*result = begin;
-			return 0;
+		__le64 *w;
+
+		if (bitmap_word_used(addr, begin, &w))
+			begin += ENTRIES_PER_WORD;
+
+		else {
+			if (_sm__lookup_bitmap(w, begin))
+				begin++;
+
+			else {
+				*result = begin;
+				return 0;
+			}
 		}
-		begin++;
 	}
 
 	return -ENOSPC;
