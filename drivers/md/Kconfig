@@ -235,8 +235,8 @@ config DM_SNAPSHOT
        ---help---
          Allow volume managers to take writable snapshots of a device.
 
-config DM_MULTISNAP
-       tristate "Multisnap target (EXPERIMENTAL)"
+config DM_THIN_PROVISIONING
+       tristate "Thin provisioning target (EXPERIMENTAL)"
        depends on BLK_DEV_DM && DM_PERSISTENT_DATA && EXPERIMENTAL
        ---help---
          Provides thin provisioning and snapshots that share a data store.

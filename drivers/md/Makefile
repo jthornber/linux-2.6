@@ -10,7 +10,7 @@ dm-snapshot-y	+= dm-snap.o dm-exception-store.o dm-snap-transient.o \
 dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
-dm-multisnapshot-y	+= dm-multisnap.o dm-multisnap-metadata.o
+dm-thinp-y	+= dm-thin.o dm-thin-metadata.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -40,7 +40,7 @@ obj-$(CONFIG_DM_MIRROR)		+= dm-mirror.o dm-log.o dm-region-hash.o
 obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
-obj-$(CONFIG_DM_MULTISNAP)	+= dm-multisnapshot.o
+obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thinp.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o

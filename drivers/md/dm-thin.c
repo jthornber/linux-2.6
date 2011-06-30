@@ -5,7 +5,7 @@
  */
 
 #include "dm.h"
-#include "dm-multisnap-metadata.h"
+#include "dm-thin-metadata.h"
 #include "persistent-data/dm-transaction-manager.h"
 
 #include <linux/blkdev.h>
@@ -16,7 +16,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#define	DM_MSG_PREFIX	"multisnap"
+#define	DM_MSG_PREFIX	"thin"
 
 /*
  * How do we handle breaking sharing of data blocks?
@@ -100,7 +100,7 @@ struct bio_prison;
 
 struct cell_key {
 	int virtual;
-	dm_multisnap_dev_t dev;
+	dm_thin_dev_t dev;
 	dm_block_t block;
 };
 
@@ -148,7 +148,7 @@ static struct bio_prison *prison_create(unsigned nr_cells)
 
 	spin_lock_init(&prison->lock);
 	prison->cell_pool = mempool_create_kmalloc_pool(nr_cells,
-						      sizeof(struct cell));
+							sizeof(struct cell));
 	prison->nr_buckets = nr_buckets;
 	prison->hash_mask = nr_buckets - 1;
 	prison->cells = (struct hlist_head *) (prison + 1);
@@ -412,7 +412,7 @@ static void build_data_key(struct dm_ms_device *msd,
 			   dm_block_t b, struct cell_key *key)
 {
 	key->virtual = 0;
-	key->dev = dm_multisnap_device_dev(msd);
+	key->dev = dm_thin_device_dev(msd);
 	key->block = b;
 }
 
@@ -420,7 +420,7 @@ static void build_virtual_key(struct dm_ms_device *msd, dm_block_t b,
 			      struct cell_key *key)
 {
 	key->virtual = 1;
-	key->dev = dm_multisnap_device_dev(msd);
+	key->dev = dm_thin_device_dev(msd);
 	key->block = b;
 }
 
@@ -462,7 +462,7 @@ struct pool {
 
 	struct block_device *pool_dev;
 	struct block_device *metadata_dev;
-	struct dm_multisnap_metadata *mmd;
+	struct dm_thin_metadata *mmd;
 
 	uint32_t sectors_per_block;
 	unsigned block_shift;
@@ -485,7 +485,7 @@ struct pool {
 	int triggered;		/* a dm event has been sent */
 	struct bio_list retry_list;
 
-	struct deferred_set ds;	/* FIXME: move to multisnap_c */
+	struct deferred_set ds;	/* FIXME: move to thin_c */
 
 	mempool_t *mapping_pool;
 	mempool_t *endio_hook_pool;
@@ -506,11 +506,11 @@ struct pool_c {
 };
 
 /*
- * Target context for a multisnap.
+ * Target context for a thin.
  */
-struct multisnap_c {
+struct thin_c {
 	struct dm_dev *pool_dev;
-	dm_multisnap_dev_t dev_id;
+	dm_thin_dev_t dev_id;
 
 	/*
 	 * These fields are only valid while the device is resumed.  This
@@ -604,7 +604,7 @@ static void set_ti(struct bio *bio, struct dm_target *ti)
 static struct dm_ms_device *get_msd(struct bio *bio)
 {
 	struct dm_target *ti = (struct dm_target *) bio->bi_bdev;
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 	return mc->msd;
 }
 
@@ -631,9 +631,9 @@ static void remap_and_issue(struct pool *pool, struct bio *bio,
 			    dm_block_t block)
 {
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
-		int r = dm_multisnap_metadata_commit(pool->mmd);
+		int r = dm_thin_metadata_commit(pool->mmd);
 		if (r) {
-			printk(KERN_ALERT "multisnap_metadata_commit failed");
+			printk(KERN_ALERT "thin_metadata_commit failed");
 			bio_io_error(bio);
 			return;
 		}
@@ -835,7 +835,7 @@ static void cell_remap_and_issue_except(struct pool *pool, struct cell *cell,
 static void retry_later(struct bio *bio)
 {
 	struct dm_target *ti = get_ti(bio);
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 	struct pool *pool = mc->pool;
 	unsigned long flags;
 
@@ -856,9 +856,9 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 	dm_block_t free_blocks;
 	unsigned long flags;
 
-	r = dm_multisnap_metadata_get_free_blocks(pool->mmd, &free_blocks);
+	r = dm_thin_metadata_get_free_blocks(pool->mmd, &free_blocks);
 	if (r) {
-		dm_multisnap_metadata_free_data_block(msd, *result);
+		dm_thin_metadata_free_data_block(msd, *result);
 		return r;
 	}
 
@@ -869,7 +869,7 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 		dm_table_event(pool->ti->table);
 	}
 
-	r = dm_multisnap_metadata_alloc_data_block(msd, result);
+	r = dm_thin_metadata_alloc_data_block(msd, result);
 	if (r)
 		return r;
 
@@ -881,10 +881,10 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 {
 	int r;
 	dm_block_t block = get_bio_block(pool, bio);
-	struct dm_multisnap_lookup_result lookup_result;
+	struct dm_thin_lookup_result lookup_result;
 
 	printk(KERN_ALERT "handling discard");
-	r = dm_multisnap_metadata_lookup(msd, block, 1, &lookup_result);
+	r = dm_thin_metadata_lookup(msd, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
 		if (lookup_result.shared)
@@ -896,15 +896,15 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 			bio_endio(bio, 0);
 
 		else {
-			r = dm_multisnap_metadata_remove(msd, block);
+			r = dm_thin_metadata_remove(msd, block);
 			if (r) {
-				printk(KERN_ALERT "dm_multisnap_metadata_remove() failed");
+				printk(KERN_ALERT "dm_thin_metadata_remove() failed");
 				bio_io_error(bio);
 			} else {
 				// FIXME: this should be handled by the value_type ops
-				r = dm_multisnap_metadata_free_data_block(msd, lookup_result.block);
+				r = dm_thin_metadata_free_data_block(msd, lookup_result.block);
 				if (r) {
-					printk(KERN_ALERT "dm_multisnap_metadata_free_data_block failed");
+					printk(KERN_ALERT "dm_thin_metadata_free_data_block failed");
 					/* carry on regardless, we've lost an unused data block */
 				}
 
@@ -923,7 +923,7 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		printk(KERN_ALERT "dm_multisnap_metadata_lookup failed, error = %d", r);
+		printk(KERN_ALERT "dm_thin_metadata_lookup failed, error = %d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -931,7 +931,7 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 
 static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 			  struct bio *bio, dm_block_t block, struct cell_key *key,
-			  struct dm_multisnap_lookup_result *lookup_result)
+			  struct dm_thin_lookup_result *lookup_result)
 {
 	int r;
 	dm_block_t data_block;
@@ -963,7 +963,7 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 
 static void process_shared_bio(struct pool *pool, struct dm_ms_device *msd,
 			       struct bio *bio, dm_block_t block,
-			       struct dm_multisnap_lookup_result *lookup_result)
+			       struct dm_thin_lookup_result *lookup_result)
 {
 	struct cell *cell;
 	struct cell_key key;
@@ -1026,9 +1026,9 @@ static void process_bio(struct pool *pool, struct dm_ms_device *msd,
 {
 	int r;
 	dm_block_t block = get_bio_block(pool, bio);
-	struct dm_multisnap_lookup_result lookup_result;
+	struct dm_thin_lookup_result lookup_result;
 
-	r = dm_multisnap_metadata_lookup(msd, block, 1, &lookup_result);
+	r = dm_thin_metadata_lookup(msd, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
 		if (lookup_result.shared)
@@ -1043,7 +1043,7 @@ static void process_bio(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		printk(KERN_ALERT "dm_multisnap_metadata_lookup failed, error=%d", r);
+		printk(KERN_ALERT "dm_thin_metadata_lookup failed, error=%d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -1096,10 +1096,10 @@ static void process_prepared_mappings(struct pool *pool)
 			bio->bi_private = m->bi_private;
 		}
 
-		r = dm_multisnap_metadata_insert(m->msd, m->virt_block,
-						 m->data_block);
+		r = dm_thin_metadata_insert(m->msd, m->virt_block,
+					    m->data_block);
 		if (r) {
-			printk(KERN_ALERT "dm_multisnap_metadata_insert() failed");
+			printk(KERN_ALERT "dm_thin_metadata_insert() failed");
 			cell_error(m->cell);
 		} else {
 			if (m->bio) {
@@ -1148,9 +1148,9 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 {
 	int r;
 	dm_block_t block = get_bio_block(pool, bio);
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 	struct dm_ms_device *msd = mc->msd;
-	struct dm_multisnap_lookup_result result;
+	struct dm_thin_lookup_result result;
 
 	/*
 	 * XXX(hch): in theory higher level code should prevent this
@@ -1168,7 +1168,7 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	r = dm_multisnap_metadata_lookup(msd, block, 0, &result);
+	r = dm_thin_metadata_lookup(msd, block, 0, &result);
 	switch (r) {
 	case 0:
 		if (unlikely(result.shared)) {
@@ -1283,7 +1283,7 @@ static void pool_destroy(struct pool *pool)
 {
 	printk(KERN_ALERT "destroying pool");
 
-	dm_multisnap_metadata_close(pool->mmd);
+	dm_thin_metadata_close(pool->mmd);
 	blkdev_put(pool->metadata_dev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 
 	prison_destroy(pool->prison);
@@ -1302,11 +1302,11 @@ static void pool_destroy(struct pool *pool)
 
 /*
  * The lifetime of the pool object is potentially longer than that of the
- * pool target.  multisnap_get_device() is very similar to
+ * pool target.  thin_get_device() is very similar to
  * dm_get_device() except it doesn't associate the device with the target,
  * which would prevent the target to be destroyed.
  */
-static struct block_device *multisnap_get_device(const char *path, fmode_t mode)
+static struct block_device *thin_get_device(const char *path, fmode_t mode)
 {
 	dev_t uninitialized_var(dev);
 	unsigned int major, minor;
@@ -1317,9 +1317,9 @@ static struct block_device *multisnap_get_device(const char *path, fmode_t mode)
 		dev = MKDEV(major, minor);
 		if (MAJOR(dev) != major || MINOR(dev) != minor)
 			return ERR_PTR(-EOVERFLOW);
-		bdev = blkdev_get_by_dev(dev, mode, &multisnap_get_device);
+		bdev = blkdev_get_by_dev(dev, mode, &thin_get_device);
 	} else
-		bdev = blkdev_get_by_path(path, mode, &multisnap_get_device);
+		bdev = blkdev_get_by_path(path, mode, &thin_get_device);
 
 	if (!bdev)
 		return ERR_PTR(-EINVAL);
@@ -1333,18 +1333,18 @@ static struct pool *pool_create(const char *metadata_path,
 	int r;
 	void *err_p;
 	struct pool *pool;
-	struct dm_multisnap_metadata *mmd;
+	struct dm_thin_metadata *mmd;
 	struct block_device *metadata_dev;
 	fmode_t metadata_dev_mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 
-	metadata_dev = multisnap_get_device(metadata_path, metadata_dev_mode);
+	metadata_dev = thin_get_device(metadata_path, metadata_dev_mode);
 	if (IS_ERR(metadata_dev)) {
 		r = PTR_ERR(metadata_dev);
 		*error = "Error opening metadata block device";
 		return ERR_PTR(r);
 	}
 
-	mmd = dm_multisnap_metadata_open(metadata_dev, block_size);
+	mmd = dm_thin_metadata_open(metadata_dev, block_size);
 	if (IS_ERR(mmd)) {
 		*error = "Error creating metadata object";
 		err_p = mmd; /* already an ERR_PTR */
@@ -1436,7 +1436,7 @@ bad_kcopyd_client:
 bad_prison:
 	kfree(pool);
 bad_pool:
-	dm_multisnap_metadata_close(mmd);
+	dm_thin_metadata_close(mmd);
 bad_mmd_open:
 	blkdev_put(metadata_dev, metadata_dev_mode);
 
@@ -1528,11 +1528,11 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 }
 
 /*
- * multisnap-pool <metadata dev>
- *                <data dev>
- *                <data block size in sectors>
- *                <low water mark (sectors)>
- *                [<#feature args> [<arg>]*]
+ * thin-pool <metadata dev>
+ *           <data dev>
+ *           <data block size in sectors>
+ *           <low water mark (sectors)>
+ *           [<#feature args> [<arg>]*]
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1660,7 +1660,7 @@ static int pool_preresume(struct dm_target *ti)
 		return r;
 
 	data_size = ti->len >> pool->block_shift;
-	r = dm_multisnap_metadata_get_data_dev_size(pool->mmd, &sb_data_size);
+	r = dm_thin_metadata_get_data_dev_size(pool->mmd, &sb_data_size);
 	if (r) {
 		DMERR("failed to retrieve data device size");
 		return r;
@@ -1672,13 +1672,13 @@ static int pool_preresume(struct dm_target *ti)
 		return -EINVAL;
 
 	} else if (data_size > sb_data_size) {
-		r = dm_multisnap_metadata_resize_data_dev(pool->mmd, data_size);
+		r = dm_thin_metadata_resize_data_dev(pool->mmd, data_size);
 		if (r) {
 			DMERR("failed to resize data device");
 			return r;
 		}
 
-		r = dm_multisnap_metadata_commit(pool->mmd);
+		r = dm_thin_metadata_commit(pool->mmd);
 		if (r) {
 			DMERR("commit failed");
 			return r;
@@ -1704,8 +1704,8 @@ static void pool_presuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
-	if (dm_multisnap_metadata_commit(pool->mmd) < 0) {
-		printk(KERN_ALERT "multisnap metadata write failed.");
+	if (dm_thin_metadata_commit(pool->mmd) < 0) {
+		printk(KERN_ALERT "thin metadata write failed.");
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
 }
@@ -1735,7 +1735,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	dm_multisnap_dev_t dev_id;
+	dm_thin_dev_t dev_id;
 	char *end;
 
 	if (!strcmp(argv[0], "new-thin")) {
@@ -1750,14 +1750,14 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_create_thin(pool->mmd, dev_id);
+		r = dm_thin_metadata_create_thin(pool->mmd, dev_id);
 		if (r) {
 			ti->error = "Creation of thin provisioned device failed";
 			return r;
 		}
 
 	} else if (!strcmp(argv[0], "new-snap")) {
-		dm_multisnap_dev_t origin_id;
+		dm_thin_dev_t origin_id;
 
 		if (argc != 3) {
 			ti->error = invalid_args;
@@ -1776,7 +1776,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_create_snap(pool->mmd, dev_id, origin_id);
+		r = dm_thin_metadata_create_snap(pool->mmd, dev_id, origin_id);
 		if (r) {
 			ti->error = "Creation of snapshot failed";
 			return r;
@@ -1794,7 +1794,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_delete_device(pool->mmd, dev_id);
+		r = dm_thin_metadata_delete_device(pool->mmd, dev_id);
 
 	} else if (!strcmp(argv[0], "trim")) {
 		sector_t new_size;
@@ -1816,7 +1816,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_trim_thin_dev(
+		r = dm_thin_metadata_trim_thin_dev(
 			pool->mmd, dev_id,
 			dm_div_up(new_size, pool->sectors_per_block));
 		if (r) {
@@ -1844,8 +1844,8 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 			return -EINVAL;
 		}
 
-		r = dm_multisnap_metadata_set_transaction_id(pool->mmd,
-							     old_id, new_id);
+		r = dm_thin_metadata_set_transaction_id(pool->mmd,
+							old_id, new_id);
 		if (r) {
 			ti->error = "Setting userspace transaction id failed";
 			return r;
@@ -1853,7 +1853,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	} else
 		return -EINVAL;
 
-	return dm_multisnap_metadata_commit(pool->mmd);
+	return dm_thin_metadata_commit(pool->mmd);
 }
 
 static int pool_status(struct dm_target *ti, status_type_t type,
@@ -1872,22 +1872,22 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		r = dm_multisnap_metadata_get_transaction_id(pool->mmd,
-							     &transaction_id);
+		r = dm_thin_metadata_get_transaction_id(pool->mmd,
+							&transaction_id);
 		if (r)
 			return r;
 
-		r = dm_multisnap_metadata_get_free_blocks(pool->mmd,
-							  &nr_free_blocks_data);
+		r = dm_thin_metadata_get_free_blocks(pool->mmd,
+						     &nr_free_blocks_data);
 		if (r)
 			return r;
 
-		r = dm_multisnap_metadata_get_free_blocks_metadata(pool->mmd,
-							  &nr_free_blocks_metadata);
+		r = dm_thin_metadata_get_free_blocks_metadata(pool->mmd,
+							      &nr_free_blocks_metadata);
 		if (r)
 			return r;
 
-		r = dm_multisnap_metadata_get_held_root(pool->mmd, &held_root);
+		r = dm_thin_metadata_get_held_root(pool->mmd, &held_root);
 		if (r)
 			return r;
 
@@ -1949,7 +1949,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 }
 
 static struct target_type pool_target = {
-	.name = "multisnap-pool",
+	.name = "thin-pool",
 	.version = {1, 0, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
@@ -1967,28 +1967,28 @@ static struct target_type pool_target = {
 
 /*----------------------------------------------------------------*/
 
-static void multisnap_dtr(struct dm_target *ti)
+static void thin_dtr(struct dm_target *ti)
 {
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 
 	pool_dec(mc->pool);
-	dm_multisnap_metadata_close_device(mc->msd);
+	dm_thin_metadata_close_device(mc->msd);
 	dm_put_device(ti, mc->pool_dev);
 	kfree(mc);
 }
 
 /*
- * Construct a multisnap device:
+ * Construct a thin device:
  *
- * <start> <length> multisnap <pool dev> <dev id>
+ * <start> <length> thin <pool dev> <dev id>
  *
  * pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  * dev id: the internal device identifier
  */
-static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	struct multisnap_c *mc;
+	struct thin_c *mc;
 	struct dm_dev *pool_dev;
 	char *end;
 
@@ -2028,9 +2028,9 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	pool_inc(mc->pool);
 
-	r = dm_multisnap_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
+	r = dm_thin_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
-		printk(KERN_ALERT "Couldn't open multisnap internal device");
+		printk(KERN_ALERT "Couldn't open thin internal device");
 		dm_put_device(ti, mc->pool_dev);
 		kfree(mc);
 		return r;
@@ -2043,34 +2043,34 @@ static int multisnap_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 }
 
-static int multisnap_map(struct dm_target *ti, struct bio *bio,
-			 union map_info *map_context)
+static int thin_map(struct dm_target *ti, struct bio *bio,
+		    union map_info *map_context)
 {
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 
 	bio->bi_sector -= ti->begin;
 	return bio_map(mc->pool, ti, bio);
 }
 
-static int multisnap_status(struct dm_target *ti, status_type_t type,
-			    char *result, unsigned maxlen)
+static int thin_status(struct dm_target *ti, status_type_t type,
+		       char *result, unsigned maxlen)
 {
 	int r;
 	ssize_t sz = 0;
 	dm_block_t mapped, highest;
 	char buf[BDEVNAME_SIZE];
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 
 	if (mc->msd) {
 		switch (type) {
 		case STATUSTYPE_INFO:
-			r = dm_multisnap_metadata_get_mapped_count(mc->msd,
-								   &mapped);
+			r = dm_thin_metadata_get_mapped_count(mc->msd,
+							      &mapped);
 			if (r)
 				return r;
 
-			r = dm_multisnap_metadata_get_highest_mapped_block(mc->msd,
-									   &highest);
+			r = dm_thin_metadata_get_highest_mapped_block(mc->msd,
+								      &highest);
 			if (r < 0)
 				return r;
 
@@ -2095,10 +2095,10 @@ static int multisnap_status(struct dm_target *ti, status_type_t type,
 }
 
 /* bvec merge method. */
-static int multisnap_bvec_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-				struct bio_vec *biovec, int max_size)
+static int thin_bvec_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+			   struct bio_vec *biovec, int max_size)
 {
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 	struct pool * pool = mc->pool;
 
 	/*
@@ -2110,10 +2110,10 @@ static int multisnap_bvec_merge(struct dm_target *ti, struct bvec_merge_data *bv
 	return pool->sectors_per_block << SECTOR_SHIFT;
 }
 
-static int multisnap_iterate_devices(struct dm_target *ti,
-				     iterate_devices_callout_fn fn, void *data)
+static int thin_iterate_devices(struct dm_target *ti,
+				iterate_devices_callout_fn fn, void *data)
 {
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 	struct pool *pool;
 
 	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
@@ -2125,9 +2125,9 @@ static int multisnap_iterate_devices(struct dm_target *ti,
 	return fn(ti, mc->pool_dev, 0, pool->sectors_per_block, data);
 }
 
-static void multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits)
+static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
-	struct multisnap_c *mc = ti->private;
+	struct thin_c *mc = ti->private;
 	struct pool *pool;
 
 	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
@@ -2147,45 +2147,45 @@ static void multisnap_io_hints(struct dm_target *ti, struct queue_limits *limits
 	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
 }
 
-static struct target_type multisnap_target = {
-	.name = "multisnap",
+static struct target_type thin_target = {
+	.name = "thin",
 	.version = {1, 0, 0},
 	.module	= THIS_MODULE,
-	.ctr = multisnap_ctr,
-	.dtr = multisnap_dtr,
-	.map = multisnap_map,
-	.status = multisnap_status,
-	.merge = multisnap_bvec_merge,
-	.iterate_devices = multisnap_iterate_devices,
-	.io_hints = multisnap_io_hints,
+	.ctr = thin_ctr,
+	.dtr = thin_dtr,
+	.map = thin_map,
+	.status = thin_status,
+	.merge = thin_bvec_merge,
+	.iterate_devices = thin_iterate_devices,
+	.io_hints = thin_io_hints,
 };
 
 /*----------------------------------------------------------------*/
 
-static int __init dm_multisnap_init(void)
+static int __init dm_thin_init(void)
 {
-	int r = dm_register_target(&multisnap_target);
+	int r = dm_register_target(&thin_target);
 	if (r)
 		return r;
 
 	r = dm_register_target(&pool_target);
 	if (r)
-		dm_unregister_target(&multisnap_target);
+		dm_unregister_target(&thin_target);
 
 	bdev_table_init(&bdev_table_);
 	return r;
 }
 
-static void dm_multisnap_exit(void)
+static void dm_thin_exit(void)
 {
-	dm_unregister_target(&multisnap_target);
+	dm_unregister_target(&thin_target);
 	dm_unregister_target(&pool_target);
 }
 
-module_init(dm_multisnap_init);
-module_exit(dm_multisnap_exit);
+module_init(dm_thin_init);
+module_exit(dm_thin_exit);
 
-MODULE_DESCRIPTION(DM_NAME "device-mapper multisnap target");
+MODULE_DESCRIPTION(DM_NAME "device-mapper thin provisioning target");
 MODULE_AUTHOR("Joe Thornber <thornber@redhat.com>");
 MODULE_LICENSE("GPL");
 
