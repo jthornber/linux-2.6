@@ -788,12 +788,15 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 /*
  * Target argument parsing helpers.
  */
-int dm_read_arg(struct dm_arg *arg, char *str, unsigned *v, char **error)
+int dm_read_arg(struct dm_arg *arg, struct dm_arg_set *arg_set,
+		unsigned *value, char **error)
 {
-	if (!str ||
-	    (sscanf(str, "%u", v) != 1) ||
-	    (*v < arg->min) ||
-	    (*v > arg->max)) {
+	const char *arg_str = dm_shift_arg(arg_set);
+
+	if (!arg_str ||
+	    (sscanf(arg_str, "%u", value) != 1) ||
+	    (*value < arg->min) ||
+	    (*value > arg->max)) {
 		*error = arg->error;
 		return -EINVAL;
 	}
@@ -802,7 +805,7 @@ int dm_read_arg(struct dm_arg *arg, char *str, unsigned *v, char **error)
 }
 EXPORT_SYMBOL(dm_read_arg);
 
-char *dm_shift_arg(struct dm_arg_set *as)
+const char *dm_shift_arg(struct dm_arg_set *as)
 {
 	char *r;
 
@@ -817,11 +820,11 @@ char *dm_shift_arg(struct dm_arg_set *as)
 }
 EXPORT_SYMBOL(dm_shift_arg);
 
-void dm_consume_args(struct dm_arg_set *as, unsigned n)
+void dm_consume_args(struct dm_arg_set *as, unsigned num_args)
 {
-	BUG_ON (as->argc < n);
-	as->argc -= n;
-	as->argv += n;
+	BUG_ON(as->argc < num_args);
+	as->argc -= num_args;
+	as->argv += num_args;
 }
 EXPORT_SYMBOL(dm_consume_args);
 

@@ -51,7 +51,7 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 		{0, 1, "invalid value to corrupt bio"},
 	};
 
-	r = dm_read_arg(_args, dm_shift_arg(as), &argc, &ti->error);
+	r = dm_read_arg(_args, as, &argc, &ti->error);
 	if (r)
 		return -EINVAL;
 
@@ -65,7 +65,7 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 		/* corrupt_bio_byte <Nth byte> <bio_flags> <value> */
 		if (!strnicmp(arg_name, MESG_STR("corrupt_bio_byte")) &&
 		    (argc >= 1)) {
-			r = dm_read_arg(_args + 1, dm_shift_arg(as),
+			r = dm_read_arg(_args + 1, as,
 					&fc->corrupt_bio_byte, &ti->error);
 			argc--;
 
@@ -73,12 +73,12 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 			 * Only corrupt bios that have specific bi_rw flag(s),
 			 * e.g.: READ=0 or REQ_WRITE=1|REQ_META=32
 			 */
-			r = dm_read_arg(_args + 2, dm_shift_arg(as),
+			r = dm_read_arg(_args + 2, as,
 					&fc->corrupt_bio_flags, &ti->error);
 			argc--;
 
 			/* allow user to write a 0 or 1 to the specified byte */
-			r = dm_read_arg(_args + 3, dm_shift_arg(as),
+			r = dm_read_arg(_args + 3, as,
 					&fc->corrupt_bio_value, &ti->error);
 			argc--;
 			continue;
@@ -145,11 +145,11 @@ static int flakey_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	as.argc--;
 	as.argv++;
 
-	r = dm_read_arg(_args, dm_shift_arg(&as), &fc->up_interval, &ti->error);
+	r = dm_read_arg(_args, &as, &fc->up_interval, &ti->error);
 	if (r)
 		goto bad;
 
-	r = dm_read_arg(_args, dm_shift_arg(&as), &fc->down_interval, &ti->error);
+	r = dm_read_arg(_args, &as, &fc->down_interval, &ti->error);
 	if (r)
 		goto bad;
 

@@ -522,7 +522,7 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 		return -EINVAL;
 	}
 
-	r = dm_read_arg(_args, dm_shift_arg(as), &ps_argc, &ti->error);
+	r = dm_read_arg(_args, as, &ps_argc, &ti->error);
 	if (r) {
 		dm_put_path_selector(pst);
 		return -EINVAL;
@@ -648,11 +648,11 @@ static struct priority_group *parse_priority_group(struct dm_arg_set *as,
 	/*
 	 * read the paths
 	 */
-	r = dm_read_arg(_args, dm_shift_arg(as), &pg->nr_pgpaths, &ti->error);
+	r = dm_read_arg(_args, as, &pg->nr_pgpaths, &ti->error);
 	if (r)
 		goto bad;
 
-	r = dm_read_arg(_args + 1, dm_shift_arg(as), &nr_selector_args, &ti->error);
+	r = dm_read_arg(_args + 1, as, &nr_selector_args, &ti->error);
 	if (r)
 		goto bad;
 
@@ -698,7 +698,7 @@ static int parse_hw_handler(struct dm_arg_set *as, struct multipath *m)
 		{0, 1024, "invalid number of hardware handler args"},
 	};
 
-	if (dm_read_arg(_args, dm_shift_arg(as), &hw_argc, &ti->error))
+	if (dm_read_arg(_args, as, &hw_argc, &ti->error))
 		return -EINVAL;
 
 	if (!hw_argc)
@@ -755,7 +755,7 @@ static int parse_features(struct dm_arg_set *as, struct multipath *m)
 		{0, 60000, "pg_init_delay_msecs must be between 0 and 60000"},
 	};
 
-	r = dm_read_arg(_args, dm_shift_arg(as), &argc, &ti->error);
+	r = dm_read_arg(_args, as, &argc, &ti->error);
 	if (r)
 		return -EINVAL;
 
@@ -773,16 +773,14 @@ static int parse_features(struct dm_arg_set *as, struct multipath *m)
 
 		if (!strnicmp(arg_name, MESG_STR("pg_init_retries")) &&
 		    (argc >= 1)) {
-			r = dm_read_arg(_args + 1, dm_shift_arg(as),
-				       &m->pg_init_retries, &ti->error);
+			r = dm_read_arg(_args + 1, as, &m->pg_init_retries, &ti->error);
 			argc--;
 			continue;
 		}
 
 		if (!strnicmp(arg_name, MESG_STR("pg_init_delay_msecs")) &&
 		    (argc >= 1)) {
-			r = dm_read_arg(_args + 2, dm_shift_arg(as),
-				       &m->pg_init_delay_msecs, &ti->error);
+			r = dm_read_arg(_args + 2, as, &m->pg_init_delay_msecs, &ti->error);
 			argc--;
 			continue;
 		}
@@ -826,11 +824,11 @@ static int multipath_ctr(struct dm_target *ti, unsigned int argc,
 	if (r)
 		goto bad;
 
-	r = dm_read_arg(_args, dm_shift_arg(&as), &m->nr_priority_groups, &ti->error);
+	r = dm_read_arg(_args, &as, &m->nr_priority_groups, &ti->error);
 	if (r)
 		goto bad;
 
-	r = dm_read_arg(_args + 1, dm_shift_arg(&as), &next_pg_num, &ti->error);
+	r = dm_read_arg(_args + 1, &as, &next_pg_num, &ti->error);
 	if (r)
 		goto bad;
 
