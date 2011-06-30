@@ -76,9 +76,25 @@ void *dm_bitmap_data(struct dm_block *b)
 	return dm_block_data(b) + sizeof(struct bitmap_header);
 }
 
-static unsigned _sm__lookup_bitmap(__le64 *w, unsigned b)
+#define WORD_MASK_LOW 0x5555555555555555
+#define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAA
+#define WORD_MASK_ALL 0xFFFFFFFFFFFFFFFF
+
+static unsigned bitmap_word_used(void *addr, unsigned b)
+{
+	__le64 *words = (__le64 *) addr;
+        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+
+	return ((*w & WORD_MASK_LOW) == WORD_MASK_LOW ||
+		(*w & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
+		(*w & WORD_MASK_ALL) == WORD_MASK_ALL);
+}
+
+unsigned sm__lookup_bitmap(void *addr, unsigned b)
 {
 	unsigned val;
+	__le64 *words = (__le64 *) addr;
+        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
 
 	b %= ENTRIES_PER_WORD;
 	val = test_bit_le(b * 2, (void*) w) ? 1 : 0;
@@ -86,29 +102,6 @@ static unsigned _sm__lookup_bitmap(__le64 *w, unsigned b)
 	val |= test_bit_le(b * 2 + 1, (void *) w) ? 1 : 0;
 
         return val;
-}
-
-#define WORD_MASK_LOW 0x5555555555555555
-#define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAA
-#define WORD_MASK_ALL 0xFFFFFFFFFFFFFFFF
-
-static unsigned bitmap_word_used(void *addr, unsigned b, __le64 **w_ret)
-{
-	__le64 *words = (__le64 *) addr;
-        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
-
-	*w_ret = w;
-	return ((*w & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
-		(*w & WORD_MASK_LOW) == WORD_MASK_LOW ||
-		(*w & WORD_MASK_ALL) == WORD_MASK_ALL);
-}
-
-unsigned sm__lookup_bitmap(void *addr, unsigned b)
-{
-	__le64 *words = (__le64 *) addr;
-        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
-
-	return _sm__lookup_bitmap(w, b);
 }
 
 
@@ -133,19 +126,18 @@ int sm__find_free(void *addr, unsigned begin, unsigned end,
 		  unsigned *result)
 {
 	while (begin < end) {
-		__le64 *w;
-
-		if (bitmap_word_used(addr, begin, &w))
+		if (!(begin & (ENTRIES_PER_WORD - 1)) &&
+		    bitmap_word_used(addr, begin)) {
 			begin += ENTRIES_PER_WORD;
+			continue;
+		}
 
-		else {
-			if (_sm__lookup_bitmap(w, begin))
-				begin++;
+		if (sm__lookup_bitmap(addr, begin)) {
+			begin++;
 
-			else {
-				*result = begin;
-				return 0;
-			}
+		} else {
+			*result = begin;
+			return 0;
 		}
 	}
 
