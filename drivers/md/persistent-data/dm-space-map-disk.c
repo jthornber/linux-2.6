@@ -70,6 +70,7 @@ struct dm_block_validator dm_sm_bitmap_validator = {
 /*----------------------------------------------------------------*/
 
 #define ENTRIES_PER_WORD 32
+#define ENTRIES_SHIFT	5
 
 void *dm_bitmap_data(struct dm_block *b)
 {
@@ -83,7 +84,7 @@ void *dm_bitmap_data(struct dm_block *b)
 static unsigned bitmap_word_used(void *addr, unsigned b)
 {
 	__le64 *words = (__le64 *) addr;
-        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+        __le64 *w = words + (b >> ENTRIES_SHIFT);
 
 	return ((*w & WORD_MASK_LOW) == WORD_MASK_LOW ||
 		(*w & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
@@ -94,9 +95,9 @@ unsigned sm__lookup_bitmap(void *addr, unsigned b)
 {
 	unsigned val;
 	__le64 *words = (__le64 *) addr;
-        __le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+        __le64 *w = words + (b >> ENTRIES_SHIFT);
 
-	b %= ENTRIES_PER_WORD;
+	b &= ENTRIES_PER_WORD - 1;
 	val = test_bit_le(b * 2, (void*) w) ? 1 : 0;
 	val <<= 1;
 	val |= test_bit_le(b * 2 + 1, (void *) w) ? 1 : 0;
@@ -108,8 +109,8 @@ unsigned sm__lookup_bitmap(void *addr, unsigned b)
 void sm__set_bitmap(void *addr, unsigned b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD);
-	b %= ENTRIES_PER_WORD;
+	__le64 *w = words + (b >> ENTRIES_SHIFT);
+	b &= ENTRIES_PER_WORD - 1;
 
 	if (val & 2)
 		__set_bit_le(b * 2, (void *) w);
