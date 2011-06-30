@@ -20,8 +20,7 @@ typedef uint64_t dm_multisnap_dev_t;
  */
 struct dm_multisnap_metadata *
 dm_multisnap_metadata_open(struct block_device *bdev,
-			   sector_t data_block_size,
-			   dm_block_t data_dev_size);
+			   sector_t data_block_size);
 
 int dm_multisnap_metadata_close(struct dm_multisnap_metadata *mmd);
 

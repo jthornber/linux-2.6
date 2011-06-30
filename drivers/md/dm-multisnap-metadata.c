@@ -372,8 +372,7 @@ static int begin(struct dm_multisnap_metadata *mmd)
 }
 
 struct dm_multisnap_metadata *
-dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
-			   dm_block_t data_dev_size)
+dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size)
 {
 	int r;
 	struct multisnap_super_block *sb;
@@ -395,7 +394,7 @@ dm_multisnap_metadata_open(struct block_device *bdev, sector_t data_block_size,
 		return ERR_PTR(r);
 	}
 
-	mmd = alloc_mmd(bm, data_dev_size, create);
+	mmd = alloc_mmd(bm, 0, create);
 	if (IS_ERR(mmd)) {
 		/* alloc_mmd() destroys the block manager on failure */
 		return mmd; /* already an ERR_PTR */
@@ -932,12 +931,9 @@ int dm_multisnap_metadata_alloc_data_block(struct dm_ms_device *msd,
 	int r;
 	struct dm_multisnap_metadata *mmd = msd->mmd;
 
-	/*
-	 * FIXME: we need to persist allocations that haven't yet been
-	 * inserted.
-	 */
 	down_write(&mmd->root_lock);
 	r = dm_sm_new_block(mmd->data_sm, result);
+	mmd->need_commit = 1;
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -951,6 +947,7 @@ int dm_multisnap_metadata_free_data_block(struct dm_ms_device *msd,
 
 	down_write(&mmd->root_lock);
 	r = dm_sm_dec_block(mmd->data_sm, result);
+	mmd->need_commit = 1;
 	up_write(&mmd->root_lock);
 
 	return r;
@@ -996,6 +993,7 @@ int dm_multisnap_metadata_commit(struct dm_multisnap_metadata *mmd)
 	size_t len;
 	struct multisnap_super_block *sb;
 
+	/* FIXME: remove DEBUG (leave BUILD_BUG_ON) */
 #if DEBUG
 	BUILD_BUG_ON(sizeof(struct multisnap_super_block) > 512);
 #endif
@@ -1143,9 +1141,12 @@ static int __resize_data_dev(struct dm_multisnap_metadata *mmd,
 		return -EINVAL;
 	}
 
-	if (new_count > old_count)
-		return dm_sm_extend(mmd->data_sm, new_count - old_count);
-	else
+	if (new_count > old_count) {
+		r = dm_sm_extend(mmd->data_sm, new_count - old_count);
+		if (!r)
+			mmd->need_commit = 1;
+		return r;
+	} else
 		return 0;
 }
 

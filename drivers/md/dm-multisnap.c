@@ -88,12 +88,6 @@ static struct block_device *ti_to_bdev(struct dm_target *ti)
 	return dm_bdev(dm_table_get_md(ti->table));
 }
 
-/* Return size of device in sectors. */
-static sector_t get_dev_size(struct dm_dev *dev)
-{
-	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -470,7 +464,6 @@ struct pool {
 	struct block_device *metadata_dev;
 	struct dm_multisnap_metadata *mmd;
 
-	sector_t data_size;
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	dm_block_t offset_mask;
@@ -863,10 +856,6 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 	dm_block_t free_blocks;
 	unsigned long flags;
 
-	r = dm_multisnap_metadata_alloc_data_block(msd, result);
-	if (r)
-		return r;
-
 	r = dm_multisnap_metadata_get_free_blocks(pool->mmd, &free_blocks);
 	if (r) {
 		dm_multisnap_metadata_free_data_block(msd, *result);
@@ -879,6 +868,10 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 		spin_unlock_irqrestore(&pool->lock, flags);
 		dm_table_event(pool->ti->table);
 	}
+
+	r = dm_multisnap_metadata_alloc_data_block(msd, result);
+	if (r)
+		return r;
 
 	return 0;
 }
@@ -1335,7 +1328,6 @@ static struct block_device *multisnap_get_device(const char *path, fmode_t mode)
 }
 
 static struct pool *pool_create(const char *metadata_path,
-				dm_block_t data_size,
 				unsigned long block_size,
 				char **error)
 {
@@ -1353,7 +1345,7 @@ static struct pool *pool_create(const char *metadata_path,
 		return ERR_PTR(r);
 	}
 
-	mmd = dm_multisnap_metadata_open(metadata_dev, block_size, data_size);
+	mmd = dm_multisnap_metadata_open(metadata_dev, block_size);
 	if (IS_ERR(mmd)) {
 		*error = "Error creating metadata object";
 		err_p = mmd; /* already an ERR_PTR */
@@ -1369,7 +1361,6 @@ static struct pool *pool_create(const char *metadata_path,
 
 	pool->metadata_dev = metadata_dev;
 	pool->mmd = mmd;
-	pool->data_size = data_size;
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
@@ -1466,7 +1457,6 @@ static void pool_dec(struct pool *pool)
 
 static struct pool *pool_find(struct block_device *pool_bdev,
 			      const char *metadata_path,
-			      dm_block_t data_size,
 			      unsigned long block_size,
 			      char **error)
 {
@@ -1476,7 +1466,7 @@ static struct pool *pool_find(struct block_device *pool_bdev,
 	if (pool)
 		pool_inc(pool);
 	else
-		pool = pool_create(metadata_path, data_size, block_size, error);
+		pool = pool_create(metadata_path, block_size, error);
 
 	return pool;
 }
@@ -1507,7 +1497,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct pool_c *pt;
 	struct pool *pool;
 	struct dm_dev *data_dev;
-	dm_block_t data_size;
 	unsigned long block_size;
 	dm_block_t low_water;
 	char *end;
@@ -1523,23 +1512,12 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return r;
 	}
 
-	/*
-	 * The pool device and data device must have the same size.
-	 */
-	data_size = get_dev_size(data_dev);
-	if (ti->len > data_size) {
-		ti->error = "Pool device bigger than data device";
-		dm_put_device(ti, data_dev);
-		return -EINVAL;
-	}
-
 	block_size = simple_strtoul(argv[2], &end, 10);
 	if (!block_size || *end) {
 		ti->error = "Invalid block size";
 		dm_put_device(ti, data_dev);
 		return -EINVAL;
 	}
-	do_div(data_size, block_size);
 
 	low_water = simple_strtoull(argv[3], &end, 10);
 	if (!low_water || *end) {
@@ -1558,7 +1536,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	pool = pool_find(ti_to_bdev(ti), argv[0], data_size, block_size, &ti->error);
+	pool = pool_find(ti_to_bdev(ti), argv[0], block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		dm_put_device(ti, data_dev);
 		return PTR_ERR(pool);
@@ -1627,7 +1605,7 @@ static int pool_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	data_size = get_dev_size(pt->data_dev) >> pool->block_shift;
+	data_size = ti->len >> pool->block_shift;
 	r = dm_multisnap_metadata_get_data_dev_size(pool->mmd, &sb_data_size);
 	if (r) {
 		DMERR("failed to retrieve data device size");
@@ -1635,7 +1613,8 @@ static int pool_preresume(struct dm_target *ti)
 	}
 
 	if (data_size < sb_data_size) {
-		DMERR("new data device size smaller than actual one");
+		DMERR("pool target too small was %llu blocks, expected %llu blocks\n",
+		      data_size, sb_data_size);
 		return -EINVAL;
 
 	} else if (data_size > sb_data_size) {
@@ -1644,10 +1623,15 @@ static int pool_preresume(struct dm_target *ti)
 			DMERR("failed to resize data device");
 			return r;
 		}
+
+		r = dm_multisnap_metadata_commit(pool->mmd);
+		if (r) {
+			DMERR("commit failed");
+			return r;
+		}
 	}
 
 	spin_lock_irqsave(&pool->lock, flags);
-	pool->data_size = data_size;
 	pool->triggered = 0;
 	spin_unlock_irqrestore(&pool->lock, flags);
 
@@ -1880,8 +1864,7 @@ static int pool_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
 	struct pool_c *pt = ti->private;
-	struct pool *pool = pt->pool;
-	return fn(ti, pt->data_dev, 0, pool->data_size * pool->sectors_per_block, data);
+	return fn(ti, pt->data_dev, 0, ti->len, data);
 }
 
 static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,

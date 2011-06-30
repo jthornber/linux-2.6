@@ -76,11 +76,11 @@ void *dm_bitmap_data(struct dm_block *b)
 	return dm_block_data(b) + sizeof(struct bitmap_header);
 }
 
-unsigned sm__lookup_bitmap(void *addr, dm_block_t b)
+unsigned sm__lookup_bitmap(void *addr, unsigned b)
 {
 	unsigned val = 0;
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: 64 bit div, use shift */
+	__le64 *w = words + (b / ENTRIES_PER_WORD);
 	b %= ENTRIES_PER_WORD;
 
 	val = test_bit_le(b * 2, (void *) w) ? 1 : 0;
@@ -89,10 +89,10 @@ unsigned sm__lookup_bitmap(void *addr, dm_block_t b)
 	return val;
 }
 
-void sm__set_bitmap(void *addr, dm_block_t b, unsigned val)
+void sm__set_bitmap(void *addr, unsigned b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
-	__le64 *w = words + (b / ENTRIES_PER_WORD); /* FIXME: use shift */
+	__le64 *w = words + (b / ENTRIES_PER_WORD);
 	b %= ENTRIES_PER_WORD;
 
 	if (val & 2)
@@ -160,34 +160,48 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 	return 0;
 }
 
-static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm,
-		  dm_block_t nr_blocks)
+static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm)
 {
 	int r;
-	dm_block_t i;
-	unsigned blocks;
 
 	r = ll_init(io, tm);
 	if (r < 0)
 		return r;
 
-	io->nr_blocks = nr_blocks;
+	io->nr_blocks = 0;
 	io->nr_allocated = 0;
 	r = dm_btree_empty(&io->bitmap_info, &io->bitmap_root);
 	if (r < 0)
 		return r;
 
+	r = dm_btree_empty(&io->ref_count_info, &io->ref_count_root);
+	if (r < 0) {
+		dm_btree_del(&io->bitmap_info, io->bitmap_root);
+		return r;
+	}
+
+	return 0;
+}
+
+static int ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
+{
+	int r;
+	dm_block_t i, nr_blocks;
+	unsigned old_blocks, blocks;
+
+	nr_blocks = io->nr_blocks + extra_blocks;
+	old_blocks = div_up(io->nr_blocks, io->entries_per_block);
 	blocks = div_up(nr_blocks, io->entries_per_block);
-	for (i = 0; i < blocks; i++) {
+	for (i = old_blocks; i < blocks; i++) {
 		struct dm_block *b;
 		struct index_entry idx;
 
-		r = dm_tm_new_block(tm, &dm_sm_bitmap_validator, &b);
+		r = dm_tm_new_block(io->tm, &dm_sm_bitmap_validator, &b);
 		if (r < 0)
 			return r;
 		idx.blocknr = __cpu_to_le64(dm_block_location(b));
 
-		r = dm_tm_unlock(tm, b);
+		r = dm_tm_unlock(io->tm, b);
 		if (r < 0)
 			return r;
 
@@ -200,12 +214,7 @@ static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm,
 			return r;
 	}
 
-	r = dm_btree_empty(&io->ref_count_info, &io->ref_count_root);
-	if (r < 0) {
-		dm_btree_del(&io->bitmap_info, io->bitmap_root);
-		return r;
-	}
-
+	io->nr_blocks = nr_blocks;
 	return 0;
 }
 
@@ -281,7 +290,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 	dm_block_t i, index_begin = begin;
 	dm_block_t index_end = div_up(end, io->entries_per_block);
 
-	do_div(index_begin, io->entries_per_block);
+	begin = do_div(index_begin, io->entries_per_block);
 	for (i = index_begin; i < index_end; i++, begin = 0) {
 		r = dm_btree_lookup(&io->bitmap_info, io->bitmap_root, &i, &ie);
 		if (r < 0)
@@ -300,11 +309,11 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 				return r;
 
 			r = sm__find_free(dm_bitmap_data(blk),
-					  mod64(begin, io->entries_per_block),
+					  max((unsigned) begin, (unsigned) __le32_to_cpu(ie.none_free_before)),
 					  bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(io->tm, blk);
-				return r;
+				continue;
 			}
 
 			r = dm_tm_unlock(io->tm, blk);
@@ -340,6 +349,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		printk(KERN_ALERT "shadow failed");
 		return r;
 	}
+	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
 
 	bm = dm_bitmap_data(nb);
 	bit = mod64(b, io->entries_per_block);
@@ -385,7 +395,6 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		ie.none_free_before = __cpu_to_le32(min((dm_block_t) __le32_to_cpu(ie.none_free_before), b));
 	}
 
-	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
 	r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
 			    &index, &ie, &io->bitmap_root);
 	if (r < 0)
@@ -438,8 +447,8 @@ static void sm_disk_destroy(struct dm_space_map *sm)
 
 static int sm_disk_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
-	BUG_ON(1);
-	return -1;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+	return ll_extend(&smd->ll, extra_blocks);
 }
 
 static int sm_disk_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
@@ -453,7 +462,7 @@ static int sm_disk_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
-	*count = smd->ll.nr_blocks;
+	*count = smd->ll.nr_blocks - smd->ll.nr_allocated;
 	return 0;
 }
 
@@ -497,7 +506,6 @@ static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
 	int r;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-
 
 	/* FIXME: we should start the search where we left off */
 	r = ll_find_free_block(&smd->ll, 0, smd->ll.nr_blocks, b);
@@ -565,7 +573,11 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 
 	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
 
-	r = ll_new(&smd->ll, tm, nr_blocks);
+	r = ll_new(&smd->ll, tm);
+	if (r)
+		return ERR_PTR(r);
+
+	r = ll_extend(&smd->ll, nr_blocks);
 	if (r)
 		return ERR_PTR(r);
 
