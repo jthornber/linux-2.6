@@ -93,16 +93,12 @@ static unsigned bitmap_word_used(void *addr, unsigned b)
 
 unsigned sm__lookup_bitmap(void *addr, unsigned b)
 {
-	unsigned val;
 	__le64 *words = (__le64 *) addr;
         __le64 *w = words + (b >> ENTRIES_SHIFT);
 
-	b &= ENTRIES_PER_WORD - 1;
-	val = test_bit_le(b * 2, (void*) w) ? 1 : 0;
-	val <<= 1;
-	val |= test_bit_le(b * 2 + 1, (void *) w) ? 1 : 0;
-
-        return val;
+	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
+	return (!!test_bit_le(b, (void*) w) << 1) |
+	       !!test_bit_le(b + 1, (void *) w);
 }
 
 
@@ -110,17 +106,18 @@ void sm__set_bitmap(void *addr, unsigned b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
 	__le64 *w = words + (b >> ENTRIES_SHIFT);
-	b &= ENTRIES_PER_WORD - 1;
+
+	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
 
 	if (val & 2)
-		__set_bit_le(b * 2, (void *) w);
+		__set_bit_le(b, (void *) w);
 	else
-		__clear_bit_le(b * 2, (void *) w);
+		__clear_bit_le(b, (void *) w);
 
 	if (val & 1)
-		__set_bit_le(b * 2 + 1, (void *) w);
+		__set_bit_le(b + 1, (void *) w);
 	else
-		__clear_bit_le(b * 2 + 1, (void *) w);
+		__clear_bit_le(b + 1, (void *) w);
 }
 
 int sm__find_free(void *addr, unsigned begin, unsigned end,
