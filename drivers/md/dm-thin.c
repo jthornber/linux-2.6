@@ -633,7 +633,7 @@ static void remap_and_issue(struct pool *pool, struct bio *bio,
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		int r = dm_thin_metadata_commit(pool->mmd);
 		if (r) {
-			printk(KERN_ALERT "thin_metadata_commit failed");
+			DMERR("thin_metadata_commit failed");
 			bio_io_error(bio);
 			return;
 		}
@@ -758,7 +758,7 @@ static void schedule_copy(struct pool *pool, struct dm_ms_device *msd,
 				   0, copy_complete, m);
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
-			printk(KERN_ALERT "dm_kcopyd_copy() failed");
+			DMERR("dm_kcopyd_copy() failed");
 			cell_error(cell);
 		}
 	}
@@ -800,7 +800,7 @@ static void schedule_zero(struct pool *pool, struct dm_ms_device *msd,
 		r = dm_kcopyd_zero(pool->copier, 1, &to, 0, copy_complete, m);
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
-			printk(KERN_ALERT "dm_kcopyd_zero() failed");
+			DMERR("dm_kcopyd_zero() failed");
 			cell_error(cell);
 		}
 	}
@@ -897,13 +897,13 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 		else {
 			r = dm_thin_metadata_remove(msd, block);
 			if (r) {
-				printk(KERN_ALERT "dm_thin_metadata_remove() failed");
+				DMERR("dm_thin_metadata_remove() failed");
 				bio_io_error(bio);
 			} else {
 				// FIXME: this should be handled by the value_type ops
 				r = dm_thin_metadata_free_data_block(msd, lookup_result.block);
 				if (r) {
-					printk(KERN_ALERT "dm_thin_metadata_free_data_block failed");
+					DMERR("dm_thin_metadata_free_data_block failed");
 					/* carry on regardless, we've lost an unused data block */
 				}
 
@@ -922,7 +922,7 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		printk(KERN_ALERT "dm_thin_metadata_lookup failed, error = %d", r);
+		DMERR("dm_thin_metadata_lookup failed, error = %d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -954,7 +954,7 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		printk(KERN_ALERT "alloc_data_block() failed");
+		DMERR("alloc_data_block() failed");
 		cell_error(cell);
 		break;
 	}
@@ -1014,7 +1014,7 @@ static void provision_block(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		printk(KERN_ALERT "-ENODATA alloc_data_block() failed");
+		DMERR("-ENODATA alloc_data_block() failed");
 		cell_error(cell);
 		break;
 	}
@@ -1042,7 +1042,7 @@ static void process_bio(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		printk(KERN_ALERT "dm_thin_metadata_lookup failed, error=%d", r);
+		DMERR("dm_thin_metadata_lookup failed, error=%d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -1098,7 +1098,7 @@ static void process_prepared_mappings(struct pool *pool)
 		r = dm_thin_metadata_insert(m->msd, m->virt_block,
 					    m->data_block);
 		if (r) {
-			printk(KERN_ALERT "dm_thin_metadata_insert() failed");
+			DMERR("dm_thin_metadata_insert() failed");
 			cell_error(m->cell);
 		} else {
 			if (m->bio) {
@@ -1157,7 +1157,7 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 	 */
 	if ((bio->bi_rw & REQ_DISCARD) &&
 	    bio->bi_size < (pool->sectors_per_block << SECTOR_SHIFT)) {
-		printk(KERN_ALERT "discard too small");
+		DMERR("discard too small");
 		bio_endio(bio, 0);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1702,7 +1702,7 @@ static void pool_presuspend(struct dm_target *ti)
 	struct pool *pool = pt->pool;
 
 	if (dm_thin_metadata_commit(pool->mmd) < 0) {
-		printk(KERN_ALERT "thin metadata write failed.");
+		DMERR("thin metadata write failed.");
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
 }
@@ -2018,7 +2018,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	mc->pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!mc->pool) {
-		printk(KERN_ALERT "Couldn't find pool object");
+		DMERR("Couldn't find pool object");
 		dm_put_device(ti, mc->pool_dev);
 		kfree(mc);
 		return -EINVAL;
@@ -2027,7 +2027,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	r = dm_thin_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
-		printk(KERN_ALERT "Couldn't open thin internal device");
+		DMERR("Couldn't open thin internal device");
 		dm_put_device(ti, mc->pool_dev);
 		kfree(mc);
 		return r;
@@ -2115,7 +2115,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!pool) {
-		printk(KERN_ALERT "Couldn't find pool object");
+		DMERR("Couldn't find pool object");
 		return -EINVAL;
 	}
 
@@ -2129,7 +2129,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!pool) {
-		printk(KERN_ALERT "Couldn't find pool object");
+		DMERR("Couldn't find pool object");
 		return;
 	}
 
