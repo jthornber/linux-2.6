@@ -16,8 +16,6 @@
 
 #define DM_MSG_PREFIX   "thin-metadata"
 
-#define DEBUG 1
-
 #define THIN_SUPERBLOCK_MAGIC 27022010
 #define THIN_SUPERBLOCK_LOCATION 0
 #define THIN_VERSION 1
@@ -995,10 +993,8 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *mmd)
 	size_t len;
 	struct thin_super_block *sb;
 
-	/* FIXME: remove DEBUG (leave BUILD_BUG_ON) */
-#if DEBUG
+	/* We want to know if/when the thin_super_block exceeds a 512b sector */
 	BUILD_BUG_ON(sizeof(struct thin_super_block) > 512);
-#endif
 
 	down_write(&mmd->root_lock);
 	r = __write_changed_details(mmd);
