@@ -342,11 +342,13 @@ EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 
 /*----------------------------------------------------------------*/
 
-static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_location,
+static int dm_tm_create_internal(struct dm_block_manager *bm,
+				 dm_block_t sb_location,
 				 struct dm_block_validator *sb_validator,
 				 size_t root_offset, size_t root_max_len,
 				 struct dm_transaction_manager **tm,
-				 struct dm_space_map **sm, struct dm_block **sblock,
+				 struct dm_space_map **sm,
+				 struct dm_block **sblock,
 				 int create)
 {
 	int r;
@@ -366,26 +368,30 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 		goto bad1;
 
 	if (create) {
-		r = dm_bm_write_lock_zero(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
+		r = dm_bm_write_lock_zero(dm_tm_get_bm(*tm), sb_location,
+					  sb_validator, sblock);
 		if (r < 0) {
 			DMERR("couldn't lock superblock");
 			goto bad1;
 		}
 
-		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm), sb_location);
+		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm),
+					  sb_location);
 		if (r) {
 			DMERR("couldn't create metadata space map");
 			goto bad2;
 		}
 
 	} else {
-		r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
+		r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location,
+				     sb_validator, sblock);
 		if (r < 0) {
 			DMERR("couldn't lock superblock");
 			goto bad1;
 		}
 
-		r = dm_sm_metadata_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
+		r = dm_sm_metadata_open(*sm, *tm,
+					dm_block_data(*sblock) + root_offset,
 					root_max_len);
 		if (IS_ERR(*sm)) {
 			DMERR("couldn't open metadata space map");
@@ -412,7 +418,8 @@ int dm_tm_create_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 			 struct dm_transaction_manager **tm,
 			 struct dm_space_map **sm, struct dm_block **sblock)
 {
-	return dm_tm_create_internal(bm, sb_location, sb_validator, 0, 0, tm, sm, sblock, 1);
+	return dm_tm_create_internal(bm, sb_location, sb_validator,
+				     0, 0, tm, sm, sblock, 1);
 }
 EXPORT_SYMBOL_GPL(dm_tm_create_with_sm);
 
@@ -422,7 +429,8 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		       struct dm_transaction_manager **tm,
 		       struct dm_space_map **sm, struct dm_block **sblock)
 {
-	return dm_tm_create_internal(bm, sb_location, sb_validator, root_offset, root_max_len, tm, sm, sblock, 0);
+	return dm_tm_create_internal(bm, sb_location, sb_validator, root_offset,
+				     root_max_len, tm, sm, sblock, 0);
 }
 EXPORT_SYMBOL_GPL(dm_tm_open_with_sm);
 

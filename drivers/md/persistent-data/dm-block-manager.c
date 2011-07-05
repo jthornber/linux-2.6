@@ -308,7 +308,8 @@ static void read_block(struct dm_block *b)
 static void write_block(struct dm_block *b)
 {
 	if (b->validator)
-		b->validator->prepare_for_write(b->validator, b, b->bm->block_size);
+		b->validator->prepare_for_write(b->validator, b,
+						b->bm->block_size);
 
 	submit_io(b, WRITE | b->io_flags, complete_io);
 }
@@ -515,8 +516,9 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 }
 
 #ifdef USE_PLUGGING
-static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t where,
-				       int need_read, struct dm_block_validator *v,
+static int recycle_block_with_plugging(struct dm_block_manager *bm,
+				       dm_block_t where, int need_read,
+				       struct dm_block_validator *v,
 				       struct dm_block **result)
 {
 	int r;
@@ -723,7 +725,8 @@ retry:
 		if (need_read) {
 			if (b->validator && (v != b->validator)) {
 				DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
-				      b->validator->name, v->name, (unsigned long long)b->where);
+				      b->validator->name, v->name,
+				      (unsigned long long)b->where);
 				BUG_ON(1); /* FIXME: remove */
 				spin_unlock_irqrestore(&bm->lock, flags);
 				return -EINVAL;
@@ -733,7 +736,8 @@ retry:
 				r = b->validator->check(b->validator, b, bm->block_size);
 				if (r) {
 					DMERR("%s validator check failed for block %llu",
-					      b->validator->name, (unsigned long long)b->where);
+					      b->validator->name,
+					      (unsigned long long)b->where);
 					spin_unlock_irqrestore(&bm->lock, flags);
 					return r;
 				}

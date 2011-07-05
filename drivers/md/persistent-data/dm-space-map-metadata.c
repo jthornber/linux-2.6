@@ -160,7 +160,8 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	b = do_div(index, ll->entries_per_block);
 	ie = ll->index + index;
 
-	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &blk);
+	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr),
+			    &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
 	*result = sm__lookup_bitmap(dm_bitmap_data(blk), b);
@@ -207,7 +208,8 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			unsigned position;
 			uint32_t bit_end = (i == index_end - 1) ? end : ll->entries_per_block;
 
-			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &blk);
+			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr),
+					    &dm_sm_bitmap_validator, &blk);
 			if (r < 0)
 				return r;
 
@@ -242,7 +244,8 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	bit = do_div(index, ll->entries_per_block);
 	ie = ll->index + index;
 
-	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr), &dm_sm_bitmap_validator, &nb, &inc);
+	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr),
+			       &dm_sm_bitmap_validator, &nb, &inc);
 	if (r < 0) {
 		DMERR("shadow failed");
 		return r;
@@ -328,7 +331,8 @@ static int ll_commit(struct ll_disk *ll)
 	int r, inc;
 	struct dm_block *b;
 
-	r = dm_tm_shadow_block(ll->tm, ll->bitmap_root, &index_validator_, &b, &inc);
+	r = dm_tm_shadow_block(ll->tm, ll->bitmap_root,
+			       &index_validator_, &b, &inc);
 	if (r)
 		return r;
 
@@ -460,11 +464,13 @@ static int sm_metadata_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 {
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
-	*count = smm->old_ll.nr_blocks - smm->old_ll.nr_allocated - smm->allocated_this_transaction;
+	*count = smm->old_ll.nr_blocks - smm->old_ll.nr_allocated -
+		smm->allocated_this_transaction;
 	return 0;
 }
 
-static int sm_metadata_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
+static int sm_metadata_get_count(struct dm_space_map *sm, dm_block_t b,
+				 uint32_t *result)
 {
 	int r, i;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -496,7 +502,8 @@ static int sm_metadata_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t
 	return 0;
 }
 
-static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
+static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm,
+					      dm_block_t b, int *result)
 {
 	int r, i, adjustment = 0;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -538,7 +545,8 @@ static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm, dm_block_
 	return 0;
 }
 
-static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
+static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
+				 uint32_t count)
 {
 	int r;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -695,19 +703,22 @@ static int sm_bootstrap_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 	return 0;
 }
 
-static int sm_bootstrap_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
+static int sm_bootstrap_get_count(struct dm_space_map *sm, dm_block_t b,
+				  uint32_t *result)
 {
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 	return b < smm->begin ? 1 : 0;
 }
 
-static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
+static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm,
+					       dm_block_t b, int *result)
 {
 	*result = 0;
 	return 0;
 }
 
-static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
+static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b,
+				  uint32_t count)
 {
 	BUG_ON(1);
 	return -1;
@@ -750,7 +761,8 @@ static int sm_bootstrap_root_size(struct dm_space_map *sm, size_t *result)
 	return -1;
 }
 
-static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where, size_t max)
+static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where,
+				  size_t max)
 {
 	BUG_ON(1);
 	return -1;

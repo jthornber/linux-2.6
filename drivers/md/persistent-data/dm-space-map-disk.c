@@ -274,7 +274,8 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr), &dm_sm_bitmap_validator, &blk);
+	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
+			    &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
 	*result = sm__lookup_bitmap(dm_bitmap_data(blk),
