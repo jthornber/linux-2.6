@@ -76,7 +76,7 @@ static unsigned bitmap_word_used(void *addr, unsigned b)
 		(*w & WORD_MASK_ALL) == WORD_MASK_ALL);
 }
 
-unsigned sm__lookup_bitmap(void *addr, unsigned b)
+unsigned sm_lookup_bitmap(void *addr, unsigned b)
 {
 	__le64 *words = (__le64 *) addr;
         __le64 *w = words + (b >> ENTRIES_SHIFT);
@@ -87,7 +87,7 @@ unsigned sm__lookup_bitmap(void *addr, unsigned b)
 }
 
 
-void sm__set_bitmap(void *addr, unsigned b, unsigned val)
+void sm_set_bitmap(void *addr, unsigned b, unsigned val)
 {
 	__le64 *words = (__le64 *) addr;
 	__le64 *w = words + (b >> ENTRIES_SHIFT);
@@ -105,8 +105,8 @@ void sm__set_bitmap(void *addr, unsigned b, unsigned val)
 		__clear_bit_le(b + 1, (void *) w);
 }
 
-int sm__find_free(void *addr, unsigned begin, unsigned end,
-		  unsigned *result)
+int sm_find_free(void *addr, unsigned begin, unsigned end,
+		 unsigned *result)
 {
 	while (begin < end) {
 		if (!(begin & (ENTRIES_PER_WORD - 1)) &&
@@ -115,10 +115,9 @@ int sm__find_free(void *addr, unsigned begin, unsigned end,
 			continue;
 		}
 
-		if (sm__lookup_bitmap(addr, begin)) {
+		if (sm_lookup_bitmap(addr, begin))
 			begin++;
-
-		} else {
+		else {
 			*result = begin;
 			return 0;
 		}
@@ -264,8 +263,8 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 			    &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
-	*result = sm__lookup_bitmap(dm_bitmap_data(blk),
-				     mod64(b, io->entries_per_block));
+	*result = sm_lookup_bitmap(dm_bitmap_data(blk),
+				   mod64(b, io->entries_per_block));
 	return dm_tm_unlock(io->tm, blk);
 }
 
@@ -315,9 +314,10 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = sm__find_free(dm_bitmap_data(blk),
-					  max((unsigned) begin, (unsigned) __le32_to_cpu(ie.none_free_before)),
-					  bit_end, &position);
+			r = sm_find_free(dm_bitmap_data(blk),
+					 max((unsigned)begin,
+					     (unsigned)__le32_to_cpu(ie.none_free_before)),
+					 bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(io->tm, blk);
 				continue;
@@ -360,11 +360,11 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 
 	bm = dm_bitmap_data(nb);
 	bit = mod64(b, io->entries_per_block);
-	old = sm__lookup_bitmap(bm, bit);
+	old = sm_lookup_bitmap(bm, bit);
 
 	if (ref_count <= 2) {
-		sm__set_bitmap(bm, bit, ref_count);
-		BUG_ON(sm__lookup_bitmap(bm, bit) != ref_count);
+		sm_set_bitmap(bm, bit, ref_count);
+		BUG_ON(sm_lookup_bitmap(bm, bit) != ref_count);
 
 		if (old > 2) {
 			r = dm_btree_remove(&io->ref_count_info, io->ref_count_root,
@@ -376,7 +376,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		}
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
-		sm__set_bitmap(bm, bit, 3);
+		sm_set_bitmap(bm, bit, 3);
 		r = dm_btree_insert(&io->ref_count_info, io->ref_count_root,
 				    &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {

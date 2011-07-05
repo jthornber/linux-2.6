@@ -152,7 +152,7 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 			    &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
-	*result = sm__lookup_bitmap(dm_bitmap_data(blk), b);
+	*result = sm_lookup_bitmap(dm_bitmap_data(blk), b);
 	return dm_tm_unlock(ll->tm, blk);
 }
 
@@ -201,7 +201,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			if (r < 0)
 				return r;
 
-			r = sm__find_free(dm_bitmap_data(blk), begin, bit_end, &position);
+			r = sm_find_free(dm_bitmap_data(blk), begin, bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(ll->tm, blk);
 				return r;
@@ -241,10 +241,10 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	ie->blocknr = __cpu_to_le64(dm_block_location(nb));
 
 	bm = dm_bitmap_data(nb);
-	old = sm__lookup_bitmap(bm, bit);
+	old = sm_lookup_bitmap(bm, bit);
 
 	if (ref_count <= 2) {
-		sm__set_bitmap(bm, bit, ref_count);
+		sm_set_bitmap(bm, bit, ref_count);
 
 		r = dm_tm_unlock(ll->tm, nb);
 		if (r < 0)
@@ -255,13 +255,13 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 					    &b, &ll->ref_count_root);
 
 			if (r) {
-				sm__set_bitmap(bm, bit, old);
+				sm_set_bitmap(bm, bit, old);
 				return r;
 			}
 		}
 	} else {
 		__le32 le_rc = __cpu_to_le32(ref_count);
-		sm__set_bitmap(bm, bit, 3);
+		sm_set_bitmap(bm, bit, 3);
 		r = dm_tm_unlock(ll->tm, nb);
 		if (r < 0)
 			return r;

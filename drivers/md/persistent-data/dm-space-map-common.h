@@ -60,10 +60,10 @@ struct bitmap_header {
 /*
  * These bitops work on a blocks worth of bits.
  */
-unsigned sm__lookup_bitmap(void *addr, unsigned b);
-void sm__set_bitmap(void *addr, unsigned b, unsigned val);
-int sm__find_free(void *addr, unsigned begin, unsigned end,
-		  unsigned *result);
+unsigned sm_lookup_bitmap(void *addr, unsigned b);
+void sm_set_bitmap(void *addr, unsigned b, unsigned val);
+int sm_find_free(void *addr, unsigned begin, unsigned end,
+		 unsigned *result);
 
 void *dm_bitmap_data(struct dm_block *b);
 
