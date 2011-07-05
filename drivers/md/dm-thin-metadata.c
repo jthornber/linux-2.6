@@ -8,7 +8,6 @@
 #include "persistent-data/dm-transaction-manager.h"
 #include "persistent-data/dm-space-map-disk.h"
 
-#include <linux/crc32c.h>
 #include <linux/list.h>
 #include <linux/device-mapper.h>
 #include <linux/workqueue.h>
@@ -130,8 +129,10 @@ static void sb_prepare_for_write(struct dm_block_validator *v,
 				 size_t block_size)
 {
 	struct thin_super_block *sb = dm_block_data(b);
+
 	sb->blocknr = __cpu_to_le64(dm_block_location(b));
-	sb->csum = __cpu_to_le32(crc32c(~ ((u32) 0), &sb->flags, sizeof(*sb) - sizeof(u32)));
+	sb->csum = dm_block_csum_data(&sb->flags,
+				      sizeof(*sb) - sizeof(u32));
 }
 
 static int sb_check(struct dm_block_validator *v,
@@ -155,7 +156,8 @@ static int sb_check(struct dm_block_validator *v,
 		return -EILSEQ;
 	}
 
-	csum = __cpu_to_le32(crc32c(~ ((u32) 0), &sb->flags, sizeof(*sb) - sizeof(u32)));
+	csum = dm_block_csum_data(&sb->flags,
+				  sizeof(*sb) - sizeof(u32));
 	if (csum != sb->csum) {
 		printk(KERN_ERR "thin sb_check failed csum %u wanted %u\n",
 		       __le32_to_cpu(csum), __le32_to_cpu(sb->csum));

@@ -1,7 +1,6 @@
 #include "dm-space-map-common.h"
 #include "dm-space-map-disk.h"
 
-#include <linux/crc32c.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
@@ -30,9 +29,8 @@ static void bitmap_prepare_for_write(struct dm_block_validator *v,
 	struct bitmap_header *header = dm_block_data(b);
 
 	header->blocknr = __cpu_to_le64(dm_block_location(b));
-	header->csum = __cpu_to_le32(crc32c(~ ((u32) 0),
-					    &header->not_used,
-					    block_size - sizeof(u32)));
+	header->csum = dm_block_csum_data(&header->not_used,
+					  block_size - sizeof(u32));
 }
 
 static int bitmap_check(struct dm_block_validator *v,
@@ -49,9 +47,8 @@ static int bitmap_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	csum = __cpu_to_le32(crc32c(~ ((u32) 0),
-				    (void *) &header->not_used,
-				    block_size - sizeof(u32)));
+	csum = dm_block_csum_data(&header->not_used,
+				  block_size - sizeof(u32));
 	if (csum != header->csum) {
 		printk(KERN_ERR "space-map bitmap check failed csum %u wanted %u\n",
 		       __le32_to_cpu(csum), __le32_to_cpu(header->csum));

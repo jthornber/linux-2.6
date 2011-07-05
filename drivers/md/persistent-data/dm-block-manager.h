@@ -3,6 +3,7 @@
 
 #include <linux/blkdev.h>
 #include <linux/types.h>
+#include <linux/crc32c.h>
 
 /*----------------------------------------------------------------*/
 
@@ -12,6 +13,11 @@ typedef uint64_t dm_block_t;
 struct dm_block;
 dm_block_t dm_block_location(struct dm_block *b);
 void *dm_block_data(struct dm_block *b);
+
+static inline __le32 dm_block_csum_data(const void *data, unsigned int length)
+{
+	return __cpu_to_le32(crc32c(~(u32)0, data, length));
+}
 
 /*----------------------------------------------------------------*/
 
