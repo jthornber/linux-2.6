@@ -141,15 +141,15 @@ static int sb_check(struct dm_block_validator *v,
 	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
-		DMERR("thin sb_check failed blocknr %llu "
-		      "wanted %llu\n", __le64_to_cpu(sb->blocknr),
+		DMERR("sb_check failed blocknr %llu "
+		      "wanted %llu", __le64_to_cpu(sb->blocknr),
 		      dm_block_location(b));
 		return -ENOTBLK;
 	}
 
 	if (__le64_to_cpu(sb->magic) != THIN_SUPERBLOCK_MAGIC) {
-		DMERR("thin sb_check failed magic %llu "
-		      "wanted %llu\n", __le64_to_cpu(sb->magic),
+		DMERR("sb_check failed magic %llu "
+		      "wanted %llu", __le64_to_cpu(sb->magic),
 		      (unsigned long long)THIN_SUPERBLOCK_MAGIC);
 		return -EILSEQ;
 	}
@@ -157,7 +157,7 @@ static int sb_check(struct dm_block_validator *v,
 	csum = dm_block_csum_data(&sb->flags,
 				  sizeof(*sb) - sizeof(u32));
 	if (csum != sb->csum) {
-		DMERR("thin sb_check failed csum %u wanted %u\n",
+		DMERR("sb_check failed csum %u wanted %u",
 		      __le32_to_cpu(csum), __le32_to_cpu(sb->csum));
 		return -EILSEQ;
 	}
@@ -263,7 +263,7 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 
 	mmd = kmalloc(sizeof(*mmd), GFP_KERNEL);
 	if (!mmd) {
-		DMERR("thin-metadata could not allocate metadata struct");
+		DMERR("could not allocate metadata struct");
 		r = -ENOMEM;
 		goto bad;
 	}
@@ -274,7 +274,7 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->tm = tm;
 	mmd->nb_tm = dm_tm_create_non_blocking_clone(tm);
 	if (!mmd->nb_tm) {
-		DMERR("thin-metadata could not create clone tm");
+		DMERR("could not create clone tm");
 		r = -ENOMEM;
 		goto bad;
 	}
@@ -363,7 +363,7 @@ static int begin_transaction(struct dm_thin_metadata *mmd)
 		~THIN_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to "
-		      "unsupported optional features (%lx).\n",
+		      "unsupported optional features (%lx).",
 		      (unsigned long)features);
 		return -EINVAL;
 	}
@@ -384,7 +384,7 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
 				     THIN_METADATA_CACHE_SIZE);
 	if (!bm) {
-		DMERR("thin-metadata could not create block manager");
+		DMERR("could not create block manager");
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -1135,7 +1135,7 @@ static int __resize_data_dev(struct dm_thin_metadata *mmd,
 		return r;
 
 	if (new_count < old_count) {
-		DMERR("cannot reduce size of data device\n");
+		DMERR("cannot reduce size of data device");
 		return -EINVAL;
 	}
 
