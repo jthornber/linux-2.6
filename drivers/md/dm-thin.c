@@ -1280,8 +1280,6 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
  *--------------------------------------------------------------*/
 static void pool_destroy(struct pool *pool)
 {
-	printk(KERN_ALERT "destroying pool");
-
 	dm_thin_metadata_close(pool->mmd);
 	blkdev_put(pool->metadata_dev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 
