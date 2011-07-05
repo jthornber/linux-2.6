@@ -2,9 +2,9 @@
 
 #include <linux/dm-io.h>
 #include <linux/slab.h>
-#include <linux/device-mapper.h> /* For SECTOR_SHIFT */
+#include <linux/device-mapper.h> /* For SECTOR_SHIFT and DMERR */
 
-#define DEBUG
+#define DM_MSG_PREFIX "block manager"
 
 /*----------------------------------------------------------------*/
 
@@ -280,7 +280,8 @@ static void __complete_io(unsigned long error, struct dm_block *b)
 	struct dm_block_manager *bm = b->bm;
 
 	if (error) {
-		printk(KERN_ALERT "io error %u", (unsigned) b->where);
+		DMERR("io error = %lu, block = %llu",
+		      error , (unsigned long long)b->where);
 		__transition(b, BS_ERROR);
 	} else
 		__transition(b, BS_CLEAN);
@@ -500,8 +501,8 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		if (b->validator) {
 			ret = b->validator->check(b->validator, b, bm->block_size);
 			if (ret) {
-				printk(KERN_ALERT "%s validator check failed for block %llu\n",
-				       b->validator->name, (unsigned long long)b->where);
+				DMERR("%s validator check failed for block %llu",
+				      b->validator->name, (unsigned long long)b->where);
 				__transition(b, BS_EMPTY);
 			}
 		}
@@ -721,8 +722,8 @@ retry:
 	if (b) {
 		if (need_read) {
 			if (b->validator && (v != b->validator)) {
-				printk(KERN_ALERT "validator mismatch (old=%s vs new=%s) for block %llu\n",
-				       b->validator->name, v->name, (unsigned long long)b->where);
+				DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
+				      b->validator->name, v->name, (unsigned long long)b->where);
 				BUG_ON(1); /* FIXME: remove */
 				spin_unlock_irqrestore(&bm->lock, flags);
 				return -EINVAL;
@@ -731,8 +732,8 @@ retry:
 				b->validator = v;
 				r = b->validator->check(b->validator, b, bm->block_size);
 				if (r) {
-					printk(KERN_ALERT "%s validator check failed for block %llu\n",
-					       b->validator->name, (unsigned long long)b->where);
+					DMERR("%s validator check failed for block %llu",
+					      b->validator->name, (unsigned long long)b->where);
 					spin_unlock_irqrestore(&bm->lock, flags);
 					return r;
 				}
@@ -873,7 +874,8 @@ int dm_bm_unlock(struct dm_block *b)
 		break;
 
 	default:
-		printk(KERN_ALERT "block not locked");
+		DMERR("block = %llu not locked",
+		      (unsigned long long)b->where);
 		ret = -EINVAL;
 		break;
 	}

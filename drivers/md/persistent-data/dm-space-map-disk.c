@@ -4,6 +4,9 @@
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
+#include <linux/device-mapper.h> /* For DMERR */
+
+#define DM_MSG_PREFIX "space map disk"
 
 /*----------------------------------------------------------------*/
 
@@ -166,7 +169,7 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 	io->block_size = dm_bm_block_size(dm_tm_get_bm(tm));
 
 	if (io->block_size > (1 << 30)) {
-		printk(KERN_ALERT "block size too big to hold bitmaps");
+		DMERR("block size too big to hold bitmaps");
 		return -EINVAL;
 	}
 	io->entries_per_block = (io->block_size - sizeof(struct bitmap_header)) *
@@ -243,7 +246,7 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	struct sm_root *smr = (struct sm_root *) root;
 
 	if (len < sizeof(struct sm_root)) {
-		printk(KERN_ALERT "sm_disk root too small");
+		DMERR("sm_disk root too small");
 		return -ENOMEM;
 	}
 
@@ -364,7 +367,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.blocknr),
 			       &dm_sm_bitmap_validator, &nb, &inc);
 	if (r < 0) {
-		printk(KERN_ALERT "shadow failed");
+		DMERR("dm_tm_shadow_block() failed");
 		return r;
 	}
 	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
@@ -392,7 +395,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 				    &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
 			dm_tm_unlock(io->tm, nb);
-			printk(KERN_ALERT "ref count insert failed");
+			DMERR("ref count insert failed");
 			return r;
 		}
 	}

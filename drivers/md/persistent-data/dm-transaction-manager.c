@@ -3,6 +3,9 @@
 #include "dm-space-map-metadata.h"
 
 #include <linux/slab.h>
+#include <linux/device-mapper.h> /* For DMERR */
+
+#define DM_MSG_PREFIX "transaction manager"
 
 /*----------------------------------------------------------------*/
 
@@ -63,8 +66,7 @@ static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 		si->where = b;
 		bucket = hash_block(b);
 		hlist_add_head(&si->hlist, tm->buckets + bucket);
-	} else
-		printk(KERN_ALERT "shadow_insert failed"); /* FIXME: remove */
+	}
 }
 
 static void wipe_shadow_table(struct dm_transaction_manager *tm)
@@ -366,27 +368,27 @@ static int dm_tm_create_internal(struct dm_block_manager *bm, dm_block_t sb_loca
 	if (create) {
 		r = dm_bm_write_lock_zero(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
 		if (r < 0) {
-			printk(KERN_ALERT "couldn't lock superblock");
+			DMERR("couldn't lock superblock");
 			goto bad1;
 		}
 
 		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm), sb_location);
 		if (r) {
-			printk(KERN_ALERT "couldn't create metadata space map");
+			DMERR("couldn't create metadata space map");
 			goto bad2;
 		}
 
 	} else {
 		r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location, sb_validator, sblock);
 		if (r < 0) {
-			printk(KERN_ALERT "couldn't lock superblock");
+			DMERR("couldn't lock superblock");
 			goto bad1;
 		}
 
 		r = dm_sm_metadata_open(*sm, *tm, dm_block_data(*sblock) + root_offset,
 					root_max_len);
 		if (IS_ERR(*sm)) {
-			printk(KERN_ALERT "couldn't open metadata space map");
+			DMERR("couldn't open metadata space map");
 			goto bad2;
 		}
 	}
