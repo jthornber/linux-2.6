@@ -883,7 +883,6 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 	dm_block_t block = get_bio_block(pool, bio);
 	struct dm_thin_lookup_result lookup_result;
 
-	printk(KERN_ALERT "handling discard");
 	r = dm_thin_metadata_lookup(msd, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
