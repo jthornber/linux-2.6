@@ -8,20 +8,6 @@
 
 #define DM_MSG_PREFIX "space map disk"
 
-/*----------------------------------------------------------------*/
-
-static uint64_t div_up(uint64_t v, uint64_t n)
-{
-	uint64_t t = v;
-	uint64_t rem = do_div(t, n);
-	return t + (rem > 0 ? 1 : 0);
-}
-
-static uint64_t mod64(uint64_t n, uint64_t d)
-{
-	return do_div(n, d);
-}
-
 /*----------------------------------------------------------------
  * bitmap validator
  *--------------------------------------------------------------*/

@@ -9,20 +9,8 @@
 #define DM_MSG_PREFIX "space map metadata"
 
 /*----------------------------------------------------------------
- * Useful maths that should probably be somewhere else
- *--------------------------------------------------------------*/
-
-static uint64_t div_up(uint64_t v, uint64_t n)
-{
-	uint64_t t = v;
-	uint64_t rem = do_div(t, n);
-	return t + (rem > 0 ? 1 : 0);
-}
-
-/*----------------------------------------------------------------
  * index validator
  *--------------------------------------------------------------*/
-
 static void index_prepare_for_write(struct dm_block_validator *v,
 				    struct dm_block *b,
 				    size_t block_size)
