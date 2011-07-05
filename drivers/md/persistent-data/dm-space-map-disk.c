@@ -44,17 +44,16 @@ static int bitmap_check(struct dm_block_validator *v,
 	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(header->blocknr)) {
-		printk(KERN_ERR "space map bitmap check failed blocknr %llu "
-		       "wanted %llu\n",
-		       __le64_to_cpu(header->blocknr), dm_block_location(b));
+	        DMERR("bitmap check failed blocknr %llu wanted %llu",
+		      __le64_to_cpu(header->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
 
 	csum = dm_block_csum_data(&header->not_used,
 				  block_size - sizeof(u32));
 	if (csum != header->csum) {
-		printk(KERN_ERR "space-map bitmap check failed csum %u wanted %u\n",
-		       __le32_to_cpu(csum), __le32_to_cpu(header->csum));
+		DMERR("bitmap check failed csum %u wanted %u",
+		      __le32_to_cpu(csum), __le32_to_cpu(header->csum));
 		return -EILSEQ;
 	}
 
