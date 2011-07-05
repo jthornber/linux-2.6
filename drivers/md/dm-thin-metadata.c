@@ -337,7 +337,7 @@ bad:
 	return ERR_PTR(r);
 }
 
-static int begin(struct dm_thin_metadata *mmd)
+static int begin_transaction(struct dm_thin_metadata *mmd)
 {
 	int r;
 	u32 features;
@@ -402,7 +402,7 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 	mmd->bdev = bdev;
 
 	if (!create) {
-		r = begin(mmd);
+		r = begin_transaction(mmd);
 		if (r < 0)
 			goto bad;
 		return mmd;
@@ -410,7 +410,7 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 
 	/* Create */
 	if (!mmd->sblock) {
-		r = begin(mmd);
+		r = begin_transaction(mmd);
 		if (r < 0)
 			goto bad;
 	}
@@ -1026,14 +1026,14 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *mmd)
 	if (r < 0)
 		goto out;
 
-	/* FIXME: unchecked dm_tm_commit() and begin() error codes? */
+	/* FIXME: unchecked dm_tm_commit() and begin_transaction() error codes? */
 	r = dm_tm_commit(mmd->tm, mmd->sblock);
 
 	/* open the next transaction */
 	mmd->sblock = NULL;
 
 	/* FIXME: the semantics of failure are confusing here, did the commit fail, or the begin? */
-	r = begin(mmd);
+	r = begin_transaction(mmd);
 out:
 	up_write(&mmd->root_lock);
 	return r;
