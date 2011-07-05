@@ -1,5 +1,9 @@
 #include "dm-btree-internal.h"
 
+#include <linux/device-mapper.h> /* For DMERR */
+
+#define DM_MSG_PREFIX "btree spine"
+
 /*----------------------------------------------------------------*/
 
 static void node_prepare_for_write(struct dm_block_validator *v,
@@ -21,16 +25,16 @@ static int node_check(struct dm_block_validator *v,
 	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(node->blocknr)) {
-		printk(KERN_ERR "btree node_check failed blocknr %llu "
-		       "wanted %llu\n", __le64_to_cpu(node->blocknr), dm_block_location(b));
+		DMERR("node_check failed blocknr %llu wanted %llu"
+		      __le64_to_cpu(node->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
 
 	csum = dm_block_csum_data(&node->flags,
 				  block_size - sizeof(u32));
 	if (csum != node->csum) {
-		printk(KERN_ERR "btree node_check failed csum %u wanted %u\n",
-		       __le32_to_cpu(csum), __le32_to_cpu(node->csum));
+		DMERR("node_check failed csum %u wanted %u",
+		      __le32_to_cpu(csum), __le32_to_cpu(node->csum));
 		return -EILSEQ;
 	}
 
