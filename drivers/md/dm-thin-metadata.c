@@ -14,7 +14,7 @@
 
 /*----------------------------------------------------------------*/
 
-#define	DAEMON "thin-metadata"
+#define DM_MSG_PREFIX   "thin-metadata"
 
 #define DEBUG 1
 
@@ -143,24 +143,24 @@ static int sb_check(struct dm_block_validator *v,
 	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
-		printk(KERN_ERR "thin sb_check failed blocknr %llu "
-		       "wanted %llu\n", __le64_to_cpu(sb->blocknr),
-		       dm_block_location(b));
+		DMERR("thin sb_check failed blocknr %llu "
+		      "wanted %llu\n", __le64_to_cpu(sb->blocknr),
+		      dm_block_location(b));
 		return -ENOTBLK;
 	}
 
 	if (__le64_to_cpu(sb->magic) != THIN_SUPERBLOCK_MAGIC) {
-		printk(KERN_ERR "thin sb_check failed magic %llu "
-		       "wanted %llu\n", __le64_to_cpu(sb->magic),
-		       (unsigned long long)THIN_SUPERBLOCK_MAGIC);
+		DMERR("thin sb_check failed magic %llu "
+		      "wanted %llu\n", __le64_to_cpu(sb->magic),
+		      (unsigned long long)THIN_SUPERBLOCK_MAGIC);
 		return -EILSEQ;
 	}
 
 	csum = dm_block_csum_data(&sb->flags,
 				  sizeof(*sb) - sizeof(u32));
 	if (csum != sb->csum) {
-		printk(KERN_ERR "thin sb_check failed csum %u wanted %u\n",
-		       __le32_to_cpu(csum), __le32_to_cpu(sb->csum));
+		DMERR("thin sb_check failed csum %u wanted %u\n",
+		      __le32_to_cpu(csum), __le32_to_cpu(sb->csum));
 		return -EILSEQ;
 	}
 
@@ -214,27 +214,27 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 		r = dm_tm_create_with_sm(bm, THIN_SUPERBLOCK_LOCATION,
 					 &sb_validator_, &tm, &sm, &sblock);
 		if (r < 0) {
-			printk(KERN_ALERT "tm_create_with_sm failed");
+			DMERR("tm_create_with_sm failed");
 			dm_block_manager_destroy(bm);
 			return ERR_PTR(r);
 		}
 
 		data_sm = dm_sm_disk_create(tm, nr_blocks);
 		if (IS_ERR(data_sm)) {
-			printk(KERN_ALERT "sm_disk_create failed");
+			DMERR("sm_disk_create failed");
 			r = PTR_ERR(data_sm);
 			goto bad;
 		}
 
 		r = dm_tm_pre_commit(tm);
 		if (r < 0) {
-			printk(KERN_ALERT "couldn't pre commit");
+			DMERR("couldn't pre commit");
 			goto bad;
 		}
 
 		r = dm_tm_commit(tm, sblock);
 		if (r < 0) {
-			printk(KERN_ALERT "couldn't commit");
+			DMERR("couldn't commit");
 			goto bad;
 		}
 	} else {
@@ -246,7 +246,7 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 				       space_map_root_offset, SPACE_MAP_ROOT_SIZE,
 				       &tm, &sm, &sblock);
 		if (r < 0) {
-			printk(KERN_ALERT "tm_open_with_sm failed");
+			DMERR("tm_open_with_sm failed");
 			dm_block_manager_destroy(bm);
 			return ERR_PTR(r);
 		}
@@ -255,7 +255,7 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 		data_sm = dm_sm_disk_open(tm, sb->data_space_map_root,
 					  sizeof(sb->data_space_map_root));
 		if (IS_ERR(data_sm)) {
-			printk(KERN_ALERT "sm_disk_open failed");
+			DMERR("sm_disk_open failed");
 			r = PTR_ERR(data_sm);
 			goto bad;
 		}
@@ -265,7 +265,7 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 
 	mmd = kmalloc(sizeof(*mmd), GFP_KERNEL);
 	if (!mmd) {
-		printk(KERN_ALERT "thin-metadata could not allocate metadata struct");
+		DMERR("thin-metadata could not allocate metadata struct");
 		r = -ENOMEM;
 		goto bad;
 	}
@@ -276,7 +276,7 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->tm = tm;
 	mmd->nb_tm = dm_tm_create_non_blocking_clone(tm);
 	if (!mmd->nb_tm) {
-		printk(KERN_ALERT "thin-metadata could not create clone tm");
+		DMERR("thin-metadata could not create clone tm");
 		r = -ENOMEM;
 		goto bad;
 	}
@@ -364,9 +364,9 @@ static int begin(struct dm_thin_metadata *mmd)
 	features = __le32_to_cpu(sb->incompat_flags) &
 		~THIN_FEATURE_INCOMPAT_SUPP;
 	if (features) {
-		printk(KERN_ERR "could not access metadata due to "
-		       "unsupported optional features (%lx).\n",
-		       (unsigned long)features);
+		DMERR("could not access metadata due to "
+		      "unsupported optional features (%lx).\n",
+		      (unsigned long)features);
 		return -EINVAL;
 	}
 
@@ -386,7 +386,7 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
 				     THIN_METADATA_CACHE_SIZE);
 	if (!bm) {
-		printk(KERN_ALERT "thin-metadata could not create block manager");
+		DMERR("thin-metadata could not create block manager");
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -431,7 +431,7 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 
 	r = dm_btree_empty(&mmd->details_info, &mmd->details_root);
 	if (r < 0) {
-		printk(KERN_ALERT "couldn't create devices root");
+		DMERR("couldn't create devices root");
 		goto bad;
 	}
 
@@ -464,7 +464,7 @@ int dm_thin_metadata_close(struct dm_thin_metadata *mmd)
 	up_read(&mmd->root_lock);
 
 	if (open_devices) {
-		printk(KERN_ALERT "attempt to close mmd when %u device(s) are still open",
+		DMERR("attempt to close mmd when %u device(s) are still open",
 		       open_devices);
 		return -EBUSY;
 	}
@@ -719,7 +719,7 @@ int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *mmd,
 	down_write(&mmd->root_lock);
 	r = __open_device(mmd, dev, 1, &msd);
 	if (r)
-		printk(KERN_ALERT "couldn't open virtual device");
+		DMERR("couldn't open virtual device");
 	else {
 		r = __trim_thin_dev(msd, new_size);
 		__close_device(msd);
@@ -739,7 +739,7 @@ int dm_thin_metadata_set_transaction_id(struct dm_thin_metadata *mmd,
 	down_write(&mmd->root_lock);
 	if (mmd->trans_id != current_id) {
 		up_write(&mmd->root_lock);
-		printk(KERN_ALERT "mismatched transaction id");
+		DMERR("mismatched transaction id");
 		return -EINVAL;
 	}
 
@@ -1139,7 +1139,7 @@ static int __resize_data_dev(struct dm_thin_metadata *mmd,
 		return r;
 
 	if (new_count < old_count) {
-		printk(KERN_ALERT "cannot reduce size of data device\n");
+		DMERR("cannot reduce size of data device\n");
 		return -EINVAL;
 	}
 
