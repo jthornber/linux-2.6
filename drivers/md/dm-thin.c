@@ -633,7 +633,8 @@ static void remap_and_issue(struct pool *pool, struct bio *bio,
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		int r = dm_thin_metadata_commit(pool->mmd);
 		if (r) {
-			DMERR("thin_metadata_commit failed");
+			DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+			      __func__, r);
 			bio_io_error(bio);
 			return;
 		}
@@ -922,7 +923,7 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		DMERR("dm_thin_metadata_lookup failed, error = %d", r);
+		DMERR("dm_thin_metadata_lookup() failed, error = %d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -954,7 +955,7 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		DMERR("alloc_data_block() failed");
+		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
 		cell_error(cell);
 		break;
 	}
@@ -1014,7 +1015,7 @@ static void provision_block(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		DMERR("-ENODATA alloc_data_block() failed");
+		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
 		cell_error(cell);
 		break;
 	}
@@ -1042,7 +1043,7 @@ static void process_bio(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	default:
-		DMERR("dm_thin_metadata_lookup failed, error=%d", r);
+		DMERR("dm_thin_metadata_lookup() failed, error = %d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -1157,7 +1158,8 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 	 */
 	if ((bio->bi_rw & REQ_DISCARD) &&
 	    bio->bi_size < (pool->sectors_per_block << SECTOR_SHIFT)) {
-		DMERR("discard too small");
+		DMERR("discard IO smaller than pool block size (%llu)",
+		      (unsigned long long)pool->sectors_per_block << SECTOR_SHIFT);
 		bio_endio(bio, 0);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1677,7 +1679,8 @@ static int pool_preresume(struct dm_target *ti)
 
 		r = dm_thin_metadata_commit(pool->mmd);
 		if (r) {
-			DMERR("commit failed");
+			DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+			      __func__, r);
 			return r;
 		}
 	}
@@ -1698,11 +1701,14 @@ static int pool_preresume(struct dm_target *ti)
 
 static void pool_presuspend(struct dm_target *ti)
 {
+	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
-	if (dm_thin_metadata_commit(pool->mmd) < 0) {
-		DMERR("thin metadata write failed.");
+	r = dm_thin_metadata_commit(pool->mmd);
+	if (r < 0) {
+		DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+		      __func__, r);
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
 }
@@ -1850,7 +1856,11 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	} else
 		return -EINVAL;
 
-	return dm_thin_metadata_commit(pool->mmd);
+	r = dm_thin_metadata_commit(pool->mmd);
+	if (r)
+		DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+		      __func__, r);
+	return r;
 }
 
 static int pool_status(struct dm_target *ti, status_type_t type,
@@ -2018,7 +2028,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	mc->pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!mc->pool) {
-		DMERR("Couldn't find pool object");
+		ti->error = "Couldn't find pool object";
 		dm_put_device(ti, mc->pool_dev);
 		kfree(mc);
 		return -EINVAL;
@@ -2027,7 +2037,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	r = dm_thin_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
-		DMERR("Couldn't open thin internal device");
+		ti->error = "Couldn't open thin internal device";
 		dm_put_device(ti, mc->pool_dev);
 		kfree(mc);
 		return r;
@@ -2115,7 +2125,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!pool) {
-		DMERR("Couldn't find pool object");
+		DMERR("%s: Couldn't find pool object", __func__);
 		return -EINVAL;
 	}
 
@@ -2129,7 +2139,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!pool) {
-		DMERR("Couldn't find pool object");
+		DMERR("%s: Couldn't find pool object", __func__);
 		return;
 	}
 
