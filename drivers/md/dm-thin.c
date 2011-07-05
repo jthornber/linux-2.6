@@ -2013,34 +2013,29 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &pool_dev);
 	if (r) {
 		ti->error = "Error opening pool device";
-		kfree(mc);
-		return r;
+		goto bad_pool_dev;
 	}
 	mc->pool_dev = pool_dev;
 
 	mc->dev_id = simple_strtoull(argv[1], &end, 10);
 	if (*end) {
 		ti->error = "Invalid device id";
-		dm_put_device(ti, mc->pool_dev);
-		kfree(mc);
-		return -EINVAL;
+		r = -EINVAL;
+		goto bad_dev_id;
 	}
 
 	mc->pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
 	if (!mc->pool) {
 		ti->error = "Couldn't find pool object";
-		dm_put_device(ti, mc->pool_dev);
-		kfree(mc);
-		return -EINVAL;
+		r = -EINVAL;
+		goto bad_pool_lookup;
 	}
 	pool_inc(mc->pool);
 
 	r = dm_thin_metadata_open_device(mc->pool->mmd, mc->dev_id, &mc->msd);
 	if (r) {
 		ti->error = "Couldn't open thin internal device";
-		dm_put_device(ti, mc->pool_dev);
-		kfree(mc);
-		return r;
+		goto bad_thin_open;
 	}
 
 	ti->split_io = mc->pool->sectors_per_block;
@@ -2048,6 +2043,16 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->num_discard_requests = 1;
 
 	return 0;
+
+bad_thin_open:
+	pool_dec(mc->pool);
+bad_pool_lookup:
+bad_dev_id:
+	dm_put_device(ti, mc->pool_dev);
+bad_pool_dev:
+	kfree(mc);
+
+	return r;
 }
 
 static int thin_map(struct dm_target *ti, struct bio *bio,
