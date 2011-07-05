@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [4/12]
+** Kernel [7/14]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -17,8 +17,8 @@
   - [X] symbolic flag field on pool target param		       :mike:
   - [X] implement btree highest key 					:ejt:
   - [X] mapped blocks count isn't being set				:ejt:
-  - [ ] extend method for space maps (needed for resizing)              :ejt:
-  - [ ] rename multisnap -> thin. Rebranding exercise           :ejt:, :mike:
+  - [X] extend method for space maps (needed for resizing)              :ejt:
+  - [X] rename multisnap -> thin. Rebranding exercise           :ejt:, :mike:
   - [ ] make sure retry io is errored if the thin dev is deactivated    :ejt:
 
 ** Userland tools [0/5]
