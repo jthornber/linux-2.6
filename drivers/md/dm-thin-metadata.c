@@ -444,7 +444,8 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 
 	return mmd;
 bad:
-	dm_thin_metadata_close(mmd);
+	if (dm_thin_metadata_close(mmd) < 0)
+		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
 	return ERR_PTR(r);
 }
 

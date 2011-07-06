@@ -1282,7 +1282,8 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
  *--------------------------------------------------------------*/
 static void pool_destroy(struct pool *pool)
 {
-	dm_thin_metadata_close(pool->mmd);
+	if (dm_thin_metadata_close(pool->mmd) < 0)
+		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
 	blkdev_put(pool->metadata_dev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 
 	prison_destroy(pool->prison);
@@ -1435,7 +1436,8 @@ bad_kcopyd_client:
 bad_prison:
 	kfree(pool);
 bad_pool:
-	dm_thin_metadata_close(mmd);
+	if (dm_thin_metadata_close(mmd))
+		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
 bad_mmd_open:
 	blkdev_put(metadata_dev, metadata_dev_mode);
 
