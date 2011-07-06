@@ -81,9 +81,9 @@
 /*----------------------------------------------------------------*/
 
 /*
- * Nasty function that breaks abstraction layering.
+ * Function that breaks abstraction layering.
  */
-static struct block_device *ti_to_bdev(struct dm_target *ti)
+static struct block_device *get_target_bdev(struct dm_target *ti)
 {
 	return dm_bdev(dm_table_get_md(ti->table));
 }
@@ -841,7 +841,7 @@ static void retry_later(struct bio *bio)
 	unsigned long flags;
 
 	/* restore the bio to a pristine state */
-	bio->bi_bdev = ti_to_bdev(ti);
+	bio->bi_bdev = get_target_bdev(ti);
 	bio->bi_sector += ti->begin;
 
 	/* push it onto the retry list */
@@ -1586,7 +1586,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
-	pool = pool_find(ti_to_bdev(ti), metadata_devname,
+	pool = pool_find(get_target_bdev(ti), metadata_devname,
 			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
@@ -1629,11 +1629,6 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	return r;
-}
-
-static struct block_device *get_target_bdev(struct dm_target *ti)
-{
-	return dm_table_get_bdev(ti->table);
 }
 
 /*
