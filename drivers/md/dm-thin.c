@@ -76,8 +76,6 @@
  * benefits far, far outweigh the disadvantages.
  */
 
-// FIXME: can cells and new_mappings be combined?
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -431,31 +429,6 @@ static void build_virtual_key(struct dm_ms_device *msd, dm_block_t b,
  * also provides the interface for creating and destroying internal
  * devices.
  */
-struct pool;
-
-struct new_mapping {
-	struct list_head list;
-
-	int prepared;
-
-	struct pool *pool;
-	struct dm_ms_device *msd;
-	dm_block_t virt_block;
-	dm_block_t data_block;
-	struct cell *cell;
-	int err;
-
-	/*
-	 * If the bio covers the whole area of a block then we can avoid
-	 * zeroing or copying.  Instead this bio is hooked.  The bio will
-	 * still be in the cell, so care has to be taken to avoid issuing
-	 * the bio twice.
-	 */
-	struct bio *bio;
-	bio_end_io_t *bi_end_io;
-	void *bi_private;
-};
-
 struct pool {
 	struct hlist_node hlist;
 	struct dm_target *ti;	/* only set if a pool target is bound */
@@ -491,6 +464,31 @@ struct pool {
 	mempool_t *endio_hook_pool;
 
 	atomic_t ref_count;
+};
+
+/* FIXME: can cells and new_mappings be combined? */
+
+struct new_mapping {
+	struct list_head list;
+
+	int prepared;
+
+	struct pool *pool;
+	struct dm_ms_device *msd;
+	dm_block_t virt_block;
+	dm_block_t data_block;
+	struct cell *cell;
+	int err;
+
+	/*
+	 * If the bio covers the whole area of a block then we can avoid
+	 * zeroing or copying.  Instead this bio is hooked.  The bio will
+	 * still be in the cell, so care has to be taken to avoid issuing
+	 * the bio twice.
+	 */
+	struct bio *bio;
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
 };
 
 /*
