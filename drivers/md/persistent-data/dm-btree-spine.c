@@ -25,7 +25,7 @@ static int node_check(struct dm_block_validator *v,
 	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(node->blocknr)) {
-		DMERR("node_check failed blocknr %llu wanted %llu"
+		DMERR("node_check failed blocknr %llu wanted %llu",
 		      __le64_to_cpu(node->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
