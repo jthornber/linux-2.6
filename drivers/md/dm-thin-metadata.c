@@ -436,8 +436,11 @@ dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
 	mmd->flags = 0;
 	mmd->need_commit = 1;
 	r = dm_thin_metadata_commit(mmd);
-	if (r < 0)
+	if (r < 0) {
+		DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+		      __func__, r);
 		goto bad;
+	}
 
 	return mmd;
 bad:
@@ -447,6 +450,7 @@ bad:
 
 int dm_thin_metadata_close(struct dm_thin_metadata *mmd)
 {
+	int r;
 	unsigned open_devices = 0;
 	struct dm_ms_device *msd, *tmp;
 
@@ -467,8 +471,12 @@ int dm_thin_metadata_close(struct dm_thin_metadata *mmd)
 		return -EBUSY;
 	}
 
-	if (mmd->sblock)
-		dm_thin_metadata_commit(mmd);
+	if (mmd->sblock) {
+		r = dm_thin_metadata_commit(mmd);
+		if (r)
+			DMWARN("%s: dm_thin_metadata_commit() failed, error = %d",
+			       __func__, r);
+	}
 
 	dm_tm_destroy(mmd->tm);
 	dm_tm_destroy(mmd->nb_tm);
