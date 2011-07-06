@@ -29,6 +29,7 @@ int dm_thin_metadata_close(struct dm_thin_metadata *mmd);
  * specified below will prevent use of the thin metadata.
  */
 #define THIN_FEATURE_COMPAT_SUPP	  0UL
+#define THIN_FEATURE_COMPAT_RO_SUPP	  0UL
 #define THIN_FEATURE_INCOMPAT_SUPP	  0UL
 
 /*
