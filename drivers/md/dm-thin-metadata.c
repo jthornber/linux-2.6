@@ -989,6 +989,10 @@ static int __write_changed_details(struct dm_thin_metadata *mmd)
 
 int dm_thin_metadata_commit(struct dm_thin_metadata *mmd)
 {
+	/*
+	 * FIXME: associated pool should be made read-only on
+	 * dm_thin_metadata_commit failure.
+	 */
 	int r;
 	size_t len;
 	struct thin_super_block *sb;
@@ -1026,13 +1030,13 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *mmd)
 	if (r < 0)
 		goto out;
 
-	/* FIXME: unchecked dm_tm_commit() and begin_transaction() error codes? */
 	r = dm_tm_commit(mmd->tm, mmd->sblock);
+	if (r < 0)
+		goto out;
 
 	/* open the next transaction */
 	mmd->sblock = NULL;
 
-	/* FIXME: the semantics of failure are confusing here, did the commit fail, or the begin? */
 	r = begin_transaction(mmd);
 out:
 	up_write(&mmd->root_lock);
