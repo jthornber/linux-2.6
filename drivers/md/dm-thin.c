@@ -863,7 +863,7 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 		return r;
 	}
 
-	if (free_blocks <= pool->low_water_mark) {
+	if (free_blocks <= pool->low_water_mark && !pool->triggered) {
 		spin_lock_irqsave(&pool->lock, flags);
 		pool->triggered = 1;
 		spin_unlock_irqrestore(&pool->lock, flags);
