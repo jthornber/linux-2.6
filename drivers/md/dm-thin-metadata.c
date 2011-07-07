@@ -176,28 +176,52 @@ static struct dm_block_validator sb_validator_ = {
  * Methods for the btree value types
  *--------------------------------------------------------------*/
 
+static uint64_t pack_dm_block_time(dm_block_t b, uint32_t t)
+{
+	return ((b << 24) | t);
+}
+
+static void unpack_dm_block_time(uint64_t v, dm_block_t *b, uint32_t *t)
+{
+	*b = v >> 24;
+	*t = v & ((1 << 24) - 1);
+}
+
 static void data_block_inc(void *context, void *value)
 {
 	struct dm_space_map *sm = context;
 	__le64 v;
+	uint64_t b;
+	uint32_t t;
+
 	memcpy(&v, value, sizeof(v));
-	dm_sm_inc_block(sm, __le64_to_cpu(v));
+	unpack_dm_block_time(v, &b, &t);
+	dm_sm_inc_block(sm, b);
 }
 
 static void data_block_dec(void *context, void *value)
 {
 	struct dm_space_map *sm = context;
 	__le64 v;
+	uint64_t b;
+	uint32_t t;
+
 	memcpy(&v, value, sizeof(v));
-	dm_sm_dec_block(sm, __le64_to_cpu(v));
+	unpack_dm_block_time(v, &b, &t);
+	dm_sm_dec_block(sm, b);
 }
 
 static int data_block_equal(void *context, void *value1, void *value2)
 {
 	__le64 v1, v2;
+	uint64_t b1, b2;
+	uint32_t t;
+
 	memcpy(&v1, value1, sizeof(v1));
 	memcpy(&v2, value2, sizeof(v2));
-	return v1 == v2;
+	unpack_dm_block_time(v1, &b1, &t);
+	unpack_dm_block_time(v2, &b2, &t);
+	return b1 == b2;
 }
 
 static void subtree_inc(void *context, void *value)
@@ -755,6 +779,7 @@ static int __delete_device(struct dm_thin_metadata *mmd,
 {
 	uint64_t key = dev;
 
+	/* FIXME: check device exists */
 	return dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
 }
 
@@ -882,17 +907,6 @@ int dm_thin_metadata_close_device(struct dm_ms_device *msd)
 dm_thin_dev_t dm_thin_device_dev(struct dm_ms_device *msd)
 {
 	return msd->id;
-}
-
-static uint64_t pack_dm_block_time(dm_block_t b, uint32_t t)
-{
-	return ((b << 24) | t);
-}
-
-static void unpack_dm_block_time(uint64_t v, dm_block_t *b, uint32_t *t)
-{
-	*b = v >> 24;
-	*t = v & ((1 << 24) - 1);
 }
 
 static int __snapshotted_since(struct dm_ms_device *msd, uint32_t time)
