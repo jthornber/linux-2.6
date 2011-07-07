@@ -1037,8 +1037,12 @@ static void process_bio(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	case -ENODATA:
-		/* FIXME: fill with zeroes for reads ? */
-		provision_block(pool, msd, bio, block);
+		if (bio_rw(bio) == READ || bio_rw(bio) == READA) {
+			bio->bi_bdev = pool->pool_dev;
+			zero_fill_bio(bio);
+			bio_endio(bio, 0);
+		} else
+			provision_block(pool, msd, bio, block);
 		break;
 
 	default:
@@ -1195,9 +1199,10 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 		break;
 
 	case -ENODATA:
-		if (bio_rw(bio) == READA)
-			bio_io_error(bio);
-		else
+		if (bio_rw(bio) == READA || bio_rw(bio) == READ) {
+			zero_fill_bio(bio);
+			bio_endio(bio, 0);
+		} else
 			defer_bio(pool, ti, bio);
 		r = DM_MAPIO_SUBMITTED;
 		break;
