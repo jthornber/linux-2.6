@@ -777,10 +777,32 @@ int dm_thin_metadata_create_snap(struct dm_thin_metadata *mmd,
 static int __delete_device(struct dm_thin_metadata *mmd,
 			   dm_thin_dev_t dev)
 {
+	int r;
 	uint64_t key = dev;
+	struct dm_ms_device *msd;
 
-	/* FIXME: check device exists */
-	return dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+	/* TODO: failure should mark the transaction invalid */
+	r = __open_device(mmd, dev, 0, &msd);
+	if (r)
+		return r;
+
+	if (msd->open_count > 1) {
+		__close_device(msd);
+		return -EBUSY;
+	}
+
+	list_del(&msd->list);
+	kfree(msd);
+	r = dm_btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
+	if (r)
+		return r;
+
+	r = dm_btree_remove(&mmd->tl_info, mmd->root, &key, &mmd->root);
+	if (r)
+		return r;
+
+	mmd->need_commit = 1;
+	return 0;
 }
 
 int dm_thin_metadata_delete_device(struct dm_thin_metadata *mmd,
