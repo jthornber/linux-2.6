@@ -27,6 +27,16 @@ struct index_entry {
 	__le32 none_free_before;
 }  __attribute__ ((packed));
 
+
+#define MAX_METADATA_BITMAPS 255
+struct metadata_index {
+	__le32 csum;
+	__le32 padding;
+	__le64 blocknr;
+
+	struct index_entry index[MAX_METADATA_BITMAPS];
+} __attribute__ ((packed));
+
 struct ll_disk {
 	struct dm_transaction_manager *tm;
 	struct dm_btree_info bitmap_info;
@@ -39,7 +49,7 @@ struct ll_disk {
 	dm_block_t bitmap_root;	/* sometimes a btree root, sometimes a simple index */
 	dm_block_t ref_count_root;
 
-	struct index_entry index[256]; /* only used by metadata */
+	struct metadata_index mi;
 };
 
 struct sm_root {

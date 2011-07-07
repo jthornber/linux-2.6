@@ -15,16 +15,37 @@ static void index_prepare_for_write(struct dm_block_validator *v,
 				    struct dm_block *b,
 				    size_t block_size)
 {
+	struct metadata_index *mi = dm_block_data(b);
+	mi->blocknr = __cpu_to_le64(dm_block_location(b));
+	mi->csum = dm_block_csum_data(&mi->padding,
+				      block_size - sizeof(__le32));
 }
 
 static int index_check(struct dm_block_validator *v,
 		       struct dm_block *b,
 		       size_t block_size)
 {
+	struct metadata_index *mi = dm_block_data(b);
+	__le32 csum;
+
+	if (dm_block_location(b) != __le64_to_cpu(mi->blocknr)) {
+		DMERR("index_check failed blocknr %llu wanted %llu",
+		      __le64_to_cpu(mi->blocknr), dm_block_location(b));
+		return -ENOTBLK;
+	}
+
+	csum = dm_block_csum_data(&mi->padding,
+				  block_size - sizeof(__le32));
+	if (csum != mi->csum) {
+		DMERR("index_check failed csum %u wanted %u",
+		      __le32_to_cpu(csum), __le32_to_cpu(mi->csum));
+		return -EILSEQ;
+	}
+
 	return 0;
 }
 
-struct dm_block_validator index_validator_ = {
+static struct dm_block_validator index_validator_ = {
 	.name = "index",
 	.prepare_for_write = index_prepare_for_write,
 	.check = index_check
@@ -65,6 +86,7 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	int r;
 	dm_block_t i;
 	unsigned blocks;
+	struct dm_block *index_block;
 
 	r = ll_init(ll, tm);
 	if (r < 0)
@@ -76,7 +98,7 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	blocks = div_up(nr_blocks, ll->entries_per_block);
 	for (i = 0; i < blocks; i++) {
 		struct dm_block *b;
-		struct index_entry *idx = ll->index + i;
+		struct index_entry *idx = ll->mi.index + i;
 
 		r = dm_tm_new_block(tm, &dm_sm_bitmap_validator, &b);
 		if (r < 0)
@@ -91,15 +113,19 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		idx->none_free_before = 0;
 	}
 
-	r = dm_tm_alloc_block(tm, &ll->bitmap_root);
+	/* write the index */
+	r = dm_tm_new_block(tm, &index_validator_, &index_block);
+	if (r)
+		return r;
+	ll->bitmap_root = dm_block_location(index_block);
+	memcpy(dm_block_data(index_block), &ll->mi, sizeof(ll->mi));
+	r = dm_tm_unlock(tm, index_block);
 	if (r)
 		return r;
 
 	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root);
-	if (r < 0) {
-		dm_tm_dec(tm, ll->bitmap_root);
+	if (r < 0)
 		return r;
-	}
 
 	return 0;
 }
@@ -129,7 +155,7 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 			    &index_validator_, &block);
 	if (r)
 		return r;
-	memcpy(&ll->index, dm_block_data(block), sizeof(ll->index));
+	memcpy(&ll->mi, dm_block_data(block), sizeof(ll->mi));
 	r = dm_tm_unlock(tm, block);
 	if (r)
 		return r;
@@ -146,7 +172,7 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	struct dm_block *blk;
 
 	b = do_div(index, ll->entries_per_block);
-	ie = ll->index + index;
+	ie = ll->mi.index + index;
 
 	r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr),
 			    &dm_sm_bitmap_validator, &blk);
@@ -189,7 +215,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 	end = do_div(end, ll->entries_per_block);
 
 	for (i = index_begin; i < index_end; i++, begin = 0) {
-		ie = ll->index + i;
+		ie = ll->mi.index + i;
 
 		if (__le32_to_cpu(ie->nr_free) > 0) {
 			struct dm_block *blk;
@@ -230,7 +256,7 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	int inc;
 
 	bit = do_div(index, ll->entries_per_block);
-	ie = ll->index + index;
+	ie = ll->mi.index + index;
 
 	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr),
 			       &dm_sm_bitmap_validator, &nb, &inc);
@@ -324,7 +350,7 @@ static int ll_commit(struct ll_disk *ll)
 	if (r)
 		return r;
 
-	memcpy(dm_block_data(b), ll->index, sizeof(ll->index));
+	memcpy(dm_block_data(b), &ll->mi, sizeof(ll->mi));
 	ll->bitmap_root = dm_block_location(b);
 	return dm_tm_unlock(ll->tm, b);
 }
