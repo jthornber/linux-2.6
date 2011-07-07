@@ -200,6 +200,37 @@ static int data_block_equal(void *context, void *value1, void *value2)
 	return v1 == v2;
 }
 
+static void subtree_inc(void *context, void *value)
+{
+	struct dm_btree_info *info = context;
+	__le64 le_root;
+	uint64_t root;
+
+	memcpy(&le_root, value, sizeof(le_root));
+	root = __le64_to_cpu(le_root);
+	dm_tm_inc(info->tm, root);
+}
+
+static void subtree_dec(void *context, void *value)
+{
+	struct dm_btree_info *info = context;
+	__le64 le_root;
+	uint64_t root;
+
+	memcpy(&le_root, value, sizeof(le_root));
+	root = __le64_to_cpu(le_root);
+	if (dm_btree_del(info, root))
+		DMERR("btree delete failed\n");
+}
+
+static int subtree_equal(void *context, void *value1, void *value2)
+{
+	__le64 v1, v2;
+	memcpy(&v1, value1, sizeof(v1));
+	memcpy(&v2, value2, sizeof(v2));
+	return v1 == v2;
+}
+
 /*----------------------------------------------------------------*/
 
 static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
@@ -321,14 +352,13 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	memcpy(&mmd->nb_info, &mmd->info, sizeof(mmd->nb_info));
 	mmd->nb_info.tm = mmd->nb_tm;
 
-	/* FIXME: fill out the value type */
 	mmd->tl_info.tm = tm;
 	mmd->tl_info.levels = 1;
-	mmd->tl_info.value_type.context = NULL;
+	mmd->tl_info.value_type.context = &mmd->info;
 	mmd->tl_info.value_type.size = sizeof(__le64);
-	mmd->tl_info.value_type.inc = NULL;
-	mmd->tl_info.value_type.dec = NULL;
-	mmd->tl_info.value_type.equal = NULL;
+	mmd->tl_info.value_type.inc = subtree_inc;
+	mmd->tl_info.value_type.dec = subtree_dec;
+	mmd->tl_info.value_type.equal = subtree_equal;
 
 	mmd->bl_info.tm = tm;
 	mmd->bl_info.levels = 1;
