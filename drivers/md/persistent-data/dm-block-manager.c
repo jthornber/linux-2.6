@@ -727,7 +727,6 @@ retry:
 				DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
 				      b->validator->name, v->name,
 				      (unsigned long long)b->where);
-				BUG_ON(1); /* FIXME: remove */
 				spin_unlock_irqrestore(&bm->lock, flags);
 				return -EINVAL;
 
