@@ -838,10 +838,6 @@ static void retry_later(struct bio *bio)
 	struct pool *pool = mc->pool;
 	unsigned long flags;
 
-	/* restore the bio to a pristine state */
-	bio->bi_bdev = get_target_bdev(ti);
-	bio->bi_sector += ti->begin;
-
 	/* push it onto the retry list */
 	spin_lock_irqsave(&pool->lock, flags);
 	bio_list_add(&pool->retry_list, bio);
@@ -1199,7 +1195,6 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 		break;
 
 	case -ENODATA:
-
 		if (bio_rw(bio) == READA)
 			bio_io_error(bio);
 		else
@@ -1244,20 +1239,20 @@ static void set_congestion_fn(struct dm_target *ti, struct pool_c *pt)
 	bdi->congested_data = pt;
 }
 
-static void requeue_bios(struct bio_list *bl, spinlock_t *lock)
+static void requeue_bios(struct pool *pool)
 {
 	struct bio *bio;
 	struct bio_list bios;
 	unsigned long flags;
 
 	bio_list_init(&bios);
-	spin_lock_irqsave(lock, flags);
-	bio_list_merge(&bios, bl);
-	bio_list_init(bl);
-	spin_unlock_irqrestore(lock, flags);
+	spin_lock_irqsave(&pool->lock, flags);
+	bio_list_merge(&bios, &pool->retry_list);
+	bio_list_init(&pool->retry_list);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
-		bio_endio(bio, DM_ENDIO_REQUEUE);
+		bio_list_add(&pool->deferred_bios, bio);
 }
 
 /*----------------------------------------------------------------
@@ -1689,7 +1684,7 @@ static int pool_preresume(struct dm_target *ti)
 	pool->triggered = 0;
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	requeue_bios(&pool->retry_list, &pool->lock);
+	requeue_bios(pool);
 	wake_producer(pool);
 
 	/* The pool object is only present if the pool is active */
