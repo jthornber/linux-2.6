@@ -33,20 +33,20 @@ struct dm_btree_value_type {
 	 * |value| argument is the new copy, the copy function may modify
 	 * it.  Probably it just wants to increment a reference count
 	 * somewhere.  This method is _not_ called for insertion of a new
-	 * value.
+	 * value, it's assumed the ref count is already 1.
 	 */
-	void (*copy)(void *context, void *value);
+	void (*inc)(void *context, void *value);
 
 	/*
 	 * This value is being deleted.  The btree takes care of freeing
 	 * the memory pointed to by |value|.  Often the |del| function just
 	 * needs to decrement a reference count somewhere.
 	 */
-	void (*del)(void *context, void *value);
+	void (*dec)(void *context, void *value);
 
 	/*
 	 * An test for equality between two values.  When a value is
-	 * overwritten with a new one the old one has the |del| method
+	 * overwritten with a new one the old one has the |dec| method
 	 * called, _unless_ the new and old value are deemed equal.
 	 */
 	int (*equal)(void *context, void *value1, void *value2);

@@ -286,8 +286,8 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->info.levels = 2;
 	mmd->info.value_type.context = NULL;
 	mmd->info.value_type.size = sizeof(__le64);
-	mmd->info.value_type.copy = NULL;
-	mmd->info.value_type.del = NULL;
+	mmd->info.value_type.inc = NULL;
+	mmd->info.value_type.dec = NULL;
 	mmd->info.value_type.equal = NULL;
 
 	memcpy(&mmd->nb_info, &mmd->info, sizeof(mmd->nb_info));
@@ -298,8 +298,8 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->tl_info.levels = 1;
 	mmd->tl_info.value_type.context = NULL;
 	mmd->tl_info.value_type.size = sizeof(__le64);
-	mmd->tl_info.value_type.copy = NULL;
-	mmd->tl_info.value_type.del = NULL;
+	mmd->tl_info.value_type.inc = NULL;
+	mmd->tl_info.value_type.dec = NULL;
 	mmd->tl_info.value_type.equal = NULL;
 
 	/* FIXME: fill out the value type */
@@ -307,8 +307,8 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->bl_info.levels = 1;
 	mmd->bl_info.value_type.context = NULL;
 	mmd->bl_info.value_type.size = sizeof(__le64);
-	mmd->bl_info.value_type.copy = NULL;
-	mmd->bl_info.value_type.del = NULL;
+	mmd->bl_info.value_type.inc = NULL;
+	mmd->bl_info.value_type.dec = NULL;
 	mmd->bl_info.value_type.equal = NULL;
 
 	/* FIXME: fill out the value type */
@@ -316,8 +316,8 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->details_info.levels = 1;
 	mmd->details_info.value_type.context = NULL;
 	mmd->details_info.value_type.size = sizeof(struct device_details);
-	mmd->details_info.value_type.copy = NULL;
-	mmd->details_info.value_type.del = NULL;
+	mmd->details_info.value_type.inc = NULL;
+	mmd->details_info.value_type.dec = NULL;
 	mmd->details_info.value_type.equal = NULL;
 
 	mmd->root = 0;

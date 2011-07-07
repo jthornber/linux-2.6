@@ -132,8 +132,8 @@ struct child {
 static struct dm_btree_value_type internal_type_ = {
 	.context = NULL,
 	.size = sizeof(__le64),
-	.copy = NULL,
-	.del = NULL,
+	.inc = NULL,
+	.dec = NULL,
 	.equal = NULL
 };
 
@@ -510,8 +510,8 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 
 	internal_type.context = NULL;
 	internal_type.size = sizeof(__le64);
-	internal_type.copy = NULL;
-	internal_type.del = NULL;
+	internal_type.inc = NULL;
+	internal_type.dec = NULL;
 	internal_type.equal = NULL;
 
 	init_shadow_spine(&spine, info);

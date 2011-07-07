@@ -56,10 +56,10 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 	if (__le32_to_cpu(n->header.flags) & INTERNAL_NODE)
 		for (i = 0; i < nr_entries; i++)
 			dm_tm_inc(tm, value64(n, i));
-	else if (vt->copy)
+	else if (vt->inc)
 		for (i = 0; i < nr_entries; i++)
-			vt->copy(vt->context,
-				 value_ptr(n, i, vt->size));
+			vt->inc(vt->context,
+				value_ptr(n, i, vt->size));
 }
 
 void insert_at(size_t value_size, struct node *node, unsigned index,
@@ -233,11 +233,11 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 				goto bad;
 
 		} else {
-			if (info->value_type.del) {
+			if (info->value_type.dec) {
 				unsigned i;
 
 				for (i = 0; i < f->nr_children; i++)
-					info->value_type.del(info->value_type.context,
+					info->value_type.dec(info->value_type.context,
 							     value_ptr(f->n, i, info->value_type.size));
 			}
 			f->current_child = f->nr_children;
@@ -667,8 +667,8 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 	/* FIXME: shame that inc information is leaking outside the spine.
 	 * Plus inc is just plain wrong in the event of a split */
 	if (__le64_to_cpu(node->keys[i]) == key && inc)
-		if (vt->del)
-			vt->del(vt->context, value_ptr(node, i, vt->size));
+		if (vt->dec)
+			vt->dec(vt->context, value_ptr(node, i, vt->size));
 
 	*index = i;
 	return 0;
@@ -687,8 +687,8 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 
 	internal_type.context = NULL;
 	internal_type.size = sizeof(__le64);
-	internal_type.copy = NULL;
-	internal_type.del = NULL;
+	internal_type.inc = NULL;
+	internal_type.dec = NULL;
 	internal_type.equal = NULL;
 
 	init_shadow_spine(&spine, info);
@@ -720,13 +720,13 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 				if (inserted)
 					*inserted = 0;
 
-				if (info->value_type.del &&
+				if (info->value_type.dec &&
 				    (!info->value_type.equal ||
 				     !info->value_type.equal(
 					     info->value_type.context,
 					     value_ptr(n, index, info->value_type.size),
 					     value))) {
-					info->value_type.del(info->value_type.context,
+					info->value_type.dec(info->value_type.context,
 					     value_ptr(n, index, info->value_type.size));
 				}
 				memcpy(value_ptr(n, index, info->value_type.size),

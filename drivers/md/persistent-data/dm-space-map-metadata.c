@@ -61,8 +61,8 @@ static int ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	ll->ref_count_info.tm = tm;
 	ll->ref_count_info.levels = 1;
 	ll->ref_count_info.value_type.size = sizeof(uint32_t);
-	ll->ref_count_info.value_type.copy = NULL;
-	ll->ref_count_info.value_type.del = NULL;
+	ll->ref_count_info.value_type.inc = NULL;
+	ll->ref_count_info.value_type.dec = NULL;
 	ll->ref_count_info.value_type.equal = NULL;
 
 	ll->block_size = dm_bm_block_size(dm_tm_get_bm(tm));
