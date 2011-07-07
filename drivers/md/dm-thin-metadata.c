@@ -55,6 +55,7 @@ struct thin_super_block {
 	__le64 metadata_nr_blocks;
 
 	__le32 compat_flags;
+	__le32 compat_ro_flags;
 	__le32 incompat_flags;
 } __attribute__ ((packed));
 
@@ -363,6 +364,19 @@ static int begin_transaction(struct dm_thin_metadata *mmd)
 		~THIN_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to "
+		      "unsupported optional features (%lx).",
+		      (unsigned long)features);
+		return -EINVAL;
+	}
+
+	/* check for read-only metadata to skip the following RDWR checks */
+	if (get_disk_ro(mmd->bdev->bd_disk))
+		return 0;
+
+	features = __le32_to_cpu(sb->compat_ro_flags) &
+		~THIN_FEATURE_COMPAT_RO_SUPP;
+	if (features) {
+		DMERR("could not access metadata RDWR due to "
 		      "unsupported optional features (%lx).",
 		      (unsigned long)features);
 		return -EINVAL;

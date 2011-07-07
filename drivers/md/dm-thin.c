@@ -76,14 +76,12 @@
  * benefits far, far outweigh the disadvantages.
  */
 
-// FIXME: can cells and new_mappings be combined?
-
 /*----------------------------------------------------------------*/
 
 /*
- * Nasty function that breaks abstraction layering.
+ * Function that breaks abstraction layering.
  */
-static struct block_device *ti_to_bdev(struct dm_target *ti)
+static struct block_device *get_target_bdev(struct dm_target *ti)
 {
 	return dm_bdev(dm_table_get_md(ti->table));
 }
@@ -431,31 +429,6 @@ static void build_virtual_key(struct dm_ms_device *msd, dm_block_t b,
  * also provides the interface for creating and destroying internal
  * devices.
  */
-struct pool;
-
-struct new_mapping {
-	struct list_head list;
-
-	int prepared;
-
-	struct pool *pool;
-	struct dm_ms_device *msd;
-	dm_block_t virt_block;
-	dm_block_t data_block;
-	struct cell *cell;
-	int err;
-
-	/*
-	 * If the bio covers the whole area of a block then we can avoid
-	 * zeroing or copying.  Instead this bio is hooked.  The bio will
-	 * still be in the cell, so care has to be taken to avoid issuing
-	 * the bio twice.
-	 */
-	struct bio *bio;
-	bio_end_io_t *bi_end_io;
-	void *bi_private;
-};
-
 struct pool {
 	struct hlist_node hlist;
 	struct dm_target *ti;	/* only set if a pool target is bound */
@@ -491,6 +464,31 @@ struct pool {
 	mempool_t *endio_hook_pool;
 
 	atomic_t ref_count;
+};
+
+/* FIXME: can cells and new_mappings be combined? */
+
+struct new_mapping {
+	struct list_head list;
+
+	int prepared;
+
+	struct pool *pool;
+	struct dm_ms_device *msd;
+	dm_block_t virt_block;
+	dm_block_t data_block;
+	struct cell *cell;
+	int err;
+
+	/*
+	 * If the bio covers the whole area of a block then we can avoid
+	 * zeroing or copying.  Instead this bio is hooked.  The bio will
+	 * still be in the cell, so care has to be taken to avoid issuing
+	 * the bio twice.
+	 */
+	struct bio *bio;
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
 };
 
 /*
@@ -841,7 +839,7 @@ static void retry_later(struct bio *bio)
 	unsigned long flags;
 
 	/* restore the bio to a pristine state */
-	bio->bi_bdev = ti_to_bdev(ti);
+	bio->bi_bdev = get_target_bdev(ti);
 	bio->bi_sector += ti->begin;
 
 	/* push it onto the retry list */
@@ -1591,7 +1589,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
-	pool = pool_find(ti_to_bdev(ti), metadata_devname,
+	pool = pool_find(get_target_bdev(ti), metadata_devname,
 			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
@@ -1634,11 +1632,6 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	return r;
-}
-
-static struct block_device *get_target_bdev(struct dm_target *ti)
-{
-	return dm_table_get_bdev(ti->table);
 }
 
 /*
