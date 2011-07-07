@@ -62,18 +62,19 @@ void *dm_bitmap_data(struct dm_block *b)
 	return dm_block_data(b) + sizeof(struct bitmap_header);
 }
 
-#define WORD_MASK_LOW 0x5555555555555555
-#define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAA
-#define WORD_MASK_ALL 0xFFFFFFFFFFFFFFFF
+#define WORD_MASK_LOW 0x5555555555555555ULL
+#define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAAULL
+#define WORD_MASK_ALL 0xFFFFFFFFFFFFFFFFULL
 
 static unsigned bitmap_word_used(void *addr, unsigned b)
 {
 	__le64 *words = (__le64 *) addr;
         __le64 *w = words + (b >> ENTRIES_SHIFT);
 
-	return ((*w & WORD_MASK_LOW) == WORD_MASK_LOW ||
-		(*w & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
-		(*w & WORD_MASK_ALL) == WORD_MASK_ALL);
+	uint64_t bits = __le64_to_cpu(*w);
+	return ((bits & WORD_MASK_LOW) == WORD_MASK_LOW ||
+		(bits & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
+		(bits & WORD_MASK_ALL) == WORD_MASK_ALL);
 }
 
 unsigned sm_lookup_bitmap(void *addr, unsigned b)
@@ -82,8 +83,8 @@ unsigned sm_lookup_bitmap(void *addr, unsigned b)
         __le64 *w = words + (b >> ENTRIES_SHIFT);
 
 	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
-	return (!!test_bit_le(b, (void*) w) << 1) |
-	       !!test_bit_le(b + 1, (void *) w);
+	return ((!!test_bit_le(b, (void*) w) << 1)) |
+		(!!test_bit_le(b + 1, (void *) w));
 }
 
 
