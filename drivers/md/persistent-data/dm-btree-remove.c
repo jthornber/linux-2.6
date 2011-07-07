@@ -520,6 +520,9 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 		if (level == last_level) {
 			BUG_ON(index < 0 ||
 			       index >= __le32_to_cpu(n->header.nr_entries));
+			if (info->value_type.dec)
+				info->value_type.dec(info->value_type.context,
+						     value_ptr(n, index, info->value_type.size));
 			delete_at(n, index, info->value_type.size);
 			r = 0;
 			*new_root = shadow_root(&spine);
