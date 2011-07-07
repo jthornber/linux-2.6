@@ -683,20 +683,20 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 	dm_block_t *block = &root;
 	struct shadow_spine spine;
 	struct node *n;
-	struct dm_btree_value_type internal_type;
+	struct dm_btree_value_type le64_type;
 
-	internal_type.context = NULL;
-	internal_type.size = sizeof(__le64);
-	internal_type.inc = NULL;
-	internal_type.dec = NULL;
-	internal_type.equal = NULL;
+	le64_type.context = NULL;
+	le64_type.size = sizeof(__le64);
+	le64_type.inc = NULL;
+	le64_type.dec = NULL;
+	le64_type.equal = NULL;
 
 	init_shadow_spine(&spine, info);
 
 	for (level = 0; level < info->levels; level++) {
 		r = btree_insert_raw(&spine, *block,
 				     (level == last_level ?
-				      &info->value_type : &internal_type),
+				      &info->value_type : &le64_type),
 				     keys[level], &index);
 		if (r < 0) {
 			exit_shadow_spine(&spine);

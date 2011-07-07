@@ -129,7 +129,7 @@ struct child {
 	struct node *n;
 };
 
-static struct dm_btree_value_type internal_type_ = {
+static struct dm_btree_value_type le64_type_ = {
 	.context = NULL,
 	.size = sizeof(__le64),
 	.inc = NULL,
@@ -152,7 +152,7 @@ static int init_child(struct dm_btree_info *info, struct node *parent,
 
 	result->n = dm_block_data(result->block);
 	if (inc)
-		inc_children(info->tm, result->n, &internal_type_);
+		inc_children(info->tm, result->n, &le64_type_);
 	return 0;
 }
 
@@ -506,19 +506,12 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 	int index = 0, r = 0;
 	struct shadow_spine spine;
 	struct node *n;
-	struct dm_btree_value_type internal_type;
-
-	internal_type.context = NULL;
-	internal_type.size = sizeof(__le64);
-	internal_type.inc = NULL;
-	internal_type.dec = NULL;
-	internal_type.equal = NULL;
 
 	init_shadow_spine(&spine, info);
 	for (level = 0; level < info->levels; level++) {
 		r = remove_raw(&spine, info,
 			       (level == last_level ?
-				&info->value_type : &internal_type),
+				&info->value_type : &le64_type_),
 			       root, keys[level], &index);
 		if (r < 0)
 			break;
