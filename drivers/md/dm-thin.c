@@ -929,6 +929,17 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 	}
 }
 
+static void no_space(struct cell *cell)
+{
+	struct bio *bio;
+	struct bio_list bios;
+
+	bio_list_init(&bios);
+	cell_release(cell, &bios);
+	while ((bio = bio_list_pop(&bios)))
+		retry_later(bio);
+}
+
 static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 			  struct bio *bio, dm_block_t block, struct cell_key *key,
 			  struct dm_thin_lookup_result *lookup_result)
@@ -936,9 +947,7 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 	int r;
 	dm_block_t data_block;
 	struct cell *cell;
-	struct bio_list bios;
 
-	bio_list_init(&bios);
 	bio_detain(pool->prison, key, bio, &cell);
 
 	r = alloc_data_block(pool, msd, &data_block);
@@ -949,9 +958,7 @@ static void break_sharing(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	case -ENOSPC:
-		cell_release(cell, &bios);
-		while ((bio = bio_list_pop(&bios)))
-			retry_later(bio);
+		no_space(cell);
 		break;
 
 	default:
@@ -1009,9 +1016,7 @@ static void provision_block(struct pool *pool, struct dm_ms_device *msd,
 		break;
 
 	case -ENOSPC:
-		cell_release(cell, NULL);
-		bio->bi_next = NULL;
-		retry_later(bio);
+		no_space(cell);
 		break;
 
 	default:
