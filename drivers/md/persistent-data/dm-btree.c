@@ -162,18 +162,18 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 	if (r)
 		return r;
 
-	if (ref_count > 1) {
+	if (ref_count > 1)
 		/*
 		 * This is a shared node, so we can just decrement it's
 		 * reference counter and leave the children.
 		 */
 		dm_tm_dec(s->tm, b);
 
-	} else {
+	else {
 		struct frame *f = s->spine + ++s->top;
 
 		r = dm_tm_read_lock(s->tm, b, &btree_node_validator, &f->b);
-		if (!r) {
+		if (r) {
 			s->top--;
 			return r;
 		}
@@ -214,8 +214,10 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 
 		top_frame(s, &f);
 
-		if (f->current_child >= f->nr_children)
+		if (f->current_child >= f->nr_children) {
 			pop_frame(s);
+			continue;
+		}
 
 		flags = __le32_to_cpu(f->n->header.flags);
 		if (flags & INTERNAL_NODE) {
@@ -225,7 +227,7 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 			if (r)
 				goto bad;
 
-		} else if (f->level != info->levels) {
+		} else if (f->level != (info->levels - 1)) {
 			b = value64(f->n, f->current_child);
 			f->current_child++;
 			r = push_frame(s, b, f->level + 1);
