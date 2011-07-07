@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [11/17]
+** Kernel [12/17]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -21,7 +21,7 @@
   - [X] rename multisnap -> thin. Rebranding exercise           :ejt:, :mike:
   - [ ] make sure retry io is errored if the thin dev is deactivated    :ejt:
   - [ ] make sure retry io is requeued with dm if the thin dev is suspended  :ejt:
-  - [ ] crc metadata sm index                                           :ejt:
+  - [X] crc metadata sm index                                           :ejt:
   - [X] return zeroes for unprovisioned reads                           :ejt:
 
 ** Userland tools [0/5]
