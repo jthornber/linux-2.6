@@ -133,9 +133,6 @@ int dm_thin_metadata_thin_highest_mapped_block(struct dm_ms_device *msd,
 int dm_thin_metadata_alloc_data_block(struct dm_ms_device *msd,
 				      dm_block_t *result);
 
-int dm_thin_metadata_free_data_block(struct dm_ms_device *msd,
-				     dm_block_t result);
-
 int dm_thin_metadata_get_free_blocks(struct dm_thin_metadata *mmd,
 				     dm_block_t *result);
 

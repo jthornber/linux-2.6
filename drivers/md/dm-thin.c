@@ -852,10 +852,8 @@ static int alloc_data_block(struct pool *pool, struct dm_ms_device *msd,
 	unsigned long flags;
 
 	r = dm_thin_metadata_get_free_blocks(pool->mmd, &free_blocks);
-	if (r) {
-		dm_thin_metadata_free_data_block(msd, *result);
+	if (r)
 		return r;
-	}
 
 	if (free_blocks <= pool->low_water_mark && !pool->triggered) {
 		spin_lock_irqsave(&pool->lock, flags);
@@ -894,16 +892,8 @@ static void process_discard(struct pool *pool, struct dm_ms_device *msd,
 			if (r) {
 				DMERR("dm_thin_metadata_remove() failed");
 				bio_io_error(bio);
-			} else {
-				// FIXME: this should be handled by the value_type ops
-				r = dm_thin_metadata_free_data_block(msd, lookup_result.block);
-				if (r) {
-					DMERR("dm_thin_metadata_free_data_block failed");
-					/* carry on regardless, we've lost an unused data block */
-				}
-
+			} else
 				remap_and_issue(pool, bio, lookup_result.block);
-			}
 		}
 		break;
 

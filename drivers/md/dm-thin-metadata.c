@@ -172,6 +172,34 @@ static struct dm_block_validator sb_validator_ = {
 	.check = sb_check
 };
 
+/*----------------------------------------------------------------
+ * Methods for the btree value types
+ *--------------------------------------------------------------*/
+
+static void data_block_inc(void *context, void *value)
+{
+	struct dm_space_map *sm = context;
+	__le64 v;
+	memcpy(&v, value, sizeof(v));
+	dm_sm_inc_block(sm, __le64_to_cpu(v));
+}
+
+static void data_block_dec(void *context, void *value)
+{
+	struct dm_space_map *sm = context;
+	__le64 v;
+	memcpy(&v, value, sizeof(v));
+	dm_sm_dec_block(sm, __le64_to_cpu(v));
+}
+
+static int data_block_equal(void *context, void *value1, void *value2)
+{
+	__le64 v1, v2;
+	memcpy(&v1, value1, sizeof(v1));
+	memcpy(&v2, value2, sizeof(v2));
+	return v1 == v2;
+}
+
 /*----------------------------------------------------------------*/
 
 static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
@@ -284,11 +312,11 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 
 	mmd->info.tm = tm;
 	mmd->info.levels = 2;
-	mmd->info.value_type.context = NULL;
+	mmd->info.value_type.context = mmd->data_sm;
 	mmd->info.value_type.size = sizeof(__le64);
-	mmd->info.value_type.inc = NULL;
-	mmd->info.value_type.dec = NULL;
-	mmd->info.value_type.equal = NULL;
+	mmd->info.value_type.inc = data_block_inc;
+	mmd->info.value_type.dec = data_block_dec;
+	mmd->info.value_type.equal = data_block_equal;
 
 	memcpy(&mmd->nb_info, &mmd->info, sizeof(mmd->nb_info));
 	mmd->nb_info.tm = mmd->nb_tm;
@@ -302,16 +330,14 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 	mmd->tl_info.value_type.dec = NULL;
 	mmd->tl_info.value_type.equal = NULL;
 
-	/* FIXME: fill out the value type */
 	mmd->bl_info.tm = tm;
 	mmd->bl_info.levels = 1;
-	mmd->bl_info.value_type.context = NULL;
+	mmd->bl_info.value_type.context = mmd->data_sm;
 	mmd->bl_info.value_type.size = sizeof(__le64);
-	mmd->bl_info.value_type.inc = NULL;
-	mmd->bl_info.value_type.dec = NULL;
-	mmd->bl_info.value_type.equal = NULL;
+	mmd->bl_info.value_type.inc = data_block_inc;
+	mmd->bl_info.value_type.dec = data_block_dec;
+	mmd->bl_info.value_type.equal = data_block_equal;
 
-	/* FIXME: fill out the value type */
 	mmd->details_info.tm = tm;
 	mmd->details_info.levels = 1;
 	mmd->details_info.value_type.context = NULL;
@@ -956,20 +982,6 @@ int dm_thin_metadata_alloc_data_block(struct dm_ms_device *msd,
 
 	down_write(&mmd->root_lock);
 	r = dm_sm_new_block(mmd->data_sm, result);
-	mmd->need_commit = 1;
-	up_write(&mmd->root_lock);
-
-	return r;
-}
-
-int dm_thin_metadata_free_data_block(struct dm_ms_device *msd,
-				     dm_block_t result)
-{
-	int r;
-	struct dm_thin_metadata *mmd = msd->mmd;
-
-	down_write(&mmd->root_lock);
-	r = dm_sm_dec_block(mmd->data_sm, result);
 	mmd->need_commit = 1;
 	up_write(&mmd->root_lock);
 
