@@ -550,7 +550,7 @@ int dm_thin_metadata_close(struct dm_thin_metadata *mmd)
 	struct dm_ms_device *msd, *tmp;
 
 	down_read(&mmd->root_lock);
-	list_for_each_entry_safe (msd, tmp, &mmd->ms_devices, list) {
+	list_for_each_entry_safe(msd, tmp, &mmd->ms_devices, list) {
 		if (msd->open_count)
 			open_devices++;
 		else {
@@ -593,7 +593,7 @@ static int __open_device(struct dm_thin_metadata *mmd,
 	struct device_details details;
 
 	/* check the device isn't already open */
-	list_for_each_entry (msd2, &mmd->ms_devices, list)
+	list_for_each_entry(msd2, &mmd->ms_devices, list)
 		if (msd2->id == dev) {
 			msd2->open_count++;
 			*msd = msd2;
@@ -1069,7 +1069,7 @@ static int __write_changed_details(struct dm_thin_metadata *mmd)
 	int r;
 	struct dm_ms_device *msd, *tmp;
 
-	list_for_each_entry_safe (msd, tmp, &mmd->ms_devices, list) {
+	list_for_each_entry_safe(msd, tmp, &mmd->ms_devices, list) {
 		if (msd->changed) {
 			struct device_details dd;
 			uint64_t key = msd->id;

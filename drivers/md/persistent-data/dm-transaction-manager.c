@@ -45,7 +45,7 @@ static int is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 	struct shadow_info *si;
 	struct hlist_node *n;
 
-	hlist_for_each_entry (si, n, tm->buckets + bucket, hlist)
+	hlist_for_each_entry(si, n, tm->buckets + bucket, hlist)
 		if (si->where == b)
 			return 1;
 
@@ -76,7 +76,7 @@ static void wipe_shadow_table(struct dm_transaction_manager *tm)
 		struct shadow_info *si;
 		struct hlist_node *n, *tmp;
 		struct hlist_head *bucket = tm->buckets + i;
-		hlist_for_each_entry_safe (si, n, tmp, bucket, hlist)
+		hlist_for_each_entry_safe(si, n, tmp, bucket, hlist)
 			kfree(si);
 
 		INIT_HLIST_HEAD(bucket);

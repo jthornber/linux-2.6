@@ -323,7 +323,7 @@ static void write_dirty(struct dm_block_manager *bm, unsigned count)
 	/* Grab the first |count| entries from the dirty list */
 	INIT_LIST_HEAD(&dirty);
 	spin_lock_irqsave(&bm->lock, flags);
-	list_for_each_entry_safe (b, tmp, &bm->dirty_list, list) {
+	list_for_each_entry_safe(b, tmp, &bm->dirty_list, list) {
 		if (count-- == 0)
 			break;
 		__transition(b, BS_WRITING);
@@ -331,7 +331,7 @@ static void write_dirty(struct dm_block_manager *bm, unsigned count)
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
 
-	list_for_each_entry_safe (b, tmp, &dirty, list) {
+	list_for_each_entry_safe(b, tmp, &dirty, list) {
 		list_del(&b->list);
 		write_block(b);
 	}
@@ -345,7 +345,7 @@ static void write_all_dirty(struct dm_block_manager *bm)
 static void __clear_errors(struct dm_block_manager *bm)
 {
 	struct dm_block *b, *tmp;
-	list_for_each_entry_safe (b, tmp, &bm->error_list, list)
+	list_for_each_entry_safe(b, tmp, &bm->error_list, list)
 		__transition(b, BS_EMPTY);
 }
 
@@ -602,7 +602,7 @@ static int populate_bm(struct dm_block_manager *bm, unsigned count)
 		struct dm_block *b = alloc_block(bm);
 		if (!b) {
 			struct dm_block *tmp;
-			list_for_each_entry_safe (b, tmp, &bs, list)
+			list_for_each_entry_safe(b, tmp, &bs, list)
 				free_block(b);
 			return -ENOMEM;
 		}
@@ -687,10 +687,10 @@ void dm_block_manager_destroy(struct dm_block_manager *bm)
 	dm_io_client_destroy(bm->io);
 
 	for (i = 0; i < bm->hash_size; i++)
-		hlist_for_each_entry_safe (b, n, tmp, bm->buckets + i, hlist)
+		hlist_for_each_entry_safe(b, n, tmp, bm->buckets + i, hlist)
 			free_block(b);
 
-	list_for_each_entry_safe (b, btmp, &bm->empty_list, list)
+	list_for_each_entry_safe(b, btmp, &bm->empty_list, list)
 		free_block(b);
 
 	kfree(bm);

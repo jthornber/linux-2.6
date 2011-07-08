@@ -174,7 +174,7 @@ static struct cell *__search_bucket(struct hlist_head *bucket, struct cell_key *
 	struct cell *cell;
 	struct hlist_node *tmp;
 
-	hlist_for_each_entry (cell, tmp, bucket, list)
+	hlist_for_each_entry(cell, tmp, bucket, list)
 		if (!memcmp(&cell->key, key, sizeof(cell->key)))
 			return cell;
 
@@ -696,7 +696,7 @@ static void shared_read_complete(struct bio *bio, int err)
 	ds_dec(h->entry, &mappings);
 
 	spin_lock_irqsave(&h->pool->lock, flags);
-	list_for_each_entry_safe (m, tmp, &mappings, list) {
+	list_for_each_entry_safe(m, tmp, &mappings, list) {
 		list_del(&m->list);
 		INIT_LIST_HEAD(&m->list);
 		__maybe_add_mapping(m->pool, m);
@@ -1077,7 +1077,7 @@ static void process_prepared_mappings(struct pool *pool)
 	list_splice_init(&pool->prepared_mappings, &maps);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	list_for_each_entry_safe (m, tmp, &maps, list) {
+	list_for_each_entry_safe(m, tmp, &maps, list) {
 		if (m->err) {
 			cell_error(m->cell);
 			continue;
