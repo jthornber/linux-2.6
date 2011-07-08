@@ -725,10 +725,8 @@ static int __create_snap(struct dm_thin_metadata *mmd,
 	/* check this device is unused */
 	r = dm_btree_lookup(&mmd->details_info, mmd->details_root,
 			    &dev_key, &detail);
-	if (!r) {
-		printk(KERN_ALERT "details already in btree\n");
+	if (!r)
 		return -EEXIST;
-	}
 
 	/* find the mapping tree for the origin */
 	r = dm_btree_lookup(&mmd->tl_info, mmd->root, &key, &value);
