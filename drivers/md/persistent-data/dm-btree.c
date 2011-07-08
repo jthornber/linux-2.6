@@ -609,11 +609,15 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 	struct node *node;
 
 	for (;;) {
-		r = shadow_step(s, root, vt, &inc); /* FIXME: why is @inc never looked at? */
+		r = shadow_step(s, root, vt, &inc);
 		if (r < 0) {
 			/* FIXME: unpick any allocations */
 			return r;
 		}
+
+		node = dm_block_data(shadow_current(s));
+		if (inc)
+			inc_children(s->info->tm, node, vt);
 
 		/*
 		 * We have to patch up the parent node, ugly, but I don't
@@ -628,11 +632,6 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 
 		BUG_ON(!shadow_current(s));
 		node = dm_block_data(shadow_current(s));
-#if 0
-		/* FIXME: put this in */
-		if (inc)
-			inc_children(info->tm, node, &info->value_type);
-#endif
 
 		if (node->header.nr_entries == node->header.max_entries) {
 			if (top)

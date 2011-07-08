@@ -472,7 +472,7 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 
 		n = dm_block_data(shadow_current(s));
 		if (inc)
-			inc_children(info->tm, n, &info->value_type);
+			inc_children(info->tm, n, vt);
 
 		if (__le32_to_cpu(n->header.flags) & LEAF_NODE)
 			return do_leaf(n, key, index);
