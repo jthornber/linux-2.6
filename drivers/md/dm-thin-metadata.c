@@ -716,9 +716,17 @@ static int __create_snap(struct dm_thin_metadata *mmd,
 {
 	int r;
 	dm_block_t origin_root, snap_root;
-	uint64_t key = origin;
+	uint64_t key = origin, dev_key = dev;
 	struct dm_ms_device *msd;
 	__le64 value;
+
+	/* check this device is unused */
+	r = dm_btree_lookup(&mmd->details_info, mmd->details_root,
+			    &dev_key, &value);
+	if (!r) {
+		printk(KERN_ALERT "details already in btree\n");
+		return -EEXIST;
+	}
 
 	/* find the mapping tree for the origin */
 	r = dm_btree_lookup(&mmd->tl_info, mmd->root, &key, &value);
