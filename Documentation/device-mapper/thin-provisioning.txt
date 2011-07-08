@@ -1,6 +1,6 @@
 * Introduction
 
-This docuement descibes a collection of device-mapper targets that
+This document descibes a collection of device-mapper targets that
 between them implement thin provisioning and snapshots.
 
 The main highlight of this implementation, compared to the previous
@@ -62,7 +62,7 @@ make one by zeroing the first 4k to indicate empty metadata.
 
 ** reloading a pool table
 
-You may reload a pools table, indeed this is how the pool is resized.
+You may reload a pool's table, indeed this is how the pool is resized.
 Its advisable that you reload with a pool target that points to the
 same metadata area.
 
@@ -82,10 +82,7 @@ the metadata device.
 
 The $low_water_mark is expressed in 512 byte sectors, if free space on
 the data device drops below this level then a dm event will be sent to
-userland.  This event is edge triggered, it will occur only once, so
-volume manager writers should register for the event, then double
-check the status of the target.  FIXME: move last sentence to
-reference.
+userland.
 
 ** Thin provisioning
 
@@ -172,9 +169,14 @@ where,
   - transaction id: A 64bit number used by userland to help
     synchronise with metadata from volume managers.
 
-  - held metadata root.  The location, in sectors, of the metadata
+  - held metadata root: The location, in sectors, of the metadata
     root that has been 'held' for userland read access.  '-' indicates
-    there is no root.
+    there is no held root.
+
+  - data free space in sectors: If this drops below the pool's low water
+    mark a dm event will be sent to userland.  This event is edge
+    triggered, it will occur only once, so volume manager writers should
+    register for the event, then double check the status of the target.
 
 *** Messages
 
@@ -188,15 +190,14 @@ where,
 
 ** thin target
 
- thin <pool dev> <metadata dev> <dev id>
+ thin <pool dev> <dev id>
 
  pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  dev id: the internal device identifier (32bit value)
 
  The device is always implicitly resized to the size of the target.
- If you truncate then provisioned blocks past the new end of device
- will be lost immediately (A pool scope 'do not truncate' flag is
- planned).
+ If you truncate, any provisioned blocks past the new end of device
+ will be lost immediately.
 
 *** Status
 

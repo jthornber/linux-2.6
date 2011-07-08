@@ -1718,7 +1718,7 @@ static void pool_postsuspend(struct dm_target *ti)
  *   new-snap        <dev id> <origin id>
  *   del             <dev id>
  *   trim            <dev id> <size in sectors>
- *   trans-id        <dev id> <current trans id> <new trans id>
+ *   trans-id        <current trans id> <new trans id>
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
