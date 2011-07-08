@@ -148,7 +148,6 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 
 	ll->nr_blocks = __le64_to_cpu(smr->nr_blocks);
 	ll->nr_allocated = __le64_to_cpu(smr->nr_allocated);
-
 	ll->bitmap_root = __le64_to_cpu(smr->bitmap_root);
 
 	r = dm_tm_read_lock(tm, __le64_to_cpu(smr->bitmap_root),
@@ -220,24 +219,29 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 		if (__le32_to_cpu(ie->nr_free) > 0) {
 			struct dm_block *blk;
 			unsigned position;
-			uint32_t bit_end = (i == index_end - 1) ? end : ll->entries_per_block;
+			uint32_t bit_end;
 
 			r = dm_tm_read_lock(ll->tm, __le64_to_cpu(ie->blocknr),
 					    &dm_sm_bitmap_validator, &blk);
 			if (r < 0)
 				return r;
+			
+			bit_end = (i == index_end - 1) ?
+				end : ll->entries_per_block;
 
-			r = sm_find_free(dm_bitmap_data(blk), begin, bit_end, &position);
+			r = sm_find_free(dm_bitmap_data(blk), begin,
+					 bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(ll->tm, blk);
-				return r;
+				return r; /* avoiding retry (FIXME: explain why) */
 			}
 
 			r = dm_tm_unlock(ll->tm, blk);
 			if (r < 0)
 				return r;
 
-			*result = i * ll->entries_per_block + (dm_block_t) position;
+			*result = i * ll->entries_per_block +
+				(dm_block_t) position;
 			return 0;
 		}
 	}
@@ -261,7 +265,7 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	r = dm_tm_shadow_block(ll->tm, __le64_to_cpu(ie->blocknr),
 			       &dm_sm_bitmap_validator, &nb, &inc);
 	if (r < 0) {
-		DMERR("shadow failed");
+		DMERR("dm_tm_shadow_block() failed");
 		return r;
 	}
 	ie->blocknr = __cpu_to_le64(dm_block_location(nb));
@@ -277,9 +281,9 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 			return r;
 
 		if (old > 2) {
-			r = dm_btree_remove(&ll->ref_count_info, ll->ref_count_root,
+			r = dm_btree_remove(&ll->ref_count_info,
+					    ll->ref_count_root,
 					    &b, &ll->ref_count_root);
-
 			if (r) {
 				sm_set_bitmap(bm, bit, old);
 				return r;
@@ -337,7 +341,10 @@ static int ll_dec(struct ll_disk *ll, dm_block_t b)
 	if (r)
 		return r;
 
-	return rc ? ll_insert(ll, b, rc - 1) : -EINVAL;
+	if (!rc)
+		return -EINVAL;
+
+	return ll_insert(ll, b, rc - 1);
 }
 
 static int ll_commit(struct ll_disk *ll)
@@ -400,7 +407,7 @@ static int add_bop(struct sm_metadata *smm, enum block_op_type type, dm_block_t 
 	struct block_op *op;
 
 	if (smm->nr_uncommitted == MAX_RECURSIVE_ALLOCATIONS) {
-		BUG_ON(1);
+		BUG();
 		return -1;
 	}
 
@@ -438,8 +445,11 @@ static void out(struct sm_metadata *smm)
 	BUG_ON(!smm->recursion_count);
 
 	if (smm->recursion_count == 1 && smm->nr_uncommitted) {
-		while (smm->nr_uncommitted && !r)
-			r = commit_bop(smm, smm->uncommitted + --smm->nr_uncommitted);
+		while (smm->nr_uncommitted && !r) {
+			smm->nr_uncommitted--;
+			r = commit_bop(smm, smm->uncommitted +
+				       smm->nr_uncommitted);
+		}
 	}
 
 	smm->recursion_count--;
@@ -463,7 +473,7 @@ static void sm_metadata_destroy(struct dm_space_map *sm)
 
 static int sm_metadata_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
-	BUG_ON(1);
+	BUG();
 	return -1;
 }
 
@@ -695,12 +705,12 @@ static struct dm_space_map ops_ = {
  */
 static void sm_bootstrap_destroy(struct dm_space_map *sm)
 {
-	BUG_ON(1);
+	BUG();
 }
 
 static int sm_bootstrap_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
-	BUG_ON(1);
+	BUG();
 	return -1;
 }
 
@@ -734,7 +744,7 @@ static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm,
 static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b,
 				  uint32_t count)
 {
-	BUG_ON(1);
+	BUG();
 	return -1;
 }
 
@@ -771,14 +781,14 @@ static int sm_bootstrap_commit(struct dm_space_map *sm)
 
 static int sm_bootstrap_root_size(struct dm_space_map *sm, size_t *result)
 {
-	BUG_ON(1);
+	BUG();
 	return -1;
 }
 
 static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where,
 				  size_t max)
 {
-	BUG_ON(1);
+	BUG();
 	return -1;
 }
 

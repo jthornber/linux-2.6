@@ -61,7 +61,8 @@ int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 {
 	int r;
 
-	r = dm_tm_shadow_block(info->tm, orig, &btree_node_validator, result, inc);
+	r = dm_tm_shadow_block(info->tm, orig, &btree_node_validator,
+			       result, inc);
 	if (r == 0 && *inc)
 		inc_children(info->tm, dm_block_data(*result), vt);
 

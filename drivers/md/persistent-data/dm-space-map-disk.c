@@ -30,7 +30,7 @@ static int bitmap_check(struct dm_block_validator *v,
 	__le32 csum;
 
 	if (dm_block_location(b) != __le64_to_cpu(header->blocknr)) {
-	        DMERR("bitmap check failed blocknr %llu wanted %llu",
+		DMERR("bitmap check failed blocknr %llu wanted %llu",
 		      __le64_to_cpu(header->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
@@ -69,7 +69,7 @@ void *dm_bitmap_data(struct dm_block *b)
 static unsigned bitmap_word_used(void *addr, unsigned b)
 {
 	__le64 *words = (__le64 *) addr;
-        __le64 *w = words + (b >> ENTRIES_SHIFT);
+	__le64 *w = words + (b >> ENTRIES_SHIFT);
 
 	uint64_t bits = __le64_to_cpu(*w);
 	return ((bits & WORD_MASK_LOW) == WORD_MASK_LOW ||
@@ -80,10 +80,10 @@ static unsigned bitmap_word_used(void *addr, unsigned b)
 unsigned sm_lookup_bitmap(void *addr, unsigned b)
 {
 	__le64 *words = (__le64 *) addr;
-        __le64 *w = words + (b >> ENTRIES_SHIFT);
+	__le64 *w = words + (b >> ENTRIES_SHIFT);
 
 	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
-	return ((!!test_bit_le(b, (void*) w) << 1)) |
+	return ((!!test_bit_le(b, (void *) w) << 1)) |
 		(!!test_bit_le(b + 1, (void *) w));
 }
 
@@ -136,7 +136,7 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 	/*
 	 * Because the new bitmap blocks are created via a shadow
 	 * operation, the old entry has already had it's reference count
-	 * decremented.  So we don't need the btree to do any book
+	 * decremented.	 So we don't need the btree to do any book
 	 * keeping.
 	 */
 	io->bitmap_info.value_type.size = sizeof(struct index_entry);
@@ -255,7 +255,6 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	struct dm_block *blk;
 
 	do_div(index, io->entries_per_block);
-
 	r = dm_btree_lookup(&io->bitmap_info, io->bitmap_root, &index, &ie);
 	if (r < 0)
 		return r;
@@ -306,15 +305,16 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 		if (__le32_to_cpu(ie.nr_free) > 0) {
 			struct dm_block *blk;
 			unsigned position;
-			uint32_t bit_end = (i == index_end - 1) ?
-				mod64(end, io->entries_per_block) :
-				io->entries_per_block;
+			uint32_t bit_end;
 
 			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
 					    &dm_sm_bitmap_validator, &blk);
 			if (r < 0)
 				return r;
 
+			bit_end = (i == index_end - 1) ?
+				mod64(end, io->entries_per_block) : io->entries_per_block;
+				
 			r = sm_find_free(dm_bitmap_data(blk),
 					 max((unsigned)begin,
 					     (unsigned)__le32_to_cpu(ie.none_free_before)),
@@ -365,7 +365,6 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 
 	if (ref_count <= 2) {
 		sm_set_bitmap(bm, bit, ref_count);
-		BUG_ON(sm_lookup_bitmap(bm, bit) != ref_count);
 
 		if (old > 2) {
 			r = dm_btree_remove(&io->ref_count_info, io->ref_count_root,
@@ -474,13 +473,15 @@ static int sm_disk_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 	return 0;
 }
 
-static int sm_disk_get_count(struct dm_space_map *sm, dm_block_t b, uint32_t *result)
+static int sm_disk_get_count(struct dm_space_map *sm, dm_block_t b,
+			     uint32_t *result)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 	return ll_lookup(&smd->ll, b, result);
 }
 
-static int sm_disk_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
+static int sm_disk_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b,
+					  int *result)
 {
 	int r;
 	uint32_t count;
@@ -492,7 +493,8 @@ static int sm_disk_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b,
 	return count > 1;
 }
 
-static int sm_disk_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t count)
+static int sm_disk_set_count(struct dm_space_map *sm, dm_block_t b,
+			     uint32_t count)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 	return ll_insert(&smd->ll, b, count);

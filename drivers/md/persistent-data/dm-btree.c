@@ -21,7 +21,7 @@ static int bsearch(struct node *n, uint64_t key, int want_hi)
 {
 	int lo = -1, hi = __le32_to_cpu(n->header.nr_entries);
 
-	while(hi - lo > 1) {
+	while (hi - lo > 1) {
 		int mid = lo + ((hi - lo) / 2);
 		uint64_t mid_key = __le64_to_cpu(n->keys[mid]);
 
@@ -286,7 +286,7 @@ static int btree_lookup_raw(struct ro_spine *s, dm_block_t block, uint64_t key,
 		if (flags & INTERNAL_NODE)
 			block = value64(ro_node(s), i);
 
-        } while (!(flags & LEAF_NODE));
+	} while (!(flags & LEAF_NODE));
 
 	*result_key = __le64_to_cpu(ro_node(s)->keys[i]);
 	memcpy(v, value_ptr(ro_node(s), i, value_size), value_size);
@@ -383,7 +383,7 @@ int dm_btree_lookup_ge(struct dm_btree_info *info, dm_block_t root,
 {
 	unsigned level, last_level = info->levels - 1;
 	int r;
-        __le64 internal_value;
+	__le64 internal_value;
 	struct ro_spine spine;
 
 	init_ro_spine(&spine, info);
@@ -423,27 +423,27 @@ EXPORT_SYMBOL_GPL(dm_btree_lookup_ge);
  * another child.
  *
  * Before:
- *        +--------+
- *        | Parent |
- *        +--------+
+ *	  +--------+
+ *	  | Parent |
+ *	  +--------+
  *	     |
- *           v
- *      +----------+
+ *	     v
+ *	+----------+
  *	| A ++++++ |
  *	+----------+
  *
  *
  * After:
- *              +--------+
- *       	| Parent |
- *	        +--------+
- *       	  |    	|
- *	          v     +------+
- *          +---------+	       |
- *          | A* +++  |	       v
- *          +---------+	  +-------+
- *		          | B +++ |
- *		          +-------+
+ *		+--------+
+ *		| Parent |
+ *		+--------+
+ *		  |	|
+ *		  v	+------+
+ *	    +---------+	       |
+ *	    | A* +++  |	       v
+ *	    +---------+	  +-------+
+ *			  | B +++ |
+ *			  +-------+
  *
  * Where A* is a shadow of A.
  */
@@ -511,21 +511,21 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
  *
  * Before:
  *	  +----------+
- *        | A ++++++ |
- *        +----------+
+ *	  | A ++++++ |
+ *	  +----------+
  *
  *
  * After:
- * 	+------------+
+ *	+------------+
  *	| A (shadow) |
  *	+------------+
- *          |   |
- *   +------+   +----+
- *   | 	   	     |
- *   v	 	     v
+ *	    |	|
+ *   +------+	+----+
+ *   |		     |
+ *   v		     v
  * +-------+	 +-------+
  * | B +++ |	 | C +++ |
- * +-------+ 	 +-------+
+ * +-------+	 +-------+
  */
 static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 {
@@ -570,7 +570,8 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	size = __le32_to_cpu(p->header.flags) & INTERNAL_NODE ?
 		sizeof(__le64) : s->info->value_type.size;
 	memcpy(value_ptr(l, 0, size), value_ptr(p, 0, size), nr_left * size);
-	memcpy(value_ptr(r, 0, size), value_ptr(p, nr_left, size), nr_right * size);
+	memcpy(value_ptr(r, 0, size), value_ptr(p, nr_left, size),
+	       nr_right * size);
 
 	/* new_parent should just point to l and r now */
 	p->header.flags = __cpu_to_le32(INTERNAL_NODE);
@@ -584,7 +585,10 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	p->keys[1] = r->keys[0];
 	memcpy(value_ptr(p, 1, sizeof(__le64)), &val, sizeof(__le64));
 
-	/* rejig the spine.  This is ugly, since it knows too much about the spine */
+	/*
+	 * rejig the spine.  This is ugly, since it knows too
+	 * much about the spine
+	 */
 	if (s->nodes[0] != new_parent) {
 		bn_unlock(s->info, s->nodes[0]);
 		s->nodes[0] = new_parent;
@@ -605,7 +609,7 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 			    struct dm_btree_value_type *vt,
 			    uint64_t key, unsigned *index)
 {
-        int r, i = *index, inc, top = 1;
+	int r, i = *index, inc, top = 1;
 	struct node *node;
 
 	for (;;) {
@@ -659,7 +663,7 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 
 		root = value64(node, i);
 		top = 0;
-        }
+	}
 
 	if (i < 0 || __le64_to_cpu(node->keys[i]) != key)
 		i++;

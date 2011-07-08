@@ -10,10 +10,10 @@ stored on the same data volume.  Simplifying administration and
 allowing sharing of data between volumes (thus reducing disk usage).
 
 Another big feature is support for arbitrary depth of recursive
-snapshots (snapshots of snapshots of snapshots ...).  Previous
-implementations of snapshots did this by chaining together lookup
-tables, and so performance was O(depth).  This implementation uses a
-single data structure so we won't get this degradation with depth
+snapshots (snapshots of snapshots of snapshots ...).  The previous
+implementation of snapshots did this by chaining together lookup
+tables, and so performance was O(depth).  This new implementation uses
+a single data structure so we won't get this degradation with depth
 (fragmentation may be an issue however in some scenarios).
 
 Metadata is stored on a separate device from data, this gives the

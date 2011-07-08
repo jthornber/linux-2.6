@@ -25,7 +25,7 @@ struct index_entry {
 	__le64 blocknr;
 	__le32 nr_free;
 	__le32 none_free_before;
-}  __attribute__ ((packed));
+} __packed;
 
 
 #define MAX_METADATA_BITMAPS 255
@@ -35,7 +35,7 @@ struct metadata_index {
 	__le64 blocknr;
 
 	struct index_entry index[MAX_METADATA_BITMAPS];
-} __attribute__ ((packed));
+} __packed;
 
 struct ll_disk {
 	struct dm_transaction_manager *tm;
@@ -46,7 +46,8 @@ struct ll_disk {
 	uint32_t entries_per_block;
 	dm_block_t nr_blocks;
 	dm_block_t nr_allocated;
-	dm_block_t bitmap_root;	/* sometimes a btree root, sometimes a simple index */
+	dm_block_t bitmap_root;	/* sometimes a btree root,
+				 * sometimes a simple index */
 	dm_block_t ref_count_root;
 
 	struct metadata_index mi;
@@ -57,7 +58,7 @@ struct sm_root {
 	__le64 nr_allocated;
 	__le64 bitmap_root;
 	__le64 ref_count_root;
-} __attribute__ ((packed));
+} __packed;
 
 #define ENTRIES_PER_BYTE 4
 
@@ -65,7 +66,7 @@ struct bitmap_header {
 	__le32 csum;
 	__le32 not_used;
 	__le64 blocknr;
-} __attribute__ ((packed));
+} __packed;
 
 /*
  * These bitops work on a blocks worth of bits.

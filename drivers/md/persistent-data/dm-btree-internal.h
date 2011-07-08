@@ -14,8 +14,8 @@
  */
 
 enum node_flags {
-        INTERNAL_NODE = 1,
-        LEAF_NODE = 1 << 1
+	INTERNAL_NODE = 1,
+	LEAF_NODE = 1 << 1
 };
 
 /*
@@ -29,12 +29,12 @@ struct node_header {
 
 	__le32 nr_entries;
 	__le32 max_entries;
-} __attribute__((packed));
+} __packed;
 
 struct node {
 	struct node_header header;
 	__le64 keys[0];
-} __attribute__((packed));
+} __packed;
 
 
 /*
@@ -46,8 +46,9 @@ struct node {
 void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt);
 
-// FIXME: I don't like the bn_ prefix for these, refers to an old struct block_node
-int bn_read_lock(struct dm_btree_info *info, dm_block_t b, struct dm_block **result);
+/* FIXME: change bn_ prefix for these, refers to an old struct block_node */
+int bn_read_lock(struct dm_btree_info *info, dm_block_t b,
+		 struct dm_block **result);
 int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 	      struct dm_btree_value_type *vt, struct dm_block **result, int *inc);
 int bn_new_block(struct dm_btree_info *info, struct dm_block **result);

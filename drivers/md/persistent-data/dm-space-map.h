@@ -10,7 +10,6 @@
  * is referenced.  It needs to be persisted to disk as part of the
  * transaction.
  */
-
 struct dm_space_map {
 	void (*destroy)(struct dm_space_map *sm);
 
@@ -20,7 +19,8 @@ struct dm_space_map {
 	int (*get_nr_free)(struct dm_space_map *sm, dm_block_t *count);
 
 	int (*get_count)(struct dm_space_map *sm, dm_block_t b, uint32_t *result);
-	int (*count_is_more_than_one)(struct dm_space_map *sm, dm_block_t b, int *result);
+	int (*count_is_more_than_one)(struct dm_space_map *sm, dm_block_t b,
+				      int *result);
 	int (*set_count)(struct dm_space_map *sm, dm_block_t b, uint32_t count);
 
 	int (*commit)(struct dm_space_map *sm);
@@ -28,7 +28,8 @@ struct dm_space_map {
 	int (*inc_block)(struct dm_space_map *sm, dm_block_t b);
 	int (*dec_block)(struct dm_space_map *sm, dm_block_t b);
 
-	int (*new_block)(struct dm_space_map *sm, dm_block_t *b); /* increments the returned block */
+	/* new_block will increment the returned block */
+	int (*new_block)(struct dm_space_map *sm, dm_block_t *b);
 
 	/*
 	 * The root contains all the information needed to persist the
@@ -67,7 +68,8 @@ static inline int dm_sm_get_count(struct dm_space_map *sm, dm_block_t b,
 	return sm->get_count(sm, b, result);
 }
 
-static inline int dm_sm_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b, int *result)
+static inline int dm_sm_count_is_more_than_one(struct dm_space_map *sm,
+					       dm_block_t b, int *result)
 {
 	return sm->count_is_more_than_one(sm, b, result);
 }

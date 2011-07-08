@@ -16,7 +16,7 @@ enum dm_block_state {
 	BS_READING,
 	BS_WRITING,
 	BS_READ_LOCKED,
-	BS_READ_LOCKED_DIRTY, 	/* block was dirty before it was read locked */
+	BS_READ_LOCKED_DIRTY,	/* block was dirty before it was read locked */
 	BS_WRITE_LOCKED,
 	BS_DIRTY,
 	BS_ERROR
@@ -127,9 +127,9 @@ static void __insert_block(struct dm_block_manager *bm, struct dm_block *b)
  * Study this to understand the state machine.
  *
  * Alternatively install graphviz and run:
- *     grep DOT dm-block-manager.c | grep -v '  ' |
- *       sed -e 's/.*DOT: //' -e 's/\*\///' |
- *       dot -Tps -o states.ps
+ *     grep DOT dm-block-manager.c | grep -v '	' |
+ *	 sed -e 's/.*DOT: //' -e 's/\*\///' |
+ *	 dot -Tps -o states.ps
  *
  * Assumes bm->lock is held.
  *--------------------------------------------------------------*/
@@ -353,7 +353,7 @@ static void __clear_errors(struct dm_block_manager *bm)
  * Waiting
  *--------------------------------------------------------------*/
 #ifdef __CHECKER__
-# define __retains(x)	__attribute__((context(x,1,1)))
+# define __retains(x)	__attribute__((context(x, 1, 1)))
 #else
 # define __retains(x)
 #endif
@@ -368,30 +368,30 @@ static inline void unplug(void) {}
 #endif
 
 #define __wait_block(wq, lock, flags, sched_fn, condition)	\
-do {   								\
-       	int ret = 0;  						\
-       	       	       	    					\
-	DEFINE_WAIT(wait);     	    				\
-       	add_wait_queue(wq, &wait);  				\
-       	       	      						\
-       	for (;;) {    						\
- 		prepare_to_wait(wq, &wait, TASK_INTERRUPTIBLE); \
- 		if (condition)  				\
- 		      	break;         	       	       		\
-       	       	       	       			      		\
-		spin_unlock_irqrestore(lock, flags);  		\
-		if (signal_pending(current)) {  		\
-		      	ret = -ERESTARTSYS;    	       	 	\
-		      	spin_lock_irqsave(lock, flags);  	\
-		       	break;  				\
-       	       	}     						\
-       	       	       	     					\
-		sched_fn();    	       	       	 		\
-	       	spin_lock_irqsave(lock, flags);  		\
-       	}  							\
-       	       	       	       	  				\
-	finish_wait(wq, &wait);        	       	       	       	\
-	return ret;   						\
+do {								\
+	int ret = 0;						\
+								\
+	DEFINE_WAIT(wait);					\
+	add_wait_queue(wq, &wait);				\
+								\
+	for (;;) {						\
+		prepare_to_wait(wq, &wait, TASK_INTERRUPTIBLE); \
+		if (condition)					\
+			break;					\
+								\
+		spin_unlock_irqrestore(lock, flags);		\
+		if (signal_pending(current)) {			\
+			ret = -ERESTARTSYS;			\
+			spin_lock_irqsave(lock, flags);		\
+			break;					\
+		}						\
+								\
+		sched_fn();					\
+		spin_lock_irqsave(lock, flags);			\
+	}							\
+								\
+	finish_wait(wq, &wait);					\
+	return ret;						\
 } while (0)
 
 static int __wait_io(struct dm_block *b, unsigned long *flags)
@@ -492,7 +492,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		/* did the io succeed ? */
 		if (b->state == BS_ERROR) {
 			/* Since this is a read that has failed we can
-			 * clear the error immediately.  Failed writes are
+			 * clear the error immediately.	 Failed writes are
 			 * revealed during a commit.
 			 */
 			__transition(b, BS_EMPTY);
@@ -663,7 +663,8 @@ dm_block_manager_create(struct block_device *bdev,
 	for (i = 0; i < hash_size; i++)
 		INIT_HLIST_HEAD(bm->buckets + i);
 
-	if (!(bm->io = dm_io_client_create())) {
+	bm->io = dm_io_client_create();
+	if (!bm->io) {
 		kfree(bm);
 		return NULL;
 	}

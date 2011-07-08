@@ -146,7 +146,8 @@ static int init_child(struct dm_btree_info *info, struct node *parent,
 	result->index = index;
 	root = value64(parent, index);
 
-	r = dm_tm_shadow_block(info->tm, root, &btree_node_validator, &result->block, &inc);
+	r = dm_tm_shadow_block(info->tm, root, &btree_node_validator,
+			       &result->block, &inc);
 	if (r)
 		return r;
 

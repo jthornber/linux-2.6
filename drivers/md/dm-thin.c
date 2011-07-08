@@ -169,7 +169,8 @@ static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
 	return (uint32_t) (hash & prison->hash_mask);
 }
 
-static struct cell *__search_bucket(struct hlist_head *bucket, struct cell_key *key)
+static struct cell *__search_bucket(struct hlist_head *bucket,
+				    struct cell_key *key)
 {
 	struct cell *cell;
 	struct hlist_node *tmp;
@@ -357,7 +358,8 @@ static unsigned ds_next(unsigned index)
 
 static void __sweep(struct deferred_set *ds, struct list_head *head)
 {
-	while ((ds->sweeper != ds->current_entry) && !ds->entries[ds->sweeper].count) {
+	while ((ds->sweeper != ds->current_entry) &&
+	       !ds->entries[ds->sweeper].count) {
 		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
 		ds->sweeper = ds_next(ds->sweeper);
 	}
@@ -1259,7 +1261,8 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 
 	pool->ti = ti;
-	pool->low_water_mark = dm_div_up(pt->low_water_mark, pool->sectors_per_block);
+	pool->low_water_mark = dm_div_up(pt->low_water_mark,
+					 pool->sectors_per_block);
 	pool->zero_new_blocks = pt->zero_new_blocks;
 	return 0;
 }
@@ -1400,13 +1403,17 @@ static struct pool *pool_create(const char *metadata_path,
 	pool->triggered = 0;
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
-	pool->mapping_pool = mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping)); /* FIXME: magic numbers, error handling */
+	/* FIXME: magic number */
+	pool->mapping_pool =
+		mempool_create_kmalloc_pool(1024, sizeof(struct new_mapping));
 	if (!pool->mapping_pool) {
 		*error = "Error creating pool's mapping mempool";
 		err_p = ERR_PTR(-ENOMEM);
 		goto bad_mapping_pool;
 	}
-	pool->endio_hook_pool = mempool_create_kmalloc_pool(10240, sizeof(struct endio_hook)); /* FIXME: magic numbers, error handling */
+	/* FIXME: magic number */
+	pool->endio_hook_pool =
+		mempool_create_kmalloc_pool(10240, sizeof(struct endio_hook));
 	if (!pool->endio_hook_pool) {
 		*error = "Error creating pool's endio_hook mempool";
 		err_p = ERR_PTR(-ENOMEM);
@@ -1656,7 +1663,7 @@ static int pool_preresume(struct dm_target *ti)
 	}
 
 	if (data_size < sb_data_size) {
-		DMERR("pool target too small was %llu blocks, expected %llu blocks\n",
+		DMERR("pool target too small, is %llu blocks (expected %llu)",
 		      data_size, sb_data_size);
 		return -EINVAL;
 
@@ -2081,7 +2088,8 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 
 			DMEMIT("%llu ", mapped * mc->pool->sectors_per_block);
 			if (r)
-				DMEMIT("%llu", ((highest + 1) * mc->pool->sectors_per_block) - 1);
+				DMEMIT("%llu", ((highest + 1) *
+						mc->pool->sectors_per_block) - 1);
 			else
 				DMEMIT("-");
 			break;
@@ -2099,12 +2107,11 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	return 0;
 }
 
-/* bvec merge method. */
 static int thin_bvec_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 			   struct bio_vec *biovec, int max_size)
 {
 	struct thin_c *mc = ti->private;
-	struct pool * pool = mc->pool;
+	struct pool *pool = mc->pool;
 
 	/*
 	 * We fib here, because the space may not have been provisioned yet

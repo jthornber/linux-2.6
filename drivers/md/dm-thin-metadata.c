@@ -57,14 +57,14 @@ struct thin_super_block {
 	__le32 compat_flags;
 	__le32 compat_ro_flags;
 	__le32 incompat_flags;
-} __attribute__ ((packed));
+} __packed;
 
 struct device_details {
 	__le64 mapped_blocks;
 	__le64 transaction_id;	/* when created */
 	__le32 creation_time;
 	__le32 snapshotted_time;
-} __attribute__ ((packed));
+} __packed;
 
 struct dm_thin_metadata {
 	struct hlist_node hash;
@@ -178,7 +178,7 @@ static struct dm_block_validator sb_validator_ = {
 
 static uint64_t pack_dm_block_time(dm_block_t b, uint32_t t)
 {
-	return ((b << 24) | t);
+	return (b << 24) | t;
 }
 
 static void unpack_dm_block_time(uint64_t v, dm_block_t *b, uint32_t *t)
@@ -324,9 +324,9 @@ static struct dm_thin_metadata *alloc_mmd(struct dm_block_manager *bm,
 		size_t space_map_root_offset =
 			offsetof(struct thin_super_block, metadata_space_map_root);
 
-		r = dm_tm_open_with_sm(bm, THIN_SUPERBLOCK_LOCATION, &sb_validator_,
-				       space_map_root_offset, SPACE_MAP_ROOT_SIZE,
-				       &tm, &sm, &sblock);
+		r = dm_tm_open_with_sm(bm, THIN_SUPERBLOCK_LOCATION,
+				       &sb_validator_, space_map_root_offset,
+				       SPACE_MAP_ROOT_SIZE, &tm, &sm, &sblock);
 		if (r < 0) {
 			DMERR("tm_open_with_sm failed");
 			dm_block_manager_destroy(bm);
@@ -424,7 +424,8 @@ static int begin_transaction(struct dm_thin_metadata *mmd)
 	u32 features;
 	struct thin_super_block *sb;
 
-	BUG_ON(mmd->sblock);
+	/* dm_thin_metadata_commit() resets mmd->sblock */
+	WARN_ON(mmd->sblock);
 	mmd->need_commit = 0;
 	/* superblock is unlocked via dm_tm_commit() */
 	r = dm_bm_write_lock(mmd->bm, THIN_SUPERBLOCK_LOCATION,
@@ -801,7 +802,8 @@ static int __delete_device(struct dm_thin_metadata *mmd,
 
 	list_del(&msd->list);
 	kfree(msd);
-	r = dm_btree_remove(&mmd->details_info, mmd->details_root, &key, &mmd->details_root);
+	r = dm_btree_remove(&mmd->details_info, mmd->details_root,
+			    &key, &mmd->details_root);
 	if (r)
 		return r;
 
@@ -828,7 +830,8 @@ int dm_thin_metadata_delete_device(struct dm_thin_metadata *mmd,
 static int __trim_thin_dev(struct dm_ms_device *msd, sector_t new_size)
 {
 	struct dm_thin_metadata *mmd = msd->mmd;
-	uint64_t key[2] = { msd->id, new_size - 1 }; /* FIXME: convert new size to blocks */
+	/* FIXME: convert new size to blocks */
+	uint64_t key[2] = { msd->id, new_size - 1 };
 
 	msd->changed = 1;
 
@@ -857,7 +860,7 @@ int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *mmd,
 		__close_device(msd);
 	}
 
-	// FIXME: update mapped_blocks
+	/* FIXME: update mapped_blocks */
 
 	up_write(&mmd->root_lock);
 
