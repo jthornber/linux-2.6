@@ -1846,10 +1846,13 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	} else
 		return -EINVAL;
 
-	r = dm_thin_metadata_commit(pool->mmd);
-	if (r)
-		DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
-		      __func__, r);
+	if (!r) {
+		r = dm_thin_metadata_commit(pool->mmd);
+		if (r)
+			DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+			      __func__, r);
+	}
+
 	return r;
 }
 
