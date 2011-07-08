@@ -644,11 +644,12 @@ static int __create_thin(struct dm_thin_metadata *mmd,
 	int r;
 	dm_block_t dev_root;
 	uint64_t key = dev;
-	__le64 value;
+	struct device_details detail;
 	struct dm_ms_device *msd;
+	__le64 value;
 
 	r = dm_btree_lookup(&mmd->details_info, mmd->details_root,
-			    &key, &value);
+			    &key, &detail);
 	if (!r)
 		return -EEXIST;
 
@@ -718,11 +719,12 @@ static int __create_snap(struct dm_thin_metadata *mmd,
 	dm_block_t origin_root, snap_root;
 	uint64_t key = origin, dev_key = dev;
 	struct dm_ms_device *msd;
+	struct device_details detail;
 	__le64 value;
 
 	/* check this device is unused */
 	r = dm_btree_lookup(&mmd->details_info, mmd->details_root,
-			    &dev_key, &value);
+			    &dev_key, &detail);
 	if (!r) {
 		printk(KERN_ALERT "details already in btree\n");
 		return -EEXIST;
@@ -1214,13 +1216,15 @@ int dm_thin_metadata_get_mapped_count(struct dm_ms_device *msd,
 static int __highest_block(struct dm_ms_device *msd, dm_block_t *result)
 {
 	int r;
+	__le64 value;
 	dm_block_t thin_root;
 	struct dm_thin_metadata *mmd = msd->mmd;
 
-	r = dm_btree_lookup(&mmd->tl_info, mmd->root, &msd->id, &thin_root);
+	r = dm_btree_lookup(&mmd->tl_info, mmd->root, &msd->id, &value);
 	if (r)
 		return r;
 
+	thin_root = __le64_to_cpu(value);
 	return dm_btree_find_highest_key(&mmd->bl_info, thin_root, result);
 }
 
