@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [14/17]
+** Kernel [14/16]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -8,7 +8,6 @@
   - [X] Test and complete pool resizing work 				:ejt:
   - [X] Test device deletion					       :mike:
   - [X] Test creation/removal of large numbers of devices	       :mike:
-  - [ ] Check reference counts are correct somehow.			:ejt:
   - [X] wire up btree value_types					:ejt:
   - [X] printks						       :mike:
         These need an audit.  Spurious ones removing, most converting to
@@ -19,10 +18,11 @@
   - [X] mapped blocks count isn't being set				:ejt:
   - [X] extend method for space maps (needed for resizing)              :ejt:
   - [X] rename multisnap -> thin. Rebranding exercise           :ejt:, :mike:
-  - [ ] make sure retry io is errored if the thin dev is deactivated    :ejt:
-  - [ ] make sure retry io is requeued with dm if the thin dev is suspended  :ejt:
   - [X] crc metadata sm index                                           :ejt:
   - [X] return zeroes for unprovisioned reads                           :ejt:
+  - [ ] Check reference counts are correct somehow.			:ejt:
+  - [ ] some work needs to be done to verify tearing down thin devices
+        when the pool has run out of space is done cleanly              :ejt:
 
 ** Userland tools [0/5]
 
