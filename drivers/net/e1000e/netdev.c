@@ -49,6 +49,7 @@
 #include <linux/pm_qos_params.h>
 #include <linux/pm_runtime.h>
 #include <linux/aer.h>
+#include <linux/prefetch.h>
 
 #include "e1000.h"
 
@@ -5360,7 +5361,7 @@ static void e1000_complete_shutdown(struct pci_dev *pdev, bool sleep,
 #ifdef CONFIG_PCIEASPM
 static void __e1000e_disable_aspm(struct pci_dev *pdev, u16 state)
 {
-	pci_disable_link_state(pdev, state);
+	pci_disable_link_state_locked(pdev, state);
 }
 #else
 static void __e1000e_disable_aspm(struct pci_dev *pdev, u16 state)

@@ -21,6 +21,7 @@
 #include <net/ipv6.h>
 #include <net/ip6_checksum.h>
 #include <linux/firmware.h>
+#include <linux/prefetch.h>
 #include "bnx2x_cmn.h"
 
 #include "bnx2x_init.h"
@@ -130,7 +131,7 @@ static u16 bnx2x_free_tx_pkt(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 
 	/* release skb */
 	WARN_ON(!skb);
-	dev_kfree_skb(skb);
+	dev_kfree_skb_any(skb);
 	tx_buf->first_bd = 0;
 	tx_buf->skb = NULL;
 
@@ -464,7 +465,7 @@ static void bnx2x_tpa_stop(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 		} else {
 			DP(NETIF_MSG_RX_STATUS, "Failed to allocate new pages"
 			   " - dropping packet!\n");
-			dev_kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 		}
 
 
@@ -2674,7 +2675,7 @@ alloc_mem_err:
 	 * Min size diferent for TPA and non-TPA queues
 	 */
 	if (ring_size < (fp->disable_tpa ?
-				MIN_RX_SIZE_TPA : MIN_RX_SIZE_NONTPA)) {
+				MIN_RX_SIZE_NONTPA : MIN_RX_SIZE_TPA)) {
 			/* release memory allocated for this queue */
 			bnx2x_free_fp_mem_at(bp, index);
 			return -ENOMEM;

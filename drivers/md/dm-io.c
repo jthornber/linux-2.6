@@ -19,6 +19,8 @@
 #define DM_MSG_PREFIX "io"
 
 #define DM_IO_MAX_REGIONS	BITS_PER_LONG
+#define MIN_IOS		16
+#define MIN_BIOS	16
 
 struct dm_io_client {
 	mempool_t *pool;
@@ -51,11 +53,12 @@ struct dm_io_client *dm_io_client_create(void)
 	if (!client)
 		return ERR_PTR(-ENOMEM);
 
-	client->pool = mempool_create_slab_pool(1, _dm_io_cache);
+	client->pool = mempool_create_slab_pool(MIN_IOS, _dm_io_cache);
 	if (!client->pool)
 		goto bad;
 
-	client->bios = bioset_create(1, 0);
+	client->bios = bioset_create(MIN_BIOS, 0);
+
 	if (!client->bios)
 		goto bad;
 

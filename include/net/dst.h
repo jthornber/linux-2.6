@@ -77,6 +77,7 @@ struct dst_entry {
 #define DST_NOPOLICY		0x0004
 #define DST_NOHASH		0x0008
 #define DST_NOCACHE		0x0010
+#define DST_NOCOUNT		0x0020
 	union {
 		struct dst_entry	*next;
 		struct rtable __rcu	*rt_next;
@@ -110,6 +111,8 @@ static inline void dst_destroy_metrics_generic(struct dst_entry *dst)
 static inline u32 *dst_metrics_write_ptr(struct dst_entry *dst)
 {
 	unsigned long p = dst->_metrics;
+
+	BUG_ON(!p);
 
 	if (p & DST_METRICS_READ_ONLY)
 		return dst->ops->cow_metrics(dst, p);

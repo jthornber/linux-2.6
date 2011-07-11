@@ -190,7 +190,8 @@ void *dst_alloc(struct dst_ops *ops, struct net_device *dev,
 	dst->lastuse = jiffies;
 	dst->flags = flags;
 	dst->next = NULL;
-	dst_entries_add(ops, 1);
+	if (!(flags & DST_NOCOUNT))
+		dst_entries_add(ops, 1);
 	return dst;
 }
 EXPORT_SYMBOL(dst_alloc);
@@ -243,7 +244,8 @@ again:
 		neigh_release(neigh);
 	}
 
-	dst_entries_add(dst->ops, -1);
+	if (!(dst->flags & DST_NOCOUNT))
+		dst_entries_add(dst->ops, -1);
 
 	if (dst->ops->destroy)
 		dst->ops->destroy(dst);
@@ -315,7 +317,7 @@ void __dst_destroy_metrics_generic(struct dst_entry *dst, unsigned long old)
 {
 	unsigned long prev, new;
 
-	new = (unsigned long) dst_default_metrics;
+	new = ((unsigned long) dst_default_metrics) | DST_METRICS_READ_ONLY;
 	prev = cmpxchg(&dst->_metrics, old, new);
 	if (prev == old)
 		kfree(__DST_METRICS_PTR(old));

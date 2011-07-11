@@ -29,10 +29,8 @@
 
 #define SUB_JOB_SIZE	128
 #define SPLIT_COUNT	8
-#define MIN_JOBS	1
-#define RESERVE_PAGES	DIV_ROUND_UP(SUB_JOB_SIZE << SECTOR_SHIFT, PAGE_SIZE)
-
-static struct page_list zero_page_list;
+#define MIN_JOBS	8
+#define RESERVE_PAGES	(DIV_ROUND_UP(SUB_JOB_SIZE << SECTOR_SHIFT, PAGE_SIZE))
 
 /*-----------------------------------------------------------------
  * Each kcopyd client has its own little pool of preallocated
@@ -40,8 +38,8 @@ static struct page_list zero_page_list;
  *---------------------------------------------------------------*/
 struct dm_kcopyd_client {
 	struct page_list *pages;
-	unsigned int nr_pages;
-	unsigned int nr_free_pages;
+	unsigned nr_reserved_pages;
+	unsigned nr_free_pages;
 
 	struct dm_io_client *io_client;
 
@@ -68,11 +66,16 @@ struct dm_kcopyd_client {
 	struct list_head pages_jobs;
 };
 
+static struct page_list zero_page_list;
+
 static void wake(struct dm_kcopyd_client *kc)
 {
 	queue_work(kc->kcopyd_wq, &kc->kcopyd_work);
 }
 
+/*
+ * Obtain one page for the use of kcopyd.
+ */
 static struct page_list *alloc_pl(gfp_t gfp)
 {
 	struct page_list *pl;
@@ -96,17 +99,25 @@ static void free_pl(struct page_list *pl)
 	kfree(pl);
 }
 
+/*
+ * Add the provided pages to a client's free page list, releasing
+ * back to the system any beyond the reserved_pages limit.
+ */
 static void kcopyd_put_pages(struct dm_kcopyd_client *kc, struct page_list *pl)
 {
+	struct page_list *next;
+
 	do {
-		struct page_list *next = pl->next;
-		if (kc->nr_free_pages < kc->nr_pages) {
+		next = pl->next;
+
+		if (kc->nr_free_pages >= kc->nr_reserved_pages)
+			free_pl(pl);
+		else {
 			pl->next = kc->pages;
 			kc->pages = pl;
 			kc->nr_free_pages++;
-		} else {
-			free_pl(pl);
 		}
+
 		pl = next;
 	} while (pl);
 }
@@ -117,21 +128,24 @@ static int kcopyd_get_pages(struct dm_kcopyd_client *kc,
 	struct page_list *pl;
 
 	*pages = NULL;
+
 	do {
 		pl = alloc_pl(__GFP_NOWARN | __GFP_NORETRY);
 		if (unlikely(!pl)) {
+			/* Use reserved pages */
 			pl = kc->pages;
 			if (unlikely(!pl))
-				goto not_enough_memory;
+				goto out_of_memory;
 			kc->pages = pl->next;
 			kc->nr_free_pages--;
 		}
 		pl->next = *pages;
 		*pages = pl;
 	} while (--nr);
+
 	return 0;
 
-not_enough_memory:
+out_of_memory:
 	if (*pages)
 		kcopyd_put_pages(kc, *pages);
 	return -ENOMEM;
@@ -151,12 +165,15 @@ static void drop_pages(struct page_list *pl)
 	}
 }
 
-static int client_alloc_pages(struct dm_kcopyd_client *kc, unsigned int nr)
+/*
+ * Allocate and reserve nr_pages for the use of a specific client.
+ */
+static int client_reserve_pages(struct dm_kcopyd_client *kc, unsigned nr_pages)
 {
-	unsigned int i;
+	unsigned i;
 	struct page_list *pl = NULL, *next;
 
-	for (i = 0; i < nr; i++) {
+	for (i = 0; i < nr_pages; i++) {
 		next = alloc_pl(GFP_KERNEL);
 		if (!next) {
 			if (pl)
@@ -167,17 +184,18 @@ static int client_alloc_pages(struct dm_kcopyd_client *kc, unsigned int nr)
 		pl = next;
 	}
 
-	kc->nr_pages += nr;
+	kc->nr_reserved_pages += nr_pages;
 	kcopyd_put_pages(kc, pl);
+
 	return 0;
 }
 
 static void client_free_pages(struct dm_kcopyd_client *kc)
 {
-	BUG_ON(kc->nr_free_pages != kc->nr_pages);
+	BUG_ON(kc->nr_free_pages != kc->nr_reserved_pages);
 	drop_pages(kc->pages);
 	kc->pages = NULL;
-	kc->nr_free_pages = kc->nr_pages = 0;
+	kc->nr_free_pages = kc->nr_reserved_pages = 0;
 }
 
 /*-----------------------------------------------------------------
@@ -311,11 +329,12 @@ static int run_complete_job(struct kcopyd_job *job)
 
 	if (job->pages && job->pages != &zero_page_list)
 		kcopyd_put_pages(kc, job->pages);
-
-	/* Do not free sub-jobs */
-	if (context != job)
+	/*
+	 * If this is the master job, the sub jobs have already
+	 * completed so we can free everything.
+	 */
+	if (job->master_job == job)
 		mempool_free(job, kc->job_pool);
-
 	fn(read_err, write_err, context);
 
 	if (atomic_dec_and_test(&kc->nr_jobs))
@@ -517,7 +536,6 @@ static void segment_complete(int read_err, unsigned long write_err,
 		int i;
 
 		*sub_job = *job;
-		sub_job->master_job = job;
 		sub_job->source.sector += progress;
 		sub_job->source.count = count;
 
@@ -547,19 +565,18 @@ static void segment_complete(int read_err, unsigned long write_err,
 }
 
 /*
- * Create some little jobs that will do the move between
- * them.
+ * Create some sub jobs to share the work between them.
  */
-static void split_job(struct kcopyd_job *job)
+static void split_job(struct kcopyd_job *master_job)
 {
 	int i;
 
-	atomic_inc(&job->kc->nr_jobs);
+	atomic_inc(&master_job->kc->nr_jobs);
 
-	atomic_set(&job->sub_jobs, SPLIT_COUNT);
+	atomic_set(&master_job->sub_jobs, SPLIT_COUNT);
 	for (i = 0; i < SPLIT_COUNT; i++) {
-		job[i + 1].master_job = job;
-		segment_complete(0, 0u, &job[i + 1]);
+		master_job[i + 1].master_job = master_job;
+		segment_complete(0, 0u, &master_job[i + 1]);
 	}
 }
 
@@ -570,7 +587,8 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 	struct kcopyd_job *job;
 
 	/*
-	 * Allocate a new job.
+	 * Allocate an array of jobs consisting of one master job
+	 * followed by SPLIT_COUNT sub jobs.
 	 */
 	job = mempool_alloc(kc->job_pool, GFP_NOIO);
 
@@ -581,21 +599,27 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 	job->flags = flags;
 	job->read_err = 0;
 	job->write_err = 0;
-	job->rw = READ;
-
-	job->source = *from;
 
 	job->num_dests = num_dests;
 	memcpy(&job->dests, dests, sizeof(*dests) * num_dests);
 
-	job->pages = NULL;
+	if (from) {
+		job->source = *from;
+		job->pages = NULL;
+		job->rw = READ;
+	} else {
+		memset(&job->source, 0, sizeof job->source);
+		job->source.count = job->dests[0].count;
+		job->pages = &zero_page_list;
+		job->rw = WRITE;
+	}
 
 	job->fn = fn;
 	job->context = context;
+	job->master_job = job;
 
 	if (job->source.count <= SUB_JOB_SIZE)
 		dispatch_job(job);
-
 	else {
 		mutex_init(&job->lock);
 		job->progress = 0;
@@ -607,46 +631,10 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 EXPORT_SYMBOL(dm_kcopyd_copy);
 
 int dm_kcopyd_zero(struct dm_kcopyd_client *kc,
-		   unsigned int num_dests, struct dm_io_region *dests,
-		   unsigned int flags, dm_kcopyd_notify_fn fn, void *context)
+		   unsigned num_dests, struct dm_io_region *dests,
+		   unsigned flags, dm_kcopyd_notify_fn fn, void *context)
 {
-	struct kcopyd_job *job;
-
-	/*
-	 * Allocate a new job.
-	 */
-	job = mempool_alloc(kc->job_pool, GFP_NOIO);
-
-	/*
-	 * set up for the write.
-	 */
-	job->kc = kc;
-	job->flags = flags;
-	job->read_err = 0;
-	job->write_err = 0;
-	job->rw = WRITE;
-
-	memset(&job->source, 0, sizeof job->source);
-	job->source.count = dests[0].count;
-
-	job->num_dests = num_dests;
-	memcpy(&job->dests, dests, sizeof(*dests) * num_dests);
-
-	job->pages = &zero_page_list;
-
-	job->fn = fn;
-	job->context = context;
-
-	if (job->source.count <= SUB_JOB_SIZE)
-		dispatch_job(job);
-
-	else {
-		mutex_init(&job->lock);
-		job->progress = 0;
-		split_job(job);
-	}
-
-	return 0;
+	return dm_kcopyd_copy(kc, NULL, num_dests, dests, flags, fn, context);
 }
 EXPORT_SYMBOL(dm_kcopyd_zero);
 
@@ -690,8 +678,8 @@ struct dm_kcopyd_client *dm_kcopyd_client_create(void)
 		goto bad_workqueue;
 
 	kc->pages = NULL;
-	kc->nr_pages = kc->nr_free_pages = 0;
-	r = client_alloc_pages(kc, RESERVE_PAGES);
+	kc->nr_reserved_pages = kc->nr_free_pages = 0;
+	r = client_reserve_pages(kc, RESERVE_PAGES);
 	if (r)
 		goto bad_client_pages;
 
