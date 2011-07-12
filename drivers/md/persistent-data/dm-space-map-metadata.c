@@ -225,7 +225,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 					    &dm_sm_bitmap_validator, &blk);
 			if (r < 0)
 				return r;
-			
+
 			bit_end = (i == index_end - 1) ?
 				end : ll->entries_per_block;
 

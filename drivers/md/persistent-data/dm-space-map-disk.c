@@ -314,7 +314,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 
 			bit_end = (i == index_end - 1) ?
 				mod64(end, io->entries_per_block) : io->entries_per_block;
-				
+
 			r = sm_find_free(dm_bitmap_data(blk),
 					 max((unsigned)begin,
 					     (unsigned)__le32_to_cpu(ie.none_free_before)),
