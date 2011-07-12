@@ -1503,14 +1503,9 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	if (!as->argc)
 		return 0;
 
-	r = dm_read_arg(_args, as, &argc, &ti->error);
+	r = dm_read_arg_group(_args, as, &argc, &ti->error);
 	if (r)
 		return -EINVAL;
-
-	if (argc > as->argc) {
-		ti->error = "not enough arguments for pool features";
-		return -EINVAL;
-	}
 
 	while (argc && !r) {
 		arg_name = dm_shift_arg(as);
