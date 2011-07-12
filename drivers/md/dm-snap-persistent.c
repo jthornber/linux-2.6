@@ -169,10 +169,9 @@ static int alloc_area(struct pstore *ps)
 	if (!ps->area)
 		goto err_area;
 
-	ps->zero_area = vmalloc(len);
+	ps->zero_area = vzalloc(len);
 	if (!ps->zero_area)
 		goto err_zero_area;
-	memset(ps->zero_area, 0, len);
 
 	ps->header_area = vmalloc(len);
 	if (!ps->header_area)
@@ -563,7 +562,7 @@ static int persistent_read_metadata(struct dm_exception_store *store,
 	ps->exceptions_per_area = (ps->store->chunk_size << SECTOR_SHIFT) /
 				  sizeof(struct disk_exception);
 	ps->callbacks = dm_vcalloc(ps->exceptions_per_area,
-			sizeof(*ps->callbacks));
+				   sizeof(*ps->callbacks));
 	if (!ps->callbacks)
 		return -ENOMEM;
 
@@ -670,7 +669,7 @@ static void persistent_commit_exception(struct dm_exception_store *store,
 	 * If we completely filled the current area, then wipe the next one.
 	 */
 	if ((ps->current_committed == ps->exceptions_per_area) &&
-	     zero_disk_area(ps, ps->current_area + 1))
+	    zero_disk_area(ps, ps->current_area + 1))
 		ps->valid = 0;
 
 	/*
@@ -753,7 +752,7 @@ static int persistent_commit_merge(struct dm_exception_store *store,
 	for (i = 0; i < nr_merged; i++)
 		clear_exception(ps, ps->current_committed - 1 - i);
 
-	r = area_io(ps, WRITE);
+	r = area_io(ps, WRITE_FLUSH_FUA);
 	if (r < 0)
 		return r;
 

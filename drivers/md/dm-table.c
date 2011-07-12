@@ -154,9 +154,7 @@ void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size)
 		return NULL;
 
 	size = nmemb * elem_size;
-	addr = vmalloc(size);
-	if (addr)
-		memset(addr, 0, size);
+	addr = vzalloc(size);
 
 	return addr;
 }
@@ -539,8 +537,7 @@ int dm_set_device_limits(struct dm_target *ti, struct dm_dev *dev,
 	 * If not we'll force DM to use PAGE_SIZE or
 	 * smaller I/O, just to be safe.
 	 */
-
-	if (q->merge_bvec_fn && !ti->type->merge)
+	if (dm_queue_merge_is_compulsory(q) && !ti->type->merge)
 		blk_limits_max_hw_sectors(limits,
 					  (unsigned int) (PAGE_SIZE >> 9));
 	return 0;
@@ -805,22 +802,36 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 /*
  * Target argument parsing helpers.
  */
-int dm_read_arg(struct dm_arg *arg, struct dm_arg_set *arg_set,
-		unsigned *value, char **error)
+static int validate_next_arg(struct dm_arg *arg, struct dm_arg_set *arg_set,
+			     unsigned *value, char **error, unsigned grouped)
 {
 	const char *arg_str = dm_shift_arg(arg_set);
 
 	if (!arg_str ||
 	    (sscanf(arg_str, "%u", value) != 1) ||
 	    (*value < arg->min) ||
-	    (*value > arg->max)) {
+	    (*value > arg->max) ||
+	    (grouped && arg_set->argc < *value)) {
 		*error = arg->error;
 		return -EINVAL;
 	}
 
 	return 0;
 }
+
+int dm_read_arg(struct dm_arg *arg, struct dm_arg_set *arg_set,
+		unsigned *value, char **error)
+{
+	return validate_next_arg(arg, arg_set, value, error, 0);
+}
 EXPORT_SYMBOL(dm_read_arg);
+
+int dm_read_arg_group(struct dm_arg *arg, struct dm_arg_set *arg_set,
+		      unsigned *value, char **error)
+{
+	return validate_next_arg(arg, arg_set, value, error, 1);
+}
+EXPORT_SYMBOL(dm_read_arg_group);
 
 const char *dm_shift_arg(struct dm_arg_set *as)
 {
@@ -937,12 +948,6 @@ struct dm_md_mempools *dm_table_get_md_mempools(struct dm_table *t)
 {
 	return t->mempools;
 }
-
-struct block_device *dm_table_get_bdev(struct dm_table *t)
-{
-	return dm_bdev(t->md);
-}
-EXPORT_SYMBOL(dm_table_get_bdev);
 
 static int setup_indexes(struct dm_table *t)
 {

@@ -43,13 +43,14 @@ struct raid_dev {
 /*
  * Flags for rs->print_flags field.
  */
-#define DMPF_DAEMON_SLEEP      0x1
-#define DMPF_MAX_WRITE_BEHIND  0x2
-#define DMPF_SYNC              0x4
-#define DMPF_NOSYNC            0x8
-#define DMPF_STRIPE_CACHE      0x10
-#define DMPF_MIN_RECOVERY_RATE 0x20
-#define DMPF_MAX_RECOVERY_RATE 0x40
+#define DMPF_SYNC              0x1
+#define DMPF_NOSYNC            0x2
+#define DMPF_REBUILD           0x4
+#define DMPF_DAEMON_SLEEP      0x8
+#define DMPF_MIN_RECOVERY_RATE 0x10
+#define DMPF_MAX_RECOVERY_RATE 0x20
+#define DMPF_MAX_WRITE_BEHIND  0x40
+#define DMPF_STRIPE_CACHE      0x80
 
 struct raid_set {
 	struct dm_target *ti;
@@ -311,6 +312,7 @@ static int parse_raid_params(struct raid_set *rs, char **argv,
 			}
 			clear_bit(In_sync, &rs->dev[value].rdev.flags);
 			rs->dev[value].rdev.recovery_offset = 0;
+			rs->print_flags |= DMPF_REBUILD;
 		} else if (!strcmp(key, "max_write_behind")) {
 			rs->print_flags |= DMPF_MAX_WRITE_BEHIND;
 
@@ -547,9 +549,10 @@ static int raid_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_TABLE:
 		/* The string you would use to construct this array */
 		for (i = 0; i < rs->md.raid_disks; i++)
-			if (rs->dev[i].data_dev &&
+			if ((rs->print_flags & DMPF_REBUILD) &&
+			    rs->dev[i].data_dev &&
 			    !test_bit(In_sync, &rs->dev[i].rdev.flags))
-				raid_param_cnt++; /* for rebuilds */
+				raid_param_cnt += 2; /* for rebuilds */
 
 		raid_param_cnt += (hweight64(rs->print_flags) * 2);
 		if (rs->print_flags & (DMPF_SYNC | DMPF_NOSYNC))
@@ -565,7 +568,8 @@ static int raid_status(struct dm_target *ti, status_type_t type,
 			DMEMIT(" nosync");
 
 		for (i = 0; i < rs->md.raid_disks; i++)
-			if (rs->dev[i].data_dev &&
+			if ((rs->print_flags & DMPF_REBUILD) &&
+			    rs->dev[i].data_dev &&
 			    !test_bit(In_sync, &rs->dev[i].rdev.flags))
 				DMEMIT(" rebuild %u", i);
 

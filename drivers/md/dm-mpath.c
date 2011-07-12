@@ -22,7 +22,6 @@
 #include <asm/atomic.h>
 
 #define DM_MSG_PREFIX "multipath"
-#define MESG_STR(x) x, sizeof(x)
 #define DM_PG_INIT_DELAY_MSECS 2000
 #define DM_PG_INIT_DELAY_DEFAULT ((unsigned) -1)
 
@@ -522,15 +521,9 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 		return -EINVAL;
 	}
 
-	r = dm_read_arg(_args, as, &ps_argc, &ti->error);
+	r = dm_read_arg_group(_args, as, &ps_argc, &ti->error);
 	if (r) {
 		dm_put_path_selector(pst);
-		return -EINVAL;
-	}
-
-	if (ps_argc > as->argc) {
-		dm_put_path_selector(pst);
-		ti->error = "not enough arguments for path selector";
 		return -EINVAL;
 	}
 
@@ -698,16 +691,11 @@ static int parse_hw_handler(struct dm_arg_set *as, struct multipath *m)
 		{0, 1024, "invalid number of hardware handler args"},
 	};
 
-	if (dm_read_arg(_args, as, &hw_argc, &ti->error))
+	if (dm_read_arg_group(_args, as, &hw_argc, &ti->error))
 		return -EINVAL;
 
 	if (!hw_argc)
 		return 0;
-
-	if (hw_argc > as->argc) {
-		ti->error = "not enough arguments for hardware handler";
-		return -EINVAL;
-	}
 
 	m->hw_handler_name = kstrdup(dm_shift_arg(as), GFP_KERNEL);
 	request_module("scsi_dh_%s", m->hw_handler_name);
@@ -755,7 +743,7 @@ static int parse_features(struct dm_arg_set *as, struct multipath *m)
 		{0, 60000, "pg_init_delay_msecs must be between 0 and 60000"},
 	};
 
-	r = dm_read_arg(_args, as, &argc, &ti->error);
+	r = dm_read_arg_group(_args, as, &argc, &ti->error);
 	if (r)
 		return -EINVAL;
 
@@ -766,19 +754,19 @@ static int parse_features(struct dm_arg_set *as, struct multipath *m)
 		arg_name = dm_shift_arg(as);
 		argc--;
 
-		if (!strnicmp(arg_name, MESG_STR("queue_if_no_path"))) {
+		if (!strcasecmp(arg_name, "queue_if_no_path")) {
 			r = queue_if_no_path(m, 1, 0);
 			continue;
 		}
 
-		if (!strnicmp(arg_name, MESG_STR("pg_init_retries")) &&
+		if (!strcasecmp(arg_name, "pg_init_retries") &&
 		    (argc >= 1)) {
 			r = dm_read_arg(_args + 1, as, &m->pg_init_retries, &ti->error);
 			argc--;
 			continue;
 		}
 
-		if (!strnicmp(arg_name, MESG_STR("pg_init_delay_msecs")) &&
+		if (!strcasecmp(arg_name, "pg_init_delay_msecs") &&
 		    (argc >= 1)) {
 			r = dm_read_arg(_args + 2, as, &m->pg_init_delay_msecs, &ti->error);
 			argc--;
@@ -1458,10 +1446,10 @@ static int multipath_message(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	if (argc == 1) {
-		if (!strnicmp(argv[0], MESG_STR("queue_if_no_path"))) {
+		if (!strcasecmp(argv[0], "queue_if_no_path")) {
 			r = queue_if_no_path(m, 1, 0);
 			goto out;
-		} else if (!strnicmp(argv[0], MESG_STR("fail_if_no_path"))) {
+		} else if (!strcasecmp(argv[0], "fail_if_no_path")) {
 			r = queue_if_no_path(m, 0, 0);
 			goto out;
 		}
@@ -1472,18 +1460,18 @@ static int multipath_message(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	if (!strnicmp(argv[0], MESG_STR("disable_group"))) {
+	if (!!strcasecmp(argv[0], "disable_group")) {
 		r = bypass_pg_num(m, argv[1], 1);
 		goto out;
-	} else if (!strnicmp(argv[0], MESG_STR("enable_group"))) {
+	} else if (!strcasecmp(argv[0], "enable_group")) {
 		r = bypass_pg_num(m, argv[1], 0);
 		goto out;
-	} else if (!strnicmp(argv[0], MESG_STR("switch_group"))) {
+	} else if (!strcasecmp(argv[0], "switch_group")) {
 		r = switch_pg_num(m, argv[1]);
 		goto out;
-	} else if (!strnicmp(argv[0], MESG_STR("reinstate_path")))
+	} else if (!strcasecmp(argv[0], "reinstate_path"))
 		action = reinstate_path;
-	else if (!strnicmp(argv[0], MESG_STR("fail_path")))
+	else if (!strcasecmp(argv[0], "fail_path"))
 		action = fail_path;
 	else {
 		DMWARN("Unrecognised multipath message received.");
