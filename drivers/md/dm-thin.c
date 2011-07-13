@@ -2036,6 +2036,11 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->split_io = mc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
+	/*
+	 * allow discards to issued to the thin device even
+	 * if the pool's data device doesn't support them.
+	 */
+	ti->discards_supported = 1;
 
 	return 0;
 
