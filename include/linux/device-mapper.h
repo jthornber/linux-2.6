@@ -123,6 +123,9 @@ int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
 						 struct dm_dev **result);
 void dm_put_device(struct dm_target *ti, struct dm_dev *d);
 
+/* Helper function to allow consistent processing of user specified device path */
+int dm_get_dev_t(const char *path, dev_t *dev);
+
 /*
  * Information about a target type
  */

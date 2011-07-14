@@ -449,6 +449,29 @@ static int upgrade_mode(struct dm_dev_internal *dd, fmode_t new_mode,
 	return 0;
 }
 
+int dm_get_dev_t(const char *path, dev_t *dev)
+{
+	unsigned int major, minor;
+
+	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
+		/* Extract the major/minor numbers */
+		*dev = MKDEV(major, minor);
+		if (MAJOR(*dev) != major || MINOR(*dev) != minor)
+			return -EOVERFLOW;
+	} else {
+		/* convert the path to a device */
+		struct block_device *bdev = lookup_bdev(path);
+
+		if (IS_ERR(bdev))
+			return PTR_ERR(bdev);
+		*dev = bdev->bd_dev;
+		bdput(bdev);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dm_get_dev_t);
+
 /*
  * Add a device to the list, or just increment the usage count if
  * it's already present.
@@ -457,26 +480,14 @@ static int __table_get_device(struct dm_table *t, struct dm_target *ti,
 		      const char *path, fmode_t mode, struct dm_dev **result)
 {
 	int r;
-	dev_t uninitialized_var(dev);
+	dev_t dev;
 	struct dm_dev_internal *dd;
-	unsigned int major, minor;
 
 	BUG_ON(!t);
 
-	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
-		/* Extract the major/minor numbers */
-		dev = MKDEV(major, minor);
-		if (MAJOR(dev) != major || MINOR(dev) != minor)
-			return -EOVERFLOW;
-	} else {
-		/* convert the path to a device */
-		struct block_device *bdev = lookup_bdev(path);
-
-		if (IS_ERR(bdev))
-			return PTR_ERR(bdev);
-		dev = bdev->bd_dev;
-		bdput(bdev);
-	}
+	r = dm_get_dev_t(path, &dev);
+	if (r)
+		return r;
 
 	dd = find_device(&t->devices, dev);
 	if (!dd) {
