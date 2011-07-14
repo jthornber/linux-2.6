@@ -500,6 +500,7 @@ struct pool_c {
 	struct dm_target *ti;
 	struct pool *pool;
 	struct dm_dev *data_dev;
+	struct dm_target_callbacks callbacks;
 
 	sector_t low_water_mark;
 	unsigned zero_new_blocks;
@@ -1208,11 +1209,11 @@ static int bio_map(struct pool *pool, struct dm_target *ti, struct bio *bio)
 	return r;
 }
 
-static int is_congested(void *congested_data, int bdi_bits)
+static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 {
 	int r;
-	struct pool_c *pt = congested_data;
 	unsigned long flags;
+	struct pool_c *pt = container_of(cb, struct pool_c, callbacks);
 
 	spin_lock_irqsave(&pt->pool->lock, flags);
 	r = !bio_list_empty(&pt->pool->retry_list);
@@ -1224,16 +1225,6 @@ static int is_congested(void *congested_data, int bdi_bits)
 	}
 
 	return r;
-}
-
-static void set_congestion_fn(struct dm_target *ti, struct pool_c *pt)
-{
-	struct mapped_device *md = dm_table_get_md(ti->table);
-	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
-
-	/* Set congested function and data. */
-	bdi->congested_fn = is_congested;
-	bdi->congested_data = pt;
 }
 
 static void requeue_bios(struct pool *pool)
@@ -1602,7 +1593,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
 	ti->private = pt;
-	set_congestion_fn(ti, pt);
+
+	pt->callbacks.congested_fn = pool_is_congested;
+	dm_table_add_target_callbacks(ti->table, &pt->callbacks);
 
 	return 0;
 out:
