@@ -2639,7 +2639,6 @@ struct gendisk *dm_disk(struct mapped_device *md)
 {
 	return md->disk;
 }
-EXPORT_SYMBOL_GPL(dm_disk);
 
 struct block_device *dm_bdev(struct mapped_device *md)
 {
