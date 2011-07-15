@@ -537,17 +537,19 @@ struct endio_hook {
 #define TABLE_SIZE 32
 #define TABLE_PRIME 27 /* Largest prime smaller than table size. */
 #define	TABLE_SHIFT 5  /* Shift fitting prime. */
-struct bdev_table {
+
+static struct dm_thin_bdev_table {
 	spinlock_t lock;
 	struct hlist_head buckets[TABLE_SIZE];
-};
+} dm_thin_bdev_table;
 
-static void bdev_table_init(struct bdev_table *t)
+static void bdev_table_init(void)
 {
 	unsigned i;
-	spin_lock_init(&t->lock);
+
+	spin_lock_init(&dm_thin_bdev_table.lock);
 	for (i = 0; i < TABLE_SIZE; i++)
-		INIT_HLIST_HEAD(t->buckets + i);
+		INIT_HLIST_HEAD(dm_thin_bdev_table.buckets + i);
 }
 
 static unsigned hash_bdev(struct block_device *bdev)
@@ -558,36 +560,34 @@ static unsigned hash_bdev(struct block_device *bdev)
 	return ((p * TABLE_PRIME) >> TABLE_SHIFT) & (TABLE_SIZE - 1);
 }
 
-static void bdev_table_insert(struct bdev_table *t, struct pool *pool)
+static void bdev_table_insert(struct pool *pool)
 {
 	unsigned bucket = hash_bdev(pool->pool_dev);
-	spin_lock(&t->lock);
-	hlist_add_head(&pool->hlist, t->buckets + bucket);
-	spin_unlock(&t->lock);
+
+	spin_lock(&dm_thin_bdev_table.lock);
+	hlist_add_head(&pool->hlist, dm_thin_bdev_table.buckets + bucket);
+	spin_unlock(&dm_thin_bdev_table.lock);
 }
 
-static void bdev_table_remove(struct bdev_table *t, struct pool *pool)
+static void bdev_table_remove(struct pool *pool)
 {
-	spin_lock(&t->lock);
+	spin_lock(&dm_thin_bdev_table.lock);
 	hlist_del(&pool->hlist);
-	spin_unlock(&t->lock);
+	spin_unlock(&dm_thin_bdev_table.lock);
 }
 
-static struct pool *bdev_table_lookup(struct bdev_table *t,
-				      struct block_device *bdev)
+static struct pool *bdev_table_lookup(struct block_device *bdev)
 {
 	unsigned bucket = hash_bdev(bdev);
 	struct hlist_node *n;
 	struct pool *pool;
 
-	hlist_for_each_entry(pool, n, t->buckets + bucket, hlist)
+	hlist_for_each_entry(pool, n, dm_thin_bdev_table.buckets + bucket, hlist)
 		if (pool->pool_dev == bdev)
 			return pool;
 
 	return NULL;
 }
-
-static struct bdev_table bdev_table_;
 
 /*----------------------------------------------------------------*/
 
@@ -1449,7 +1449,7 @@ static struct pool *pool_find(struct block_device *pool_bdev,
 {
 	struct pool *pool;
 
-	pool = bdev_table_lookup(&bdev_table_, pool_bdev);
+	pool = bdev_table_lookup(pool_bdev);
 	if (pool)
 		pool_inc(pool);
 	else
@@ -1679,7 +1679,7 @@ static int pool_preresume(struct dm_target *ti)
 
 	/* The pool object is only present if the pool is active */
 	pool->pool_dev = get_target_bdev(ti);
-	bdev_table_insert(&bdev_table_, pool);
+	bdev_table_insert(pool);
 
 	return 0;
 }
@@ -1703,7 +1703,7 @@ static void pool_postsuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
-	bdev_table_remove(&bdev_table_, pool);
+	bdev_table_remove(pool);
 	pool->pool_dev = NULL;
 }
 
@@ -2012,7 +2012,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_dev_id;
 	}
 
-	mc->pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
+	mc->pool = bdev_table_lookup(mc->pool_dev->bdev);
 	if (!mc->pool) {
 		ti->error = "Couldn't find pool object";
 		r = -EINVAL;
@@ -2121,7 +2121,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 	struct thin_c *mc = ti->private;
 	struct pool *pool;
 
-	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
+	pool = bdev_table_lookup(mc->pool_dev->bdev);
 	if (!pool) {
 		DMERR("%s: Couldn't find pool object", __func__);
 		return -EINVAL;
@@ -2135,7 +2135,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	struct thin_c *mc = ti->private;
 	struct pool *pool;
 
-	pool = bdev_table_lookup(&bdev_table_, mc->pool_dev->bdev);
+	pool = bdev_table_lookup(mc->pool_dev->bdev);
 	if (!pool) {
 		DMERR("%s: Couldn't find pool object", __func__);
 		return;
@@ -2177,7 +2177,7 @@ static int __init dm_thin_init(void)
 	if (r)
 		dm_unregister_target(&thin_target);
 
-	bdev_table_init(&bdev_table_);
+	bdev_table_init();
 	return r;
 }
 
