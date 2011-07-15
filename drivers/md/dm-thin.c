@@ -1289,21 +1289,25 @@ static void pool_destroy(struct pool *pool)
 
 /*
  * The lifetime of the pool object is potentially longer than that of the
- * pool target.  thin_get_device() doesn't associate the opened device with
- * the target, like dm_get_device() does, because it would prevent the pool
- * target from being destroyed.
+ * pool target.  thin_get_device() is very similar to
+ * dm_get_device() except it doesn't associate the device with the target,
+ * which would prevent the target to be destroyed.
  */
 static struct block_device *thin_get_device(const char *path, fmode_t mode)
 {
-	int r;
-	dev_t dev;
+	dev_t uninitialized_var(dev);
+	unsigned int major, minor;
 	struct block_device *bdev;
 
-	r = dm_get_dev_t(path, &dev);
-	if (r)
-		return ERR_PTR(r);
+	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
+		/* Extract the major/minor numbers */
+		dev = MKDEV(major, minor);
+		if (MAJOR(dev) != major || MINOR(dev) != minor)
+			return ERR_PTR(-EOVERFLOW);
+		bdev = blkdev_get_by_dev(dev, mode, &thin_get_device);
+	} else
+		bdev = blkdev_get_by_path(path, mode, &thin_get_device);
 
-	bdev = blkdev_get_by_dev(dev, mode, &thin_get_device);
 	if (!bdev)
 		return ERR_PTR(-EINVAL);
 
