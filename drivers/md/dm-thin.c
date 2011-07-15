@@ -1511,11 +1511,13 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 }
 
 /*
- * thin-pool <metadata dev>
- *           <data dev>
- *           <data block size in sectors>
+ * thin-pool <metadata dev> <data dev>
+ *           <data block size (sectors)>
  *           <low water mark (sectors)>
  *           [<#feature args> [<arg>]*]
+ *
+ * Optional feature arguments are:
+ *           skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1527,7 +1529,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_dev *data_dev;
 	unsigned long block_size;
 	dm_block_t low_water;
-	const char *metadata_devname;
+	const char *metadata_path;
 	char *end;
 
 	if (argc < 4) {
@@ -1537,7 +1539,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argc = argc;
 	as.argv = argv;
 
-	metadata_devname = argv[0];
+	metadata_path = argv[0];
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -1559,7 +1561,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	/* set pool feature defaults */
+	/*
+	 * Set default pool features.
+	 */
 	memset(&pf, 0, sizeof(pf));
 	pf.zero_new_blocks = 1;
 
@@ -1568,7 +1572,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
-	pool = pool_find(get_target_bdev(ti), metadata_devname,
+	pool = pool_find(get_target_bdev(ti), metadata_path,
 			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
@@ -1969,9 +1973,9 @@ static void thin_dtr(struct dm_target *ti)
 }
 
 /*
- * Construct a thin device:
+ * Thin target parameters:
  *
- * <start> <length> thin <pool dev> <dev id>
+ * <pool dev> <dev id>
  *
  * pool dev: the path to the pool (eg, /dev/mapper/my_pool)
  * dev id: the internal device identifier
