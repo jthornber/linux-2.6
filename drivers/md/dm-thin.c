@@ -1483,7 +1483,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "invalid number of pool feature args"},
+		{0, 1, "Invalid number of pool feature arguments"},
 	};
 
 	/* No feature arguments supplied. */
@@ -1503,7 +1503,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 			continue;
 		}
 
-		ti->error = "Unrecognised pool feature request";
+		ti->error = "Unrecognised pool feature requested";
 		r = -EINVAL;
 	}
 
