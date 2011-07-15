@@ -168,12 +168,12 @@ i) Constructor
 
  thin-pool <metadata dev>
            <data dev>
-           <data block size in sectors>
+           <data block size (sectors)>
            <low water mark (sectors)>
-	   [number of feature args> [<arg>]*]
+	   [<number of feature args> [<arg>]*]
 
- optional feature args:
-   - 'skip_block_zeroing': skips the zeroing of newly provisioned blocks
+ Optional feature arguments:
+   - 'skip_block_zeroing': skips the zeroing of newly provisioned blocks.
 
 ii) Status
 
