@@ -12,7 +12,7 @@
 /*----------------------------------------------------------------*/
 
 struct dm_thin_metadata;
-struct dm_ms_device;
+struct dm_thin_device;
 typedef uint64_t dm_thin_dev_t;
 
 /*
@@ -22,7 +22,7 @@ struct dm_thin_metadata *
 dm_thin_metadata_open(struct block_device *bdev,
 		      sector_t data_block_size);
 
-int dm_thin_metadata_close(struct dm_thin_metadata *mmd);
+int dm_thin_metadata_close(struct dm_thin_metadata *tmd);
 
 /*
  * Compat feature flags.  Any incompat flags beyond the ones
@@ -35,7 +35,7 @@ int dm_thin_metadata_close(struct dm_thin_metadata *mmd);
 /*
  * Device creation/deletion.
  */
-int dm_thin_metadata_create_thin(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_create_thin(struct dm_thin_metadata *tmd,
 				 dm_thin_dev_t dev);
 
 /*
@@ -44,7 +44,7 @@ int dm_thin_metadata_create_thin(struct dm_thin_metadata *mmd,
  * You can only snapshot a quiesced origin.  i.e. one that is either
  * suspended or not instanced at all.
  */
-int dm_thin_metadata_create_snap(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_create_snap(struct dm_thin_metadata *tmd,
 				 dm_thin_dev_t dev,
 				 dm_thin_dev_t origin);
 
@@ -53,7 +53,7 @@ int dm_thin_metadata_create_snap(struct dm_thin_metadata *mmd,
  * when that device is open, operations on that device will just start
  * failing.  You still need to call close() on the device.
  */
-int dm_thin_metadata_delete_device(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_delete_device(struct dm_thin_metadata *tmd,
 				   dm_thin_dev_t dev);
 
 /*
@@ -61,7 +61,7 @@ int dm_thin_metadata_delete_device(struct dm_thin_metadata *mmd,
  * highest mapped block.  This trimming function allows the user to remove
  * mappings above a certain virtual block.
  */
-int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *tmd,
 				   dm_thin_dev_t dev,
 				   sector_t new_size);
 
@@ -69,24 +69,24 @@ int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *mmd,
  * Commits _all_ metadata changes: device creation, deletion, mapping
  * updates.
  */
-int dm_thin_metadata_commit(struct dm_thin_metadata *mmd);
+int dm_thin_metadata_commit(struct dm_thin_metadata *tmd);
 
 /*
  * Set/get userspace transaction id
  */
-int dm_thin_metadata_set_transaction_id(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_set_transaction_id(struct dm_thin_metadata *tmd,
 					uint64_t current_id,
 					uint64_t new_id);
 
-int dm_thin_metadata_get_transaction_id(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_get_transaction_id(struct dm_thin_metadata *tmd,
 					uint64_t *result);
 
 /*
  * hold/get root for userspace transaction
  */
-int dm_thin_metadata_hold_root(struct dm_thin_metadata *mmd);
+int dm_thin_metadata_hold_root(struct dm_thin_metadata *tmd);
 
-int dm_thin_metadata_get_held_root(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_get_held_root(struct dm_thin_metadata *tmd,
 				   dm_block_t *result);
 
 /*
@@ -96,13 +96,13 @@ int dm_thin_metadata_get_held_root(struct dm_thin_metadata *mmd,
 /*
  * Opening the same device more than once will fail with -EBUSY.
  */
-int dm_thin_metadata_open_device(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_open_device(struct dm_thin_metadata *tmd,
 				 dm_thin_dev_t dev,
-				 struct dm_ms_device **msd);
+				 struct dm_thin_device **td);
 
-int dm_thin_metadata_close_device(struct dm_ms_device *msd);
+int dm_thin_metadata_close_device(struct dm_thin_device *td);
 
-dm_thin_dev_t dm_thin_device_dev(struct dm_ms_device *msd);
+dm_thin_dev_t dm_thin_device_dev(struct dm_thin_device *td);
 
 struct dm_thin_lookup_result {
 	dm_block_t block;
@@ -115,48 +115,48 @@ struct dm_thin_lookup_result {
  *   -ENODATA iff that mapping is not present.
  *   0 success
  */
-int dm_thin_metadata_lookup(struct dm_ms_device *msd,
+int dm_thin_metadata_lookup(struct dm_thin_device *td,
 			    dm_block_t block, int can_block,
 			    struct dm_thin_lookup_result *result);
 
 /* Inserts a new mapping */
-int dm_thin_metadata_insert(struct dm_ms_device *msd, dm_block_t block,
+int dm_thin_metadata_insert(struct dm_thin_device *td, dm_block_t block,
 			    dm_block_t data_block);
 
-int dm_thin_metadata_remove(struct dm_ms_device *msd,
+int dm_thin_metadata_remove(struct dm_thin_device *td,
 			    dm_block_t block);
 
-int dm_thin_metadata_thin_highest_mapped_block(struct dm_ms_device *msd,
+int dm_thin_metadata_thin_highest_mapped_block(struct dm_thin_device *td,
 					       dm_block_t *highest_mapped);
 
-/* FIXME: why are these passed an msd, rather than an mmd ? */
-int dm_thin_metadata_alloc_data_block(struct dm_ms_device *msd,
+/* FIXME: why are these passed an td, rather than an tmd ? */
+int dm_thin_metadata_alloc_data_block(struct dm_thin_device *td,
 				      dm_block_t *result);
 
-int dm_thin_metadata_get_free_blocks(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_get_free_blocks(struct dm_thin_metadata *tmd,
 				     dm_block_t *result);
 
 int
-dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *mmd,
+dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *tmd,
 					  dm_block_t *result);
 
-int dm_thin_metadata_get_data_block_size(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_get_data_block_size(struct dm_thin_metadata *tmd,
 					 sector_t *result);
 
-int dm_thin_metadata_get_data_dev_size(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_get_data_dev_size(struct dm_thin_metadata *tmd,
 				       dm_block_t *result);
 
-int dm_thin_metadata_get_mapped_count(struct dm_ms_device *msd,
+int dm_thin_metadata_get_mapped_count(struct dm_thin_device *td,
 				      dm_block_t *result);
 
-int dm_thin_metadata_get_highest_mapped_block(struct dm_ms_device *msd,
+int dm_thin_metadata_get_highest_mapped_block(struct dm_thin_device *td,
 					      dm_block_t *result);
 
 /*
  * Returns -ENOSPC if the new size is too small and already allocated
  * blocks would be lost.
  */
-int dm_thin_metadata_resize_data_dev(struct dm_thin_metadata *mmd,
+int dm_thin_metadata_resize_data_dev(struct dm_thin_metadata *tmd,
 				     dm_block_t new_size);
 
 /*----------------------------------------------------------------*/
