@@ -4,11 +4,11 @@
  * This file is released under the GPL.
  */
 
-#include "dm.h"
 #include "dm-thin-metadata.h"
 #include "persistent-data/dm-transaction-manager.h"
 
 #include <linux/blkdev.h>
+#include <linux/device-mapper.h>
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
 #include <linux/list.h>
