@@ -616,6 +616,12 @@ static struct dm_target *get_ti(struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * This section of code contains the logic for processing a thin devices
+ * io.  Even though it's a 'pool' object being passed in, they're almost
+ * exclusively called from the thin target rather than the thin-pool
+ * target.
+ */
 static dm_block_t get_bio_block(struct pool *pool, struct bio *bio)
 {
 	return bio->bi_sector >> pool->block_shift;
