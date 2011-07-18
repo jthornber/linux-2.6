@@ -25,6 +25,13 @@ dm_thin_metadata_open(struct block_device *bdev,
 int dm_thin_metadata_close(struct dm_thin_metadata *tmd);
 
 /*
+ * This does not currently resize the metadata device, but should eventually.
+ */
+int
+dm_thin_metadata_rebind_block_device(struct dm_thin_metadata *tmd,
+				     struct block_device *bdev);
+
+/*
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the thin metadata.
  */

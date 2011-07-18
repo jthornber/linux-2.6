@@ -584,6 +584,13 @@ int dm_thin_metadata_close(struct dm_thin_metadata *tmd)
 	return 0;
 }
 
+int
+dm_thin_metadata_rebind_block_device(struct dm_thin_metadata *tmd,
+				     struct block_device *bdev)
+{
+	return dm_bm_rebind_block_device(tmd->bm, bdev);
+}
+
 static int __open_device(struct dm_thin_metadata *tmd,
 			 dm_thin_dev_t dev, int create,
 			 struct dm_thin_device **td)
