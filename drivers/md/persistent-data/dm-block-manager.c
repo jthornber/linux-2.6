@@ -426,6 +426,14 @@ static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 		     !bm->writing_count);
 }
 
+static int __wait_all_io(struct dm_block_manager *bm, unsigned long *flags)
+	__retains(&bm->lock)
+{
+	unplug();
+	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
+		     !bm->writing_count && !bm->reading_count);
+}
+
 static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
@@ -927,5 +935,27 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	return __wait_flush(bm);
 }
 EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
+
+int dm_bm_rebind_block_device(struct dm_block_manager *bm, struct block_device *bdev)
+{
+	unsigned long flags;
+	dm_block_t nr_blocks = i_size_read(bdev->bd_inode);
+	do_div(nr_blocks, bm->block_size);
+
+	spin_lock_irqsave(&bm->lock, flags);
+	if (nr_blocks < bm->nr_blocks) {
+		spin_unlock_irqrestore(&bm->lock, flags);
+		return -EINVAL;
+	}
+
+	bm->bdev = bdev;
+	bm->nr_blocks = nr_blocks;
+
+	/* wait for any in-flight io that may be using the old bdev */
+	__wait_all_io(bm, &flags);
+	spin_unlock_irqrestore(&bm->lock, flags);
+
+	return 0;
+}
 
 /*----------------------------------------------------------------*/

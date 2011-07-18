@@ -101,6 +101,18 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock);
 
 /*
+ * The client may wish to change which block device the block manager
+ * points at.  If you use this function then the cache remains intact, so
+ * make sure your data is identical on the new device.  The new device must
+ * be at least as long as the old.
+ *
+ * This function guarantees that once it returns, no further IO will occur
+ * on the old device.
+ */
+int dm_bm_rebind_block_device(struct dm_block_manager *bm,
+			      struct block_device *bdev);
+
+/*
  * Debug routines.
  */
 unsigned dm_bm_locks_held(struct dm_block_manager *bm);
