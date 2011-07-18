@@ -436,7 +436,6 @@ struct pool {
 	struct dm_target *ti;	/* only set if a pool target is bound */
 
 	struct block_device *pool_dev;
-	struct block_device *metadata_dev;
 	struct dm_thin_metadata *tmd;
 
 	uint32_t sectors_per_block;
@@ -500,6 +499,7 @@ struct pool_c {
 	struct dm_target *ti;
 	struct pool *pool;
 	struct dm_dev *data_dev;
+	struct dm_dev *metadata_dev;
 	struct dm_target_callbacks callbacks;
 
 	sector_t low_water_mark;
@@ -1261,6 +1261,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->low_water_mark = dm_div_up(pt->low_water_mark,
 					 pool->sectors_per_block);
 	pool->zero_new_blocks = pt->zero_new_blocks;
+	dm_thin_metadata_rebind_block_device(pool->tmd, pt->metadata_dev->bdev);
 	return 0;
 }
 
@@ -1277,7 +1278,6 @@ static void pool_destroy(struct pool *pool)
 {
 	if (dm_thin_metadata_close(pool->tmd) < 0)
 		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
-	blkdev_put(pool->metadata_dev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 
 	prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
@@ -1293,55 +1293,19 @@ static void pool_destroy(struct pool *pool)
 	kfree(pool);
 }
 
-/*
- * The lifetime of the pool object is potentially longer than that of the
- * pool target.  thin_get_device() is very similar to
- * dm_get_device() except it doesn't associate the device with the target,
- * which would prevent the target to be destroyed.
- */
-static struct block_device *thin_get_device(const char *path, fmode_t mode)
-{
-	dev_t uninitialized_var(dev);
-	unsigned int major, minor;
-	struct block_device *bdev;
-
-	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
-		/* Extract the major/minor numbers */
-		dev = MKDEV(major, minor);
-		if (MAJOR(dev) != major || MINOR(dev) != minor)
-			return ERR_PTR(-EOVERFLOW);
-		bdev = blkdev_get_by_dev(dev, mode, &thin_get_device);
-	} else
-		bdev = blkdev_get_by_path(path, mode, &thin_get_device);
-
-	if (!bdev)
-		return ERR_PTR(-EINVAL);
-
-	return bdev;
-}
-
-static struct pool *pool_create(const char *metadata_path,
+static struct pool *pool_create(struct block_device *metadata_dev,
 				unsigned long block_size, char **error)
 {
 	int r;
 	void *err_p;
 	struct pool *pool;
 	struct dm_thin_metadata *tmd;
-	struct block_device *metadata_dev;
-	fmode_t metadata_dev_mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
-
-	metadata_dev = thin_get_device(metadata_path, metadata_dev_mode);
-	if (IS_ERR(metadata_dev)) {
-		r = PTR_ERR(metadata_dev);
-		*error = "Error opening metadata block device";
-		return ERR_PTR(r);
-	}
 
 	tmd = dm_thin_metadata_open(metadata_dev, block_size);
 	if (IS_ERR(tmd)) {
 		*error = "Error creating metadata object";
 		err_p = tmd; /* already an ERR_PTR */
-		goto bad_tmd_open;
+		return err_p;
 	}
 
 	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
@@ -1351,7 +1315,6 @@ static struct pool *pool_create(const char *metadata_path,
 		goto bad_pool;
 	}
 
-	pool->metadata_dev = metadata_dev;
 	pool->tmd = tmd;
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
@@ -1435,8 +1398,6 @@ bad_prison:
 bad_pool:
 	if (dm_thin_metadata_close(tmd))
 		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
-bad_tmd_open:
-	blkdev_put(metadata_dev, metadata_dev_mode);
 
 	return err_p;
 }
@@ -1453,7 +1414,7 @@ static void pool_dec(struct pool *pool)
 }
 
 static struct pool *pool_find(struct block_device *pool_bdev,
-			      const char *metadata_path,
+			      struct block_device *metadata_dev,
 			      unsigned long block_size,
 			      char **error)
 {
@@ -1463,7 +1424,7 @@ static struct pool *pool_find(struct block_device *pool_bdev,
 	if (pool)
 		pool_inc(pool);
 	else
-		pool = pool_create(metadata_path, block_size, error);
+		pool = pool_create(metadata_dev, block_size, error);
 
 	return pool;
 }
@@ -1475,6 +1436,7 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
 
+	dm_put_device(ti, pt->metadata_dev);
 	dm_put_device(ti, pt->data_dev);
 	unbind_control_target(pt->pool, ti);
 	pool_dec(pt->pool);
@@ -1540,6 +1502,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	unsigned long block_size;
 	dm_block_t low_water;
 	const char *metadata_path;
+	struct dm_dev *metadata_dev;
 	char *end;
 
 	if (argc < 4) {
@@ -1550,11 +1513,16 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argv = argv;
 
 	metadata_path = argv[0];
+	r = dm_get_device(ti, metadata_path, FMODE_READ | FMODE_WRITE, &metadata_dev);
+	if (r) {
+		ti->error = "Error opening metadata block device";
+		return r;
+	}
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
 		ti->error = "Error getting data device";
-		return r;
+		goto out_md;
 	}
 
 	block_size = simple_strtoul(argv[2], &end, 10);
@@ -1582,7 +1550,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
-	pool = pool_find(get_target_bdev(ti), metadata_path,
+	pool = pool_find(get_target_bdev(ti), metadata_dev->bdev,
 			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
@@ -1597,6 +1565,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	pt->pool = pool;
 	pt->ti = ti;
+	pt->metadata_dev = metadata_dev;
 	pt->data_dev = data_dev;
 	pt->low_water_mark = low_water;
 	pt->zero_new_blocks = pf.zero_new_blocks;
@@ -1608,6 +1577,10 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	dm_table_add_target_callbacks(ti->table, &pt->callbacks);
 
 	return 0;
+
+out_md:
+	dm_put_device(ti, metadata_dev);
+
 out:
 	dm_put_device(ti, data_dev);
 	return r;
@@ -1909,7 +1882,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %lu %lu ",
-		       format_dev_t(buf, pool->metadata_dev->bd_dev),
+		       format_dev_t(buf, pt->metadata_dev->bdev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long) pool->sectors_per_block,
 		       (unsigned long) pt->low_water_mark);
