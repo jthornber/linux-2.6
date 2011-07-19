@@ -1229,17 +1229,8 @@ static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 
 static void __requeue_bios(struct pool *pool)
 {
-	struct bio *bio;
-	struct bio_list bios;
-
-	bio_list_init(&bios);
-	/* retry_later() adds bios, that already have set_tc(), to retry_list */
-	bio_list_merge(&bios, &pool->retry_list);
+	bio_list_merge(&pool->deferred_bios, &pool->retry_list);
 	bio_list_init(&pool->retry_list);
-
-	/* FIXME: why wasn't this protected by &pool->lock like defer_bio() !? */
-	while ((bio = bio_list_pop(&bios)))
-		bio_list_add(&pool->deferred_bios, bio);
 }
 
 /*----------------------------------------------------------------
