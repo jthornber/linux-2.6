@@ -1501,7 +1501,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_dev *data_dev;
 	unsigned long block_size;
 	dm_block_t low_water;
-	const char *metadata_path;
 	struct dm_dev *metadata_dev;
 	char *end;
 
@@ -1512,8 +1511,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argc = argc;
 	as.argv = argv;
 
-	metadata_path = argv[0];
-	r = dm_get_device(ti, metadata_path, FMODE_READ | FMODE_WRITE, &metadata_dev);
+	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
 	if (r) {
 		ti->error = "Error opening metadata block device";
 		return r;
@@ -1522,7 +1520,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
 		ti->error = "Error getting data device";
-		goto out_md;
+		goto out_data_dev;
 	}
 
 	block_size = simple_strtoul(argv[2], &end, 10);
@@ -1578,11 +1576,11 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	return 0;
 
-out_md:
-	dm_put_device(ti, metadata_dev);
-
 out:
 	dm_put_device(ti, data_dev);
+out_data_dev:
+	dm_put_device(ti, metadata_dev);
+
 	return r;
 }
 
