@@ -79,16 +79,6 @@
 /*----------------------------------------------------------------*/
 
 /*
- * Function that breaks abstraction layering.
- */
-static struct block_device *get_target_bdev(struct dm_target *ti)
-{
-	return dm_bdev(dm_table_get_md(ti->table));
-}
-
-/*----------------------------------------------------------------*/
-
-/*
  * Sometimes we can't deal with a bio straight away.  We put them in prison
  * where they can't cause any mischief.  Bios are put in a cell identified
  * by a key, multiple bios can be in the same cell.  When the cell is
@@ -435,7 +425,7 @@ struct pool {
 	struct hlist_node hlist;
 	struct dm_target *ti;	/* only set if a pool target is bound */
 
-	struct block_device *pool_dev;
+	struct mapped_device *pool_md;
 	struct dm_thin_metadata *tmd;
 
 	uint32_t sectors_per_block;
@@ -531,7 +521,7 @@ struct new_mapping {
 /*----------------------------------------------------------------*/
 
 /*
- * A global table that uses a struct block_device as a key.
+ * A global table that uses a struct mapped_device as a key.
  */
 #define TABLE_SIZE 32
 #define TABLE_PRIME 27 /* Largest prime smaller than table size. */
@@ -551,9 +541,9 @@ static void pool_table_init(void)
 		INIT_HLIST_HEAD(dm_thin_pool_table.buckets + i);
 }
 
-static unsigned hash_bdev(struct block_device *bdev)
+static unsigned hash_md(struct mapped_device *md)
 {
-	unsigned long p = (unsigned long) bdev;
+	unsigned long p = (unsigned long)md;
 
 	do_div(p, cache_line_size());
 	return ((p * TABLE_PRIME) >> TABLE_SHIFT) & (TABLE_SIZE - 1);
@@ -561,7 +551,7 @@ static unsigned hash_bdev(struct block_device *bdev)
 
 static void pool_table_insert(struct pool *pool)
 {
-	unsigned bucket = hash_bdev(pool->pool_dev);
+	unsigned bucket = hash_md(pool->pool_md);
 
 	spin_lock(&dm_thin_pool_table.lock);
 	hlist_add_head(&pool->hlist, dm_thin_pool_table.buckets + bucket);
@@ -575,14 +565,14 @@ static void pool_table_remove(struct pool *pool)
 	spin_unlock(&dm_thin_pool_table.lock);
 }
 
-static struct pool *pool_table_lookup(struct block_device *bdev)
+static struct pool *pool_table_lookup(struct mapped_device *md)
 {
-	unsigned bucket = hash_bdev(bdev);
+	unsigned bucket = hash_md(md);
 	struct hlist_node *n;
 	struct pool *pool;
 
 	hlist_for_each_entry(pool, n, dm_thin_pool_table.buckets + bucket, hlist)
-		if (pool->pool_dev == bdev)
+		if (pool->pool_md == md)
 			return pool;
 
 	return NULL;
@@ -1416,14 +1406,14 @@ static void pool_dec(struct pool *pool)
 		pool_destroy(pool);
 }
 
-static struct pool *pool_find(struct block_device *pool_bdev,
+static struct pool *pool_find(struct mapped_device *pool_md,
 			      struct block_device *metadata_dev,
 			      unsigned long block_size,
 			      char **error)
 {
 	struct pool *pool;
 
-	pool = pool_table_lookup(pool_bdev);
+	pool = pool_table_lookup(pool_md);
 	if (pool)
 		pool_inc(pool);
 	else
@@ -1551,7 +1541,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
-	pool = pool_find(get_target_bdev(ti), metadata_dev->bdev,
+	pool = pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
 			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
@@ -1662,7 +1652,7 @@ static int pool_preresume(struct dm_target *ti)
 	wake_producer(pool);
 
 	/* The pool object is only present if the pool is active */
-	pool->pool_dev = get_target_bdev(ti);
+	pool->pool_md = dm_table_get_md(ti->table);
 	pool_table_insert(pool);
 
 	return 0;
@@ -1688,7 +1678,7 @@ static void pool_postsuspend(struct dm_target *ti)
 	struct pool *pool = pt->pool;
 
 	pool_table_remove(pool);
-	pool->pool_dev = NULL;
+	pool->pool_md = NULL;
 }
 
 /*
@@ -1970,6 +1960,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	struct thin_c *tc;
 	struct dm_dev *pool_dev;
+	struct mapped_device *pool_md;
 	char *end;
 
 	if (argc != 2) {
@@ -1994,16 +1985,24 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (*end) {
 		ti->error = "Invalid device id";
 		r = -EINVAL;
-		goto bad_dev_id;
+		goto bad_common;
 	}
 
-	tc->pool = pool_table_lookup(tc->pool_dev->bdev);
+	pool_md = dm_get_md(tc->pool_dev->bdev->bd_dev);
+	if (!pool_md) {
+		ti->error = "Couldn't get pool mapped device";
+		r = -EINVAL;
+		goto bad_common;
+	}
+
+	tc->pool = pool_table_lookup(pool_md);
 	if (!tc->pool) {
 		ti->error = "Couldn't find pool object";
 		r = -EINVAL;
 		goto bad_pool_lookup;
 	}
 	pool_inc(tc->pool);
+	dm_put(pool_md);
 
 	r = dm_thin_metadata_open_device(tc->pool->tmd, tc->dev_id, &tc->td);
 	if (r) {
@@ -2025,7 +2024,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 bad_thin_open:
 	pool_dec(tc->pool);
 bad_pool_lookup:
-bad_dev_id:
+	dm_put(pool_md);
+bad_common:
 	dm_put_device(ti, tc->pool_dev);
 bad_pool_dev:
 	kfree(tc);
@@ -2102,13 +2102,20 @@ static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
 	struct thin_c *tc = ti->private;
+	struct mapped_device *pool_md;
 	struct pool *pool;
 
-	pool = pool_table_lookup(tc->pool_dev->bdev);
+	pool_md = dm_get_md(tc->pool_dev->bdev->bd_dev);
+	if (!pool_md)
+		return -EINVAL;
+
+	pool = pool_table_lookup(pool_md);
 	if (!pool) {
 		DMERR("%s: Couldn't find pool object", __func__);
+		dm_put(pool_md);
 		return -EINVAL;
 	}
+	dm_put(pool_md);
 
 	return fn(ti, tc->pool_dev, 0, pool->sectors_per_block, data);
 }
@@ -2116,12 +2123,17 @@ static int thin_iterate_devices(struct dm_target *ti,
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct thin_c *tc = ti->private;
+	struct mapped_device *pool_md;
 	struct pool *pool;
 
-	pool = pool_table_lookup(tc->pool_dev->bdev);
+	pool_md = dm_get_md(tc->pool_dev->bdev->bd_dev);
+	if (!pool_md)
+		return;
+
+	pool = pool_table_lookup(pool_md);
 	if (!pool) {
 		DMERR("%s: Couldn't find pool object", __func__);
-		return;
+		goto out;
 	}
 
 	blk_limits_io_min(limits, 0);
@@ -2133,6 +2145,8 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	limits->max_discard_sectors = pool->sectors_per_block;
 	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+out:
+	dm_put(pool_md);
 }
 
 static struct target_type thin_target = {
