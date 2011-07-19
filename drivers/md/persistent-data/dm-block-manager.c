@@ -936,7 +936,8 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 }
 EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
 
-int dm_bm_rebind_block_device(struct dm_block_manager *bm, struct block_device *bdev)
+int dm_bm_rebind_block_device(struct dm_block_manager *bm,
+			      struct block_device *bdev)
 {
 	unsigned long flags;
 	dm_block_t nr_blocks = i_size_read(bdev->bd_inode);
@@ -957,5 +958,6 @@ int dm_bm_rebind_block_device(struct dm_block_manager *bm, struct block_device *
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(dm_bm_rebind_block_device);
 
 /*----------------------------------------------------------------*/
