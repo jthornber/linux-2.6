@@ -467,33 +467,6 @@ struct pool {
 	atomic_t ref_count;
 };
 
-/* FIXME: move thin_c here */
-struct thin_c;
-
-/* FIXME: can cells and new_mappings be combined? */
-
-struct new_mapping {
-	struct list_head list;
-
-	int prepared;
-
-	struct thin_c *tc;
-	dm_block_t virt_block;
-	dm_block_t data_block;
-	struct cell *cell;
-	int err;
-
-	/*
-	 * If the bio covers the whole area of a block then we can avoid
-	 * zeroing or copying.  Instead this bio is hooked.  The bio will
-	 * still be in the cell, so care has to be taken to avoid issuing
-	 * the bio twice.
-	 */
-	struct bio *bio;
-	bio_end_io_t *bi_end_io;
-	void *bi_private;
-};
-
 /*
  * Target context for a pool.
  */
@@ -529,6 +502,30 @@ struct endio_hook {
 	bio_end_io_t *bi_end_io;
 	void *bi_private;
 	struct deferred_entry *entry;
+};
+
+/* FIXME: can cells and new_mappings be combined? */
+
+struct new_mapping {
+	struct list_head list;
+
+	int prepared;
+
+	struct thin_c *tc;
+	dm_block_t virt_block;
+	dm_block_t data_block;
+	struct cell *cell;
+	int err;
+
+	/*
+	 * If the bio covers the whole area of a block then we can avoid
+	 * zeroing or copying.  Instead this bio is hooked.  The bio will
+	 * still be in the cell, so care has to be taken to avoid issuing
+	 * the bio twice.
+	 */
+	struct bio *bio;
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
 };
 
 /*----------------------------------------------------------------*/
