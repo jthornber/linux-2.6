@@ -612,11 +612,13 @@ static struct thin_c *get_tc(struct bio *bio)
 /*----------------------------------------------------------------*/
 
 /*
- * This section of code contains the logic for processing a thin device's
- * IO.  Even though it's a 'pool' object being passed in, they're almost
- * exclusively called from the thin target rather than the thin-pool
- * target.
+ * This section of code contains the logic for processing a thin devices' IO.
+ * Much of the code depends on pool object resources (lists, workqueues, etc)
+ * but most is exclusively called from the thin target rather than the thin-pool
+ * target.  wake_producer() being the most notable exception (which is also used
+ * by thin-pool to continue deferred IO processing after pool resume).
  */
+
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
 	return bio->bi_sector >> tc->pool->block_shift;
