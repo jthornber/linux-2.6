@@ -162,8 +162,11 @@ struct target_type {
 /*
  * Any table that contains an instance of this target must have only one.
  */
-#define DM_TARGET_SINGLETON	0x00000001
+#define DM_TARGET_SINGLETON		0x00000001
 #define dm_target_needs_singleton(type)	((type)->features & DM_TARGET_SINGLETON)
+
+#define DM_TARGET_ALWAYS_WRITEABLE	0x00000002
+#define dm_target_always_writeable(type)	((type)->features & DM_TARGET_ALWAYS_WRITEABLE)
 
 struct dm_target {
 	struct dm_table *table;
