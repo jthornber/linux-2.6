@@ -2039,7 +2039,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -ENOMEM;
 	}
 
-	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &pool_dev);
+	r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &pool_dev);
 	if (r) {
 		ti->error = "Error opening pool device";
 		goto bad_pool_dev;
