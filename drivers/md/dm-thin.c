@@ -478,11 +478,6 @@ struct thin_c {
 	struct dm_dev *pool_dev;
 	dm_thin_dev_t dev_id;
 
-	/*
-	 * These fields are only valid while the device is resumed.  This
-	 * is because the pool_c may totally change due to table reloads
-	 * (where as the pool_dev above remains constant).
-	 */
 	struct pool *pool;
 	struct dm_thin_device *td;
 };
@@ -2078,66 +2073,37 @@ static int thin_bvec_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 			   struct bio_vec *biovec, int max_size)
 {
 	struct thin_c *tc = ti->private;
-	struct pool *pool = tc->pool;
 
 	/*
 	 * We fib here, because the space may not have been provisioned yet
 	 * we can't give a good answer.  It's better to return the block
 	 * size, and incur extra splitting in a few cases than always
-	 * return the smallest, page sized, chunk.
+	 * return the smallest, page-sized, chunk.
 	 */
-	return pool->sectors_per_block << SECTOR_SHIFT;
+	return tc->pool->sectors_per_block << SECTOR_SHIFT;
 }
 
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
 	struct thin_c *tc = ti->private;
-	struct mapped_device *pool_md;
-	struct pool *pool;
 
-	pool_md = dm_get_md(tc->pool_dev->bdev->bd_dev);
-	if (!pool_md)
-		return -EINVAL;
-
-	pool = pool_table_lookup(pool_md);
-	if (!pool) {
-		DMERR("%s: Couldn't find pool object", __func__);
-		dm_put(pool_md);
-		return -EINVAL;
-	}
-	dm_put(pool_md);
-
-	return fn(ti, tc->pool_dev, 0, pool->sectors_per_block, data);
+	return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block, data);
 }
 
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct thin_c *tc = ti->private;
-	struct mapped_device *pool_md;
-	struct pool *pool;
-
-	pool_md = dm_get_md(tc->pool_dev->bdev->bd_dev);
-	if (!pool_md)
-		return;
-
-	pool = pool_table_lookup(pool_md);
-	if (!pool) {
-		DMERR("%s: Couldn't find pool object", __func__);
-		goto out;
-	}
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+	blk_limits_io_opt(limits, tc->pool->sectors_per_block << SECTOR_SHIFT);
 
 	/*
 	 * Only allow discard requests aligned to our block size, and make
 	 * sure that we never get sent larger discard requests either.
 	 */
-	limits->max_discard_sectors = pool->sectors_per_block;
-	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-out:
-	dm_put(pool_md);
+	limits->max_discard_sectors = tc->pool->sectors_per_block;
+	limits->discard_granularity = tc->pool->sectors_per_block << SECTOR_SHIFT;
 }
 
 static struct target_type thin_target = {
