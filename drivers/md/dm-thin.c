@@ -973,9 +973,14 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	struct pool *pool = tc->pool;
 	struct endio_hook *endio_hook;
 
+	/*
+	 * If cell is already occupied, then sharing is already
+	 * in the process of being broken so we have nothing
+	 * further to do here.
+	 */
 	build_data_key(tc->td, lookup_result->block, &key);
 	if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
-		return; /* already underway */
+		return;
 
 	if (bio_data_dir(bio) == WRITE)
 		break_sharing(tc, bio, block, &key, lookup_result);
