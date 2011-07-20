@@ -1929,7 +1929,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type pool_target = {
 	.name = "thin-pool",
-	.features = DM_TARGET_SINGLETON,
+	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE,
 	.version = {1, 0, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
