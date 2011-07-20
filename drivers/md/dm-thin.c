@@ -1503,7 +1503,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	unsigned long block_size;
 	dm_block_t low_water;
 	struct dm_dev *metadata_dev;
-	char *end;
 
 	if (argc < 4) {
 		ti->error = "Invalid argument count";
@@ -1524,15 +1523,14 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_data_dev;
 	}
 
-	block_size = simple_strtoul(argv[2], &end, 10);
-	if (!block_size || *end) {
+	if (kstrtoul(argv[2], 10, &block_size) || !block_size) {
 		ti->error = "Invalid block size";
 		r = -EINVAL;
 		goto out;
 	}
 
-	low_water = simple_strtoull(argv[3], &end, 10);
-	if (!low_water || *end) {
+	if (kstrtoull(argv[3], 10, (unsigned long long *)&low_water) ||
+	    !low_water) {
 		ti->error = "Invalid low water mark";
 		r = -EINVAL;
 		goto out;
@@ -1702,10 +1700,7 @@ static int check_arg_count(unsigned argc, unsigned args_required)
 
 static int read_dev_id(char *arg, dm_thin_dev_t *dev_id)
 {
-	char *end;
-
-	*dev_id = simple_strtoull(arg, &end, 10);
-	if (*end) {
+	if (kstrtoull(arg, 10, (unsigned long long *)dev_id)) {
 		DMWARN("Message received with invalid device id: %s", arg);
 		return -EINVAL;
 	}
@@ -1788,7 +1783,6 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 {
 	dm_thin_dev_t dev_id;
 	sector_t new_size;
-	char *end;
 	int r;
 
 	r = check_arg_count(argc, 3);
@@ -1799,8 +1793,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	new_size = simple_strtoull(argv[2], &end, 10);
-	if (*end) {
+	if (kstrtoull(argv[2], 10, (unsigned long long *)&new_size)) {
 		DMWARN("trim device %s: Invalid new size: %s sectors.",
 		       argv[1], argv[2]);
 		return -EINVAL;
@@ -1816,22 +1809,19 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 
 static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	char *end;
-	uint64_t old_id, new_id;
+	dm_thin_dev_t old_id, new_id;
 	int r;
 
 	r = check_arg_count(argc, 3);
 	if (r)
 		return r;
 
-	old_id = simple_strtoull(argv[1], &end, 10);
-	if (*end) {
+	if (kstrtoull(argv[1], 10, (unsigned long long *)&old_id)) {
 		DMWARN("set_transaction_id message: Unrecognised id %s.", argv[1]);
 		return -EINVAL;
 	}
 
-	new_id = simple_strtoull(argv[2], &end, 10);
-	if (*end) {
+	if (kstrtoull(argv[2], 10, (unsigned long long *)&new_id)) {
 		DMWARN("set_transaction_id message: Unrecognised new id %s.", argv[2]);
 		return -EINVAL;
 	}
@@ -1876,7 +1866,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		r = process_set_transaction_id_mesg(argc, argv, pool);
 
 	else
-		DMWARN("Unrecognised pool target message received.");
+		DMWARN("Unrecognised thin pool target message received.");
 
 	if (!r) {
 		r = dm_thin_metadata_commit(pool->tmd);
@@ -2026,7 +2016,6 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct thin_c *tc;
 	struct dm_dev *pool_dev;
 	struct mapped_device *pool_md;
-	char *end;
 
 	if (argc != 2) {
 		ti->error = "Invalid argument count";
@@ -2046,8 +2035,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	tc->pool_dev = pool_dev;
 
-	tc->dev_id = simple_strtoull(argv[1], &end, 10);
-	if (*end) {
+	if (kstrtoull(argv[1], 10, (unsigned long long *)&tc->dev_id)) {
 		ti->error = "Invalid device id";
 		r = -EINVAL;
 		goto bad_common;
