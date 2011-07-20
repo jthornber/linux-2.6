@@ -454,7 +454,7 @@ struct pool {
 	unsigned block_shift;
 	dm_block_t offset_mask;
 	dm_block_t low_water_mark;
-	unsigned zero_new_blocks;
+	unsigned zero_new_blocks:1;
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -490,7 +490,7 @@ struct pool_c {
 	struct dm_target_callbacks callbacks;
 
 	sector_t low_water_mark;
-	unsigned zero_new_blocks;
+	unsigned zero_new_blocks:1;
 };
 
 /*
@@ -1445,7 +1445,7 @@ static void pool_dtr(struct dm_target *ti)
 }
 
 struct pool_features {
-	unsigned zero_new_blocks;
+	unsigned zero_new_blocks:1;
 };
 
 static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
@@ -1689,145 +1689,200 @@ static void pool_postsuspend(struct dm_target *ti)
 	pool->pool_md = NULL;
 }
 
+static int check_arg_count(unsigned argc, unsigned args_required)
+{
+	if (argc != args_required) {
+		DMWARN("Message received with %u arguments instead of %u.",
+		       argc, args_required);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int read_dev_id(char *arg, dm_thin_dev_t *dev_id)
+{
+	char *end;
+
+	*dev_id = simple_strtoull(arg, &end, 10);
+	if (*end) {
+		DMWARN("Message received with invalid device id: %s", arg);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	dm_thin_dev_t dev_id;
+	int r;
+
+	r = check_arg_count(argc, 2);
+	if (r)
+		return r;
+
+	r = read_dev_id(argv[1], &dev_id);
+	if (r)
+		return r;
+
+	r = dm_thin_metadata_create_thin(pool->tmd, dev_id);
+	if (r) {
+		DMWARN("Creation of new thinly-provisioned device with id %s failed.",
+		       argv[1]);
+		return r;
+	}
+
+	return 0;
+}
+
+static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	dm_thin_dev_t dev_id;
+	dm_thin_dev_t origin_dev_id;
+	int r;
+
+	r = check_arg_count(argc, 3);
+	if (r)
+		return r;
+
+	r = read_dev_id(argv[1], &dev_id);
+	if (r)
+		return r;
+
+	r = read_dev_id(argv[2], &origin_dev_id);
+	if (r)
+		return r;
+
+	r = dm_thin_metadata_create_snap(pool->tmd, dev_id, origin_dev_id);
+	if (r) {
+		DMWARN("Creation of new snapshot %s of device %s failed.",
+		       argv[1], argv[2]);
+		return r;
+	}
+
+	return 0;
+}
+
+static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	dm_thin_dev_t dev_id;
+	int r;
+
+	r = check_arg_count(argc, 2);
+	if (r)
+		return r;
+
+	r = read_dev_id(argv[1], &dev_id);
+	if (r)
+		return r;
+
+	r = dm_thin_metadata_delete_device(pool->tmd, dev_id);
+	if (r)
+		DMWARN("Deletion of thin device %s failed.", argv[1]);
+
+	return r;
+}
+
+static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	dm_thin_dev_t dev_id;
+	sector_t new_size;
+	char *end;
+	int r;
+
+	r = check_arg_count(argc, 3);
+	if (r)
+		return r;
+
+	r = read_dev_id(argv[1], &dev_id);
+	if (r)
+		return r;
+
+	new_size = simple_strtoull(argv[2], &end, 10);
+	if (*end) {
+		DMWARN("trim device %s: Invalid new size: %s sectors.",
+		       argv[1], argv[2]);
+		return -EINVAL;
+	}
+
+	r = dm_thin_metadata_trim_thin_dev(pool->tmd, dev_id,
+			dm_div_up(new_size, pool->sectors_per_block));
+	if (r)
+		DMWARN("Attempt to trim thin device %s failed.", argv[1]);
+
+	return r;
+}
+
+static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	char *end;
+	uint64_t old_id, new_id;
+	int r;
+
+	r = check_arg_count(argc, 3);
+	if (r)
+		return r;
+
+	old_id = simple_strtoull(argv[1], &end, 10);
+	if (*end) {
+		DMWARN("set_transaction_id message: Unrecognised id %s.", argv[1]);
+		return -EINVAL;
+	}
+
+	new_id = simple_strtoull(argv[2], &end, 10);
+	if (*end) {
+		DMWARN("set_transaction_id message: Unrecognised new id %s.", argv[2]);
+		return -EINVAL;
+	}
+
+	r = dm_thin_metadata_set_transaction_id(pool->tmd, old_id, new_id);
+	if (r) {
+		DMWARN("Failed to change transaction id from %s to %s.",
+		       argv[1], argv[2]);
+		return r;
+	}
+
+	return 0;
+}
+
 /*
  * Messages supported:
- *   new-thin        <dev id>
- *   new-snap        <dev id> <origin id>
- *   del             <dev id>
- *   trim            <dev id> <size in sectors>
- *   trans-id        <current trans id> <new trans id>
+ *   create_thin	<dev_id>
+ *   create_snap	<dev_id> <origin_id>
+ *   delete		<dev_id>
+ *   trim		<dev_id> <new_size_in_sectors>
+ *   set_transaction_id <current_trans_id> <new_trans_id>
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
-	/* ti->error doesn't have a const qualifier :( */
-	char *invalid_args = "Incorrect number of arguments";
-
-	int r;
+	int r = -EINVAL;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	dm_thin_dev_t dev_id;
-	char *end;
 
-	if (!strcmp(argv[0], "new-thin")) {
-		if (argc != 2) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
+	if (!strcasecmp(argv[0], "create_thin"))
+		r = process_create_thin_mesg(argc, argv, pool);
 
-		dev_id = simple_strtoull(argv[1], &end, 10);
-		if (*end) {
-			ti->error = "Invalid device id";
-			return -EINVAL;
-		}
+	else if (!strcasecmp(argv[0], "create_snap"))
+		r = process_create_snap_mesg(argc, argv, pool);
 
-		r = dm_thin_metadata_create_thin(pool->tmd, dev_id);
-		if (r) {
-			ti->error = "Creation of thin provisioned device failed";
-			return r;
-		}
+	else if (!strcasecmp(argv[0], "delete"))
+		r = process_delete_mesg(argc, argv, pool);
 
-	} else if (!strcmp(argv[0], "new-snap")) {
-		dm_thin_dev_t origin_id;
+	else if (!strcasecmp(argv[0], "trim"))
+		r = process_trim_mesg(argc, argv, pool);
 
-		if (argc != 3) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
+	else if (!strcasecmp(argv[0], "set_transaction_id"))
+		r = process_set_transaction_id_mesg(argc, argv, pool);
 
-		dev_id = simple_strtoull(argv[1], &end, 10);
-		if (*end) {
-			ti->error = "Invalid device id";
-			return -EINVAL;
-		}
-
-		origin_id = simple_strtoull(argv[2], &end, 10);
-		if (*end) {
-			ti->error = "Invalid origin id";
-			return -EINVAL;
-		}
-
-		r = dm_thin_metadata_create_snap(pool->tmd, dev_id, origin_id);
-		if (r) {
-			ti->error = "Creation of snapshot failed";
-			return r;
-		}
-
-	} else if (!strcmp(argv[0], "del")) {
-		if (argc != 2) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
-
-		dev_id = simple_strtoull(argv[1], &end, 10);
-		if (*end) {
-			ti->error = "Invalid device id";
-			return -EINVAL;
-		}
-
-		r = dm_thin_metadata_delete_device(pool->tmd, dev_id);
-
-	} else if (!strcmp(argv[0], "trim")) {
-		sector_t new_size;
-
-		if (argc != 3) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
-
-		dev_id = simple_strtoull(argv[1], &end, 10);
-		if (*end) {
-			ti->error = "Invalid device id";
-			return -EINVAL;
-		}
-
-		new_size = simple_strtoull(argv[2], &end, 10);
-		if (*end) {
-			ti->error = "Invalid size";
-			return -EINVAL;
-		}
-
-		r = dm_thin_metadata_trim_thin_dev(
-			pool->tmd, dev_id,
-			dm_div_up(new_size, pool->sectors_per_block));
-		if (r) {
-			ti->error = "Couldn't trim thin device";
-			return r;
-		}
-
-	} else if (!strcmp(argv[0], "trans-id")) {
-		uint64_t old_id, new_id;
-
-		if (argc != 3) {
-			ti->error = invalid_args;
-			return -EINVAL;
-		}
-
-		old_id = simple_strtoull(argv[1], &end, 10);
-		if (*end) {
-			ti->error = "Invalid current transaction id";
-			return -EINVAL;
-		}
-
-		new_id = simple_strtoull(argv[2], &end, 10);
-		if (*end) {
-			ti->error = "Invalid new transaction id";
-			return -EINVAL;
-		}
-
-		r = dm_thin_metadata_set_transaction_id(pool->tmd,
-							old_id, new_id);
-		if (r) {
-			ti->error = "Setting userspace transaction id failed";
-			return r;
-		}
-	} else
-		return -EINVAL;
+	else
+		DMWARN("Unrecognised pool target message received.");
 
 	if (!r) {
 		r = dm_thin_metadata_commit(pool->tmd);
 		if (r)
-			DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
-			      __func__, r);
+			DMERR("%s message: dm_thin_metadata_commit() failed, error = %d",
+			      argv[0], r);
 	}
 
 	return r;

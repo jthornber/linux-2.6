@@ -102,7 +102,7 @@ i) Creating a new thinly provisioned volume
   To create a new thin provision volume you must send a message to an
   active pool device.
 
-    dmsetup message /dev/mapper/pool 0 "new-thin 0"
+    dmsetup message /dev/mapper/pool 0 "create_thin 0"
 
   Here '0' is an identifier for the volume (32bit range).  It's up to
   the caller to allocate and manage these identifiers.  If there's a
@@ -129,7 +129,7 @@ i) Creating an internal snapshot
   may proceed without doing anything.
 
     dmsetup suspend /dev/mapper/thin
-    dmsetup message /dev/mapper/pool 0 "new-snap 1 0"
+    dmsetup message /dev/mapper/pool 0 "create_snap 1 0"
     dmsetup resume /dev/mapper/thin
 
   Here '1' is an identifier for the volume (32bit range).  '0' is the
@@ -196,27 +196,27 @@ ii) Status
 
 iii) Messages
 
- new-thin <dev id>
+ create_thin <dev id>
 
    Create a new thin provisioned device.  <dev id> is an arbitrary
    unique 32 bit number, chosen by the caller.
 
- new-snap <dev id> <origin id>
+ create_snap <dev id> <origin id>
 
    Create a new snapshot of another thin device.  <origin id> is the
    dev id of the thin dev that you wish to snap.
 
- del      <dev id>
+ delete <dev id>
 
    Deletes a thin device.  Irreversible.
 
- trim     <dev id> <new size in sectors>
+ trim <dev id> <new size in sectors>
 
    Delete mappings from the back of a thin device.  Irreversible.  You
    might want to do this if you're shrinking the size of your thin
    device.
 
- trans-id <current id> <new id>
+ set_transaction_id <current id> <new id>
 
    Userland volume managers, such as LVM, need a way to synchonise
    their external metadata with the internal metadata of the pool
