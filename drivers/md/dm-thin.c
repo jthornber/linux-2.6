@@ -510,7 +510,6 @@ struct endio_hook {
 	struct thin_c *tc;
 
 	bio_end_io_t *saved_bi_end_io;
-	void *saved_bi_private;
 
 	struct deferred_entry *entry;
 };
@@ -534,21 +533,18 @@ struct new_mapping {
 	 */
 	struct bio *bio;
 	bio_end_io_t *saved_bi_end_io;
-	void *saved_bi_private;
 };
 
 #define save_and_set_bio_endio(m, bio, endio)		\
 do {							\
 	(m)->saved_bi_end_io = (bio)->bi_end_io;	\
-	(m)->saved_bi_private = (bio)->bi_private;	\
 	(bio)->bi_end_io = (endio);			\
-	(bio)->bi_private = (m);			\
+	dm_get_mapinfo((bio))->ptr = (m);		\
 } while (0)
 
 #define restore_bio_endio(m, bio)			\
 do {							\
 	(bio)->bi_end_io = (m)->saved_bi_end_io;	\
-	(bio)->bi_private = (m)->saved_bi_private;	\
 } while (0)
 
 /*----------------------------------------------------------------*/
@@ -684,7 +680,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 static void overwrite_endio(struct bio *bio, int err)
 {
 	unsigned long flags;
-	struct new_mapping *m = bio->bi_private;
+	struct new_mapping *m = dm_get_mapinfo(bio)->ptr;
 	struct pool *pool = m->tc->pool;
 
 	m->err = err;
@@ -695,12 +691,11 @@ static void overwrite_endio(struct bio *bio, int err)
 	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
-
 static void shared_read_endio(struct bio *bio, int err)
 {
 	struct list_head mappings;
 	struct new_mapping *m, *tmp;
-	struct endio_hook *endio_hook = bio->bi_private;
+	struct endio_hook *endio_hook = dm_get_mapinfo(bio)->ptr;
 	unsigned long flags;
 
 	restore_bio_endio(endio_hook, bio);
@@ -1040,7 +1035,6 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	case -ENODATA:
 		if (bio_rw(bio) == READ || bio_rw(bio) == READA) {
-			bio->bi_bdev = tc->pool_dev->bdev;
 			zero_fill_bio(bio);
 			bio_endio(bio, 0);
 		} else
@@ -1054,7 +1048,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	}
 }
 
-static void process_bios(struct pool *pool)
+static void process_deferred_bios(struct pool *pool)
 {
 	unsigned long flags;
 	struct bio *bio;
@@ -1128,7 +1122,7 @@ static void do_producer(struct work_struct *ws)
 {
 	struct pool *pool = container_of(ws, struct pool, producer);
 
-	process_bios(pool);
+	process_deferred_bios(pool);
 }
 
 static void do_consumer(struct work_struct *ws)
