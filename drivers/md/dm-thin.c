@@ -614,28 +614,6 @@ static struct pool *pool_table_lookup(struct mapped_device *md)
 /*----------------------------------------------------------------*/
 
 /*
- * We need to maintain an association between a bio and a thin target
- * when deferring a bio and handing it from the individual thin target to the
- * workqueue which is shared across all thin targets.
- *
- * To avoid another mempool allocation or lookups in an auxillary table,
- * we borrow the bi_bdev field for this purpose, as we know it is
- * not used while the bio is being processed and we know the value it holds.
- */
-// FIXME Can this use map_context instead?
-static void set_tc(struct bio *bio, struct thin_c *tc)
-{
-	bio->bi_bdev = (struct block_device *)tc;
-}
-
-static struct thin_c *get_tc(struct bio *bio)
-{
-	return (struct thin_c *)bio->bi_bdev;
-}
-
-/*----------------------------------------------------------------*/
-
-/*
  * This section of code contains the logic for processing a thin devices' IO.
  * Much of the code depends on pool object resources (lists, workqueues, etc)
  * but most is exclusively called from the thin target rather than the thin-pool
@@ -869,7 +847,7 @@ static void cell_remap_and_issue_except(struct thin_c *tc, struct cell *cell,
 
 static void retry_later(struct bio *bio)
 {
-	struct thin_c *tc = get_tc(bio);
+	struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
@@ -1085,7 +1063,7 @@ static void process_bios(struct pool *pool)
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	while ((bio = bio_list_pop(&bios))) {
-		struct thin_c *tc = get_tc(bio);
+		struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
 
 		if (bio->bi_rw & REQ_DISCARD)
 			process_discard(tc, bio);
@@ -1160,8 +1138,6 @@ static void defer_bio(struct thin_c *tc, struct bio *bio)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 
-	set_tc(bio, tc);
-
 	spin_lock_irqsave(&pool->lock, flags);
 	bio_list_add(&pool->deferred_bios, bio);
 	spin_unlock_irqrestore(&pool->lock, flags);
@@ -1170,10 +1146,11 @@ static void defer_bio(struct thin_c *tc, struct bio *bio)
 }
 
 /*
- * Non-blocking function designed to be called from the targets map
+ * Non-blocking function designed to be called from the target's map
  * function.
  */
-static int bio_map(struct dm_target *ti, struct bio *bio)
+static int bio_map(struct dm_target *ti, struct bio *bio,
+		   union map_info *map_context)
 {
 	int r;
 	struct thin_c *tc = ti->private;
@@ -1193,6 +1170,11 @@ static int bio_map(struct dm_target *ti, struct bio *bio)
 		bio_endio(bio, 0);
 		return DM_MAPIO_SUBMITTED;
 	}
+
+	/*
+	 * Save the thin context for easy access from the deferred bio later.
+	 */
+	map_context->ptr = tc;
 
 	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
 		defer_bio(tc, bio);
@@ -2067,7 +2049,7 @@ static int thin_map(struct dm_target *ti, struct bio *bio,
 {
 	bio->bi_sector -= ti->begin;
 
-	return bio_map(ti, bio);
+	return bio_map(ti, bio, map_context);
 }
 
 static int thin_status(struct dm_target *ti, status_type_t type,
