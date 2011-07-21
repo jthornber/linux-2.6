@@ -1888,7 +1888,8 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		r = process_set_transaction_id_mesg(argc, argv, pool);
 
 	else
-		DMWARN("Unrecognised thin pool target message received.");
+		DMWARN("Unrecognised thin pool target message (%s) received.",
+		       argv[0]);
 
 	if (!r) {
 		r = dm_thin_metadata_commit(pool->tmd);
