@@ -27,6 +27,12 @@
 #define PRISON_CELLS 1024
 
 /*
+ * pool's data dev block size constraints: min=64K, max=1G
+ */
+#define DATA_DEV_BLOCK_SIZE_MIN_SECTORS 128
+#define DATA_DEV_BLOCK_SIZE_MAX_SECTORS 2097152
+
+/*
  * How do we handle breaking sharing of data blocks?
  * =================================================
  *
@@ -1521,7 +1527,10 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_data_dev;
 	}
 
-	if (kstrtoul(argv[2], 10, &block_size) || !block_size) {
+	if (kstrtoul(argv[2], 10, &block_size) || !block_size ||
+	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    block_size > DATA_DEV_BLOCK_SIZE_MAX_SECTORS ||
+	    !is_power_of_2(block_size)) {
 		ti->error = "Invalid block size";
 		r = -EINVAL;
 		goto out;

@@ -175,6 +175,11 @@ i) Constructor
  Optional feature arguments:
    - 'skip_block_zeroing': skips the zeroing of newly provisioned blocks.
 
+ where,
+
+   - data block size: minimum value is 64K (128 sectors) and maximum is
+     1G (2097152 sectors).
+
 ii) Status
 
    <transaction id> <data free space in sectors> <metadata free space in sectors> <held metadata root>
