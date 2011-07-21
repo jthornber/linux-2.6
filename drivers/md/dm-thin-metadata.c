@@ -14,7 +14,7 @@
 
 /*----------------------------------------------------------------*/
 
-#define DM_MSG_PREFIX   "thin-metadata"
+#define DM_MSG_PREFIX   "thin metadata"
 
 #define THIN_SUPERBLOCK_MAGIC 27022010
 #define THIN_SUPERBLOCK_LOCATION 0
