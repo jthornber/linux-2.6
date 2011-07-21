@@ -2,6 +2,7 @@
 #include "dm-space-map-disk.h"
 #include "dm-space-map-metadata.h"
 
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/device-mapper.h> /* For DMERR */
 
@@ -439,4 +440,11 @@ unsigned dm_tm_shadow_count(struct dm_transaction_manager *tm)
 	return tm->shadow_count;
 }
 EXPORT_SYMBOL_GPL(dm_tm_shadow_count);
+
+/*----------------------------------------------------------------*/
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Joe Thornber");
+MODULE_DESCRIPTION("Immutable metadata library for dm");
+
 /*----------------------------------------------------------------*/
