@@ -508,9 +508,7 @@ struct thin_c {
 
 struct endio_hook {
 	struct thin_c *tc;
-
 	bio_end_io_t *saved_bi_end_io;
-
 	struct deferred_entry *entry;
 };
 
@@ -535,17 +533,14 @@ struct new_mapping {
 	bio_end_io_t *saved_bi_end_io;
 };
 
-#define save_and_set_bio_endio(m, bio, endio)		\
-do {							\
-	(m)->saved_bi_end_io = (bio)->bi_end_io;	\
-	(bio)->bi_end_io = (endio);			\
-	dm_get_mapinfo((bio))->ptr = (m);		\
-} while (0)
+/*----------------------------------------------------------------*/
 
-#define restore_bio_endio(m, bio)			\
-do {							\
-	(bio)->bi_end_io = (m)->saved_bi_end_io;	\
-} while (0)
+static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
+			       bio_end_io_t *fn)
+{
+	*save = bio->bi_end_io;
+	bio->bi_end_io = fn;
+}
 
 /*----------------------------------------------------------------*/
 
@@ -695,24 +690,25 @@ static void shared_read_endio(struct bio *bio, int err)
 {
 	struct list_head mappings;
 	struct new_mapping *m, *tmp;
-	struct endio_hook *endio_hook = dm_get_mapinfo(bio)->ptr;
+	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	unsigned long flags;
+	struct pool *pool = h->tc->pool;
 
-	restore_bio_endio(endio_hook, bio);
+	bio->bi_end_io = h->saved_bi_end_io;
 	bio_endio(bio, err);
 
 	INIT_LIST_HEAD(&mappings);
-	ds_dec(endio_hook->entry, &mappings);
+	ds_dec(h->entry, &mappings);
 
-	spin_lock_irqsave(&endio_hook->tc->pool->lock, flags);
+	spin_lock_irqsave(&pool->lock, flags);
 	list_for_each_entry_safe(m, tmp, &mappings, list) {
 		list_del(&m->list);
 		INIT_LIST_HEAD(&m->list);
 		__maybe_add_mapping(m);
 	}
-	spin_unlock_irqrestore(&endio_hook->tc->pool->lock, flags);
+	spin_unlock_irqrestore(&pool->lock, flags);
 
-	mempool_free(endio_hook, endio_hook->tc->pool->endio_hook_pool);
+	mempool_free(h, pool->endio_hook_pool);
 }
 
 static int io_covers_block(struct pool *pool, struct bio *bio)
@@ -746,7 +742,8 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	 */
 	if (io_covers_block(pool, bio)) {
 		m->bio = bio;
-		save_and_set_bio_endio(m, bio, overwrite_endio);
+		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
+		dm_get_mapinfo(bio)->ptr = m;
 		remap_and_issue(tc, bio, data_dest);
 	} else {
 		struct dm_io_region from, to;
@@ -793,7 +790,8 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	 */
 	if (!pool->zero_new_blocks || io_covers_block(pool, bio)) {
 		m->bio = bio;
-		save_and_set_bio_endio(m, bio, overwrite_endio);
+		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
+		dm_get_mapinfo(bio)->ptr = m;
 		remap_and_issue(tc, bio, data_block);
 	} else {
 		int r;
@@ -966,7 +964,6 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	struct cell *cell;
 	struct cell_key key;
 	struct pool *pool = tc->pool;
-	struct endio_hook *endio_hook;
 
 	/*
 	 * If cell is already occupied, then sharing is already
@@ -980,12 +977,13 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	if (bio_data_dir(bio) == WRITE)
 		break_sharing(tc, bio, block, &key, lookup_result);
 	else {
-		endio_hook = mempool_alloc(pool->endio_hook_pool, GFP_NOIO);
+		struct endio_hook *h;
+		h = mempool_alloc(pool->endio_hook_pool, GFP_NOIO);
 
-		endio_hook->tc = tc;
-		endio_hook->entry = ds_inc(&pool->ds);
-		save_and_set_bio_endio(endio_hook, bio, shared_read_endio);
-
+		h->tc = tc;
+		h->entry = ds_inc(&pool->ds);
+		save_and_set_endio(bio, &h->saved_bi_end_io, shared_read_endio);
+		dm_get_mapinfo(bio)->ptr = h;
 		remap_and_issue(tc, bio, lookup_result->block);
 	}
 }
@@ -1084,7 +1082,7 @@ static void process_prepared_mapping(struct new_mapping *m)
 
 	bio = m->bio;
 	if (bio)
-		restore_bio_endio(m, bio);
+		bio->bi_end_io = m->saved_bi_end_io;
 
 	r = dm_thin_metadata_insert(tc->td, m->virt_block, m->data_block);
 	if (r) {
