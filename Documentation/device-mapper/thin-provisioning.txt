@@ -237,7 +237,7 @@ iii) Messages
  thin <pool dev> <dev id>
 
  pool dev: the path to the pool (eg, /dev/mapper/my_pool)
- dev id: the internal device identifier (32bit value)
+ dev id: the internal device identifier (24bit value)
 
  The pool doesn't store any size against the thin devices.  If you
  load a thin target that is smaller than you've been using previously,

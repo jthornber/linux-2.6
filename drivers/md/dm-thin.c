@@ -33,6 +33,11 @@
 #define DATA_DEV_BLOCK_SIZE_MAX_SECTORS 2097152
 
 /*
+ * Constrain maximum device id to 24 bits (2**24 - 1).
+ */
+#define MAX_DEV_ID 16777215
+
+/*
  * How do we handle breaking sharing of data blocks?
  * =================================================
  *
@@ -1707,12 +1712,22 @@ static int check_arg_count(unsigned argc, unsigned args_required)
 
 static int read_dev_id(char *arg, dm_thin_dev_t *dev_id)
 {
-	if (kstrtoull(arg, 10, (unsigned long long *)dev_id)) {
-		DMWARN("Message received with invalid device id: %s", arg);
+	if (kstrtoull(arg, 10, (unsigned long long *)dev_id) ||
+	    *dev_id > MAX_DEV_ID)
 		return -EINVAL;
-	}
 
 	return 0;
+}
+
+static int read_dev_id_mesg(char *arg, dm_thin_dev_t *dev_id)
+{
+	int r = 0;
+
+	r = read_dev_id(arg, dev_id);
+	if (r < 0)
+		DMWARN("Message received with invalid device id: %s", arg);
+
+	return r;
 }
 
 static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *pool)
@@ -1724,7 +1739,7 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 	if (r)
 		return r;
 
-	r = read_dev_id(argv[1], &dev_id);
+	r = read_dev_id_mesg(argv[1], &dev_id);
 	if (r)
 		return r;
 
@@ -1748,11 +1763,11 @@ static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *poo
 	if (r)
 		return r;
 
-	r = read_dev_id(argv[1], &dev_id);
+	r = read_dev_id_mesg(argv[1], &dev_id);
 	if (r)
 		return r;
 
-	r = read_dev_id(argv[2], &origin_dev_id);
+	r = read_dev_id_mesg(argv[2], &origin_dev_id);
 	if (r)
 		return r;
 
@@ -1775,7 +1790,7 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	r = read_dev_id(argv[1], &dev_id);
+	r = read_dev_id_mesg(argv[1], &dev_id);
 	if (r)
 		return r;
 
@@ -1796,7 +1811,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	r = read_dev_id(argv[1], &dev_id);
+	r = read_dev_id_mesg(argv[1], &dev_id);
 	if (r)
 		return r;
 
@@ -2042,7 +2057,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	tc->pool_dev = pool_dev;
 
-	if (kstrtoull(argv[1], 10, (unsigned long long *)&tc->dev_id)) {
+	if (read_dev_id(argv[1], (unsigned long long *)&tc->dev_id)) {
 		ti->error = "Invalid device id";
 		r = -EINVAL;
 		goto bad_common;
