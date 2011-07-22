@@ -43,6 +43,9 @@ All tools run offline for first release.
   - [ ] resize metadata device
   - [ ] implement the btree trimming
   - [ ] external origin (read-only)
+  - [ ] a bug found in the userland tools, check that nr_free in the
+    last index entry is being set correctly if there are fewer than a
+    whole blocks worth.  Also check this is extended correctly.
 
 ** Userland tools
 
