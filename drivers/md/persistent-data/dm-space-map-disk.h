@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2011 Red Hat, Inc. All rights reserved.
+ *
+ * This file is released under the GPL.
+ */
 #ifndef DM_SPACE_MAP_DISK_H
 #define DM_SPACE_MAP_DISK_H
 

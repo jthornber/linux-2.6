@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2011 Red Hat, Inc. All rights reserved.
+ *
+ * This file is released under the GPL.
+ */
 #include "dm-btree.h"
 #include "dm-btree-internal.h"
 
