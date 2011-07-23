@@ -135,7 +135,7 @@ int sm_find_free(void *addr, unsigned begin, unsigned end,
 	return -ENOSPC;
 }
 
-static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
+static int disk_ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 {
 	io->tm = tm;
 	io->bitmap_info.tm = tm;
@@ -174,11 +174,11 @@ static int ll_init(struct ll_disk *io, struct dm_transaction_manager *tm)
 	return 0;
 }
 
-static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm)
+static int disk_ll_new(struct ll_disk *io, struct dm_transaction_manager *tm)
 {
 	int r;
 
-	r = ll_init(io, tm);
+	r = disk_ll_init(io, tm);
 	if (r < 0)
 		return r;
 
@@ -197,7 +197,7 @@ static int ll_new(struct ll_disk *io, struct dm_transaction_manager *tm)
 	return 0;
 }
 
-static int ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
+static int disk_ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
 {
 	int r;
 	dm_block_t i, nr_blocks;
@@ -232,8 +232,8 @@ static int ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
 	return 0;
 }
 
-static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
-		   void *root, size_t len)
+static int disk_ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
+			void *root, size_t len)
 {
 	int r;
 	struct sm_root *smr = (struct sm_root *) root;
@@ -243,7 +243,7 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		return -ENOMEM;
 	}
 
-	r = ll_init(ll, tm);
+	r = disk_ll_init(ll, tm);
 	if (r < 0)
 		return r;
 
@@ -255,7 +255,7 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	return 0;
 }
 
-static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
+static int disk_ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 {
 	int r;
 	dm_block_t index = b;
@@ -276,9 +276,9 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	return dm_tm_unlock(io->tm, blk);
 }
 
-static int ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
+static int disk_ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
 {
-	int r = ll_lookup_bitmap(io, b, result);
+	int r = disk_ll_lookup_bitmap(io, b, result);
 
 	if (r)
 		return r;
@@ -296,8 +296,8 @@ static int ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	return r;
 }
 
-static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
-			      dm_block_t end, dm_block_t *result)
+static int disk_ll_find_free_block(struct ll_disk *io, dm_block_t begin,
+				   dm_block_t end, dm_block_t *result)
 {
 	int r;
 	struct index_entry ie;
@@ -344,7 +344,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 	return -ENOSPC;
 }
 
-static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
+static int disk_ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 {
 	int r;
 	uint32_t bit, old;
@@ -418,31 +418,31 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	return 0;
 }
 
-static int ll_inc(struct ll_disk *ll, dm_block_t b)
+static int disk_ll_inc(struct ll_disk *ll, dm_block_t b)
 {
 	int r;
 	uint32_t rc;
 
-	r = ll_lookup(ll, b, &rc);
+	r = disk_ll_lookup(ll, b, &rc);
 	if (r)
 		return r;
 
-	return ll_insert(ll, b, rc + 1);
+	return disk_ll_insert(ll, b, rc + 1);
 }
 
-static int ll_dec(struct ll_disk *ll, dm_block_t b)
+static int disk_ll_dec(struct ll_disk *ll, dm_block_t b)
 {
 	int r;
 	uint32_t rc;
 
-	r = ll_lookup(ll, b, &rc);
+	r = disk_ll_lookup(ll, b, &rc);
 	if (r)
 		return r;
 
 	if (!rc)
 		return -EINVAL;
 
-	return ll_insert(ll, b, rc - 1);
+	return disk_ll_insert(ll, b, rc - 1);
 }
 
 /*----------------------------------------------------------------
@@ -463,7 +463,7 @@ static void sm_disk_destroy(struct dm_space_map *sm)
 static int sm_disk_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return ll_extend(&smd->ll, extra_blocks);
+	return disk_ll_extend(&smd->ll, extra_blocks);
 }
 
 static int sm_disk_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
@@ -485,7 +485,7 @@ static int sm_disk_get_count(struct dm_space_map *sm, dm_block_t b,
 			     uint32_t *result)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return ll_lookup(&smd->ll, b, result);
+	return disk_ll_lookup(&smd->ll, b, result);
 }
 
 static int sm_disk_count_is_more_than_one(struct dm_space_map *sm, dm_block_t b,
@@ -505,19 +505,19 @@ static int sm_disk_set_count(struct dm_space_map *sm, dm_block_t b,
 			     uint32_t count)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return ll_insert(&smd->ll, b, count);
+	return disk_ll_insert(&smd->ll, b, count);
 }
 
 static int sm_disk_inc_block(struct dm_space_map *sm, dm_block_t b)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return ll_inc(&smd->ll, b);
+	return disk_ll_inc(&smd->ll, b);
 }
 
 static int sm_disk_dec_block(struct dm_space_map *sm, dm_block_t b)
 {
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	return ll_dec(&smd->ll, b);
+	return disk_ll_dec(&smd->ll, b);
 }
 
 static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
@@ -526,11 +526,11 @@ static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
 	/* FIXME: we should start the search where we left off */
-	r = ll_find_free_block(&smd->ll, 0, smd->ll.nr_blocks, b);
+	r = disk_ll_find_free_block(&smd->ll, 0, smd->ll.nr_blocks, b);
 	if (r)
 		return r;
 
-	return ll_inc(&smd->ll, *b);
+	return disk_ll_inc(&smd->ll, *b);
 }
 
 static int sm_disk_commit(struct dm_space_map *sm)
@@ -591,11 +591,11 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 
 	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
 
-	r = ll_new(&smd->ll, tm);
+	r = disk_ll_new(&smd->ll, tm);
 	if (r)
 		return ERR_PTR(r);
 
-	r = ll_extend(&smd->ll, nr_blocks);
+	r = disk_ll_extend(&smd->ll, nr_blocks);
 	if (r)
 		return ERR_PTR(r);
 
@@ -619,7 +619,7 @@ struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 
 	memcpy(&smd->sm, &ops_, sizeof(smd->sm));
 
-	r = ll_open(&smd->ll, tm, root, len);
+	r = disk_ll_open(&smd->ll, tm, root, len);
 	if (r)
 		return ERR_PTR(r);
 

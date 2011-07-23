@@ -61,7 +61,7 @@ static struct dm_block_validator index_validator_ = {
 /*----------------------------------------------------------------
  * low level disk ops
  *--------------------------------------------------------------*/
-static int ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
+static int metadata_ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 {
 	ll->tm = tm;
 
@@ -87,15 +87,15 @@ static int ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	return 0;
 }
 
-static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
-		  dm_block_t nr_blocks)
+static int metadata_ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
+			   dm_block_t nr_blocks)
 {
 	int r;
 	dm_block_t i;
 	unsigned blocks;
 	struct dm_block *index_block;
 
-	r = ll_init(ll, tm);
+	r = metadata_ll_init(ll, tm);
 	if (r < 0)
 		return r;
 
@@ -137,8 +137,8 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	return 0;
 }
 
-static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
-		   void *root, size_t len)
+static int metadata_ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
+			    void *root, size_t len)
 {
 	int r;
 	struct sm_root *smr = (struct sm_root *) root;
@@ -149,7 +149,7 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 		return -ENOMEM;
 	}
 
-	r = ll_init(ll, tm);
+	r = metadata_ll_init(ll, tm);
 	if (r < 0)
 		return r;
 
@@ -170,7 +170,7 @@ static int ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	return 0;
 }
 
-static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
+static int metadata_ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 {
 	int r;
 	dm_block_t index = b;
@@ -188,9 +188,9 @@ static int ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	return dm_tm_unlock(ll->tm, blk);
 }
 
-static int ll_lookup(struct ll_disk *ll, dm_block_t b, uint32_t *result)
+static int metadata_ll_lookup(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 {
-	int r = ll_lookup_bitmap(ll, b, result);
+	int r = metadata_ll_lookup_bitmap(ll, b, result);
 
 	if (r)
 		return r;
@@ -208,8 +208,8 @@ static int ll_lookup(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 	return r;
 }
 
-static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
-			      dm_block_t end, dm_block_t *result)
+static int metadata_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
+				       dm_block_t end, dm_block_t *result)
 {
 	int r;
 	struct index_entry *ie;
@@ -256,7 +256,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 	return -ENOSPC;
 }
 
-static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
+static int metadata_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 {
 	int r;
 	uint32_t bit, old;
@@ -327,34 +327,34 @@ static int ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	return 0;
 }
 
-static int ll_inc(struct ll_disk *ll, dm_block_t b)
+static int metadata_ll_inc(struct ll_disk *ll, dm_block_t b)
 {
 	int r;
 	uint32_t rc;
 
-	r = ll_lookup(ll, b, &rc);
+	r = metadata_ll_lookup(ll, b, &rc);
 	if (r)
 		return r;
 
-	return ll_insert(ll, b, rc + 1);
+	return metadata_ll_insert(ll, b, rc + 1);
 }
 
-static int ll_dec(struct ll_disk *ll, dm_block_t b)
+static int metadata_ll_dec(struct ll_disk *ll, dm_block_t b)
 {
 	int r;
 	uint32_t rc;
 
-	r = ll_lookup(ll, b, &rc);
+	r = metadata_ll_lookup(ll, b, &rc);
 	if (r)
 		return r;
 
 	if (!rc)
 		return -EINVAL;
 
-	return ll_insert(ll, b, rc - 1);
+	return metadata_ll_insert(ll, b, rc - 1);
 }
 
-static int ll_commit(struct ll_disk *ll)
+static int metadata_ll_commit(struct ll_disk *ll)
 {
 	int r, inc;
 	struct dm_block *b;
@@ -376,7 +376,7 @@ static int ll_commit(struct ll_disk *ll)
  * transaction manager.  This means that performing disk operations may
  * cause us to recurse into the space map in order to allocate new blocks.
  * For this reason we have a pool of pre-allocated blocks large enough to
- * service any ll_disk operation.
+ * service any metadata_ll_disk operation.
  *--------------------------------------------------------------*/
 
 /*
@@ -430,11 +430,11 @@ static int commit_bop(struct sm_metadata *smm, struct block_op *op)
 
 	switch (op->type) {
 	case BOP_INC:
-		r = ll_inc(&smm->ll, op->block);
+		r = metadata_ll_inc(&smm->ll, op->block);
 		break;
 
 	case BOP_DEC:
-		r = ll_dec(&smm->ll, op->block);
+		r = metadata_ll_dec(&smm->ll, op->block);
 		break;
 	}
 
@@ -525,7 +525,7 @@ static int sm_metadata_get_count(struct dm_space_map *sm, dm_block_t b,
 			}
 	}
 
-	r = ll_lookup(&smm->ll, b, result);
+	r = metadata_ll_lookup(&smm->ll, b, result);
 	if (r)
 		return r;
 	*result += adjustment;
@@ -563,7 +563,7 @@ static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm,
 		return 0;
 	}
 
-	r = ll_lookup_bitmap(&smm->ll, b, &rc);
+	r = metadata_ll_lookup_bitmap(&smm->ll, b, &rc);
 	if (r)
 		return r;
 
@@ -585,7 +585,7 @@ static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
 	no_recurse(smm);
 
 	in(smm);
-	r = ll_insert(&smm->ll, b, count);
+	r = metadata_ll_insert(&smm->ll, b, count);
 	out(smm);
 	return r;
 }
@@ -600,7 +600,7 @@ static int sm_metadata_inc_block(struct dm_space_map *sm, dm_block_t b)
 
 	else {
 		in(smm);
-		r = ll_inc(&smm->ll, b);
+		r = metadata_ll_inc(&smm->ll, b);
 		out(smm);
 	}
 	return r;
@@ -616,7 +616,7 @@ static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 
 	else {
 		in(smm);
-		r = ll_dec(&smm->ll, b);
+		r = metadata_ll_dec(&smm->ll, b);
 		out(smm);
 	}
 	return r;
@@ -627,7 +627,7 @@ static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 	int r;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
-	r = ll_find_free_block(&smm->old_ll, smm->begin, smm->old_ll.nr_blocks, b);
+	r = metadata_ll_find_free_block(&smm->old_ll, smm->begin, smm->old_ll.nr_blocks, b);
 	if (r)
 		return r;
 
@@ -638,7 +638,7 @@ static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 
 	else {
 		in(smm);
-		r = ll_inc(&smm->ll, *b);
+		r = metadata_ll_inc(&smm->ll, *b);
 		out(smm);
 	}
 
@@ -654,7 +654,7 @@ static int sm_metadata_commit(struct dm_space_map *sm)
 
 	memcpy(&smm->old_ll, &smm->ll, sizeof(smm->old_ll));
 
-	r = ll_commit(&smm->ll);
+	r = metadata_ll_commit(&smm->ll);
 	if (r)
 		return r;
 
@@ -844,7 +844,7 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 	smm->nr_uncommitted = 0;
 
 	memcpy(&smm->sm, &bootstrap_ops_, sizeof(smm->sm));
-	r = ll_new(&smm->ll, tm, nr_blocks);
+	r = metadata_ll_new(&smm->ll, tm, nr_blocks);
 	if (r)
 		return r;
 	memcpy(&smm->sm, &ops_, sizeof(smm->sm));
@@ -854,7 +854,7 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 	 * allocated blocks that they were built from.
 	 */
 	for (i = superblock; !r && i < smm->begin; i++)
-		r = ll_inc(&smm->ll, i);
+		r = metadata_ll_inc(&smm->ll, i);
 
 	if (r)
 		return r;
@@ -869,7 +869,7 @@ int dm_sm_metadata_open(struct dm_space_map *sm,
 	int r;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
-	r = ll_open(&smm->ll, tm, root, len);
+	r = metadata_ll_open(&smm->ll, tm, root, len);
 	if (r)
 		return r;
 
