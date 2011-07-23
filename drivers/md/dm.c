@@ -1172,7 +1172,8 @@ static int __clone_and_map_discard(struct clone_info *ci)
 
 		/*
 		 * Even though the device advertised discard support,
-		 * reconfiguration might have changed that since the
+		 * that does not mean every target supports it, and
+		 * reconfiguration might also have changed that since the
 		 * check was performed.
 		 */
 		if (!ti->num_discard_requests)
@@ -2633,19 +2634,13 @@ void dm_uevent_add(struct mapped_device *md, struct list_head *elist)
 }
 
 /*
- * The gendisk or block_device are only valid as long as you
- * have a reference count on 'md'.
+ * The gendisk is only valid as long as you have a reference
+ * count on 'md'.
  */
 struct gendisk *dm_disk(struct mapped_device *md)
 {
 	return md->disk;
 }
-
-struct block_device *dm_bdev(struct mapped_device *md)
-{
-	return md->bdev;
-}
-EXPORT_SYMBOL_GPL(dm_bdev);
 
 struct kobject *dm_kobject(struct mapped_device *md)
 {

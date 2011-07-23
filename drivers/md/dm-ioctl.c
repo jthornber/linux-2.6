@@ -1424,6 +1424,11 @@ static int target_message(struct dm_ioctl *param, size_t param_size)
 		goto out;
 	}
 
+	if (!argc) {
+		DMWARN("Empty message received.");
+		goto out;
+	}
+
 	table = dm_get_live_table(md);
 	if (!table)
 		goto out_argv;
