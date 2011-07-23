@@ -3,13 +3,15 @@
  *
  * This file is released under the GPL.
  */
+
+#include "dm-space-map.h"
 #include "dm-space-map-common.h"
 #include "dm-space-map-metadata.h"
 
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
-#include <linux/device-mapper.h> /* For DMERR */
+#include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "space map metadata"
 
@@ -100,7 +102,7 @@ static int ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	ll->nr_blocks = nr_blocks;
 	ll->nr_allocated = 0;
 
-	blocks = div_up(nr_blocks, ll->entries_per_block);
+	blocks = dm_sector_div_up(nr_blocks, ll->entries_per_block);
 	for (i = 0; i < blocks; i++) {
 		struct dm_block *b;
 		struct index_entry *idx = ll->mi.index + i;
@@ -212,7 +214,7 @@ static int ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 	int r;
 	struct index_entry *ie;
 	dm_block_t i, index_begin = begin;
-	dm_block_t index_end = div_up(end, ll->entries_per_block);
+	dm_block_t index_end = dm_sector_div_up(end, ll->entries_per_block);
 
 	/* FIXME: use shifts */
 	begin = do_div(index_begin, ll->entries_per_block);

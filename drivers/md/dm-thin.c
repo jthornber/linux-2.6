@@ -5,9 +5,7 @@
  */
 
 #include "dm-thin-metadata.h"
-#include "persistent-data/dm-transaction-manager.h"
 
-#include <linux/blkdev.h>
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>

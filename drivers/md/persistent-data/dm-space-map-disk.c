@@ -3,13 +3,16 @@
  *
  * This file is released under the GPL.
  */
+
 #include "dm-space-map-common.h"
 #include "dm-space-map-disk.h"
+#include "dm-space-map.h"
+#include "dm-transaction-manager.h"
 
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <asm-generic/bitops/le.h>
-#include <linux/device-mapper.h> /* For DMERR */
+#include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "space map disk"
 
@@ -201,8 +204,8 @@ static int ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
 	unsigned old_blocks, blocks;
 
 	nr_blocks = io->nr_blocks + extra_blocks;
-	old_blocks = div_up(io->nr_blocks, io->entries_per_block);
-	blocks = div_up(nr_blocks, io->entries_per_block);
+	old_blocks = dm_sector_div_up(io->nr_blocks, io->entries_per_block);
+	blocks = dm_sector_div_up(nr_blocks, io->entries_per_block);
 	for (i = old_blocks; i < blocks; i++) {
 		struct dm_block *b;
 		struct index_entry idx;
@@ -269,7 +272,7 @@ static int ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *result)
 	if (r < 0)
 		return r;
 	*result = sm_lookup_bitmap(dm_bitmap_data(blk),
-				   mod64(b, io->entries_per_block));
+				   do_div(b, io->entries_per_block));
 	return dm_tm_unlock(io->tm, blk);
 }
 
@@ -299,7 +302,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 	int r;
 	struct index_entry ie;
 	dm_block_t i, index_begin = begin;
-	dm_block_t index_end = div_up(end, io->entries_per_block);
+	dm_block_t index_end = dm_sector_div_up(end, io->entries_per_block);
 
 	begin = do_div(index_begin, io->entries_per_block);
 	for (i = index_begin; i < index_end; i++, begin = 0) {
@@ -318,7 +321,7 @@ static int ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 				return r;
 
 			bit_end = (i == index_end - 1) ?
-				mod64(end, io->entries_per_block) : io->entries_per_block;
+				do_div(end, io->entries_per_block) : io->entries_per_block;
 
 			r = sm_find_free(dm_bitmap_data(blk),
 					 max((unsigned)begin,
@@ -365,7 +368,7 @@ static int ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
 
 	bm = dm_bitmap_data(nb);
-	bit = mod64(b, io->entries_per_block);
+	bit = do_div(b, io->entries_per_block);
 	old = sm_lookup_bitmap(bm, bit);
 
 	if (ref_count <= 2) {

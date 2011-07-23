@@ -3,8 +3,10 @@
  *
  * This file is released under the GPL.
  */
+
 #include "dm-btree-internal.h"
 #include "dm-space-map.h"
+#include "dm-transaction-manager.h"
 
 /*----------------------------------------------------------------
  * Array manipulation
@@ -101,7 +103,7 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root)
 	size_t block_size;
 	uint32_t max_entries;
 
-	r = bn_new_block(info, &b);
+	r = new_block(info, &b);
 	if (r < 0)
 		return r;
 
@@ -115,7 +117,7 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root)
 	n->header.max_entries =	__cpu_to_le32(max_entries);
 
 	*root = dm_block_location(b);
-	return bn_unlock(info, b);
+	return unlock_for_block(info, b);
 }
 EXPORT_SYMBOL_GPL(dm_btree_empty);
 
@@ -382,7 +384,7 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	left = shadow_current(s);
 	BUG_ON(!left);
 
-	ret = bn_new_block(s->info, &right);
+	ret = new_block(s->info, &right);
 	if (ret < 0)
 		return ret;
 
@@ -418,10 +420,10 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 		  __le64_to_cpu(r->keys[0]), &location);
 
 	if (key < __le64_to_cpu(r->keys[0])) {
-		bn_unlock(s->info, right);
+		unlock_for_block(s->info, right);
 		s->nodes[1] = left;
 	} else {
-		bn_unlock(s->info, left);
+		unlock_for_block(s->info, left);
 		s->nodes[1] = right;
 	}
 
@@ -461,11 +463,11 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	new_parent = shadow_current(s);
 	BUG_ON(!new_parent);
 
-	ret = bn_new_block(s->info, &left);
+	ret = new_block(s->info, &left);
 	if (ret < 0)
 		return ret;
 
-	ret = bn_new_block(s->info, &right);
+	ret = new_block(s->info, &right);
 	if (ret < 0) {
 		/* FIXME: put left */
 		return ret;
@@ -512,14 +514,14 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	 * much about the spine
 	 */
 	if (s->nodes[0] != new_parent) {
-		bn_unlock(s->info, s->nodes[0]);
+		unlock_for_block(s->info, s->nodes[0]);
 		s->nodes[0] = new_parent;
 	}
 	if (key < __le64_to_cpu(r->keys[0])) {
-		bn_unlock(s->info, right);
+		unlock_for_block(s->info, right);
 		s->nodes[1] = left;
 	} else {
-		bn_unlock(s->info, left);
+		unlock_for_block(s->info, left);
 		s->nodes[1] = right;
 	}
 	s->count = 2;
@@ -710,7 +712,7 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 	struct node *b_node, *orig_node;
 
 	/* Copy the root node */
-	r = bn_new_block(info, &b);
+	r = new_block(info, &b);
 	if (r < 0)
 		return r;
 
@@ -718,7 +720,7 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 	if (r < 0) {
 		dm_block_t location = dm_block_location(b);
 
-		bn_unlock(info, b);
+		unlock_for_block(info, b);
 		dm_tm_dec(info->tm, location);
 	}
 

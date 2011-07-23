@@ -4,12 +4,13 @@
  * This file is released under the GPL.
  */
 #include "dm-transaction-manager.h"
+#include "dm-space-map.h"
 #include "dm-space-map-disk.h"
 #include "dm-space-map-metadata.h"
 
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/device-mapper.h> /* For DMERR */
+#include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "transaction manager"
 

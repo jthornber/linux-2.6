@@ -3,13 +3,14 @@
  *
  * This file is released under the GPL.
  */
+
 #ifndef DM_SPACE_MAP_COMMON_H
 #define DM_SPACE_MAP_COMMON_H
 
-#include "dm-transaction-manager.h"
 #include "dm-btree.h"
 
-/*----------------------------------------------------------------
+/*
+ *--------------------------------------------------------------------
  * Low level disk format
  *
  * Bitmap btree
@@ -24,8 +25,10 @@
  * --------------
  *
  * Any entry that has a ref count higher than 2 gets entered in the ref
- * count tree.  The leaf values for this tree is the 32bit ref count.
- *--------------------------------------------------------------*/
+ * count tree.  The leaf values for this tree is the 32-bit ref count.
+ *---------------------------------------------------------------------
+ */
+
 struct index_entry {
 	__le64 blocknr;
 	__le32 nr_free;
@@ -51,8 +54,12 @@ struct ll_disk {
 	uint32_t entries_per_block;
 	dm_block_t nr_blocks;
 	dm_block_t nr_allocated;
-	dm_block_t bitmap_root;	/* sometimes a btree root,
-				 * sometimes a simple index */
+
+	/*
+	 * bitmap_root may be a btree root or a simple index.
+	 */
+	dm_block_t bitmap_root;
+
 	dm_block_t ref_count_root;
 
 	struct metadata_index mi;
@@ -74,31 +81,14 @@ struct bitmap_header {
 } __packed;
 
 /*
- * These bitops work on a blocks worth of bits.
+ * These bitops work on a block's worth of bits.
  */
 unsigned sm_lookup_bitmap(void *addr, unsigned b);
 void sm_set_bitmap(void *addr, unsigned b, unsigned val);
-int sm_find_free(void *addr, unsigned begin, unsigned end,
-		 unsigned *result);
+int sm_find_free(void *addr, unsigned begin, unsigned end, unsigned *result);
 
 void *dm_bitmap_data(struct dm_block *b);
 
 extern struct dm_block_validator dm_sm_bitmap_validator;
 
-/*----------------------------------------------------------------*/
-
-static inline uint64_t div_up(uint64_t v, uint64_t n)
-{
-	uint64_t t = v;
-	uint64_t rem = do_div(t, n);
-	return t + (rem > 0 ? 1 : 0);
-}
-
-static inline uint64_t mod64(uint64_t n, uint64_t d)
-{
-	return do_div(n, d);
-}
-
-/*----------------------------------------------------------------*/
-
-#endif
+#endif	/* DM_SPACE_MAP_COMMON_H */

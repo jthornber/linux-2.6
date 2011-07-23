@@ -5,8 +5,10 @@
  */
 
 #include "dm-thin-metadata.h"
-#include "persistent-data/dm-transaction-manager.h"
+#include "persistent-data/dm-btree.h"
+#include "persistent-data/dm-space-map.h"
 #include "persistent-data/dm-space-map-disk.h"
+#include "persistent-data/dm-transaction-manager.h"
 
 #include <linux/list.h>
 #include <linux/device-mapper.h>

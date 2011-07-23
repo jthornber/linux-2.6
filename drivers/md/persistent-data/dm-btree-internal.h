@@ -3,16 +3,14 @@
  *
  * This file is released under the GPL.
  */
+
 #ifndef DM_BTREE_INTERNAL_H
 #define DM_BTREE_INTERNAL_H
 
 #include "dm-btree.h"
 
-#include <linux/list.h>
-
 /*----------------------------------------------------------------*/
 
-/* TODO: move all this into btree.c */
 /*
  * We'll need 2 accessor functions for n->csum and n->blocknr
  * to support dm-btree-spine.c in that case.
@@ -30,7 +28,7 @@ enum node_flags {
 struct node_header {
 	__le32 csum;
 	__le32 flags;
-	__le64 blocknr; /* which block this node is supposed to live in */
+	__le64 blocknr; /* Block this node is supposed to live in. */
 
 	__le32 nr_entries;
 	__le32 max_entries;
@@ -42,18 +40,11 @@ struct node {
 } __packed;
 
 
-/*
- * Based on the ideas in ["B-trees, Shadowing, and Clones" Ohad Rodeh]
- */
-
-/* FIXME: enable close packing for on disk structures */
-
 void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt);
 
-/* FIXME: change bn_ prefix for these, refers to an old struct block_node */
-int bn_new_block(struct dm_btree_info *info, struct dm_block **result);
-int bn_unlock(struct dm_btree_info *info, struct dm_block *b);
+int new_block(struct dm_btree_info *info, struct dm_block **result);
+int unlock_for_block(struct dm_btree_info *info, struct dm_block *b);
 
 /*
  * Spines keep track of the rolling locks.  There are 2 variants, read-only
@@ -112,7 +103,9 @@ static inline void *value_ptr(struct node *n, uint32_t index, size_t value_size)
 	return value_base(n) + (value_size * index);
 }
 
-/* assumes the values are suitably aligned and converts to core format */
+/*
+ * Assumes the values are suitably-aligned and converts to core format.
+ */
 static inline uint64_t value64(struct node *n, uint32_t index)
 {
 	__le64 *values = value_base(n);
@@ -124,14 +117,8 @@ static inline uint64_t value64(struct node *n, uint32_t index)
  */
 int lower_bound(struct node *n, uint64_t key);
 
-/*
- * Exported for testing.
- */
-int dm_btree_merge(struct shadow_spine *s, unsigned parent_index,
-		   size_t value_size);
-
 extern struct dm_block_validator btree_node_validator;
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif	/* DM_BTREE_INTERNAL_H */

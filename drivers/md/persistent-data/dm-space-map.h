@@ -3,17 +3,15 @@
  *
  * This file is released under the GPL.
  */
-#ifndef DM_SPACE_MAP_H
-#define DM_SPACE_MAP_H
+
+#ifndef _LINUX_DM_SPACE_MAP_H
+#define _LINUX_DM_SPACE_MAP_H
 
 #include "dm-block-manager.h"
 
-/*----------------------------------------------------------------*/
-
 /*
- * This structure keeps a record of how many times each block in a device
- * is referenced.  It needs to be persisted to disk as part of the
- * transaction.
+ * struct dm_space_map keeps a record of how many times each block in a device
+ * is referenced.  It needs to be fixed on disk as part of the transaction.
  */
 struct dm_space_map {
 	void (*destroy)(struct dm_space_map *sm);
@@ -33,13 +31,15 @@ struct dm_space_map {
 	int (*inc_block)(struct dm_space_map *sm, dm_block_t b);
 	int (*dec_block)(struct dm_space_map *sm, dm_block_t b);
 
-	/* new_block will increment the returned block */
+	/*
+	 * new_block will increment the returned block.
+	 */
 	int (*new_block)(struct dm_space_map *sm, dm_block_t *b);
 
 	/*
-	 * The root contains all the information needed to persist the
-	 * space map.  Generally this info is small, squirrel it away in a
-	 * disk block along with other info.
+	 * The root contains all the information needed to fix the space map.
+	 * Generally this info is small, so squirrel it away in a disk block
+	 * along with other info.
 	 */
 	int (*root_size)(struct dm_space_map *sm, size_t *result);
 	int (*copy_root)(struct dm_space_map *sm, void *copy_to_here, size_t len);
@@ -116,6 +116,4 @@ static inline int dm_sm_copy_root(struct dm_space_map *sm,
 	return sm->copy_root(sm, copy_to_here, len);
 }
 
-/*----------------------------------------------------------------*/
-
-#endif
+#endif	/* _LINUX_DM_SPACE_MAP_H */

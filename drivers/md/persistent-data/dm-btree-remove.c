@@ -3,8 +3,10 @@
  *
  * This file is released under the GPL.
  */
+
 #include "dm-btree.h"
 #include "dm-btree-internal.h"
+#include "dm-transaction-manager.h"
 
 /*
  * Removing an entry from a btree

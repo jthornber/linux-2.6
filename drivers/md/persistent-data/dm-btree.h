@@ -3,21 +3,21 @@
  *
  * This file is released under the GPL.
  */
-#ifndef DM_BTREE_H
-#define DM_BTREE_H
+#ifndef _LINUX_DM_BTREE_H
+#define _LINUX_DM_BTREE_H
 
-#include "dm-transaction-manager.h"
+#include "dm-block-manager.h"
+struct dm_transaction_manager;
 
 /*----------------------------------------------------------------*/
 
 /*
- * Manipulates hierarchical B+ trees with 64bit keys and arbitrary sized
+ * Manipulates hierarchical B+ trees with 64-bit keys and arbitrary-sized
  * values.
  */
 
 /*
- * The btree needs some knowledge about the values stored within it.  This
- * is provided by a |btree_value_type| structure.
+ * Infomation about the values stored within the btree.
  */
 struct dm_btree_value_type {
 	void *context;
@@ -29,41 +29,43 @@ struct dm_btree_value_type {
 
 	/*
 	 * Any of these methods can be safely set to NULL if you do not
-	 * need this feature.
+	 * need the corresponding feature.
 	 */
 
 	/*
 	 * The btree is making a duplicate of the value, for instance
-	 * because previously shared btree nodes have now diverged.  The
-	 * |value| argument is the new copy, the copy function may modify
-	 * it.  Probably it just wants to increment a reference count
-	 * somewhere.  This method is _not_ called for insertion of a new
-	 * value, it's assumed the ref count is already 1.
+	 * because previously-shared btree nodes have now diverged.
+	 * @value argument is the new copy that the copy function may modify.
+	 * (Probably it just wants to increment a reference count
+	 * somewhere.) This method is _not_ called for insertion of a new
+	 * value: It is assumed the ref count is already 1.
 	 */
 	void (*inc)(void *context, void *value);
 
 	/*
 	 * This value is being deleted.  The btree takes care of freeing
-	 * the memory pointed to by |value|.  Often the |del| function just
+	 * the memory pointed to by @value.  Often the del function just
 	 * needs to decrement a reference count somewhere.
 	 */
 	void (*dec)(void *context, void *value);
 
 	/*
-	 * An test for equality between two values.  When a value is
-	 * overwritten with a new one the old one has the |dec| method
-	 * called, _unless_ the new and old value are deemed equal.
+	 * A test for equality between two values.  When a value is
+	 * overwritten with a new one, the old one has the dec method
+	 * called _unless_ the new and old value are deemed equal.
 	 */
 	int (*equal)(void *context, void *value1, void *value2);
 };
 
 /*
- * The |btree_info| structure describes the shape and contents of a btree.
+ * The shape and contents of a btree.
  */
 struct dm_btree_info {
 	struct dm_transaction_manager *tm;
 
-	/* number of nested btrees (not the depth of a single tree). */
+	/*
+	 * Number of nested btrees. (Not the depth of a single tree.)
+	 */
 	unsigned levels;
 	struct dm_btree_value_type value_type;
 };
@@ -75,13 +77,13 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root);
 
 /*
  * Delete a tree.  O(n) - this is the slow one!  It can also block, so
- * please don't call it on an io path.
+ * please don't call it on an IO path.
  */
 int dm_btree_del(struct dm_btree_info *info, dm_block_t root);
 
 /*
  * Delete part of a tree.  This is really specific to truncation of
- * multisnap devs.  It only removes keys from the bottom level btree that
+ * thin devices.  It only removes keys from the bottom level-btree that
  * are greater than key[info->levels - 1].
  */
 int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
@@ -91,13 +93,14 @@ int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
  * All the lookup functions return -ENODATA if the key cannot be found.
  */
 
-/* Tries to find a key that matches exactly.  O(ln(n)) */
+/*
+ * Tries to find a key that matches exactly.  O(ln(n))
+ */
 int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value);
 
 /*
- * Insertion (or overwrite an existing value).
- * O(ln(n))
+ * Insertion (or overwrite an existing value).  O(ln(n))
  */
 int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value, dm_block_t *new_root);
@@ -114,16 +117,15 @@ int dm_btree_insert_notify(struct dm_btree_info *info, dm_block_t root,
 /*
  * Remove a key if present.  This doesn't remove empty sub trees.  Normally
  * subtrees represent a separate entity, like a snapshot map, so this is
- * correct behaviour.
- * O(ln(n)).
- * Returns ENODATA if the key isn't present.
+ * correct behaviour.  O(ln(n)).
  */
 int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, dm_block_t *new_root);
 
-/* Clone a tree. O(1) */
-int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
-		   dm_block_t *clone);
+/*
+ * Clone a tree. O(1)
+ */
+int dm_btree_clone(struct dm_btree_info *info, dm_block_t root, dm_block_t *clone);
 
 /*
  * Returns < 0 on failure.  Otherwise the number of key entries that have
@@ -135,4 +137,4 @@ int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif	/* _LINUX_DM_BTREE_H */

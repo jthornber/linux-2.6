@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2010-2011 Red Hat, Inc. All rights reserved.
  *
  * This file is released under the GPL.
  */
@@ -7,7 +7,7 @@
 #ifndef DM_THIN_METADATA_H
 #define DM_THIN_METADATA_H
 
-#include "persistent-data/dm-btree.h"
+#include "persistent-data/dm-block-manager.h"
 
 /*----------------------------------------------------------------*/
 
@@ -48,7 +48,7 @@ int dm_thin_metadata_create_thin(struct dm_thin_metadata *tmd,
 /*
  * An internal snapshot.
  *
- * You can only snapshot a quiesced origin.  i.e. one that is either
+ * You can only snapshot a quiesced origin i.e. one that is either
  * suspended or not instanced at all.
  */
 int dm_thin_metadata_create_snap(struct dm_thin_metadata *tmd,
@@ -79,7 +79,7 @@ int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *tmd,
 int dm_thin_metadata_commit(struct dm_thin_metadata *tmd);
 
 /*
- * Set/get userspace transaction id
+ * Set/get userspace transaction id.
  */
 int dm_thin_metadata_set_transaction_id(struct dm_thin_metadata *tmd,
 					uint64_t current_id,
@@ -89,7 +89,7 @@ int dm_thin_metadata_get_transaction_id(struct dm_thin_metadata *tmd,
 					uint64_t *result);
 
 /*
- * hold/get root for userspace transaction
+ * Hold/get root for userspace transaction.
  */
 int dm_thin_metadata_hold_root(struct dm_thin_metadata *tmd);
 
@@ -126,7 +126,9 @@ int dm_thin_metadata_lookup(struct dm_thin_device *td,
 			    dm_block_t block, int can_block,
 			    struct dm_thin_lookup_result *result);
 
-/* Inserts a new mapping */
+/*
+ * Inserts a new mapping
+ */
 int dm_thin_metadata_insert(struct dm_thin_device *td, dm_block_t block,
 			    dm_block_t data_block);
 
@@ -136,16 +138,15 @@ int dm_thin_metadata_remove(struct dm_thin_device *td,
 int dm_thin_metadata_thin_highest_mapped_block(struct dm_thin_device *td,
 					       dm_block_t *highest_mapped);
 
-/* FIXME: why are these passed an td, rather than an tmd ? */
+/* FIXME: why are these passed td, rather than tmd ? */
 int dm_thin_metadata_alloc_data_block(struct dm_thin_device *td,
 				      dm_block_t *result);
 
 int dm_thin_metadata_get_free_blocks(struct dm_thin_metadata *tmd,
 				     dm_block_t *result);
 
-int
-dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *tmd,
-					  dm_block_t *result);
+int dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *tmd,
+					      dm_block_t *result);
 
 int dm_thin_metadata_get_data_block_size(struct dm_thin_metadata *tmd,
 					 sector_t *result);
