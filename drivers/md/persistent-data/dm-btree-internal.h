@@ -52,10 +52,6 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt);
 
 /* FIXME: change bn_ prefix for these, refers to an old struct block_node */
-int bn_read_lock(struct dm_btree_info *info, dm_block_t b,
-		 struct dm_block **result);
-int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
-	      struct dm_btree_value_type *vt, struct dm_block **result, int *inc);
 int bn_new_block(struct dm_btree_info *info, struct dm_block **result);
 int bn_unlock(struct dm_btree_info *info, struct dm_block *b);
 
@@ -123,19 +119,14 @@ static inline uint64_t value64(struct node *n, uint32_t index)
 	return __le64_to_cpu(values[index]);
 }
 
-/* searching for a key within a single node */
+/*
+ * Searching for a key within a single node.
+ */
 int lower_bound(struct node *n, uint64_t key);
-
-int upper_bound(struct node *n, uint64_t key);
 
 /*
  * Exported for testing.
  */
-uint32_t calc_max_entries(size_t value_size, size_t block_size);
-
-void insert_at(size_t value_size, struct node *node,
-	       unsigned index, uint64_t key, void *value);
-
 int dm_btree_merge(struct shadow_spine *s, unsigned parent_index,
 		   size_t value_size);
 

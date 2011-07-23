@@ -358,18 +358,9 @@ static void __clear_errors(struct dm_block_manager *bm)
  * Waiting
  *--------------------------------------------------------------*/
 #ifdef __CHECKER__
-# define __retains(x)	__attribute__((context(x, 1, 1)))
+#  define __retains(x)	__attribute__((context(x, 1, 1)))
 #else
-# define __retains(x)
-#endif
-
-#ifdef USE_PLUGGING
-static inline unplug(void)
-{
-	blk_flush_plug(current);
-}
-#else
-static inline void unplug(void) {}
+#  define __retains(x)
 #endif
 
 #define __wait_block(wq, lock, flags, sched_fn, condition)	\
@@ -402,7 +393,6 @@ do {								\
 static int __wait_io(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
-	unplug();
 	__wait_block(&b->io_q, &b->bm->lock, *flags, io_schedule,
 		     ((b->state != BS_READING) && (b->state != BS_WRITING)));
 }
@@ -426,7 +416,6 @@ static int __wait_read_lockable(struct dm_block *b, unsigned long *flags)
 static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
-	unplug();
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     !bm->writing_count);
 }
@@ -434,7 +423,6 @@ static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 static int __wait_all_io(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
-	unplug();
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     !bm->writing_count && !bm->reading_count);
 }
@@ -442,7 +430,6 @@ static int __wait_all_io(struct dm_block_manager *bm, unsigned long *flags)
 static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
-	unplug();
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     (!list_empty(&bm->clean_list) ||
 		      (bm->writing_count == 0)));
@@ -528,31 +515,9 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 	return ret;
 }
 
-#ifdef USE_PLUGGING
-static int recycle_block_with_plugging(struct dm_block_manager *bm,
-				       dm_block_t where, int need_read,
-				       struct dm_block_validator *v,
-				       struct dm_block **result)
-{
-	int r;
-	struct blk_plug plug;
-
-	blk_start_plug(&plug);
-	r = recycle_block(bm, where, need_read, v, result);
-	blk_finish_plug(&plug);
-
-	return r;
-}
-#endif
-
 /*----------------------------------------------------------------
  * Low level block management
  *--------------------------------------------------------------*/
-static void *align(void *ptr, size_t amount)
-{
-	size_t offset = (uint64_t) ptr & (amount - 1);
-	return offset ? ((unsigned char *) ptr) + (amount - offset) : ptr;
-}
 
 /* Alloc a page if block_size equals PAGE_SIZE or kmalloc it. */
 static void *_alloc_block(struct dm_block_manager *bm)
@@ -585,7 +550,7 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 	}
 
 	b->validator = NULL;
-	b->data = align(b->data_actual, SECTOR_SIZE);
+	b->data = (void *)ALIGN((uintptr_t)b->data_actual, SECTOR_SIZE);
 	b->state = BS_EMPTY;
 	init_waitqueue_head(&b->io_q);
 	b->read_lock_count = 0;
@@ -721,7 +686,6 @@ dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm)
 {
 	return bm->nr_blocks;
 }
-EXPORT_SYMBOL_GPL(dm_bm_nr_blocks);
 
 static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 			 int how, int need_read, int can_block,
@@ -797,11 +761,7 @@ retry:
 
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
-#ifdef USE_PLUGGING
-		r = recycle_block_with_plugging(bm, block, need_read, v, &b);
-#else
 		r = recycle_block(bm, block, need_read, v, &b);
-#endif
 		spin_lock_irqsave(&bm->lock, flags);
 	}
 
@@ -851,7 +811,6 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 {
 	return lock_internal(bm, b, READ, 1, 0, v, result);
 }
-EXPORT_SYMBOL_GPL(dm_bm_read_try_lock);
 
 int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 			  dm_block_t b, struct dm_block_validator *v,
@@ -862,7 +821,6 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 		memset((*result)->data, 0, bm->block_size);
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
 int dm_bm_unlock(struct dm_block *b)
 {
@@ -939,7 +897,6 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 
 	return __wait_flush(bm);
 }
-EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
 
 int dm_bm_rebind_block_device(struct dm_block_manager *bm,
 			      struct block_device *bdev)

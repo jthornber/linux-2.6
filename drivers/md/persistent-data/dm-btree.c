@@ -47,11 +47,6 @@ int lower_bound(struct node *n, uint64_t key)
 	return bsearch(n, key, 0);
 }
 
-int upper_bound(struct node *n, uint64_t key)
-{
-	return bsearch(n, key, 1);
-}
-
 void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt)
 {
@@ -67,8 +62,8 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 				value_ptr(n, i, vt->size));
 }
 
-void insert_at(size_t value_size, struct node *node, unsigned index,
-	       uint64_t key, void *value)
+static void insert_at(size_t value_size, struct node *node, unsigned index,
+		      uint64_t key, void *value)
 {
 	uint32_t nr_entries = __le32_to_cpu(node->header.nr_entries);
 
@@ -86,7 +81,7 @@ void insert_at(size_t value_size, struct node *node, unsigned index,
  * We want 3n entries (for some n).  This works more nicely for repeated
  * insert remove loops than (2n + 1).
  */
-uint32_t calc_max_entries(size_t value_size, size_t block_size)
+static uint32_t calc_max_entries(size_t value_size, size_t block_size)
 {
 	uint32_t total, n;
 	size_t elt_size = sizeof(uint64_t) + value_size; /* key + value */
@@ -343,84 +338,6 @@ int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_btree_lookup);
-
-int dm_btree_lookup_le(struct dm_btree_info *info, dm_block_t root,
-		       uint64_t *keys, uint64_t *key, void *value)
-{
-	unsigned level, last_level = info->levels - 1;
-	int r;
-	__le64 internal_value;
-	struct ro_spine spine;
-
-	init_ro_spine(&spine, info);
-	for (level = 0; level < info->levels; level++) {
-		size_t size;
-		void *value_p;
-
-		if (level == last_level) {
-			value_p = value;
-			size = info->value_type.size;
-
-		} else {
-			value_p = &internal_value;
-			size = sizeof(uint64_t);
-		}
-
-		r = btree_lookup_raw(&spine, root, keys[level],
-				     lower_bound, key,
-				     value_p, size);
-
-		if (r != 0) {
-			exit_ro_spine(&spine);
-			return r;
-		}
-
-		root = __le64_to_cpu(internal_value);
-	}
-	exit_ro_spine(&spine);
-
-	return r;
-}
-EXPORT_SYMBOL_GPL(dm_btree_lookup_le);
-
-int dm_btree_lookup_ge(struct dm_btree_info *info, dm_block_t root,
-		       uint64_t *keys, uint64_t *key, void *value)
-{
-	unsigned level, last_level = info->levels - 1;
-	int r;
-	__le64 internal_value;
-	struct ro_spine spine;
-
-	init_ro_spine(&spine, info);
-	for (level = 0; level < info->levels; level++) {
-		size_t size;
-		void *value_p;
-
-		if (level == last_level) {
-			value_p = value;
-			size = info->value_type.size;
-
-		} else {
-			value_p = &internal_value;
-			size = sizeof(uint64_t);
-		}
-
-		r = btree_lookup_raw(&spine, root, keys[level],
-				     upper_bound, key,
-				     value_p, size);
-
-		if (r != 0) {
-			exit_ro_spine(&spine);
-			return r;
-		}
-
-		root = __le64_to_cpu(internal_value);
-	}
-	exit_ro_spine(&spine);
-
-	return r;
-}
-EXPORT_SYMBOL_GPL(dm_btree_lookup_ge);
 
 /*
  * Splits a node by creating a sibling node and shifting half the nodes

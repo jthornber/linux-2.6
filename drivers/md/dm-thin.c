@@ -27,15 +27,16 @@
 #define PRISON_CELLS 1024
 
 /*
- * pool's data dev block size constraints: min=64K, max=1G
+ * The block size of the device holding pool data must be
+ * between 64KB and 1GB.
  */
-#define DATA_DEV_BLOCK_SIZE_MIN_SECTORS 128
-#define DATA_DEV_BLOCK_SIZE_MAX_SECTORS 2097152
+#define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (64 * 1024 >> SECTOR_SHIFT)
+#define DATA_DEV_BLOCK_SIZE_MAX_SECTORS (1024 * 1024 * 1024 >> SECTOR_SHIFT)
 
 /*
- * Constrain maximum device id to 24 bits (2**24 - 1).
+ * Device id is restricted to 24 bits.
  */
-#define MAX_DEV_ID 16777215
+#define MAX_DEV_ID ((1 << 24) - 1)
 
 /*
  * How do we handle breaking sharing of data blocks?
@@ -913,7 +914,8 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		break;
 
 	case -ENODATA:
-		/* Either this isn't provisioned, or preparation for
+		/*
+		 * Either this isn't provisioned, or preparation for
 		 * provisioning may be pending (we could find out by
 		 * calling bio_detain_if_occupied).  But even in this case
 		 * it's easier to just forget the discard.
@@ -1006,9 +1008,13 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	struct cell *cell;
 	struct cell_key key;
 
+	/*
+	 * If cell is already occupied, then the block is already
+	 * being provisioned so we have nothing further to do here.
+	 */
 	build_virtual_key(tc->td, block, &key);
 	if (bio_detain(tc->pool->prison, &key, bio, &cell))
-		return; /* already underway */
+		return;
 
 	r = alloc_data_block(tc, &data_block);
 	switch (r) {
@@ -1043,7 +1049,11 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		break;
 
 	case -ENODATA:
-		if (bio_rw(bio) == READ || bio_rw(bio) == READA) {
+		/*
+		 * When reading, we return zeroes regardless of the
+		 * zero_new_blocks setting.
+		 */
+		if (bio_data_dir(bio) == READ) {
 			zero_fill_bio(bio);
 			bio_endio(bio, 0);
 		} else
@@ -1191,6 +1201,9 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 
 	r = dm_thin_metadata_lookup(td, block, 0, &result);
 
+	/*
+	 * Note that we defer readahead too.
+	 */
 	switch (r) {
 	case 0:
 		if (unlikely(result.shared)) {
@@ -1217,7 +1230,14 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	case -ENODATA:
-		if (bio_rw(bio) == READA || bio_rw(bio) == READ) {
+		/*
+		 * In future, the failed dm_thin_metadata_lookup above could
+		 * provide the hint to load the metadata into cache.
+		 *
+		 * When reading, we return zeroes regardless of the
+		 * zero_new_blocks setting.
+		 */
+		if (bio_data_dir(bio) == READ) {
 			zero_fill_bio(bio);
 			bio_endio(bio, 0);
 		} else
@@ -1267,8 +1287,8 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 
 	pool->ti = ti;
-	pool->low_water_mark = dm_div_up(pt->low_water_mark,
-					 pool->sectors_per_block);
+	pool->low_water_mark = dm_sector_div_up(pt->low_water_mark,
+						pool->sectors_per_block);
 	pool->zero_new_blocks = pt->zero_new_blocks;
 	dm_thin_metadata_rebind_block_device(pool->tmd, pt->metadata_dev->bdev);
 
@@ -1346,7 +1366,8 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 		goto bad_kcopyd_client;
 	}
 
-	/* Create singlethreaded workqueue that will service all devices
+	/*
+	 * Create singlethreaded workqueues that will service all devices
 	 * that use this metadata.
 	 */
 	pool->producer_wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX "-producer",
@@ -1710,24 +1731,16 @@ static int check_arg_count(unsigned argc, unsigned args_required)
 	return 0;
 }
 
-static int read_dev_id(char *arg, dm_thin_dev_t *dev_id)
+static int read_dev_id(char *arg, dm_thin_dev_t *dev_id, int warning)
 {
-	if (kstrtoull(arg, 10, (unsigned long long *)dev_id) ||
-	    *dev_id > MAX_DEV_ID)
-		return -EINVAL;
+	if (!kstrtoull(arg, 10, (unsigned long long *)dev_id) &&
+	    *dev_id <= MAX_DEV_ID)
+		return 0;
 
-	return 0;
-}
-
-static int read_dev_id_mesg(char *arg, dm_thin_dev_t *dev_id)
-{
-	int r = 0;
-
-	r = read_dev_id(arg, dev_id);
-	if (r < 0)
+	if (warning)
 		DMWARN("Message received with invalid device id: %s", arg);
 
-	return r;
+	return -EINVAL;
 }
 
 static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *pool)
@@ -1739,7 +1752,7 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 	if (r)
 		return r;
 
-	r = read_dev_id_mesg(argv[1], &dev_id);
+	r = read_dev_id(argv[1], &dev_id, 1);
 	if (r)
 		return r;
 
@@ -1763,11 +1776,11 @@ static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *poo
 	if (r)
 		return r;
 
-	r = read_dev_id_mesg(argv[1], &dev_id);
+	r = read_dev_id(argv[1], &dev_id, 1);
 	if (r)
 		return r;
 
-	r = read_dev_id_mesg(argv[2], &origin_dev_id);
+	r = read_dev_id(argv[2], &origin_dev_id, 1);
 	if (r)
 		return r;
 
@@ -1790,7 +1803,7 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	r = read_dev_id_mesg(argv[1], &dev_id);
+	r = read_dev_id(argv[1], &dev_id, 1);
 	if (r)
 		return r;
 
@@ -1811,7 +1824,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	r = read_dev_id_mesg(argv[1], &dev_id);
+	r = read_dev_id(argv[1], &dev_id, 1);
 	if (r)
 		return r;
 
@@ -1822,7 +1835,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 	}
 
 	r = dm_thin_metadata_trim_thin_dev(pool->tmd, dev_id,
-			dm_div_up(new_size, pool->sectors_per_block));
+			dm_sector_div_up(new_size, pool->sectors_per_block));
 	if (r)
 		DMWARN("Attempt to trim thin device %s failed.", argv[1]);
 
@@ -1888,8 +1901,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		r = process_set_transaction_id_mesg(argc, argv, pool);
 
 	else
-		DMWARN("Unrecognised thin pool target message (%s) received.",
-		       argv[0]);
+		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
 
 	if (!r) {
 		r = dm_thin_metadata_commit(pool->tmd);
@@ -2028,10 +2040,10 @@ static void thin_dtr(struct dm_target *ti)
 /*
  * Thin target parameters:
  *
- * <pool dev> <dev id>
+ * <pool_dev> <dev_id>
  *
- * pool dev: the path to the pool (eg, /dev/mapper/my_pool)
- * dev id: the internal device identifier
+ * pool_dev: the path to the pool (eg, /dev/mapper/my_pool)
+ * dev_id: the internal device identifier
  */
 static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2058,7 +2070,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	tc->pool_dev = pool_dev;
 
-	if (read_dev_id(argv[1], (unsigned long long *)&tc->dev_id)) {
+	if (read_dev_id(argv[1], (unsigned long long *)&tc->dev_id, 0)) {
 		ti->error = "Invalid device id";
 		r = -EINVAL;
 		goto bad_common;

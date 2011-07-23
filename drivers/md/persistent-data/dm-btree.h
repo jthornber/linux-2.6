@@ -68,7 +68,9 @@ struct dm_btree_info {
 	struct dm_btree_value_type value_type;
 };
 
-/* Set up an empty tree.  O(1). */
+/*
+ * Set up an empty tree.  O(1).
+ */
 int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root);
 
 /*
@@ -92,21 +94,6 @@ int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
 /* Tries to find a key that matches exactly.  O(ln(n)) */
 int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value);
-
-/*
- * Find the greatest key that is less than or equal to that requested.  A
- * ENODATA result indicates the key would appear in front of all (possibly
- * zero) entries.  O(ln(n))
- */
-int dm_btree_lookup_le(struct dm_btree_info *info, dm_block_t root,
-		       uint64_t *keys, uint64_t *rkey, void *value);
-
-/*
- * Find the least key that is greater than or equal to that requested.
- * ENODATA indicates all the keys are below.  O(ln(n))
- */
-int dm_btree_lookup_ge(struct dm_btree_info *info, dm_block_t root,
-		       uint64_t *keys, uint64_t *rkey, void *value);
 
 /*
  * Insertion (or overwrite an existing value).

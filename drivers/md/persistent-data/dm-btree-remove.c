@@ -518,7 +518,7 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 		r = remove_raw(&spine, info,
 			       (level == last_level ?
 				&info->value_type : &le64_type_),
-			       root, keys[level], &index);
+			       root, keys[level], (unsigned *)&index);
 		if (r < 0)
 			break;
 

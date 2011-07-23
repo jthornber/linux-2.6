@@ -12,7 +12,63 @@
 #include <linux/device-mapper.h>
 #include <linux/workqueue.h>
 
-/*----------------------------------------------------------------*/
+/*--------------------------------------------------------------------------
+ * As far as the metadata goes, there is:
+ *
+ * - A superblock in block zero, taking up fewer than 512 bytes for
+ *   atomic writes.
+ *
+ * - A space map managing the metadata blocks
+ *
+ * - A space map managing the data blocks
+ *
+ * - A btree mapping our internal thin dev ids onto struct device_details
+ *
+ * - A hierarchical btree, with 2 levels.  Which effectively maps (thin
+ *   dev id, virtual block) -> block_time.  Where block time is a 64 bit
+ *   field holding the time in the low 24 bits, and block in the top 48
+ *   bits.
+ *
+ * BTrees consist solely of btree_nodes, that fill a block.  Some are
+ * internal nodes, as such their values are a __le64 pointing to other
+ * nodes.  Leaf nodes can store data of any reasonable size (ie. much
+ * smaller than the block size).  The nodes consist of the header,
+ * followed by an array of keys, followed by an array of values.  We have
+ * to binary search on the keys so they're all held together to help the
+ * cpu cache.
+ *
+ * Space maps have 2 btrees:
+ *
+ * - One maps a uint64_t onto a struct index_entry.  Which points to a
+ *   bitmap block, and has some details about how many free entries there
+ *   are etc.
+ *
+ * - The bitmap blocks have a header (for the checksum).  Then the rest
+ *   of the block is pairs of bits.  With the meaning being:
+ *
+ *   0 - ref count is 0
+ *   1 - ref count is 1
+ *   2 - ref count is 2
+ *   3 - ref count is higher than 2
+ *
+ * - If the count is higher than 2 then the ref count is entered in a
+ *   second btree that directly maps the block_address to a uint32_t ref
+ *   count.
+ *
+ * The space map metadata variant doesn't have a bitmaps btree.  Instead
+ * it has one single blocks worth of index_entries.  This avoids
+ * recursive issues with the bitmap btree needing to allocate space in
+ * order to insert.  With a small data block size such as 64k the
+ * metadata support data devices that are hundreds of terrabytes.
+ *
+ * The space maps allocate space linearly from front to back.  Space that
+ * is freed in a transaction is never recycled within that transaction.
+ * To try and avoid fragmenting _free_ space the allocator always goes
+ * back and fills in gaps.
+ *
+ * All metadata io is in THIN_METADATA_BLOCK_SIZE sized/aligned chunks
+ * from the block manager.
+ *--------------------------------------------------------------------------*/
 
 #define DM_MSG_PREFIX   "thin metadata"
 

@@ -54,13 +54,13 @@ struct dm_block_validator btree_node_validator = {
 
 /*----------------------------------------------------------------*/
 
-int bn_read_lock(struct dm_btree_info *info, dm_block_t b,
+static int bn_read_lock(struct dm_btree_info *info, dm_block_t b,
 		 struct dm_block **result)
 {
 	return dm_tm_read_lock(info->tm, b, &btree_node_validator, result);
 }
 
-int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
+static int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 	      struct dm_btree_value_type *vt,
 	      struct dm_block **result, int *inc)
 {
