@@ -31,6 +31,8 @@
 #define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (64 * 1024 >> SECTOR_SHIFT)
 #define DATA_DEV_BLOCK_SIZE_MAX_SECTORS (1024 * 1024 * 1024 >> SECTOR_SHIFT)
 
+#define METADATA_DEV_MAX_SECTORS (255 * (1 << 14) * 8)
+
 /*
  * Device id is restricted to 24 bits.
  */
@@ -1516,6 +1518,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	unsigned long block_size;
 	dm_block_t low_water;
 	struct dm_dev *metadata_dev;
+	sector_t metadata_dev_size;
 
 	if (argc < 4) {
 		ti->error = "Invalid argument count";
@@ -1529,11 +1532,17 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata block device";
 		return r;
 	}
+	metadata_dev_size = i_size_read(metadata_dev->bdev->bd_inode) >> SECTOR_SHIFT;
+	if (metadata_dev_size > METADATA_DEV_MAX_SECTORS) {
+		ti->error = "Metadata device is too large";
+		r = -EINVAL;
+		goto out_metadata;
+	}
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
 		ti->error = "Error getting data device";
-		goto out_data_dev;
+		goto out_metadata;
 	}
 
 	if (kstrtoul(argv[2], 10, &block_size) || !block_size ||
@@ -1593,7 +1602,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 out:
 	dm_put_device(ti, data_dev);
-out_data_dev:
+out_metadata:
 	dm_put_device(ti, metadata_dev);
 
 	return r;
