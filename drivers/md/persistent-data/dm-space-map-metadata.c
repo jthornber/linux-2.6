@@ -103,6 +103,11 @@ static int metadata_ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm
 	ll->nr_allocated = 0;
 
 	blocks = dm_sector_div_up(nr_blocks, ll->entries_per_block);
+	if (blocks > MAX_METADATA_BITMAPS) {
+		DMERR("metadata device too large");
+		return -EINVAL;
+	}
+
 	for (i = 0; i < blocks; i++) {
 		struct dm_block *b;
 		struct index_entry *idx = ll->mi.index + i;
