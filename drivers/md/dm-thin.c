@@ -571,16 +571,16 @@ static void pool_table_init(void)
 	unsigned i;
 
 	spin_lock_init(&dm_thin_pool_table.lock);
+	spin_lock(&dm_thin_pool_table.lock);
 	for (i = 0; i < TABLE_SIZE; i++)
 		INIT_HLIST_HEAD(dm_thin_pool_table.buckets + i);
+	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static unsigned hash_md(struct mapped_device *md)
 {
-	unsigned long p = (unsigned long)md;
-
-	do_div(p, cache_line_size());
-	return ((p * TABLE_PRIME) >> TABLE_SHIFT) & (TABLE_SIZE - 1);
+	/* FIXME: find a good hash function */
+	return 0;
 }
 
 static void pool_table_insert(struct pool *pool)
@@ -601,15 +601,17 @@ static void pool_table_remove(struct pool *pool)
 
 static struct pool *pool_table_lookup(struct mapped_device *md)
 {
-	unsigned bucket = hash_md(md);
+	unsigned bucket;
 	struct hlist_node *n;
-	struct pool *pool;
+	struct pool *pool = NULL;
 
+	spin_lock(&dm_thin_pool_table.lock);
+	bucket = hash_md(md);
 	hlist_for_each_entry(pool, n, dm_thin_pool_table.buckets + bucket, hlist)
 		if (pool->pool_md == md)
-			return pool;
-
-	return NULL;
+			break;
+	spin_unlock(&dm_thin_pool_table.lock);
+	return pool;
 }
 
 /*----------------------------------------------------------------*/
@@ -2224,7 +2226,10 @@ static struct target_type thin_target = {
 
 static int __init dm_thin_init(void)
 {
-	int r = dm_register_target(&thin_target);
+	int r;
+
+	pool_table_init();
+	r = dm_register_target(&thin_target);
 	if (r)
 		return r;
 
@@ -2232,7 +2237,6 @@ static int __init dm_thin_init(void)
 	if (r)
 		dm_unregister_target(&thin_target);
 
-	pool_table_init();
 	return r;
 }
 
