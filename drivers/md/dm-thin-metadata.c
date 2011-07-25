@@ -310,6 +310,7 @@ static int subtree_equal(void *context, void *value1, void *value2)
 	__le64 v1, v2;
 	memcpy(&v1, value1, sizeof(v1));
 	memcpy(&v2, value2, sizeof(v2));
+
 	return v1 == v2;
 }
 
@@ -317,13 +318,14 @@ static int subtree_equal(void *context, void *value1, void *value2)
 
 static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 {
-	int r, i;
+	int r;
+	unsigned i;
 	struct dm_block *b;
 	uint64_t *data;
 	unsigned block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
 
 	/*
-	 * We can't use a validator here, it may be all zeroes.
+	 * We can't use a validator here - it may be all zeroes.
 	 */
 	r = dm_bm_read_lock(bm, THIN_SUPERBLOCK_LOCATION, NULL, &b);
 	if (r)
@@ -332,7 +334,7 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	data = dm_block_data(b);
 	*result = 1;
 	for (i = 0; i < block_size; i++) {
-		if (data[i] != 0LL) {
+		if (data[i]) {
 			*result = 0;
 			break;
 		}
@@ -499,8 +501,7 @@ static int begin_transaction(struct dm_thin_metadata *tmd)
 	tmd->flags = __le32_to_cpu(sb->flags);
 	tmd->data_block_size = __le32_to_cpu(sb->data_block_size);
 
-	features = __le32_to_cpu(sb->incompat_flags) &
-		~THIN_FEATURE_INCOMPAT_SUPP;
+	features = __le32_to_cpu(sb->incompat_flags) & ~THIN_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to "
 		      "unsupported optional features (%lx).",
@@ -512,8 +513,7 @@ static int begin_transaction(struct dm_thin_metadata *tmd)
 	if (get_disk_ro(tmd->bdev->bd_disk))
 		return 0;
 
-	features = __le32_to_cpu(sb->compat_ro_flags) &
-		~THIN_FEATURE_COMPAT_RO_SUPP;
+	features = __le32_to_cpu(sb->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
 	if (features) {
 		DMERR("could not access metadata RDWR due to "
 		      "unsupported optional features (%lx).",
@@ -524,8 +524,8 @@ static int begin_transaction(struct dm_thin_metadata *tmd)
 	return 0;
 }
 
-struct dm_thin_metadata *
-dm_thin_metadata_open(struct block_device *bdev, sector_t data_block_size)
+struct dm_thin_metadata * dm_thin_metadata_open(struct block_device *bdev,
+						sector_t data_block_size)
 {
 	int r;
 	struct thin_super_block *sb;
@@ -670,15 +670,14 @@ static int __open_device(struct dm_thin_metadata *tmd,
 	r = dm_btree_lookup(&tmd->details_info, tmd->details_root,
 			    &key, &details);
 	if (r) {
-		if (r == -ENODATA && create) {
-			changed = 1;
-			details.mapped_blocks = 0;
-			details.transaction_id = __cpu_to_le64(tmd->trans_id);
-			details.creation_time = __cpu_to_le32(tmd->time);
-			details.snapshotted_time = __cpu_to_le32(tmd->time);
-
-		} else
+		if (r != -ENODATA || !create)
 			return r;
+
+		changed = 1;
+		details.mapped_blocks = 0;
+		details.transaction_id = __cpu_to_le64(tmd->trans_id);
+		details.creation_time = __cpu_to_le32(tmd->time);
+		details.snapshotted_time = __cpu_to_le32(tmd->time);
 	}
 
 	*td = kmalloc(sizeof(**td), GFP_NOIO);
@@ -719,12 +718,16 @@ static int __create_thin(struct dm_thin_metadata *tmd,
 	if (!r)
 		return -EEXIST;
 
-	/* create an empty btree for the mappings */
+	/*
+	 * Create an empty btree for the mappings.
+	 */
 	r = dm_btree_empty(&tmd->bl_info, &dev_root);
 	if (r)
 		return r;
 
-	/* insert it into the main mapping tree */
+	/*
+	 * Insert it into the main mapping tree.
+	 */
 	value = __cpu_to_le64(dev_root);
 	r = dm_btree_insert(&tmd->tl_info, tmd->root, &key, &value, &tmd->root);
 	if (r) {
@@ -877,6 +880,7 @@ static int __delete_device(struct dm_thin_metadata *tmd,
 		return r;
 
 	tmd->need_commit = 1;
+
 	return 0;
 }
 
@@ -960,13 +964,6 @@ int dm_thin_metadata_get_transaction_id(struct dm_thin_metadata *tmd,
 	return 0;
 }
 
-int dm_thin_metadata_hold_root(struct dm_thin_metadata *tmd)
-{
-	/* FIXME implement */
-
-	return 0;
-}
-
 int dm_thin_metadata_get_held_root(struct dm_thin_metadata *tmd,
 				   dm_block_t *result)
 {
@@ -1017,12 +1014,10 @@ int dm_thin_metadata_lookup(struct dm_thin_device *td,
 			    struct dm_thin_lookup_result *result)
 {
 	int r;
-	uint64_t keys[2], dm_block_time = 0;
+	uint64_t dm_block_time = 0;
 	__le64 value;
 	struct dm_thin_metadata *tmd = td->tmd;
-
-	keys[0] = td->id;
-	keys[1] = block;
+	dm_block_t keys[2] = { td->id, block };
 
 	if (can_block) {
 		down_read(&tmd->root_lock);
@@ -1056,12 +1051,9 @@ static int __insert(struct dm_thin_device *td,
 		    dm_block_t block, dm_block_t data_block)
 {
 	int r, inserted;
-	dm_block_t keys[2];
 	__le64 value;
 	struct dm_thin_metadata *tmd = td->tmd;
-
-	keys[0] = td->id;
-	keys[1] = block;
+	dm_block_t keys[2] = { td->id, block };
 
 	tmd->need_commit = 1;
 	value = __cpu_to_le64(pack_dm_block_time(data_block, tmd->time));
@@ -1102,6 +1094,7 @@ static int __remove(struct dm_thin_device *td, dm_block_t block)
 		return r;
 
 	tmd->need_commit = 1;
+
 	return 0;
 }
 
@@ -1134,31 +1127,33 @@ static int __write_changed_details(struct dm_thin_metadata *tmd)
 {
 	int r;
 	struct dm_thin_device *td, *tmp;
+	struct device_details dd;
+	uint64_t key;
 
 	list_for_each_entry_safe(td, tmp, &tmd->thin_devices, list) {
-		if (td->changed) {
-			struct device_details dd;
-			uint64_t key = td->id;
+		if (!td->changed)
+			continue;
 
-			dd.mapped_blocks = __cpu_to_le64(td->mapped_blocks);
-			dd.transaction_id = __cpu_to_le64(td->transaction_id);
-			dd.creation_time = __cpu_to_le32(td->creation_time);
-			dd.snapshotted_time = __cpu_to_le32(td->snapshotted_time);
+		key = td->id;
 
-			r = dm_btree_insert(&tmd->details_info, tmd->details_root,
-					    &key, &dd, &tmd->details_root);
-			if (r)
-				return r;
+		dd.mapped_blocks = __cpu_to_le64(td->mapped_blocks);
+		dd.transaction_id = __cpu_to_le64(td->transaction_id);
+		dd.creation_time = __cpu_to_le32(td->creation_time);
+		dd.snapshotted_time = __cpu_to_le32(td->snapshotted_time);
 
-			if (td->open_count)
-				td->changed = 0;
-			else {
-				list_del(&td->list);
-				kfree(td);
-			}
+		r = dm_btree_insert(&tmd->details_info, tmd->details_root,
+				    &key, &dd, &tmd->details_root);
+		if (r)
+			return r;
 
-			tmd->need_commit = 1;
+		if (td->open_count)
+			td->changed = 0;
+		else {
+			list_del(&td->list);
+			kfree(td);
 		}
+
+		tmd->need_commit = 1;
 	}
 
 	return 0;
@@ -1174,7 +1169,9 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *tmd)
 	size_t len;
 	struct thin_super_block *sb;
 
-	/* We want to know if/when the thin_super_block exceeds a 512b sector */
+	/*
+	 * We need to know if the thin_super_block exceeds a 512-byte sector.
+	 */
 	BUILD_BUG_ON(sizeof(struct thin_super_block) > 512);
 
 	down_write(&tmd->root_lock);
@@ -1199,6 +1196,7 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *tmd)
 	sb->device_details_root = __cpu_to_le64(tmd->details_root);
 	sb->trans_id = __cpu_to_le64(tmd->trans_id);
 	sb->flags = __cpu_to_le32(tmd->flags);
+
 	r = dm_sm_copy_root(tmd->metadata_sm, &sb->metadata_space_map_root, len);
 	if (r < 0)
 		goto out;
@@ -1211,7 +1209,9 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *tmd)
 	if (r < 0)
 		goto out;
 
-	/* open the next transaction */
+	/*
+	 * Open the next transaction.
+	 */
 	tmd->sblock = NULL;
 
 	r = begin_transaction(tmd);
@@ -1232,9 +1232,8 @@ int dm_thin_metadata_get_free_blocks(struct dm_thin_metadata *tmd,
 	return r;
 }
 
-int
-dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *tmd,
-					  dm_block_t *result)
+int dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *tmd,
+					      dm_block_t *result)
 {
 	int r;
 
@@ -1291,6 +1290,7 @@ static int __highest_block(struct dm_thin_device *td, dm_block_t *result)
 		return r;
 
 	thin_root = __le64_to_cpu(value);
+
 	return dm_btree_find_highest_key(&tmd->bl_info, thin_root, result);
 }
 
@@ -1317,18 +1317,19 @@ static int __resize_data_dev(struct dm_thin_metadata *tmd,
 	if (r)
 		return r;
 
+	if (new_count == old_count)
+		return 0;
+
 	if (new_count < old_count) {
 		DMERR("cannot reduce size of data device");
 		return -EINVAL;
 	}
 
-	if (new_count > old_count) {
-		r = dm_sm_extend(tmd->data_sm, new_count - old_count);
-		if (!r)
-			tmd->need_commit = 1;
-		return r;
-	} else
-		return 0;
+	r = dm_sm_extend(tmd->data_sm, new_count - old_count);
+	if (!r)
+		tmd->need_commit = 1;
+
+	return r;
 }
 
 int dm_thin_metadata_resize_data_dev(struct dm_thin_metadata *tmd,
@@ -1342,5 +1343,3 @@ int dm_thin_metadata_resize_data_dev(struct dm_thin_metadata *tmd,
 
 	return r;
 }
-
-/*----------------------------------------------------------------*/

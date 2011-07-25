@@ -11,7 +11,7 @@
 
 #include <linux/list.h>
 #include <linux/slab.h>
-#include <asm-generic/bitops/le.h>
+#include <linux/bitops.h>
 #include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "space map disk"
