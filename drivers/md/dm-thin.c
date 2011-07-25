@@ -454,7 +454,7 @@ static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
  * devices.
  */
 struct pool {
-	struct hlist_node hlist;
+	struct list_head list;
 	struct dm_target *ti;	/* Only set if a pool target is bound */
 
 	struct mapped_device *pool_md;
@@ -555,61 +555,46 @@ static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
 /*----------------------------------------------------------------*/
 
 /*
- * A global table that uses a struct mapped_device as a key.
+ * A global list that uses a struct mapped_device as a key.
  */
-#define TABLE_SIZE 32
-#define TABLE_PRIME 27	/* Largest prime smaller than table size. */
-#define	TABLE_SHIFT 5	/* Shift fitting prime. */
-
 static struct dm_thin_pool_table {
 	spinlock_t lock;
-	struct hlist_head buckets[TABLE_SIZE];
+	struct list_head pools;
 } dm_thin_pool_table;
 
 static void pool_table_init(void)
 {
-	unsigned i;
-
 	spin_lock_init(&dm_thin_pool_table.lock);
-	spin_lock(&dm_thin_pool_table.lock);
-	for (i = 0; i < TABLE_SIZE; i++)
-		INIT_HLIST_HEAD(dm_thin_pool_table.buckets + i);
-	spin_unlock(&dm_thin_pool_table.lock);
-}
 
-static unsigned hash_md(struct mapped_device *md)
-{
-	/* FIXME: find a good hash function */
-	return 0;
+	spin_lock(&dm_thin_pool_table.lock);
+	INIT_LIST_HEAD(&dm_thin_pool_table.pools);
+	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static void pool_table_insert(struct pool *pool)
 {
-	unsigned bucket = hash_md(pool->pool_md);
-
 	spin_lock(&dm_thin_pool_table.lock);
-	hlist_add_head(&pool->hlist, dm_thin_pool_table.buckets + bucket);
+	list_add(&pool->list, &dm_thin_pool_table.pools);
 	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static void pool_table_remove(struct pool *pool)
 {
 	spin_lock(&dm_thin_pool_table.lock);
-	hlist_del(&pool->hlist);
+	list_del(&pool->list);
 	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static struct pool *pool_table_lookup(struct mapped_device *md)
 {
-	unsigned bucket;
-	struct hlist_node *n;
-	struct pool *pool = NULL;
+	struct pool *pool = NULL, *tmp;
 
 	spin_lock(&dm_thin_pool_table.lock);
-	bucket = hash_md(md);
-	hlist_for_each_entry(pool, n, dm_thin_pool_table.buckets + bucket, hlist)
-		if (pool->pool_md == md)
+	list_for_each_entry(tmp, &dm_thin_pool_table.pools, list)
+		if (tmp->pool_md == md) {
+			pool = tmp;
 			break;
+		}
 	spin_unlock(&dm_thin_pool_table.lock);
 	return pool;
 }
