@@ -15,12 +15,12 @@ struct dm_transaction_manager;
 #  define __written_to_disk(x) __releases(x)
 #  define __reads_from_disk(x) __acquires(x)
 #  define __bless_for_disk(x) __acquire(x)
-#  define __bless_for_cpu(x) __release(x)
+#  define __unbless_for_disk(x) __release(x)
 #else
 #  define __written_to_disk(x)
 #  define __reads_from_disk(x)
 #  define __bless_for_disk(x)
-#  define __bless_for_cpu(x)
+#  define __unbless_for_disk(x)
 #endif
 
 /*----------------------------------------------------------------*/

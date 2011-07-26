@@ -221,7 +221,7 @@ static int disk_ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
 
 		idx.nr_free = cpu_to_le32(io->entries_per_block);
 		idx.none_free_before = 0;
-
+		__bless_for_disk(&idx);
 		r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
 				    &i, &idx, &io->bitmap_root);
 		if (r < 0)
@@ -385,6 +385,7 @@ static int disk_ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	} else {
 		__le32 le_rc = cpu_to_le32(ref_count);
 		sm_set_bitmap(bm, bit, 3);
+		__bless_for_disk(&le_rc);
 		r = dm_btree_insert(&io->ref_count_info, io->ref_count_root,
 				    &b, &le_rc, &io->ref_count_root);
 		if (r < 0) {
@@ -410,6 +411,7 @@ static int disk_ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 		ie.none_free_before = cpu_to_le32(min((dm_block_t) le32_to_cpu(ie.none_free_before), b));
 	}
 
+	__bless_for_disk(&ie);
 	r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
 			    &index, &ie, &io->bitmap_root);
 	if (r < 0)

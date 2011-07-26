@@ -308,6 +308,7 @@ static int metadata_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_cou
 		if (r < 0)
 			return r;
 
+		__bless_for_disk(&le_rc);
 		r = dm_btree_insert(&ll->ref_count_info, ll->ref_count_root,
 				    &b, &le_rc, &ll->ref_count_root);
 		if (r < 0) {

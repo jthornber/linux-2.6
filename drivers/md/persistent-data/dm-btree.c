@@ -20,7 +20,7 @@ static void array_insert(void *base, size_t elt_size, unsigned nr_elts,
 			base + (elt_size * index),
 			(nr_elts - index) * elt_size);
 	memcpy(base + (elt_size * index), elt, elt_size);
-	__release(elt);
+	__unbless_for_disk(elt);
 }
 
 /*----------------------------------------------------------------*/
@@ -612,6 +612,7 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 static int insert(struct dm_btree_info *info, dm_block_t root,
 		  uint64_t *keys, void *value, dm_block_t *new_root,
 		  int *inserted)
+	__written_to_disk(value)
 {
 	int r, need_insert;
 	unsigned level, index = -1, last_level = info->levels - 1;
@@ -628,77 +629,82 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 
 	init_shadow_spine(&spine, info);
 
-	for (level = 0; level < info->levels; level++) {
-		r = btree_insert_raw(&spine, block,
-				     (level == last_level ?
-				      &info->value_type : &le64_type),
-				     keys[level], &index);
-		if (r < 0) {
-			exit_shadow_spine(&spine);
-			/* FIXME: avoid block leaks */
-			return r;
-		}
+	for (level = 0; level < (info->levels - 1); level++) {
+		r = btree_insert_raw(&spine, block, &le64_type, keys[level], &index);
+		if (r < 0)
+			goto bad;
 
 		BUG_ON(!shadow_current(&spine));
 		n = dm_block_data(shadow_current(&spine));
 		need_insert = ((index >= le32_to_cpu(n->header.nr_entries)) ||
 			       (le64_to_cpu(n->keys[index]) != keys[level]));
 
-		if (level == last_level) {
-			if (need_insert) {
-				if (inserted)
-					*inserted = 1;
+		if (need_insert) {
+			dm_block_t new_tree;
+			__le64 new_le;
 
-				insert_at(info->value_type.size, n, index,
-					  keys[level], value);
-			} else {
-				if (inserted)
-					*inserted = 0;
+			r = dm_btree_empty(info, &new_tree);
+			if (r < 0)
+				goto bad;
 
-				if (info->value_type.dec &&
-				    (!info->value_type.equal ||
-				     !info->value_type.equal(
-					     info->value_type.context,
-					     value_ptr(n, index, info->value_type.size),
-					     value))) {
-					info->value_type.dec(info->value_type.context,
-					     value_ptr(n, index, info->value_type.size));
-				}
-				memcpy(value_ptr(n, index, info->value_type.size),
-				       value, info->value_type.size);
-			}
-		} else {
-			if (need_insert) {
-				dm_block_t new_tree;
-				__le64 new_le;
-
-				r = dm_btree_empty(info, &new_tree);
-				if (r < 0) {
-					/* FIXME: avoid block leaks */
-					exit_shadow_spine(&spine);
-					return r;
-				}
-
-				new_le = cpu_to_le64(new_tree);
-				__bless_for_disk(&new_le);
-				insert_at(sizeof(uint64_t), n, index,
-					  keys[level], &new_le);
-			}
+			new_le = cpu_to_le64(new_tree);
+			__bless_for_disk(&new_le);
+			insert_at(sizeof(uint64_t), n, index,
+				  keys[level], &new_le);
 		}
 
 		if (level < last_level)
 			block = value64(n, index);
 	}
 
+	r = btree_insert_raw(&spine, block, &info->value_type,
+			     keys[level], &index);
+	if (r < 0)
+		goto bad;
+
+	BUG_ON(!shadow_current(&spine));
+	n = dm_block_data(shadow_current(&spine));
+	need_insert = ((index >= le32_to_cpu(n->header.nr_entries)) ||
+		       (le64_to_cpu(n->keys[index]) != keys[level]));
+
+	if (need_insert) {
+		if (inserted)
+			*inserted = 1;
+
+		insert_at(info->value_type.size, n, index,
+			  keys[level], value);
+	} else {
+		if (inserted)
+			*inserted = 0;
+
+		if (info->value_type.dec &&
+		    (!info->value_type.equal ||
+		     !info->value_type.equal(
+			     info->value_type.context,
+			     value_ptr(n, index, info->value_type.size),
+			     value))) {
+			info->value_type.dec(info->value_type.context,
+					     value_ptr(n, index, info->value_type.size));
+		}
+		memcpy(value_ptr(n, index, info->value_type.size),
+		       value, info->value_type.size);
+		__unbless_for_disk(value);
+	}
+
 	*new_root = shadow_root(&spine);
 	exit_shadow_spine(&spine);
-
 	return 0;
+
+bad:
+	exit_shadow_spine(&spine);
+	__unbless_for_disk(value);
+	return r;
 }
 
 
 int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value, dm_block_t *new_root)
+	__written_to_disk(value)
 {
 	return insert(info, root, keys, value, new_root, NULL);
 }
@@ -707,6 +713,7 @@ EXPORT_SYMBOL_GPL(dm_btree_insert);
 int dm_btree_insert_notify(struct dm_btree_info *info, dm_block_t root,
 			   uint64_t *keys, void *value, dm_block_t *new_root,
 			   int *inserted)
+	__written_to_disk(value)
 {
 	return insert(info, root, keys, value, new_root, inserted);
 }
