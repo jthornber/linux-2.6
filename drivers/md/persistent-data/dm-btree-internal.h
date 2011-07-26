@@ -95,7 +95,7 @@ static inline __le64 *key_ptr(struct node *n, uint32_t index)
 
 static inline void *value_base(struct node *n)
 {
-	return &n->keys[__le32_to_cpu(n->header.max_entries)];
+	return &n->keys[le32_to_cpu(n->header.max_entries)];
 }
 
 static inline void *value_ptr(struct node *n, uint32_t index, size_t value_size)
@@ -109,7 +109,7 @@ static inline void *value_ptr(struct node *n, uint32_t index, size_t value_size)
 static inline uint64_t value64(struct node *n, uint32_t index)
 {
 	__le64 *values = value_base(n);
-	return __le64_to_cpu(values[index]);
+	return le64_to_cpu(values[index]);
 }
 
 /*

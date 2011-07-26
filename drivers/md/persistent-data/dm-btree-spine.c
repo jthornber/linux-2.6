@@ -19,7 +19,7 @@ static void node_prepare_for_write(struct dm_block_validator *v,
 {
 	struct node_header *node = dm_block_data(b);
 
-	node->blocknr = __cpu_to_le64(dm_block_location(b));
+	node->blocknr = cpu_to_le64(dm_block_location(b));
 	node->csum = dm_block_csum_data(&node->flags,
 					block_size - sizeof(u32));
 }
@@ -31,9 +31,9 @@ static int node_check(struct dm_block_validator *v,
 	struct node_header *node = dm_block_data(b);
 	__le32 csum;
 
-	if (dm_block_location(b) != __le64_to_cpu(node->blocknr)) {
+	if (dm_block_location(b) != le64_to_cpu(node->blocknr)) {
 		DMERR("node_check failed blocknr %llu wanted %llu",
-		      __le64_to_cpu(node->blocknr), dm_block_location(b));
+		      le64_to_cpu(node->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
 
@@ -41,7 +41,7 @@ static int node_check(struct dm_block_validator *v,
 				  block_size - sizeof(u32));
 	if (csum != node->csum) {
 		DMERR("node_check failed csum %u wanted %u",
-		      __le32_to_cpu(csum), __le32_to_cpu(node->csum));
+		      le32_to_cpu(csum), le32_to_cpu(node->csum));
 		return -EILSEQ;
 	}
 

@@ -187,7 +187,7 @@ static void sb_prepare_for_write(struct dm_block_validator *v,
 {
 	struct thin_super_block *sb = dm_block_data(b);
 
-	sb->blocknr = __cpu_to_le64(dm_block_location(b));
+	sb->blocknr = cpu_to_le64(dm_block_location(b));
 	sb->csum = dm_block_csum_data(&sb->flags,
 				      sizeof(*sb) - sizeof(u32));
 }
@@ -199,16 +199,16 @@ static int sb_check(struct dm_block_validator *v,
 	struct thin_super_block *sb = dm_block_data(b);
 	__le32 csum;
 
-	if (dm_block_location(b) != __le64_to_cpu(sb->blocknr)) {
+	if (dm_block_location(b) != le64_to_cpu(sb->blocknr)) {
 		DMERR("sb_check failed blocknr %llu "
-		      "wanted %llu", __le64_to_cpu(sb->blocknr),
+		      "wanted %llu", le64_to_cpu(sb->blocknr),
 		      dm_block_location(b));
 		return -ENOTBLK;
 	}
 
-	if (__le64_to_cpu(sb->magic) != THIN_SUPERBLOCK_MAGIC) {
+	if (le64_to_cpu(sb->magic) != THIN_SUPERBLOCK_MAGIC) {
 		DMERR("sb_check failed magic %llu "
-		      "wanted %llu", __le64_to_cpu(sb->magic),
+		      "wanted %llu", le64_to_cpu(sb->magic),
 		      (unsigned long long)THIN_SUPERBLOCK_MAGIC);
 		return -EILSEQ;
 	}
@@ -217,7 +217,7 @@ static int sb_check(struct dm_block_validator *v,
 				  sizeof(*sb) - sizeof(u32));
 	if (csum != sb->csum) {
 		DMERR("sb_check failed csum %u wanted %u",
-		      __le32_to_cpu(csum), __le32_to_cpu(sb->csum));
+		      le32_to_cpu(csum), le32_to_cpu(sb->csum));
 		return -EILSEQ;
 	}
 
@@ -289,7 +289,7 @@ static void subtree_inc(void *context, void *value)
 	uint64_t root;
 
 	memcpy(&le_root, value, sizeof(le_root));
-	root = __le64_to_cpu(le_root);
+	root = le64_to_cpu(le_root);
 	dm_tm_inc(info->tm, root);
 }
 
@@ -300,7 +300,7 @@ static void subtree_dec(void *context, void *value)
 	uint64_t root;
 
 	memcpy(&le_root, value, sizeof(le_root));
-	root = __le64_to_cpu(le_root);
+	root = le64_to_cpu(le_root);
 	if (dm_btree_del(info, root))
 		DMERR("btree delete failed\n");
 }
@@ -494,14 +494,14 @@ static int begin_transaction(struct dm_thin_metadata *tmd)
 		return r;
 
 	sb = dm_block_data(tmd->sblock);
-	tmd->time = __le32_to_cpu(sb->time);
-	tmd->root = __le64_to_cpu(sb->data_mapping_root);
-	tmd->details_root = __le64_to_cpu(sb->device_details_root);
-	tmd->trans_id = __le64_to_cpu(sb->trans_id);
-	tmd->flags = __le32_to_cpu(sb->flags);
-	tmd->data_block_size = __le32_to_cpu(sb->data_block_size);
+	tmd->time = le32_to_cpu(sb->time);
+	tmd->root = le64_to_cpu(sb->data_mapping_root);
+	tmd->details_root = le64_to_cpu(sb->device_details_root);
+	tmd->trans_id = le64_to_cpu(sb->trans_id);
+	tmd->flags = le32_to_cpu(sb->flags);
+	tmd->data_block_size = le32_to_cpu(sb->data_block_size);
 
-	features = __le32_to_cpu(sb->incompat_flags) & ~THIN_FEATURE_INCOMPAT_SUPP;
+	features = le32_to_cpu(sb->incompat_flags) & ~THIN_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to "
 		      "unsupported optional features (%lx).",
@@ -513,7 +513,7 @@ static int begin_transaction(struct dm_thin_metadata *tmd)
 	if (get_disk_ro(tmd->bdev->bd_disk))
 		return 0;
 
-	features = __le32_to_cpu(sb->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
+	features = le32_to_cpu(sb->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
 	if (features) {
 		DMERR("could not access metadata RDWR due to "
 		      "unsupported optional features (%lx).",
@@ -569,12 +569,12 @@ struct dm_thin_metadata * dm_thin_metadata_open(struct block_device *bdev,
 	}
 
 	sb = dm_block_data(tmd->sblock);
-	sb->magic = __cpu_to_le64(THIN_SUPERBLOCK_MAGIC);
-	sb->version = __cpu_to_le32(THIN_VERSION);
+	sb->magic = cpu_to_le64(THIN_SUPERBLOCK_MAGIC);
+	sb->version = cpu_to_le32(THIN_VERSION);
 	sb->time = 0;
-	sb->metadata_block_size = __cpu_to_le32(THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
-	sb->metadata_nr_blocks = __cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
-	sb->data_block_size = __cpu_to_le32(data_block_size);
+	sb->metadata_block_size = cpu_to_le32(THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
+	sb->metadata_nr_blocks = cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
+	sb->data_block_size = cpu_to_le32(data_block_size);
 
 	r = dm_btree_empty(&tmd->info, &tmd->root);
 	if (r < 0)
@@ -675,9 +675,9 @@ static int __open_device(struct dm_thin_metadata *tmd,
 
 		changed = 1;
 		details.mapped_blocks = 0;
-		details.transaction_id = __cpu_to_le64(tmd->trans_id);
-		details.creation_time = __cpu_to_le32(tmd->time);
-		details.snapshotted_time = __cpu_to_le32(tmd->time);
+		details.transaction_id = cpu_to_le64(tmd->trans_id);
+		details.creation_time = cpu_to_le32(tmd->time);
+		details.snapshotted_time = cpu_to_le32(tmd->time);
 	}
 
 	*td = kmalloc(sizeof(**td), GFP_NOIO);
@@ -688,10 +688,10 @@ static int __open_device(struct dm_thin_metadata *tmd,
 	(*td)->id = dev;
 	(*td)->open_count = 1;
 	(*td)->changed = changed;
-	(*td)->mapped_blocks = __le64_to_cpu(details.mapped_blocks);
-	(*td)->transaction_id = __le64_to_cpu(details.transaction_id);
-	(*td)->creation_time = __le32_to_cpu(details.creation_time);
-	(*td)->snapshotted_time = __le32_to_cpu(details.snapshotted_time);
+	(*td)->mapped_blocks = le64_to_cpu(details.mapped_blocks);
+	(*td)->transaction_id = le64_to_cpu(details.transaction_id);
+	(*td)->creation_time = le32_to_cpu(details.creation_time);
+	(*td)->snapshotted_time = le32_to_cpu(details.snapshotted_time);
 
 	list_add(&(*td)->list, &tmd->thin_devices);
 
@@ -728,7 +728,7 @@ static int __create_thin(struct dm_thin_metadata *tmd,
 	/*
 	 * Insert it into the main mapping tree.
 	 */
-	value = __cpu_to_le64(dev_root);
+	value = cpu_to_le64(dev_root);
 	r = dm_btree_insert(&tmd->tl_info, tmd->root, &key, &value, &tmd->root);
 	if (r) {
 		dm_btree_del(&tmd->bl_info, dev_root);
@@ -801,7 +801,7 @@ static int __create_snap(struct dm_thin_metadata *tmd,
 	r = dm_btree_lookup(&tmd->tl_info, tmd->root, &key, &value);
 	if (r)
 		return r;
-	origin_root = __le64_to_cpu(value);
+	origin_root = le64_to_cpu(value);
 
 	/* clone the origin */
 	r = dm_btree_clone(&tmd->bl_info, origin_root, &snap_root);
@@ -809,7 +809,7 @@ static int __create_snap(struct dm_thin_metadata *tmd,
 		return r;
 
 	/* insert into the main mapping tree */
-	value = __cpu_to_le64(snap_root);
+	value = cpu_to_le64(snap_root);
 	key = dev;
 	r = dm_btree_insert(&tmd->tl_info, tmd->root, &key, &value, &tmd->root);
 	if (r) {
@@ -971,7 +971,7 @@ int dm_thin_metadata_get_held_root(struct dm_thin_metadata *tmd,
 
 	down_read(&tmd->root_lock);
 	sb = dm_block_data(tmd->sblock);
-	*result = __le64_to_cpu(sb->held_root);
+	*result = le64_to_cpu(sb->held_root);
 	up_read(&tmd->root_lock);
 
 	return 0;
@@ -1023,13 +1023,13 @@ int dm_thin_metadata_lookup(struct dm_thin_device *td,
 		down_read(&tmd->root_lock);
 		r = dm_btree_lookup(&tmd->info, tmd->root, keys, &value);
 		if (!r)
-			dm_block_time = __le64_to_cpu(value);
+			dm_block_time = le64_to_cpu(value);
 		up_read(&tmd->root_lock);
 
 	} else if (down_read_trylock(&tmd->root_lock)) {
 		r = dm_btree_lookup(&tmd->nb_info, tmd->root, keys, &value);
 		if (!r)
-			dm_block_time = __le64_to_cpu(value);
+			dm_block_time = le64_to_cpu(value);
 		up_read(&tmd->root_lock);
 
 	} else
@@ -1056,7 +1056,7 @@ static int __insert(struct dm_thin_device *td,
 	dm_block_t keys[2] = { td->id, block };
 
 	tmd->need_commit = 1;
-	value = __cpu_to_le64(pack_dm_block_time(data_block, tmd->time));
+	value = cpu_to_le64(pack_dm_block_time(data_block, tmd->time));
 
 	r = dm_btree_insert_notify(&tmd->info, tmd->root, keys, &value,
 				   &tmd->root, &inserted);
@@ -1136,10 +1136,10 @@ static int __write_changed_details(struct dm_thin_metadata *tmd)
 
 		key = td->id;
 
-		dd.mapped_blocks = __cpu_to_le64(td->mapped_blocks);
-		dd.transaction_id = __cpu_to_le64(td->transaction_id);
-		dd.creation_time = __cpu_to_le32(td->creation_time);
-		dd.snapshotted_time = __cpu_to_le32(td->snapshotted_time);
+		dd.mapped_blocks = cpu_to_le64(td->mapped_blocks);
+		dd.transaction_id = cpu_to_le64(td->transaction_id);
+		dd.creation_time = cpu_to_le32(td->creation_time);
+		dd.snapshotted_time = cpu_to_le32(td->snapshotted_time);
 
 		r = dm_btree_insert(&tmd->details_info, tmd->details_root,
 				    &key, &dd, &tmd->details_root);
@@ -1191,11 +1191,11 @@ int dm_thin_metadata_commit(struct dm_thin_metadata *tmd)
 		goto out;
 
 	sb = dm_block_data(tmd->sblock);
-	sb->time = __cpu_to_le32(tmd->time);
-	sb->data_mapping_root = __cpu_to_le64(tmd->root);
-	sb->device_details_root = __cpu_to_le64(tmd->details_root);
-	sb->trans_id = __cpu_to_le64(tmd->trans_id);
-	sb->flags = __cpu_to_le32(tmd->flags);
+	sb->time = cpu_to_le32(tmd->time);
+	sb->data_mapping_root = cpu_to_le64(tmd->root);
+	sb->device_details_root = cpu_to_le64(tmd->details_root);
+	sb->trans_id = cpu_to_le64(tmd->trans_id);
+	sb->flags = cpu_to_le32(tmd->flags);
 
 	r = dm_sm_copy_root(tmd->metadata_sm, &sb->metadata_space_map_root, len);
 	if (r < 0)
@@ -1289,7 +1289,7 @@ static int __highest_block(struct dm_thin_device *td, dm_block_t *result)
 	if (r)
 		return r;
 
-	thin_root = __le64_to_cpu(value);
+	thin_root = le64_to_cpu(value);
 
 	return dm_btree_find_highest_key(&tmd->bl_info, thin_root, result);
 }

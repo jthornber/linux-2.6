@@ -25,7 +25,7 @@ static void bitmap_prepare_for_write(struct dm_block_validator *v,
 {
 	struct bitmap_header *header = dm_block_data(b);
 
-	header->blocknr = __cpu_to_le64(dm_block_location(b));
+	header->blocknr = cpu_to_le64(dm_block_location(b));
 	header->csum = dm_block_csum_data(&header->not_used,
 					  block_size - sizeof(u32));
 }
@@ -37,9 +37,9 @@ static int bitmap_check(struct dm_block_validator *v,
 	struct bitmap_header *header = dm_block_data(b);
 	__le32 csum;
 
-	if (dm_block_location(b) != __le64_to_cpu(header->blocknr)) {
+	if (dm_block_location(b) != le64_to_cpu(header->blocknr)) {
 		DMERR("bitmap check failed blocknr %llu wanted %llu",
-		      __le64_to_cpu(header->blocknr), dm_block_location(b));
+		      le64_to_cpu(header->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
 
@@ -47,7 +47,7 @@ static int bitmap_check(struct dm_block_validator *v,
 				  block_size - sizeof(u32));
 	if (csum != header->csum) {
 		DMERR("bitmap check failed csum %u wanted %u",
-		      __le32_to_cpu(csum), __le32_to_cpu(header->csum));
+		      le32_to_cpu(csum), le32_to_cpu(header->csum));
 		return -EILSEQ;
 	}
 
@@ -79,7 +79,7 @@ static unsigned bitmap_word_used(void *addr, unsigned b)
 	__le64 *words = (__le64 *) addr;
 	__le64 *w = words + (b >> ENTRIES_SHIFT);
 
-	uint64_t bits = __le64_to_cpu(*w);
+	uint64_t bits = le64_to_cpu(*w);
 	return ((bits & WORD_MASK_LOW) == WORD_MASK_LOW ||
 		(bits & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
 		(bits & WORD_MASK_ALL) == WORD_MASK_ALL);
@@ -213,13 +213,13 @@ static int disk_ll_extend(struct ll_disk *io, dm_block_t extra_blocks)
 		r = dm_tm_new_block(io->tm, &dm_sm_bitmap_validator, &b);
 		if (r < 0)
 			return r;
-		idx.blocknr = __cpu_to_le64(dm_block_location(b));
+		idx.blocknr = cpu_to_le64(dm_block_location(b));
 
 		r = dm_tm_unlock(io->tm, b);
 		if (r < 0)
 			return r;
 
-		idx.nr_free = __cpu_to_le32(io->entries_per_block);
+		idx.nr_free = cpu_to_le32(io->entries_per_block);
 		idx.none_free_before = 0;
 
 		r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
@@ -247,10 +247,10 @@ static int disk_ll_open(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	if (r < 0)
 		return r;
 
-	ll->nr_blocks = __le64_to_cpu(smr->nr_blocks);
-	ll->nr_allocated = __le64_to_cpu(smr->nr_allocated);
-	ll->bitmap_root = __le64_to_cpu(smr->bitmap_root);
-	ll->ref_count_root = __le64_to_cpu(smr->ref_count_root);
+	ll->nr_blocks = le64_to_cpu(smr->nr_blocks);
+	ll->nr_allocated = le64_to_cpu(smr->nr_allocated);
+	ll->bitmap_root = le64_to_cpu(smr->bitmap_root);
+	ll->ref_count_root = le64_to_cpu(smr->ref_count_root);
 
 	return 0;
 }
@@ -267,7 +267,7 @@ static int disk_ll_lookup_bitmap(struct ll_disk *io, dm_block_t b, uint32_t *res
 	if (r < 0)
 		return r;
 
-	r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
+	r = dm_tm_read_lock(io->tm, le64_to_cpu(ie.blocknr),
 			    &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
@@ -290,7 +290,7 @@ static int disk_ll_lookup(struct ll_disk *io, dm_block_t b, uint32_t *result)
 		if (r < 0)
 			return r;
 
-		*result = __le32_to_cpu(le_rc);
+		*result = le32_to_cpu(le_rc);
 	}
 
 	return r;
@@ -310,12 +310,12 @@ static int disk_ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 		if (r < 0)
 			return r;
 
-		if (__le32_to_cpu(ie.nr_free) > 0) {
+		if (le32_to_cpu(ie.nr_free) > 0) {
 			struct dm_block *blk;
 			unsigned position;
 			uint32_t bit_end;
 
-			r = dm_tm_read_lock(io->tm, __le64_to_cpu(ie.blocknr),
+			r = dm_tm_read_lock(io->tm, le64_to_cpu(ie.blocknr),
 					    &dm_sm_bitmap_validator, &blk);
 			if (r < 0)
 				return r;
@@ -325,7 +325,7 @@ static int disk_ll_find_free_block(struct ll_disk *io, dm_block_t begin,
 
 			r = sm_find_free(dm_bitmap_data(blk),
 					 max((unsigned)begin,
-					     (unsigned)__le32_to_cpu(ie.none_free_before)),
+					     (unsigned)le32_to_cpu(ie.none_free_before)),
 					 bit_end, &position);
 			if (r < 0) {
 				dm_tm_unlock(io->tm, blk);
@@ -359,13 +359,13 @@ static int disk_ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_shadow_block(io->tm, __le64_to_cpu(ie.blocknr),
+	r = dm_tm_shadow_block(io->tm, le64_to_cpu(ie.blocknr),
 			       &dm_sm_bitmap_validator, &nb, &inc);
 	if (r < 0) {
 		DMERR("dm_tm_shadow_block() failed");
 		return r;
 	}
-	ie.blocknr = __cpu_to_le64(dm_block_location(nb));
+	ie.blocknr = cpu_to_le64(dm_block_location(nb));
 
 	bm = dm_bitmap_data(nb);
 	bit = do_div(b, io->entries_per_block);
@@ -383,7 +383,7 @@ static int disk_ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 			}
 		}
 	} else {
-		__le32 le_rc = __cpu_to_le32(ref_count);
+		__le32 le_rc = cpu_to_le32(ref_count);
 		sm_set_bitmap(bm, bit, 3);
 		r = dm_btree_insert(&io->ref_count_info, io->ref_count_root,
 				    &b, &le_rc, &io->ref_count_root);
@@ -400,14 +400,14 @@ static int disk_ll_insert(struct ll_disk *io, dm_block_t b, uint32_t ref_count)
 
 	if (ref_count && !old) {
 		io->nr_allocated++;
-		ie.nr_free = __cpu_to_le32(__le32_to_cpu(ie.nr_free) - 1);
-		if (__le32_to_cpu(ie.none_free_before) == b)
-			ie.none_free_before = __cpu_to_le32(b + 1);
+		ie.nr_free = cpu_to_le32(le32_to_cpu(ie.nr_free) - 1);
+		if (le32_to_cpu(ie.none_free_before) == b)
+			ie.none_free_before = cpu_to_le32(b + 1);
 
 	} else if (old && !ref_count) {
 		io->nr_allocated--;
-		ie.nr_free = __cpu_to_le32(__le32_to_cpu(ie.nr_free) + 1);
-		ie.none_free_before = __cpu_to_le32(min((dm_block_t) __le32_to_cpu(ie.none_free_before), b));
+		ie.nr_free = cpu_to_le32(le32_to_cpu(ie.nr_free) + 1);
+		ie.none_free_before = cpu_to_le32(min((dm_block_t) le32_to_cpu(ie.none_free_before), b));
 	}
 
 	r = dm_btree_insert(&io->bitmap_info, io->bitmap_root,
@@ -549,10 +549,10 @@ static int sm_disk_copy_root(struct dm_space_map *sm, void *where, size_t max)
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 	struct sm_root root;
 
-	root.nr_blocks = __cpu_to_le64(smd->ll.nr_blocks);
-	root.nr_allocated = __cpu_to_le64(smd->ll.nr_allocated);
-	root.bitmap_root = __cpu_to_le64(smd->ll.bitmap_root);
-	root.ref_count_root = __cpu_to_le64(smd->ll.ref_count_root);
+	root.nr_blocks = cpu_to_le64(smd->ll.nr_blocks);
+	root.nr_allocated = cpu_to_le64(smd->ll.nr_allocated);
+	root.bitmap_root = cpu_to_le64(smd->ll.bitmap_root);
+	root.ref_count_root = cpu_to_le64(smd->ll.ref_count_root);
 
 	if (max < sizeof(root))
 		return -ENOSPC;

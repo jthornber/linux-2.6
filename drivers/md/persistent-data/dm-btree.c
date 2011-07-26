@@ -26,11 +26,11 @@ static void array_insert(void *base, size_t elt_size, unsigned nr_elts,
 /* makes the assumption that no two keys are the same. */
 static int bsearch(struct node *n, uint64_t key, int want_hi)
 {
-	int lo = -1, hi = __le32_to_cpu(n->header.nr_entries);
+	int lo = -1, hi = le32_to_cpu(n->header.nr_entries);
 
 	while (hi - lo > 1) {
 		int mid = lo + ((hi - lo) / 2);
-		uint64_t mid_key = __le64_to_cpu(n->keys[mid]);
+		uint64_t mid_key = le64_to_cpu(n->keys[mid]);
 
 		if (mid_key == key)
 			return mid;
@@ -53,9 +53,9 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt)
 {
 	unsigned i;
-	uint32_t nr_entries = __le32_to_cpu(n->header.nr_entries);
+	uint32_t nr_entries = le32_to_cpu(n->header.nr_entries);
 
-	if (__le32_to_cpu(n->header.flags) & INTERNAL_NODE)
+	if (le32_to_cpu(n->header.flags) & INTERNAL_NODE)
 		for (i = 0; i < nr_entries; i++)
 			dm_tm_inc(tm, value64(n, i));
 	else if (vt->inc)
@@ -67,14 +67,14 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 static void insert_at(size_t value_size, struct node *node, unsigned index,
 		      uint64_t key, void *value)
 {
-	uint32_t nr_entries = __le32_to_cpu(node->header.nr_entries);
+	uint32_t nr_entries = le32_to_cpu(node->header.nr_entries);
 
 	BUG_ON(index > nr_entries ||
-	       index >= __le32_to_cpu(node->header.max_entries));
+	       index >= le32_to_cpu(node->header.max_entries));
 
 	array_insert(node->keys, sizeof(*node->keys), nr_entries, index, &key);
 	array_insert(value_base(node), value_size, nr_entries, index, value);
-	node->header.nr_entries = __cpu_to_le32(nr_entries + 1);
+	node->header.nr_entries = cpu_to_le32(nr_entries + 1);
 }
 
 /*----------------------------------------------------------------*/
@@ -112,9 +112,9 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root)
 
 	n = (struct node *) dm_block_data(b);
 	memset(n, 0, block_size);
-	n->header.flags = __cpu_to_le32(LEAF_NODE);
-	n->header.nr_entries = __cpu_to_le32(0);
-	n->header.max_entries =	__cpu_to_le32(max_entries);
+	n->header.flags = cpu_to_le32(LEAF_NODE);
+	n->header.nr_entries = cpu_to_le32(0);
+	n->header.max_entries =	cpu_to_le32(max_entries);
 
 	*root = dm_block_location(b);
 	return unlock_for_block(info, b);
@@ -182,7 +182,7 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 
 		f->n = dm_block_data(f->b);
 		f->level = level;
-		f->nr_children = __le32_to_cpu(f->n->header.nr_entries);
+		f->nr_children = le32_to_cpu(f->n->header.nr_entries);
 		f->current_child = 0;
 	}
 
@@ -221,7 +221,7 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 			continue;
 		}
 
-		flags = __le32_to_cpu(f->n->header.flags);
+		flags = le32_to_cpu(f->n->header.flags);
 		if (flags & INTERNAL_NODE) {
 			b = value64(f->n, f->current_child);
 			f->current_child++;
@@ -280,8 +280,8 @@ static int btree_lookup_raw(struct ro_spine *s, dm_block_t block, uint64_t key,
 
 		i = search_fn(ro_node(s), key);
 
-		flags = __le32_to_cpu(ro_node(s)->header.flags);
-		nr_entries = __le32_to_cpu(ro_node(s)->header.nr_entries);
+		flags = le32_to_cpu(ro_node(s)->header.flags);
+		nr_entries = le32_to_cpu(ro_node(s)->header.nr_entries);
 		if (i < 0 || i >= nr_entries)
 			return -ENODATA;
 
@@ -290,7 +290,7 @@ static int btree_lookup_raw(struct ro_spine *s, dm_block_t block, uint64_t key,
 
 	} while (!(flags & LEAF_NODE));
 
-	*result_key = __le64_to_cpu(ro_node(s)->keys[i]);
+	*result_key = le64_to_cpu(ro_node(s)->keys[i]);
 	memcpy(v, value_ptr(ro_node(s), i, value_size), value_size);
 
 	return 0;
@@ -333,7 +333,7 @@ int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
 			return r;
 		}
 
-		root = __le64_to_cpu(internal_value);
+		root = le64_to_cpu(internal_value);
 	}
 	exit_ro_spine(&spine);
 
@@ -391,17 +391,17 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	l = dm_block_data(left);
 	r = (struct node *) dm_block_data(right);
 
-	nr_left = __le32_to_cpu(l->header.nr_entries) / 2;
-	nr_right = __le32_to_cpu(l->header.nr_entries) - nr_left;
+	nr_left = le32_to_cpu(l->header.nr_entries) / 2;
+	nr_right = le32_to_cpu(l->header.nr_entries) - nr_left;
 
-	l->header.nr_entries = __cpu_to_le32(nr_left);
+	l->header.nr_entries = cpu_to_le32(nr_left);
 
 	r->header.flags = l->header.flags;
-	r->header.nr_entries = __cpu_to_le32(nr_right);
+	r->header.nr_entries = cpu_to_le32(nr_right);
 	r->header.max_entries = l->header.max_entries;
 	memcpy(r->keys, l->keys + nr_left, nr_right * sizeof(r->keys[0]));
 
-	size = __le32_to_cpu(l->header.flags) & INTERNAL_NODE ?
+	size = le32_to_cpu(l->header.flags) & INTERNAL_NODE ?
 		sizeof(uint64_t) : s->info->value_type.size;
 	memcpy(value_ptr(r, 0, size), value_ptr(l, nr_left, size),
 	       size * nr_right);
@@ -411,15 +411,15 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	BUG_ON(!parent);
 
 	p = dm_block_data(parent);
-	location = __cpu_to_le64(dm_block_location(left));
+	location = cpu_to_le64(dm_block_location(left));
 	memcpy(value_ptr(p, parent_index, sizeof(__le64)),
 	       &location, sizeof(__le64));
 
-	location = __cpu_to_le64(dm_block_location(right));
+	location = cpu_to_le64(dm_block_location(right));
 	insert_at(sizeof(__le64), p, parent_index + 1,
-		  __le64_to_cpu(r->keys[0]), &location);
+		  le64_to_cpu(r->keys[0]), &location);
 
-	if (key < __le64_to_cpu(r->keys[0])) {
+	if (key < le64_to_cpu(r->keys[0])) {
 		unlock_for_block(s->info, right);
 		s->nodes[1] = left;
 	} else {
@@ -477,35 +477,35 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	l = (struct node *) dm_block_data(left);
 	r = (struct node *) dm_block_data(right);
 
-	nr_left = __le32_to_cpu(p->header.nr_entries) / 2;
-	nr_right = __le32_to_cpu(p->header.nr_entries) - nr_left;
+	nr_left = le32_to_cpu(p->header.nr_entries) / 2;
+	nr_right = le32_to_cpu(p->header.nr_entries) - nr_left;
 
 	l->header.flags = p->header.flags;
-	l->header.nr_entries = __cpu_to_le32(nr_left);
+	l->header.nr_entries = cpu_to_le32(nr_left);
 	l->header.max_entries = p->header.max_entries;
 
 	r->header.flags = p->header.flags;
-	r->header.nr_entries = __cpu_to_le32(nr_right);
+	r->header.nr_entries = cpu_to_le32(nr_right);
 	r->header.max_entries = p->header.max_entries;
 
 	memcpy(l->keys, p->keys, nr_left * sizeof(p->keys[0]));
 	memcpy(r->keys, p->keys + nr_left, nr_right * sizeof(p->keys[0]));
 
-	size = __le32_to_cpu(p->header.flags) & INTERNAL_NODE ?
+	size = le32_to_cpu(p->header.flags) & INTERNAL_NODE ?
 		sizeof(__le64) : s->info->value_type.size;
 	memcpy(value_ptr(l, 0, size), value_ptr(p, 0, size), nr_left * size);
 	memcpy(value_ptr(r, 0, size), value_ptr(p, nr_left, size),
 	       nr_right * size);
 
 	/* new_parent should just point to l and r now */
-	p->header.flags = __cpu_to_le32(INTERNAL_NODE);
-	p->header.nr_entries = __cpu_to_le32(2);
+	p->header.flags = cpu_to_le32(INTERNAL_NODE);
+	p->header.nr_entries = cpu_to_le32(2);
 
-	val = __cpu_to_le64(dm_block_location(left));
+	val = cpu_to_le64(dm_block_location(left));
 	p->keys[0] = l->keys[0];
 	memcpy(value_ptr(p, 0, sizeof(__le64)), &val, sizeof(__le64));
 
-	val = __cpu_to_le64(dm_block_location(right));
+	val = cpu_to_le64(dm_block_location(right));
 	p->keys[1] = r->keys[0];
 	memcpy(value_ptr(p, 1, sizeof(__le64)), &val, sizeof(__le64));
 
@@ -517,7 +517,7 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 		unlock_for_block(s->info, s->nodes[0]);
 		s->nodes[0] = new_parent;
 	}
-	if (key < __le64_to_cpu(r->keys[0])) {
+	if (key < le64_to_cpu(r->keys[0])) {
 		unlock_for_block(s->info, right);
 		s->nodes[1] = left;
 	} else {
@@ -553,7 +553,7 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 		 * op.
 		 */
 		if (shadow_parent(s) && i >= 0) { /* FIXME: second clause unness. */
-			__le64 location = __cpu_to_le64(dm_block_location(shadow_current(s)));
+			__le64 location = cpu_to_le64(dm_block_location(shadow_current(s)));
 			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
 			       &location, sizeof(__le64));
 		}
@@ -576,12 +576,12 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 
 		i = lower_bound(node, key);
 
-		if (__le32_to_cpu(node->header.flags) & LEAF_NODE)
+		if (le32_to_cpu(node->header.flags) & LEAF_NODE)
 			break;
 
 		if (i < 0) {
 			/* change the bounds on the lowest key */
-			node->keys[0] = __cpu_to_le64(key);
+			node->keys[0] = cpu_to_le64(key);
 			i = 0;
 		}
 
@@ -589,13 +589,13 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 		top = 0;
 	}
 
-	if (i < 0 || __le64_to_cpu(node->keys[i]) != key)
+	if (i < 0 || le64_to_cpu(node->keys[i]) != key)
 		i++;
 
 	/* we're about to overwrite this value, so undo the increment for it */
 	/* FIXME: shame that inc information is leaking outside the spine.
 	 * Plus inc is just plain wrong in the event of a split */
-	if (__le64_to_cpu(node->keys[i]) == key && inc)
+	if (le64_to_cpu(node->keys[i]) == key && inc)
 		if (vt->dec)
 			vt->dec(vt->context, value_ptr(node, i, vt->size));
 
@@ -635,8 +635,8 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 
 		BUG_ON(!shadow_current(&spine));
 		n = dm_block_data(shadow_current(&spine));
-		need_insert = ((index >= __le32_to_cpu(n->header.nr_entries)) ||
-			       (__le64_to_cpu(n->keys[index]) != keys[level]));
+		need_insert = ((index >= le32_to_cpu(n->header.nr_entries)) ||
+			       (le64_to_cpu(n->keys[index]) != keys[level]));
 
 		if (level == last_level) {
 			if (need_insert) {
@@ -751,14 +751,14 @@ static int find_highest_key(struct ro_spine *s, dm_block_t block,
 		if (r < 0)
 			return r;
 
-		flags = __le32_to_cpu(ro_node(s)->header.flags);
-		i = __le32_to_cpu(ro_node(s)->header.nr_entries);
+		flags = le32_to_cpu(ro_node(s)->header.flags);
+		i = le32_to_cpu(ro_node(s)->header.nr_entries);
 		if (i == 0)
 			return -ENODATA;
 		else
 			i--;
 
-		*result_key = __le64_to_cpu(ro_node(s)->keys[i]);
+		*result_key = le64_to_cpu(ro_node(s)->keys[i]);
 		if (next_block || flags & INTERNAL_NODE)
 			block = value64(ro_node(s), i);
 

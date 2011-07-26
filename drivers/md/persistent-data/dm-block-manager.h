@@ -31,7 +31,7 @@ void *dm_block_data(struct dm_block *b);
  */
 static inline __le32 dm_block_csum_data(const void *data, unsigned length)
 {
-	return __cpu_to_le32(crc32c(~(u32)0, data, length));
+	return cpu_to_le32(crc32c(~(u32)0, data, length));
 }
 
 /*----------------------------------------------------------------*/
