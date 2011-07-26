@@ -68,11 +68,12 @@ static void insert_at(size_t value_size, struct node *node, unsigned index,
 		      uint64_t key, void *value)
 {
 	uint32_t nr_entries = le32_to_cpu(node->header.nr_entries);
+	__le64 key_le = cpu_to_le64(key);
 
 	BUG_ON(index > nr_entries ||
 	       index >= le32_to_cpu(node->header.max_entries));
 
-	array_insert(node->keys, sizeof(*node->keys), nr_entries, index, &key);
+	array_insert(node->keys, sizeof(*node->keys), nr_entries, index, &key_le);
 	array_insert(value_base(node), value_size, nr_entries, index, value);
 	node->header.nr_entries = cpu_to_le32(nr_entries + 1);
 }
