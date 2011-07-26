@@ -11,6 +11,13 @@
 /*----------------------------------------------------------------
  * Array manipulation
  *--------------------------------------------------------------*/
+static void memcpy_disk(void *dest, const void *src, size_t len)
+	__written_to_disk(src)
+{
+	memcpy(dest, src, len);
+	__unbless_for_disk(src);
+}
+
 static void array_insert(void *base, size_t elt_size, unsigned nr_elts,
 			 unsigned index, void *elt)
 	__written_to_disk(elt)
@@ -19,8 +26,7 @@ static void array_insert(void *base, size_t elt_size, unsigned nr_elts,
 		memmove(base + (elt_size * (index + 1)),
 			base + (elt_size * index),
 			(nr_elts - index) * elt_size);
-	memcpy(base + (elt_size * index), elt, elt_size);
-	__unbless_for_disk(elt);
+	memcpy_disk(base + (elt_size * index), elt, elt_size);
 }
 
 /*----------------------------------------------------------------*/
@@ -417,8 +423,9 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 
 	p = dm_block_data(parent);
 	location = cpu_to_le64(dm_block_location(left));
-	memcpy(value_ptr(p, parent_index, sizeof(__le64)),
-	       &location, sizeof(__le64));
+	__bless_for_disk(&location);
+	memcpy_disk(value_ptr(p, parent_index, sizeof(__le64)),
+		    &location, sizeof(__le64));
 
 	location = cpu_to_le64(dm_block_location(right));
 	__bless_for_disk(&location);
@@ -508,12 +515,14 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	p->header.nr_entries = cpu_to_le32(2);
 
 	val = cpu_to_le64(dm_block_location(left));
+	__bless_for_disk(&val);
 	p->keys[0] = l->keys[0];
-	memcpy(value_ptr(p, 0, sizeof(__le64)), &val, sizeof(__le64));
+	memcpy_disk(value_ptr(p, 0, sizeof(__le64)), &val, sizeof(__le64));
 
 	val = cpu_to_le64(dm_block_location(right));
 	p->keys[1] = r->keys[0];
-	memcpy(value_ptr(p, 1, sizeof(__le64)), &val, sizeof(__le64));
+	__bless_for_disk(&val);
+	memcpy_disk(value_ptr(p, 1, sizeof(__le64)), &val, sizeof(__le64));
 
 	/*
 	 * rejig the spine.  This is ugly, since it knows too
@@ -560,7 +569,8 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 		 */
 		if (shadow_parent(s) && i >= 0) { /* FIXME: second clause unness. */
 			__le64 location = cpu_to_le64(dm_block_location(shadow_current(s)));
-			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
+			__bless_for_disk(&location);
+			memcpy_disk(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
 			       &location, sizeof(__le64));
 		}
 
@@ -686,9 +696,8 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 			info->value_type.dec(info->value_type.context,
 					     value_ptr(n, index, info->value_type.size));
 		}
-		memcpy(value_ptr(n, index, info->value_type.size),
-		       value, info->value_type.size);
-		__unbless_for_disk(value);
+		memcpy_disk(value_ptr(n, index, info->value_type.size),
+			    value, info->value_type.size);
 	}
 
 	*new_root = shadow_root(&spine);
