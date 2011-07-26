@@ -729,6 +729,7 @@ static int __create_thin(struct dm_thin_metadata *tmd,
 	 * Insert it into the main mapping tree.
 	 */
 	value = cpu_to_le64(dev_root);
+	__bless_for_disk(&value);
 	r = dm_btree_insert(&tmd->tl_info, tmd->root, &key, &value, &tmd->root);
 	if (r) {
 		dm_btree_del(&tmd->bl_info, dev_root);
@@ -811,6 +812,7 @@ static int __create_snap(struct dm_thin_metadata *tmd,
 	/* insert into the main mapping tree */
 	value = cpu_to_le64(snap_root);
 	key = dev;
+	__bless_for_disk(&value);
 	r = dm_btree_insert(&tmd->tl_info, tmd->root, &key, &value, &tmd->root);
 	if (r) {
 		dm_btree_del(&tmd->bl_info, snap_root);
@@ -1057,7 +1059,7 @@ static int __insert(struct dm_thin_device *td,
 
 	tmd->need_commit = 1;
 	value = cpu_to_le64(pack_dm_block_time(data_block, tmd->time));
-
+	__bless_for_disk(&value);
 	r = dm_btree_insert_notify(&tmd->info, tmd->root, keys, &value,
 				   &tmd->root, &inserted);
 	if (r)
@@ -1140,7 +1142,7 @@ static int __write_changed_details(struct dm_thin_metadata *tmd)
 		dd.transaction_id = cpu_to_le64(td->transaction_id);
 		dd.creation_time = cpu_to_le32(td->creation_time);
 		dd.snapshotted_time = cpu_to_le32(td->snapshotted_time);
-
+	        __bless_for_disk(&dd);
 		r = dm_btree_insert(&tmd->details_info, tmd->details_root,
 				    &key, &dd, &tmd->details_root);
 		if (r)

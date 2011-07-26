@@ -13,12 +13,14 @@
  *--------------------------------------------------------------*/
 static void array_insert(void *base, size_t elt_size, unsigned nr_elts,
 			 unsigned index, void *elt)
+	__written_to_disk(elt)
 {
 	if (index < nr_elts)
 		memmove(base + (elt_size * (index + 1)),
 			base + (elt_size * index),
 			(nr_elts - index) * elt_size);
 	memcpy(base + (elt_size * index), elt, elt_size);
+	__release(elt);
 }
 
 /*----------------------------------------------------------------*/
@@ -66,6 +68,7 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 
 static void insert_at(size_t value_size, struct node *node, unsigned index,
 		      uint64_t key, void *value)
+	__written_to_disk(value)
 {
 	uint32_t nr_entries = le32_to_cpu(node->header.nr_entries);
 	__le64 key_le = cpu_to_le64(key);
@@ -73,6 +76,7 @@ static void insert_at(size_t value_size, struct node *node, unsigned index,
 	BUG_ON(index > nr_entries ||
 	       index >= le32_to_cpu(node->header.max_entries));
 
+	__bless_for_disk(&key_le);
 	array_insert(node->keys, sizeof(*node->keys), nr_entries, index, &key_le);
 	array_insert(value_base(node), value_size, nr_entries, index, value);
 	node->header.nr_entries = cpu_to_le32(nr_entries + 1);
@@ -417,6 +421,7 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	       &location, sizeof(__le64));
 
 	location = cpu_to_le64(dm_block_location(right));
+	__bless_for_disk(&location);
 	insert_at(sizeof(__le64), p, parent_index + 1,
 		  le64_to_cpu(r->keys[0]), &location);
 
@@ -665,6 +670,8 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 		} else {
 			if (need_insert) {
 				dm_block_t new_tree;
+				__le64 new_le;
+
 				r = dm_btree_empty(info, &new_tree);
 				if (r < 0) {
 					/* FIXME: avoid block leaks */
@@ -672,8 +679,10 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 					return r;
 				}
 
+				new_le = cpu_to_le64(new_tree);
+				__bless_for_disk(&new_le);
 				insert_at(sizeof(uint64_t), n, index,
-					  keys[level], &new_tree);
+					  keys[level], &new_le);
 			}
 		}
 
