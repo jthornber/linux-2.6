@@ -321,8 +321,8 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	int r;
 	unsigned i;
 	struct dm_block *b;
-	uint64_t *data;
-	unsigned block_size = dm_bm_block_size(bm) / sizeof(uint64_t);
+	__le64 *data, zero = cpu_to_le64(0);
+	unsigned block_size = dm_bm_block_size(bm) / sizeof(__le64);
 
 	/*
 	 * We can't use a validator here - it may be all zeroes.
@@ -334,7 +334,7 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	data = dm_block_data(b);
 	*result = 1;
 	for (i = 0; i < block_size; i++) {
-		if (data[i]) {
+		if (data[i] != zero) {
 			*result = 0;
 			break;
 		}
