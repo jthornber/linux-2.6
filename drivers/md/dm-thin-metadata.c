@@ -253,7 +253,7 @@ static void data_block_inc(void *context, void *value)
 	uint32_t t;
 
 	memcpy(&v, value, sizeof(v));
-	unpack_dm_block_time(v, &b, &t);
+	unpack_dm_block_time(le64_to_cpu(v), &b, &t);
 	dm_sm_inc_block(sm, b);
 }
 
@@ -265,7 +265,7 @@ static void data_block_dec(void *context, void *value)
 	uint32_t t;
 
 	memcpy(&v, value, sizeof(v));
-	unpack_dm_block_time(v, &b, &t);
+	unpack_dm_block_time(le64_to_cpu(v), &b, &t);
 	dm_sm_dec_block(sm, b);
 }
 
@@ -277,8 +277,8 @@ static int data_block_equal(void *context, void *value1, void *value2)
 
 	memcpy(&v1, value1, sizeof(v1));
 	memcpy(&v2, value2, sizeof(v2));
-	unpack_dm_block_time(v1, &b1, &t);
-	unpack_dm_block_time(v2, &b2, &t);
+	unpack_dm_block_time(le64_to_cpu(v1), &b1, &t);
+	unpack_dm_block_time(le64_to_cpu(v2), &b2, &t);
 	return b1 == b2;
 }
 
