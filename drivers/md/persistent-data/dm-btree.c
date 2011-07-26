@@ -665,6 +665,7 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 		} else {
 			if (need_insert) {
 				dm_block_t new_tree;
+				__le64 new_le;
 				r = dm_btree_empty(info, &new_tree);
 				if (r < 0) {
 					/* FIXME: avoid block leaks */
@@ -672,8 +673,9 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 					return r;
 				}
 
+				new_le = cpu_to_le64(new_tree);
 				insert_at(sizeof(uint64_t), n, index,
-					  keys[level], &new_tree);
+					  keys[level], &new_le);
 			}
 		}
 
