@@ -610,7 +610,7 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 {
 	int r, need_insert;
 	unsigned level, index = -1, last_level = info->levels - 1;
-	dm_block_t *block = &root;
+	dm_block_t block = root;
 	struct shadow_spine spine;
 	struct node *n;
 	struct dm_btree_value_type le64_type;
@@ -624,7 +624,7 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 	init_shadow_spine(&spine, info);
 
 	for (level = 0; level < info->levels; level++) {
-		r = btree_insert_raw(&spine, *block,
+		r = btree_insert_raw(&spine, block,
 				     (level == last_level ?
 				      &info->value_type : &le64_type),
 				     keys[level], &index);
@@ -678,7 +678,7 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 		}
 
 		if (level < last_level)
-			block = value_ptr(n, index, sizeof(uint64_t));
+			block = value64(n, index);
 	}
 
 	*new_root = shadow_root(&spine);
