@@ -79,9 +79,17 @@ int exit_shadow_spine(struct shadow_spine *s);
 int shadow_step(struct shadow_spine *s, dm_block_t b,
 		struct dm_btree_value_type *vt, int *inc);
 
+/*
+ * The spine must have at least one entry before calling this.
+ */
 struct dm_block *shadow_current(struct shadow_spine *s);
 
+/*
+ * The spine must have at least two entries before calling this.
+ */
 struct dm_block *shadow_parent(struct shadow_spine *s);
+
+int shadow_has_parent(struct shadow_spine *s);
 
 int shadow_root(struct shadow_spine *s);
 

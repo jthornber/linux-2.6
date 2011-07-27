@@ -183,12 +183,19 @@ int shadow_step(struct shadow_spine *s, dm_block_t b,
 
 struct dm_block *shadow_current(struct shadow_spine *s)
 {
+	BUG_ON(s->count == 0);
 	return s->nodes[s->count - 1];
 }
 
 struct dm_block *shadow_parent(struct shadow_spine *s)
 {
+	BUG_ON(s->count != 2);
 	return s->count == 2 ? s->nodes[0] : NULL;
+}
+
+int shadow_has_parent(struct shadow_spine *s)
+{
+	return s->count >= 2;
 }
 
 int shadow_root(struct shadow_spine *s)

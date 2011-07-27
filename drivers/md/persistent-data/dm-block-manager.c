@@ -189,7 +189,6 @@ static void __transition(struct dm_block *b, enum dm_block_state new_state)
 	case BS_READING:
 		/* DOT: empty -> reading */
 		BUG_ON(!(b->state == BS_EMPTY));
-		/* FIXME: insert into the hash */
 		__insert_block(bm, b);
 		list_del(&b->list);
 		bm->available_count--;

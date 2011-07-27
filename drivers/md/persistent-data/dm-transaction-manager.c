@@ -290,6 +290,7 @@ EXPORT_SYMBOL_GPL(dm_tm_unlock);
 
 void dm_tm_inc(struct dm_transaction_manager *tm, dm_block_t b)
 {
+	/* the non-blocking clone doesn't support this */
 	BUG_ON(tm->is_clone);
 	dm_sm_inc_block(tm->sm, b);
 }
@@ -297,6 +298,7 @@ EXPORT_SYMBOL_GPL(dm_tm_inc);
 
 void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 {
+	/* the non-blocking clone doesn't support this */
 	BUG_ON(tm->is_clone);
 	dm_sm_dec_block(tm->sm, b);
 }
@@ -312,7 +314,6 @@ int dm_tm_ref(struct dm_transaction_manager *tm, dm_block_t b,
 
 struct dm_block_manager *dm_tm_get_bm(struct dm_transaction_manager *tm)
 {
-	BUG_ON(tm->is_clone);
 	return tm->bm;
 }
 

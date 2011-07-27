@@ -472,7 +472,7 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		/* We have to patch up the parent node, ugly, but I don't
 		 * see a way to do this automatically as part of the spine
 		 * op. */
-		if (shadow_parent(s)) {
+		if (shadow_has_parent(s)) {
 			__le64 location = cpu_to_le64(dm_block_location(shadow_current(s)));
 			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
 			       &location, sizeof(__le64));

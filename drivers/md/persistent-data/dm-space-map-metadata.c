@@ -150,7 +150,7 @@ static int metadata_ll_open(struct ll_disk *ll, struct dm_transaction_manager *t
 	struct dm_block *block;
 
 	if (len < sizeof(struct sm_root)) {
-		DMERR("sm_disk root too small");
+		DMERR("sm_metadata root too small");
 		return -ENOMEM;
 	}
 
@@ -420,8 +420,8 @@ static int add_bop(struct sm_metadata *smm, enum block_op_type type, dm_block_t 
 	struct block_op *op;
 
 	if (smm->nr_uncommitted == MAX_RECURSIVE_ALLOCATIONS) {
-		BUG();
-		return -1;
+		DMERR("too many recursive allocations");
+		return -ENOMEM;
 	}
 
 	op = smm->uncommitted + smm->nr_uncommitted++;
@@ -452,25 +452,40 @@ static void in(struct sm_metadata *smm)
 	smm->recursion_count++;
 }
 
-static void out(struct sm_metadata *smm)
+static int out(struct sm_metadata *smm)
 {
 	int r = 0;
-	BUG_ON(!smm->recursion_count);
+
+	/*
+	 * If we're not recursing then very bad things are happening.
+	 */
+	if (smm->recursion_count == 0) {
+		DMERR("lost track of recursion depth");
+		return -ENOMEM;
+	}
 
 	if (smm->recursion_count == 1 && smm->nr_uncommitted) {
 		while (smm->nr_uncommitted && !r) {
 			smm->nr_uncommitted--;
 			r = commit_bop(smm, smm->uncommitted +
 				       smm->nr_uncommitted);
+			if (r)
+				break;
 		}
 	}
 
 	smm->recursion_count--;
+	return r;
 }
 
-static void no_recurse(struct sm_metadata *smm)
+/*
+ * When using the out() function above, we often want to combine an error
+ * code for the operation run in the recursive context, with that from
+ * out().
+ */
+static int combine_errors(int r1, int r2)
 {
-	BUG_ON(smm->recursion_count);
+	return r1 ? r1 : r2;
 }
 
 static int recursing(struct sm_metadata *smm)
@@ -486,8 +501,8 @@ static void sm_metadata_destroy(struct dm_space_map *sm)
 
 static int sm_metadata_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
-	BUG();
-	return -1;
+	DMERR("doesn't support extend");
+	return -EINVAL;
 }
 
 static int sm_metadata_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
@@ -585,20 +600,23 @@ static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm,
 static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
 				 uint32_t count)
 {
-	int r;
+	int r, r2;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
-	no_recurse(smm);
+	if (smm->recursion_count) {
+		DMERR("cannot recurse set_count()");
+		return -EINVAL;
+	}
 
 	in(smm);
 	r = metadata_ll_insert(&smm->ll, b, count);
-	out(smm);
-	return r;
+	r2 = out(smm);
+	return combine_errors(r, r2);
 }
 
 static int sm_metadata_inc_block(struct dm_space_map *sm, dm_block_t b)
 {
-	int r;
+	int r, r2 = 0;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	if (recursing(smm))
@@ -607,14 +625,14 @@ static int sm_metadata_inc_block(struct dm_space_map *sm, dm_block_t b)
 	else {
 		in(smm);
 		r = metadata_ll_inc(&smm->ll, b);
-		out(smm);
+		r2 = out(smm);
 	}
-	return r;
+	return combine_errors(r, r2);
 }
 
 static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 {
-	int r;
+	int r, r2 = 0;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	if (recursing(smm))
@@ -623,14 +641,14 @@ static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 	else {
 		in(smm);
 		r = metadata_ll_dec(&smm->ll, b);
-		out(smm);
+		r2 = out(smm);
 	}
-	return r;
+	return combine_errors(r, r2);
 }
 
 static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
-	int r;
+	int r, r2 = 0;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	r = metadata_ll_find_free_block(&smm->old_ll, smm->begin, smm->old_ll.nr_blocks, b);
@@ -645,12 +663,12 @@ static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 	else {
 		in(smm);
 		r = metadata_ll_inc(&smm->ll, *b);
-		out(smm);
+		r2 = out(smm);
 	}
 
 	if (!r)
 		smm->allocated_this_transaction++;
-	return r;
+	return combine_errors(r, r2);
 }
 
 static int sm_metadata_commit(struct dm_space_map *sm)
@@ -718,13 +736,12 @@ static struct dm_space_map ops_ = {
  */
 static void sm_bootstrap_destroy(struct dm_space_map *sm)
 {
-	BUG();
 }
 
 static int sm_bootstrap_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
-	BUG();
-	return -1;
+	DMERR("boostrap doesn't support extend");
+	return -EINVAL;
 }
 
 static int sm_bootstrap_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
@@ -757,8 +774,8 @@ static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm,
 static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b,
 				  uint32_t count)
 {
-	BUG();
-	return -1;
+	DMERR("boostrap doesn't support set_count");
+	return -EINVAL;
 }
 
 static int sm_bootstrap_new_block(struct dm_space_map *sm, dm_block_t *b)
@@ -794,15 +811,15 @@ static int sm_bootstrap_commit(struct dm_space_map *sm)
 
 static int sm_bootstrap_root_size(struct dm_space_map *sm, size_t *result)
 {
-	BUG();
-	return -1;
+	DMERR("boostrap doesn't support root_size");
+	return -EINVAL;
 }
 
 static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where,
 				  size_t max)
 {
-	BUG();
-	return -1;
+	DMERR("boostrap doesn't support copy_root");
+	return -EINVAL;
 }
 
 static struct dm_space_map bootstrap_ops_ = {
