@@ -21,7 +21,7 @@ static void node_prepare_for_write(struct dm_block_validator *v,
 	struct node_header *h = &n->header;
 
 	h->blocknr = cpu_to_le64(dm_block_location(b));
-	h->csum = dm_block_csum_data(&h->flags,	block_size - sizeof(u32));
+	h->csum = cpu_to_le32(dm_block_csum_data(&h->flags, block_size - sizeof(__le32)));
 }
 
 static int node_check(struct dm_block_validator *v,
@@ -31,7 +31,7 @@ static int node_check(struct dm_block_validator *v,
 	struct node *n = dm_block_data(b);
 	struct node_header *h = &n->header;
 	size_t value_size;
-	__le32 csum;
+	__le32 csum_disk;
 
 	if (dm_block_location(b) != le64_to_cpu(h->blocknr)) {
 		DMERR("node_check failed blocknr %llu wanted %llu",
@@ -39,10 +39,10 @@ static int node_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	csum = dm_block_csum_data(&h->flags, block_size - sizeof(u32));
-	if (csum != h->csum) {
+	csum_disk = cpu_to_le32(dm_block_csum_data(&h->flags, block_size - sizeof(__le32)));
+	if (csum_disk != h->csum) {
 		DMERR("node_check failed csum %u wanted %u",
-		      le32_to_cpu(csum), le32_to_cpu(h->csum));
+		      le32_to_cpu(csum_disk), le32_to_cpu(h->csum));
 		return -EILSEQ;
 	}
 
@@ -50,12 +50,11 @@ static int node_check(struct dm_block_validator *v,
 
 	if (sizeof(struct node_header) +
 	    (sizeof(__le64) + value_size) * le32_to_cpu(h->max_entries) > block_size) {
-		DMERR("node_check failed, max_entries too large");
+		DMERR("node_check failed: max_entries too large");
 		return -EILSEQ;
 	}
 
-	if (le32_to_cpu(h->nr_entries) >
-	    le32_to_cpu(h->max_entries)) {
+	if (le32_to_cpu(h->nr_entries) > le32_to_cpu(h->max_entries)) {
 		DMERR("node_check failed, too many entries");
 		return -EILSEQ;
 	}
@@ -85,7 +84,7 @@ static int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 
 	r = dm_tm_shadow_block(info->tm, orig, &btree_node_validator,
 			       result, inc);
-	if (r == 0 && *inc)
+	if (!r && *inc)
 		inc_children(info->tm, dm_block_data(*result), vt);
 
 	return r;
@@ -137,7 +136,7 @@ int ro_step(struct ro_spine *s, dm_block_t new_child)
 	}
 
 	r = bn_read_lock(s->info, new_child, s->nodes + s->count);
-	if (r == 0)
+	if (!r)
 		s->count++;
 
 	return r;
@@ -145,10 +144,12 @@ int ro_step(struct ro_spine *s, dm_block_t new_child)
 
 struct node *ro_node(struct ro_spine *s)
 {
-	struct dm_block *n;
+	struct dm_block *block;
+
 	BUG_ON(!s->count);
-	n = s->nodes[s->count - 1];
-	return dm_block_data(n);
+	block = s->nodes[s->count - 1];
+
+	return dm_block_data(block);
 }
 
 /*----------------------------------------------------------------*/
@@ -186,8 +187,8 @@ int shadow_step(struct shadow_spine *s, dm_block_t b,
 	}
 
 	r = bn_shadow(s->info, b, vt, s->nodes + s->count, inc);
-	if (r == 0) {
-		if (s->count == 0)
+	if (!r) {
+		if (!s->count)
 			s->root = dm_block_location(s->nodes[0]);
 
 		s->count++;
@@ -198,13 +199,15 @@ int shadow_step(struct shadow_spine *s, dm_block_t b,
 
 struct dm_block *shadow_current(struct shadow_spine *s)
 {
-	BUG_ON(s->count == 0);
+	BUG_ON(!s->count);
+
 	return s->nodes[s->count - 1];
 }
 
 struct dm_block *shadow_parent(struct shadow_spine *s)
 {
 	BUG_ON(s->count != 2);
+
 	return s->count == 2 ? s->nodes[0] : NULL;
 }
 
@@ -217,5 +220,3 @@ int shadow_root(struct shadow_spine *s)
 {
 	return s->root;
 }
-
-/*----------------------------------------------------------------*/

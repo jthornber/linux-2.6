@@ -28,6 +28,6 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
  */
 int dm_sm_metadata_open(struct dm_space_map *sm,
 			struct dm_transaction_manager *tm,
-			void *root, size_t len);
+			void *root_le, size_t len);
 
 #endif	/* DM_SPACE_MAP_METADATA_H */

@@ -29,7 +29,7 @@
  *---------------------------------------------------------------------
  */
 
-struct index_entry {
+struct disk_index_entry {
 	__le64 blocknr;
 	__le32 nr_free;
 	__le32 none_free_before;
@@ -37,12 +37,12 @@ struct index_entry {
 
 
 #define MAX_METADATA_BITMAPS 255
-struct metadata_index {
+struct disk_metadata_index {
 	__le32 csum;
 	__le32 padding;
 	__le64 blocknr;
 
-	struct index_entry index[MAX_METADATA_BITMAPS];
+	struct disk_index_entry index[MAX_METADATA_BITMAPS];
 } __packed;
 
 struct ll_disk {
@@ -62,10 +62,10 @@ struct ll_disk {
 
 	dm_block_t ref_count_root;
 
-	struct metadata_index mi;
+	struct disk_metadata_index mi_le;
 };
 
-struct sm_root {
+struct disk_sm_root {
 	__le64 nr_blocks;
 	__le64 nr_allocated;
 	__le64 bitmap_root;
@@ -74,7 +74,7 @@ struct sm_root {
 
 #define ENTRIES_PER_BYTE 4
 
-struct bitmap_header {
+struct disk_bitmap_header {
 	__le32 csum;
 	__le32 not_used;
 	__le64 blocknr;

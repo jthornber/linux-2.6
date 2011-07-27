@@ -11,25 +11,27 @@
 
 /*----------------------------------------------------------------*/
 
-struct dm_thin_metadata;
+struct dm_pool_metadata;
 struct dm_thin_device;
-typedef uint64_t dm_thin_dev_t;
+
+/*
+ * Device identifier
+ */
+typedef uint64_t dm_thin_dev_id_t;
 
 /*
  * Reopens or creates a new, empty metadata volume.
  */
-struct dm_thin_metadata *
-dm_thin_metadata_open(struct block_device *bdev,
-		      sector_t data_block_size);
+struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
+					       sector_t data_block_size);
 
-int dm_thin_metadata_close(struct dm_thin_metadata *tmd);
+int dm_pool_metadata_close(struct dm_pool_metadata *pmd);
 
 /*
  * This does not currently resize the metadata device, but should eventually.
  */
-int
-dm_thin_metadata_rebind_block_device(struct dm_thin_metadata *tmd,
-				     struct block_device *bdev);
+int dm_pool_rebind_metadata_device(struct dm_pool_metadata *pmd,
+				   struct block_device *bdev);
 
 /*
  * Compat feature flags.  Any incompat flags beyond the ones
@@ -42,8 +44,7 @@ dm_thin_metadata_rebind_block_device(struct dm_thin_metadata *tmd,
 /*
  * Device creation/deletion.
  */
-int dm_thin_metadata_create_thin(struct dm_thin_metadata *tmd,
-				 dm_thin_dev_t dev);
+int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev);
 
 /*
  * An internal snapshot.
@@ -51,49 +52,47 @@ int dm_thin_metadata_create_thin(struct dm_thin_metadata *tmd,
  * You can only snapshot a quiesced origin i.e. one that is either
  * suspended or not instanced at all.
  */
-int dm_thin_metadata_create_snap(struct dm_thin_metadata *tmd,
-				 dm_thin_dev_t dev,
-				 dm_thin_dev_t origin);
+int dm_pool_create_snap(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+			dm_thin_dev_id_t origin);
 
 /*
  * Deletes a virtual device from the metadata.  It _is_ safe to call this
- * when that device is open, operations on that device will just start
+ * when that device is open.  Operations on that device will just start
  * failing.  You still need to call close() on the device.
  */
-int dm_thin_metadata_delete_device(struct dm_thin_metadata *tmd,
-				   dm_thin_dev_t dev);
+int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,
+			       dm_thin_dev_id_t dev);
 
 /*
  * Thin devices don't have a size, however they do keep track of the
  * highest mapped block.  This trimming function allows the user to remove
  * mappings above a certain virtual block.
  */
-int dm_thin_metadata_trim_thin_dev(struct dm_thin_metadata *tmd,
-				   dm_thin_dev_t dev,
-				   sector_t new_size);
+int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+			     sector_t new_size);
 
 /*
  * Commits _all_ metadata changes: device creation, deletion, mapping
  * updates.
  */
-int dm_thin_metadata_commit(struct dm_thin_metadata *tmd);
+int dm_pool_commit_metadata(struct dm_pool_metadata *pmd);
 
 /*
  * Set/get userspace transaction id.
  */
-int dm_thin_metadata_set_transaction_id(struct dm_thin_metadata *tmd,
+int dm_pool_set_metadata_transaction_id(struct dm_pool_metadata *pmd,
 					uint64_t current_id,
 					uint64_t new_id);
 
-int dm_thin_metadata_get_transaction_id(struct dm_thin_metadata *tmd,
+int dm_pool_get_metadata_transaction_id(struct dm_pool_metadata *pmd,
 					uint64_t *result);
 
 /*
  * Hold/get root for userspace transaction.
  */
-int dm_thin_metadata_hold_root(struct dm_thin_metadata *tmd);
+int dm_pool_hold_metadata_root(struct dm_pool_metadata *pmd);
 
-int dm_thin_metadata_get_held_root(struct dm_thin_metadata *tmd,
+int dm_pool_get_held_metadata_root(struct dm_pool_metadata *pmd,
 				   dm_block_t *result);
 
 /*
@@ -103,13 +102,12 @@ int dm_thin_metadata_get_held_root(struct dm_thin_metadata *tmd,
 /*
  * Opening the same device more than once will fail with -EBUSY.
  */
-int dm_thin_metadata_open_device(struct dm_thin_metadata *tmd,
-				 dm_thin_dev_t dev,
-				 struct dm_thin_device **td);
+int dm_pool_open_thin_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+			     struct dm_thin_device **td);
 
-int dm_thin_metadata_close_device(struct dm_thin_device *td);
+int dm_pool_close_thin_device(struct dm_thin_device *td);
 
-dm_thin_dev_t dm_thin_device_dev(struct dm_thin_device *td);
+dm_thin_dev_id_t dm_thin_dev_id(struct dm_thin_device *td);
 
 struct dm_thin_lookup_result {
 	dm_block_t block;
@@ -122,50 +120,45 @@ struct dm_thin_lookup_result {
  *   -ENODATA iff that mapping is not present.
  *   0 success
  */
-int dm_thin_metadata_lookup(struct dm_thin_device *td,
-			    dm_block_t block, int can_block,
-			    struct dm_thin_lookup_result *result);
+int dm_thin_find_block(struct dm_thin_device *td, dm_block_t block,
+		       int can_block, struct dm_thin_lookup_result *result);
 
 /*
- * Inserts a new mapping
+ * Obtain an unused block.
  */
-int dm_thin_metadata_insert(struct dm_thin_device *td, dm_block_t block,
-			    dm_block_t data_block);
+int dm_pool_alloc_data_block(struct dm_pool_metadata *pmd, dm_block_t *result);
 
-int dm_thin_metadata_remove(struct dm_thin_device *td,
-			    dm_block_t block);
+/*
+ * Insert or remove block.
+ */
+int dm_thin_insert_block(struct dm_thin_device *td, dm_block_t block,
+			 dm_block_t data_block);
 
-int dm_thin_metadata_thin_highest_mapped_block(struct dm_thin_device *td,
-					       dm_block_t *highest_mapped);
+int dm_thin_remove_block(struct dm_thin_device *td, dm_block_t block);
 
-/* FIXME: why are these passed td, rather than tmd ? */
-int dm_thin_metadata_alloc_data_block(struct dm_thin_device *td,
-				      dm_block_t *result);
+/*
+ * Queries.
+ */
+int dm_thin_get_highest_mapped_block(struct dm_thin_device *td,
+				     dm_block_t *highest_mapped);
 
-int dm_thin_metadata_get_free_blocks(struct dm_thin_metadata *tmd,
-				     dm_block_t *result);
+int dm_thin_get_mapped_count(struct dm_thin_device *td, dm_block_t *result);
 
-int dm_thin_metadata_get_free_blocks_metadata(struct dm_thin_metadata *tmd,
-					      dm_block_t *result);
+int dm_pool_get_free_block_count(struct dm_pool_metadata *pmd,
+				 dm_block_t *result);
 
-int dm_thin_metadata_get_data_block_size(struct dm_thin_metadata *tmd,
-					 sector_t *result);
+int dm_pool_get_free_metadata_block_count(struct dm_pool_metadata *pmd,
+					  dm_block_t *result);
 
-int dm_thin_metadata_get_data_dev_size(struct dm_thin_metadata *tmd,
-				       dm_block_t *result);
+int dm_pool_get_data_block_size(struct dm_pool_metadata *pmd, sector_t *result);
 
-int dm_thin_metadata_get_mapped_count(struct dm_thin_device *td,
-				      dm_block_t *result);
-
-int dm_thin_metadata_get_highest_mapped_block(struct dm_thin_device *td,
-					      dm_block_t *result);
+int dm_pool_get_data_dev_size(struct dm_pool_metadata *pmd, dm_block_t *result);
 
 /*
  * Returns -ENOSPC if the new size is too small and already allocated
  * blocks would be lost.
  */
-int dm_thin_metadata_resize_data_dev(struct dm_thin_metadata *tmd,
-				     dm_block_t new_size);
+int dm_pool_resize_data_dev(struct dm_pool_metadata *pmd, dm_block_t new_size);
 
 /*----------------------------------------------------------------*/
 

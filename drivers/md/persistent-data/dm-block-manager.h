@@ -14,7 +14,7 @@
 /*----------------------------------------------------------------*/
 
 /*
- * Number of blocks.
+ * Block number.
  */
 typedef uint64_t dm_block_t;
 
@@ -29,9 +29,9 @@ void *dm_block_data(struct dm_block *b);
 /*
  * Use CRC32 checksumming on data blocks.
  */
-static inline __le32 dm_block_csum_data(const void *data, unsigned length)
+static inline uint32_t dm_block_csum_data(const void *data_le, unsigned length)
 {
-	return cpu_to_le32(crc32c(~(u32)0, data, length));
+	return crc32c(~(u32)0, data_le, length);
 }
 
 /*----------------------------------------------------------------*/
@@ -123,7 +123,5 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
  */
 int dm_bm_rebind_block_device(struct dm_block_manager *bm,
 			      struct block_device *bdev);
-
-/*----------------------------------------------------------------*/
 
 #endif	/* _LINUX_DM_BLOCK_MANAGER_H */

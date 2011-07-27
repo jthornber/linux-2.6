@@ -7,20 +7,24 @@
 #define _LINUX_DM_BTREE_H
 
 #include "dm-block-manager.h"
+
 struct dm_transaction_manager;
 
 /*----------------------------------------------------------------*/
 
+/*
+ * Annotations used to check on-disk metadata is handled as little-endian.
+ */
 #ifdef __CHECKER__
-#  define __written_to_disk(x) __releases(x)
-#  define __reads_from_disk(x) __acquires(x)
-#  define __bless_for_disk(x) __acquire(x)
-#  define __unbless_for_disk(x) __release(x)
+#  define __dm_written_to_disk(x) __releases(x)
+#  define __dm_reads_from_disk(x) __acquires(x)
+#  define __dm_bless_for_disk(x) __acquire(x)
+#  define __dm_unbless_for_disk(x) __release(x)
 #else
-#  define __written_to_disk(x)
-#  define __reads_from_disk(x)
-#  define __bless_for_disk(x)
-#  define __unbless_for_disk(x)
+#  define __dm_written_to_disk(x)
+#  define __dm_reads_from_disk(x)
+#  define __dm_bless_for_disk(x)
+#  define __dm_unbless_for_disk(x)
 #endif
 
 /*----------------------------------------------------------------*/
@@ -111,14 +115,14 @@ int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
  * Tries to find a key that matches exactly.  O(ln(n))
  */
 int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
-		    uint64_t *keys, void *value);
+		    uint64_t *keys, void *value_le);
 
 /*
  * Insertion (or overwrite an existing value).  O(ln(n))
  */
 int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value, dm_block_t *new_root)
-	__written_to_disk(value);
+		    __dm_written_to_disk(value);
 
 /*
  * A variant of insert that indicates whether it actually inserted or just
@@ -128,7 +132,7 @@ int dm_btree_insert(struct dm_btree_info *info, dm_block_t root,
 int dm_btree_insert_notify(struct dm_btree_info *info, dm_block_t root,
 			   uint64_t *keys, void *value, dm_block_t *new_root,
 			   int *inserted)
-	__written_to_disk(value);
+			   __dm_written_to_disk(value);
 
 /*
  * Remove a key if present.  This doesn't remove empty sub trees.  Normally
@@ -150,7 +154,5 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root, dm_block_t *clon
  */
 int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 			      uint64_t *result_keys);
-
-/*----------------------------------------------------------------*/
 
 #endif	/* _LINUX_DM_BTREE_H */

@@ -25,12 +25,13 @@ void dm_tm_destroy(struct dm_transaction_manager *tm);
 
 /*
  * The non-blocking version of a transaction manager is intended for use in
- * fast path code that needs to do lookups e.g. a dm mapping function.  You
- * create the non-blocking variant from a normal tm.  The interface is the
- * same, except that most functions will just return -EWOULDBLOCK.  Methods
- * that return void yet may block should not be called on a clone (tm_inc,
- * tm_dec).  Call dm_tm_destroy() as you would with a normal tm when you've
- * finished with it.  You may not destroy the original prior to clones.
+ * fast path code that needs to do lookups e.g. a dm mapping function.
+ * You create the non-blocking variant from a normal tm.  The interface is
+ * the same, except that most functions will just return -EWOULDBLOCK.
+ * Methods that return void yet may block should not be called on a clone
+ * viz. tm_inc, tm_dec.  Call dm_tm_destroy() as you would with a normal tm
+ * when you've finished with it.  You may not destroy the original prior
+ * to clones.
  */
 struct dm_transaction_manager *dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real);
 
@@ -53,7 +54,6 @@ int dm_tm_commit(struct dm_transaction_manager *tm, struct dm_block *root);
 /*
  * These methods are the only way to get hold of a writeable block.
  */
-
 
 /*
  * dm_tm_new_block() is pretty self-explanatory.  Make sure you do actually
@@ -126,7 +126,5 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		       size_t root_offset, size_t root_max_len,
 		       struct dm_transaction_manager **tm,
 		       struct dm_space_map **sm, struct dm_block **sblock);
-
-/*----------------------------------------------------------------*/
 
 #endif	/* _LINUX_DM_TRANSACTION_MANAGER_H */

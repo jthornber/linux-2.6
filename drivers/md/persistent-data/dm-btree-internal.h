@@ -117,8 +117,9 @@ static inline void *value_ptr(struct node *n, uint32_t index, size_t value_size)
  */
 static inline uint64_t value64(struct node *n, uint32_t index)
 {
-	__le64 *values = value_base(n);
-	return le64_to_cpu(values[index]);
+	__le64 *values_le = value_base(n);
+
+	return le64_to_cpu(values_le[index]);
 }
 
 /*
@@ -127,7 +128,5 @@ static inline uint64_t value64(struct node *n, uint32_t index)
 int lower_bound(struct node *n, uint64_t key);
 
 extern struct dm_block_validator btree_node_validator;
-
-/*----------------------------------------------------------------*/
 
 #endif	/* DM_BTREE_INTERNAL_H */

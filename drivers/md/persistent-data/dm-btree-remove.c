@@ -136,7 +136,7 @@ struct child {
 	struct node *n;
 };
 
-static struct dm_btree_value_type le64_type_ = {
+static struct dm_btree_value_type le64_type = {
 	.context = NULL,
 	.size = sizeof(__le64),
 	.inc = NULL,
@@ -159,8 +159,10 @@ static int init_child(struct dm_btree_info *info, struct node *parent,
 		return r;
 
 	result->n = dm_block_data(result->block);
+
 	if (inc)
-		inc_children(info->tm, result->n, &le64_type_);
+		inc_children(info->tm, result->n, &le64_type);
+
 	return 0;
 }
 
@@ -171,13 +173,12 @@ static int exit_child(struct dm_btree_info *info, struct child *c)
 
 static void shift(struct node *left, struct node *right, int count)
 {
-	if (count == 0)
+	if (!count)
 		return;
 
 	if (count > 0) {
 		node_shift(right, count);
 		node_copy(left, right, count);
-
 	} else {
 		node_copy(left, right, count);
 		node_shift(right, count);
@@ -185,6 +186,7 @@ static void shift(struct node *left, struct node *right, int count)
 
 	left->header.nr_entries =
 		cpu_to_le32(le32_to_cpu(left->header.nr_entries) - count);
+
 	right->header.nr_entries =
 		cpu_to_le32(le32_to_cpu(right->header.nr_entries) + count);
 }
@@ -198,7 +200,9 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 	uint32_t nr_right = le32_to_cpu(right->header.nr_entries);
 
 	if (nr_left + nr_right <= merge_threshold(left)) {
-		/* merge */
+		/*
+		 * Merge
+		 */
 		node_copy(left, right, -nr_right);
 		left->header.nr_entries = cpu_to_le32(nr_left + nr_right);
 
@@ -208,13 +212,15 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 
 		/*
 		 * We need to decrement the right block, but not it's
-		 * children, since they're still referenced by @left
+		 * children, since they're still referenced by left.
 		 */
 		dm_tm_dec(info->tm, dm_block_location(r->block));
-
 	} else {
-		/* rebalance */
+		/*
+		 * Rebalance.
+		 */
 		unsigned target_left = (nr_left + nr_right) / 2;
+
 		shift(left, right, nr_left - target_left);
 		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
 			cpu_to_le64(dm_block_location(l->block));
@@ -270,15 +276,18 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	uint32_t nr_right = le32_to_cpu(right->header.nr_entries);
 	uint32_t max_entries = le32_to_cpu(left->header.max_entries);
 
+	unsigned target;
+
 	if (((nr_left + nr_center + nr_right) / 2) < merge_threshold(center)) {
-		/* delete center node:
+		/*
+		 * Delete center node:
 		 *
 		 * We dump as many entries from center as possible into
 		 * left, then the rest in right, then rebalance2.  This
 		 * wastes some cpu, but I want something simple atm.
 		 */
-
 		unsigned shift = min(max_entries - nr_left, nr_center);
+
 		node_copy(left, center, -shift);
 		left->header.nr_entries = cpu_to_le32(nr_left + shift);
 
@@ -301,27 +310,34 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 		dm_tm_dec(info->tm, dm_block_location(c->block));
 		__rebalance2(info, parent, l, r);
 
-	} else {
-		/* rebalance */
-		unsigned target = (nr_left + nr_center + nr_right) / 3;
-		BUG_ON(target == nr_center);
-
-		/* adjust the left node */
-		shift(left, center, nr_left - target);
-
-		/* adjust the right node */
-		shift(center, right, target - nr_right);
-
-		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(l->block));
-		*((__le64 *) value_ptr(parent, c->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(c->block));
-		*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(r->block));
-
-		*key_ptr(parent, c->index) = center->keys[0];
-		*key_ptr(parent, r->index) = right->keys[0];
+		return;
 	}
+
+	/*
+	 * Rebalance
+	 */
+	target = (nr_left + nr_center + nr_right) / 3;
+	BUG_ON(target == nr_center);
+
+	/*
+	 * Adjust the left node
+	 */
+	shift(left, center, nr_left - target);
+
+	/*
+	 * Adjust the right node
+	 */
+	shift(center, right, target - nr_right);
+
+	*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
+		cpu_to_le64(dm_block_location(l->block));
+	*((__le64 *) value_ptr(parent, c->index, sizeof(__le64))) =
+		cpu_to_le64(dm_block_location(c->block));
+	*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
+		cpu_to_le64(dm_block_location(r->block));
+
+	*key_ptr(parent, c->index) = center->keys[0];
+	*key_ptr(parent, r->index) = right->keys[0];
 }
 
 static int rebalance3(struct shadow_spine *s, struct dm_btree_info *info,
@@ -331,7 +347,9 @@ static int rebalance3(struct shadow_spine *s, struct dm_btree_info *info,
 	struct node *parent = dm_block_data(shadow_current(s));
 	struct child left, center, right;
 
-	/* FIXME: fill out an array? */
+	/*
+	 * FIXME: fill out an array?
+	 */
 	r = init_child(info, parent, left_index, &left);
 	if (r)
 		return r;
@@ -376,14 +394,14 @@ static int get_nr_entries(struct dm_transaction_manager *tm,
 {
 	int r;
 	struct dm_block *block;
-	struct node *c;
+	struct node *n;
 
 	r = dm_tm_read_lock(tm, b, &btree_node_validator, &block);
 	if (r)
 		return r;
 
-	c = dm_block_data(block);
-	*result = le32_to_cpu(c->header.nr_entries);
+	n = dm_block_data(block);
+	*result = le32_to_cpu(n->header.nr_entries);
 
 	return dm_tm_unlock(tm, block);
 }
@@ -410,32 +428,32 @@ static int rebalance_children(struct shadow_spine *s,
 		r = dm_tm_unlock(info->tm, child);
 		dm_tm_dec(info->tm, dm_block_location(child));
 
-	} else {
-		i = lower_bound(n, key);
-
-		if (i < 0)
-			return -ENODATA;
-
-		r = get_nr_entries(info->tm, value64(n, i), &child_entries);
-		if (r)
-			return r;
-
-		if (child_entries > del_threshold(n))
-			return 0;
-
-		has_left_sibling = i > 0 ? 1 : 0;
-		has_right_sibling =
-			(i >= (le32_to_cpu(n->header.nr_entries) - 1)) ? 0 : 1;
-
-		if (!has_left_sibling)
-			r = rebalance2(s, info, i);
-
-		else if (!has_right_sibling)
-			r = rebalance2(s, info, i - 1);
-
-		else
-			r = rebalance3(s, info, i - 1);
+		return r;
 	}
+
+	i = lower_bound(n, key);
+	if (i < 0)
+		return -ENODATA;
+
+	r = get_nr_entries(info->tm, value64(n, i), &child_entries);
+	if (r)
+		return r;
+
+	if (child_entries > del_threshold(n))
+		return 0;
+
+	has_left_sibling = i > 0 ? 1 : 0;
+	has_right_sibling =
+		(i >= (le32_to_cpu(n->header.nr_entries) - 1)) ? 0 : 1;
+
+	if (!has_left_sibling)
+		r = rebalance2(s, info, i);
+
+	else if (!has_right_sibling)
+		r = rebalance2(s, info, i - 1);
+
+	else
+		r = rebalance3(s, info, i - 1);
 
 	return r;
 }
@@ -450,6 +468,7 @@ static int do_leaf(struct node *n, uint64_t key, unsigned *index)
 		return -ENODATA;
 
 	*index = i;
+
 	return 0;
 }
 
@@ -469,9 +488,11 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		if (r < 0)
 			break;
 
-		/* We have to patch up the parent node, ugly, but I don't
+		/*
+		 * We have to patch up the parent node, ugly, but I don't
 		 * see a way to do this automatically as part of the spine
-		 * op. */
+		 * op.
+		 */
 		if (shadow_has_parent(s)) {
 			__le64 location = cpu_to_le64(dm_block_location(shadow_current(s)));
 			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
@@ -485,23 +506,22 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		if (le32_to_cpu(n->header.flags) & LEAF_NODE)
 			return do_leaf(n, key, index);
 
-		else {
-			r = rebalance_children(s, info, key);
-			if (r)
-				break;
+		r = rebalance_children(s, info, key);
+		if (r)
+			break;
 
-			n = dm_block_data(shadow_current(s));
-			if (le32_to_cpu(n->header.flags) & LEAF_NODE)
-				return do_leaf(n, key, index);
+		n = dm_block_data(shadow_current(s));
+		if (le32_to_cpu(n->header.flags) & LEAF_NODE)
+			return do_leaf(n, key, index);
 
-			i = lower_bound(n, key);
+		i = lower_bound(n, key);
 
-			/* We know the key is present, or else
-			 * rebalance_children would have returned
-			 * -ENODATA
-			 */
-			root = value64(n, i);
-		}
+		/*
+		 * We know the key is present, or else
+		 * rebalance_children would have returned
+		 * -ENODATA
+		 */
+		root = value64(n, i);
 	}
 
 	return r;
@@ -519,29 +539,31 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 	for (level = 0; level < info->levels; level++) {
 		r = remove_raw(&spine, info,
 			       (level == last_level ?
-				&info->value_type : &le64_type_),
+				&info->value_type : &le64_type),
 			       root, keys[level], (unsigned *)&index);
 		if (r < 0)
 			break;
 
 		n = dm_block_data(shadow_current(&spine));
-		if (level == last_level) {
-			BUG_ON(index < 0 ||
-			       index >= le32_to_cpu(n->header.nr_entries));
-			if (info->value_type.dec)
-				info->value_type.dec(info->value_type.context,
-						     value_ptr(n, index, info->value_type.size));
-			delete_at(n, index, info->value_type.size);
-			r = 0;
-			*new_root = shadow_root(&spine);
-
-		} else
+		if (level != last_level) {
 			root = value64(n, index);
+			continue;
+		}
+
+		BUG_ON(index < 0 || index >= le32_to_cpu(n->header.nr_entries));
+
+		if (info->value_type.dec)
+			info->value_type.dec(info->value_type.context,
+					     value_ptr(n, index, info->value_type.size));
+
+		delete_at(n, index, info->value_type.size);
+
+		r = 0;
+		*new_root = shadow_root(&spine);
 	}
+
 	exit_shadow_spine(&spine);
 
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_btree_remove);
-
-/*----------------------------------------------------------------*/

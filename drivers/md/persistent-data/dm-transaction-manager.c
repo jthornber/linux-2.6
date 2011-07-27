@@ -7,6 +7,7 @@
 #include "dm-space-map.h"
 #include "dm-space-map-disk.h"
 #include "dm-space-map-metadata.h"
+#include "dm-persistent-data-internal.h"
 
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -21,9 +22,12 @@ struct shadow_info {
 	dm_block_t where;
 };
 
-/* it would be nice if we scaled with the size of transaction */
+/*
+ * It would be nice if we scaled with the size of transaction.
+ */
 #define HASH_SIZE 256
 #define HASH_MASK (HASH_SIZE - 1)
+
 struct dm_transaction_manager {
 	int is_clone;
 	struct dm_transaction_manager *real;
@@ -33,22 +37,17 @@ struct dm_transaction_manager {
 
 	struct hlist_head buckets[HASH_SIZE];
 
-	/* stats */
+	/*
+	 * Statistics
+	 */
 	unsigned shadow_count;
 };
 
 /*----------------------------------------------------------------*/
 
-/* FIXME: similar code in block-manager */
-static unsigned hash_block(dm_block_t b)
-{
-	const unsigned BIG_PRIME = 4294967291UL;
-	return (((unsigned) b) * BIG_PRIME) & HASH_MASK;
-}
-
 static int is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 {
-	unsigned bucket = hash_block(b);
+	unsigned bucket = dm_hash_block(b, HASH_MASK);
 	struct shadow_info *si;
 	struct hlist_node *n;
 
@@ -71,18 +70,20 @@ static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 	si = kmalloc(sizeof(*si), GFP_NOIO);
 	if (si) {
 		si->where = b;
-		bucket = hash_block(b);
+		bucket = dm_hash_block(b, HASH_MASK);
 		hlist_add_head(&si->hlist, tm->buckets + bucket);
 	}
 }
 
 static void wipe_shadow_table(struct dm_transaction_manager *tm)
 {
+	struct shadow_info *si;
+	struct hlist_node *n, *tmp;
+	struct hlist_head *bucket;
 	int i;
+
 	for (i = 0; i < HASH_SIZE; i++) {
-		struct shadow_info *si;
-		struct hlist_node *n, *tmp;
-		struct hlist_head *bucket = tm->buckets + i;
+		bucket = tm->buckets + i;
 		hlist_for_each_entry_safe(si, n, tmp, bucket, hlist)
 			kfree(si);
 
@@ -117,8 +118,7 @@ static struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
 	return tm;
 }
 
-struct dm_transaction_manager *
-dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real)
+struct dm_transaction_manager *dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real)
 {
 	struct dm_transaction_manager *tm;
 
@@ -159,6 +159,7 @@ int dm_tm_commit(struct dm_transaction_manager *tm, struct dm_block *root)
 		return -EWOULDBLOCK;
 
 	wipe_shadow_table(tm);
+
 	return dm_bm_flush_and_unlock(tm->bm, root);
 }
 EXPORT_SYMBOL_GPL(dm_tm_commit);
@@ -184,7 +185,7 @@ int dm_tm_new_block(struct dm_transaction_manager *tm,
 	}
 
 	/*
-	 * New blocks count as shadows, in that they don't need to be
+	 * New blocks count as shadows in that they don't need to be
 	 * shadowed again.
 	 */
 	insert_shadow(tm, new_block);
@@ -206,40 +207,38 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		return r;
 
 	r = dm_bm_write_lock_zero(tm->bm, new, v, result);
-	if (r < 0) {
-		dm_sm_dec_block(tm->sm, new);
-		return r;
-	}
+	if (r < 0)
+		goto bad_dec_block;
 
 	r = dm_bm_read_lock(tm->bm, orig, v, &orig_block);
-	if (r < 0) {
-		dm_sm_dec_block(tm->sm, new);
-		return r;
-	}
+	if (r < 0)
+		goto bad_dec_block;
+
 	memcpy(dm_block_data(*result), dm_block_data(orig_block),
 	       dm_bm_block_size(tm->bm));
+
 	r = dm_bm_unlock(orig_block);
-	if (r < 0) {
-		dm_sm_dec_block(tm->sm, new);
-		return r;
-	}
+	if (r < 0)
+		goto bad_dec_block;
 
 	r = dm_sm_get_count(tm->sm, orig, &count);
-	if (r < 0) {
-		dm_sm_dec_block(tm->sm, new);
-		dm_bm_unlock(*result);
-		return r;
-	}
+	if (r < 0)
+		goto bad;
 
 	r = dm_sm_dec_block(tm->sm, orig);
-	if (r < 0) {
-		dm_sm_dec_block(tm->sm, new);
-		dm_bm_unlock(*result);
-		return r;
-	}
+	if (r < 0)
+		goto bad;
 
 	*inc_children = count > 1;
+
 	return 0;
+
+bad:
+	dm_bm_unlock(*result);
+bad_dec_block:
+	dm_sm_dec_block(tm->sm, new);
+
+	return r;
 }
 
 int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
@@ -290,16 +289,22 @@ EXPORT_SYMBOL_GPL(dm_tm_unlock);
 
 void dm_tm_inc(struct dm_transaction_manager *tm, dm_block_t b)
 {
-	/* the non-blocking clone doesn't support this */
+	/*
+	 * The non-blocking clone doesn't support this.
+	 */
 	BUG_ON(tm->is_clone);
+
 	dm_sm_inc_block(tm->sm, b);
 }
 EXPORT_SYMBOL_GPL(dm_tm_inc);
 
 void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 {
-	/* the non-blocking clone doesn't support this */
+	/*
+	 * The non-blocking clone doesn't support this.
+	 */
 	BUG_ON(tm->is_clone);
+
 	dm_sm_dec_block(tm->sm, b);
 }
 
@@ -337,7 +342,7 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 	*tm = dm_tm_create(bm, *sm);
 	if (IS_ERR(*tm)) {
 		dm_sm_destroy(*sm);
-		return -1;
+		return PTR_ERR(*tm);
 	}
 
 	if (create) {

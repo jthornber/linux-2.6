@@ -108,7 +108,7 @@ struct bio_prison;
 
 struct cell_key {
 	int virtual;
-	dm_thin_dev_t dev;
+	dm_thin_dev_id_t dev;
 	dm_block_t block;
 };
 
@@ -434,7 +434,7 @@ static void build_data_key(struct dm_thin_device *td,
 			   dm_block_t b, struct cell_key *key)
 {
 	key->virtual = 0;
-	key->dev = dm_thin_device_dev(td);
+	key->dev = dm_thin_dev_id(td);
 	key->block = b;
 }
 
@@ -442,7 +442,7 @@ static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
 			      struct cell_key *key)
 {
 	key->virtual = 1;
-	key->dev = dm_thin_device_dev(td);
+	key->dev = dm_thin_dev_id(td);
 	key->block = b;
 }
 
@@ -458,7 +458,7 @@ struct pool {
 	struct dm_target *ti;	/* Only set if a pool target is bound */
 
 	struct mapped_device *pool_md;
-	struct dm_thin_metadata *tmd;
+	struct dm_pool_metadata *pmd;
 
 	uint32_t sectors_per_block;
 	unsigned block_shift;
@@ -508,7 +508,7 @@ struct pool_c {
  */
 struct thin_c {
 	struct dm_dev *pool_dev;
-	dm_thin_dev_t dev_id;
+	dm_thin_dev_id_t dev_id;
 
 	struct pool *pool;
 	struct dm_thin_device *td;
@@ -566,9 +566,7 @@ static void pool_table_init(void)
 {
 	spin_lock_init(&dm_thin_pool_table.lock);
 
-	spin_lock(&dm_thin_pool_table.lock);
 	INIT_LIST_HEAD(&dm_thin_pool_table.pools);
-	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static void pool_table_insert(struct pool *pool)
@@ -596,6 +594,7 @@ static struct pool *pool_table_lookup(struct mapped_device *md)
 			break;
 		}
 	spin_unlock(&dm_thin_pool_table.lock);
+
 	return pool;
 }
 
@@ -627,9 +626,9 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 			    dm_block_t block)
 {
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
-		int r = dm_thin_metadata_commit(tc->pool->tmd);
+		int r = dm_pool_commit_metadata(tc->pool->pmd);
 		if (r) {
-			DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
 			      __func__, r);
 			bio_io_error(bio);
 			return;
@@ -853,7 +852,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 
-	r = dm_thin_metadata_get_free_blocks(pool->tmd, &free_blocks);
+	r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
 	if (r)
 		return r;
 
@@ -864,7 +863,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		dm_table_event(pool->ti->table);
 	}
 
-	r = dm_thin_metadata_alloc_data_block(tc->td, result);
+	r = dm_pool_alloc_data_block(pool->pmd, result);
 	if (r)
 		return r;
 
@@ -877,7 +876,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
 
-	r = dm_thin_metadata_lookup(tc->td, block, 1, &lookup_result);
+	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
 		if (lookup_result.shared)
@@ -889,9 +888,9 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			bio_endio(bio, 0);
 
 		else {
-			r = dm_thin_metadata_remove(tc->td, block);
+			r = dm_thin_remove_block(tc->td, block);
 			if (r) {
-				DMERR("dm_thin_metadata_remove() failed");
+				DMERR("dm_thin_remove_block() failed");
 				bio_io_error(bio);
 			} else
 				remap_and_issue(tc, bio, lookup_result.block);
@@ -909,7 +908,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		break;
 
 	default:
-		DMERR("dm_thin_metadata_lookup() failed, error = %d", r);
+		DMERR("dm_thin_find_block() failed, error = %d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -1024,7 +1023,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
 
-	r = dm_thin_metadata_lookup(tc->td, block, 1, &lookup_result);
+	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
 		if (lookup_result.shared)
@@ -1046,7 +1045,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		break;
 
 	default:
-		DMERR("dm_thin_metadata_lookup() failed, error = %d", r);
+		DMERR("dm_thin_find_block() failed, error = %d", r);
 		bio_io_error(bio);
 		break;
 	}
@@ -1090,9 +1089,9 @@ static void process_prepared_mapping(struct new_mapping *m)
 	if (bio)
 		bio->bi_end_io = m->saved_bi_end_io;
 
-	r = dm_thin_metadata_insert(tc->td, m->virt_block, m->data_block);
+	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
 	if (r) {
-		DMERR("dm_thin_metadata_insert() failed");
+		DMERR("dm_thin_insert_block() failed");
 		cell_error(m->cell);
 		return;
 	}
@@ -1184,7 +1183,7 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	r = dm_thin_metadata_lookup(td, block, 0, &result);
+	r = dm_thin_find_block(td, block, 0, &result);
 
 	/*
 	 * Note that we defer readahead too.
@@ -1216,7 +1215,7 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 
 	case -ENODATA:
 		/*
-		 * In future, the failed dm_thin_metadata_lookup above could
+		 * In future, the failed dm_thin_find_block above could
 		 * provide the hint to load the metadata into cache.
 		 *
 		 * When reading, we return zeroes regardless of the
@@ -1275,7 +1274,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->low_water_mark = dm_sector_div_up(pt->low_water_mark,
 						pool->sectors_per_block);
 	pool->zero_new_blocks = pt->zero_new_blocks;
-	dm_thin_metadata_rebind_block_device(pool->tmd, pt->metadata_dev->bdev);
+	dm_pool_rebind_metadata_device(pool->pmd, pt->metadata_dev->bdev);
 
 	return 0;
 }
@@ -1291,8 +1290,8 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
  *--------------------------------------------------------------*/
 static void pool_destroy(struct pool *pool)
 {
-	if (dm_thin_metadata_close(pool->tmd) < 0)
-		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
+	if (dm_pool_metadata_close(pool->pmd) < 0)
+		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
 
 	prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
@@ -1314,13 +1313,12 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	int r;
 	void *err_p;
 	struct pool *pool;
-	struct dm_thin_metadata *tmd;
+	struct dm_pool_metadata *pmd;
 
-	tmd = dm_thin_metadata_open(metadata_dev, block_size);
-	if (IS_ERR(tmd)) {
+	pmd = dm_pool_metadata_open(metadata_dev, block_size);
+	if (IS_ERR(pmd)) {
 		*error = "Error creating metadata object";
-		err_p = tmd; /* already an ERR_PTR */
-		return err_p;
+		return (struct pool *)pmd;
 	}
 
 	pool = kmalloc(sizeof(*pool), GFP_KERNEL);
@@ -1330,7 +1328,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 		goto bad_pool;
 	}
 
-	pool->tmd = tmd;
+	pool->pmd = pmd;
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
@@ -1412,8 +1410,8 @@ bad_kcopyd_client:
 bad_prison:
 	kfree(pool);
 bad_pool:
-	if (dm_thin_metadata_close(tmd))
-		DMWARN("%s: dm_thin_metadata_close() failed.", __func__);
+	if (dm_pool_metadata_close(pmd))
+		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
 
 	return err_p;
 }
@@ -1532,6 +1530,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata block device";
 		return r;
 	}
+
 	metadata_dev_size = i_size_read(metadata_dev->bdev->bd_inode) >> SECTOR_SHIFT;
 	if (metadata_dev_size > METADATA_DEV_MAX_SECTORS) {
 		ti->error = "Metadata device is too large";
@@ -1649,7 +1648,7 @@ static int pool_preresume(struct dm_target *ti)
 		return r;
 
 	data_size = ti->len >> pool->block_shift;
-	r = dm_thin_metadata_get_data_dev_size(pool->tmd, &sb_data_size);
+	r = dm_pool_get_data_dev_size(pool->pmd, &sb_data_size);
 	if (r) {
 		DMERR("failed to retrieve data device size");
 		return r;
@@ -1661,15 +1660,15 @@ static int pool_preresume(struct dm_target *ti)
 		return -EINVAL;
 
 	} else if (data_size > sb_data_size) {
-		r = dm_thin_metadata_resize_data_dev(pool->tmd, data_size);
+		r = dm_pool_resize_data_dev(pool->pmd, data_size);
 		if (r) {
 			DMERR("failed to resize data device");
 			return r;
 		}
 
-		r = dm_thin_metadata_commit(pool->tmd);
+		r = dm_pool_commit_metadata(pool->pmd);
 		if (r) {
-			DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
 			      __func__, r);
 			return r;
 		}
@@ -1695,9 +1694,9 @@ static void pool_presuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
-	r = dm_thin_metadata_commit(pool->tmd);
+	r = dm_pool_commit_metadata(pool->pmd);
 	if (r < 0) {
-		DMERR("%s: dm_thin_metadata_commit() failed, error = %d",
+		DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
 		      __func__, r);
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
@@ -1723,7 +1722,7 @@ static int check_arg_count(unsigned argc, unsigned args_required)
 	return 0;
 }
 
-static int read_dev_id(char *arg, dm_thin_dev_t *dev_id, int warning)
+static int read_dev_id(char *arg, dm_thin_dev_id_t *dev_id, int warning)
 {
 	if (!kstrtoull(arg, 10, (unsigned long long *)dev_id) &&
 	    *dev_id <= MAX_DEV_ID)
@@ -1737,7 +1736,7 @@ static int read_dev_id(char *arg, dm_thin_dev_t *dev_id, int warning)
 
 static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_t dev_id;
+	dm_thin_dev_id_t dev_id;
 	int r;
 
 	r = check_arg_count(argc, 2);
@@ -1748,7 +1747,7 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 	if (r)
 		return r;
 
-	r = dm_thin_metadata_create_thin(pool->tmd, dev_id);
+	r = dm_pool_create_thin(pool->pmd, dev_id);
 	if (r) {
 		DMWARN("Creation of new thinly-provisioned device with id %s failed.",
 		       argv[1]);
@@ -1760,8 +1759,8 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 
 static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_t dev_id;
-	dm_thin_dev_t origin_dev_id;
+	dm_thin_dev_id_t dev_id;
+	dm_thin_dev_id_t origin_dev_id;
 	int r;
 
 	r = check_arg_count(argc, 3);
@@ -1776,7 +1775,7 @@ static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *poo
 	if (r)
 		return r;
 
-	r = dm_thin_metadata_create_snap(pool->tmd, dev_id, origin_dev_id);
+	r = dm_pool_create_snap(pool->pmd, dev_id, origin_dev_id);
 	if (r) {
 		DMWARN("Creation of new snapshot %s of device %s failed.",
 		       argv[1], argv[2]);
@@ -1788,7 +1787,7 @@ static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *poo
 
 static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_t dev_id;
+	dm_thin_dev_id_t dev_id;
 	int r;
 
 	r = check_arg_count(argc, 2);
@@ -1799,7 +1798,7 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	r = dm_thin_metadata_delete_device(pool->tmd, dev_id);
+	r = dm_pool_delete_thin_device(pool->pmd, dev_id);
 	if (r)
 		DMWARN("Deletion of thin device %s failed.", argv[1]);
 
@@ -1808,7 +1807,7 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 
 static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_t dev_id;
+	dm_thin_dev_id_t dev_id;
 	sector_t new_size;
 	int r;
 
@@ -1826,7 +1825,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 		return -EINVAL;
 	}
 
-	r = dm_thin_metadata_trim_thin_dev(pool->tmd, dev_id,
+	r = dm_pool_trim_thin_device(pool->pmd, dev_id,
 			dm_sector_div_up(new_size, pool->sectors_per_block));
 	if (r)
 		DMWARN("Attempt to trim thin device %s failed.", argv[1]);
@@ -1836,7 +1835,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 
 static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_t old_id, new_id;
+	dm_thin_dev_id_t old_id, new_id;
 	int r;
 
 	r = check_arg_count(argc, 3);
@@ -1853,7 +1852,7 @@ static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct po
 		return -EINVAL;
 	}
 
-	r = dm_thin_metadata_set_transaction_id(pool->tmd, old_id, new_id);
+	r = dm_pool_set_metadata_transaction_id(pool->pmd, old_id, new_id);
 	if (r) {
 		DMWARN("Failed to change transaction id from %s to %s.",
 		       argv[1], argv[2]);
@@ -1896,9 +1895,9 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
 
 	if (!r) {
-		r = dm_thin_metadata_commit(pool->tmd);
+		r = dm_pool_commit_metadata(pool->pmd);
 		if (r)
-			DMERR("%s message: dm_thin_metadata_commit() failed, error = %d",
+			DMERR("%s message: dm_pool_commit_metadata() failed, error = %d",
 			      argv[0], r);
 	}
 
@@ -1921,22 +1920,22 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		r = dm_thin_metadata_get_transaction_id(pool->tmd,
+		r = dm_pool_get_metadata_transaction_id(pool->pmd,
 							&transaction_id);
 		if (r)
 			return r;
 
-		r = dm_thin_metadata_get_free_blocks(pool->tmd,
+		r = dm_pool_get_free_block_count(pool->pmd,
 						     &nr_free_blocks_data);
 		if (r)
 			return r;
 
-		r = dm_thin_metadata_get_free_blocks_metadata(pool->tmd,
+		r = dm_pool_get_free_metadata_block_count(pool->pmd,
 							      &nr_free_blocks_metadata);
 		if (r)
 			return r;
 
-		r = dm_thin_metadata_get_held_root(pool->tmd, &held_root);
+		r = dm_pool_get_held_metadata_root(pool->pmd, &held_root);
 		if (r)
 			return r;
 
@@ -2024,7 +2023,7 @@ static void thin_dtr(struct dm_target *ti)
 	struct thin_c *tc = ti->private;
 
 	pool_dec(tc->pool);
-	dm_thin_metadata_close_device(tc->td);
+	dm_pool_close_thin_device(tc->td);
 	dm_put_device(ti, tc->pool_dev);
 	kfree(tc);
 }
@@ -2084,7 +2083,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool_inc(tc->pool);
 	dm_put(pool_md);
 
-	r = dm_thin_metadata_open_device(tc->pool->tmd, tc->dev_id, &tc->td);
+	r = dm_pool_open_thin_device(tc->pool->pmd, tc->dev_id, &tc->td);
 	if (r) {
 		ti->error = "Couldn't open thin internal device";
 		goto bad_thin_open;
@@ -2133,13 +2132,11 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	if (tc->td) {
 		switch (type) {
 		case STATUSTYPE_INFO:
-			r = dm_thin_metadata_get_mapped_count(tc->td,
-							      &mapped);
+			r = dm_thin_get_mapped_count(tc->td, &mapped);
 			if (r)
 				return r;
 
-			r = dm_thin_metadata_get_highest_mapped_block(tc->td,
-								      &highest);
+			r = dm_thin_get_highest_mapped_block(tc->td, &highest);
 			if (r < 0)
 				return r;
 
@@ -2221,6 +2218,7 @@ static int __init dm_thin_init(void)
 	int r;
 
 	pool_table_init();
+
 	r = dm_register_target(&thin_target);
 	if (r)
 		return r;
