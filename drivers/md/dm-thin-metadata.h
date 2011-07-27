@@ -17,7 +17,7 @@ struct dm_thin_device;
 /*
  * Device identifier
  */
-typedef uint64_t dm_thin_dev_id_t;
+typedef uint64_t dm_thin_id;
 
 /*
  * Reopens or creates a new, empty metadata volume.
@@ -44,7 +44,7 @@ int dm_pool_rebind_metadata_device(struct dm_pool_metadata *pmd,
 /*
  * Device creation/deletion.
  */
-int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev);
+int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_id dev);
 
 /*
  * An internal snapshot.
@@ -52,8 +52,8 @@ int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev);
  * You can only snapshot a quiesced origin i.e. one that is either
  * suspended or not instanced at all.
  */
-int dm_pool_create_snap(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
-			dm_thin_dev_id_t origin);
+int dm_pool_create_snap(struct dm_pool_metadata *pmd, dm_thin_id dev,
+			dm_thin_id origin);
 
 /*
  * Deletes a virtual device from the metadata.  It _is_ safe to call this
@@ -61,14 +61,14 @@ int dm_pool_create_snap(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
  * failing.  You still need to call close() on the device.
  */
 int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,
-			       dm_thin_dev_id_t dev);
+			       dm_thin_id dev);
 
 /*
  * Thin devices don't have a size, however they do keep track of the
  * highest mapped block.  This trimming function allows the user to remove
  * mappings above a certain virtual block.
  */
-int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
 			     sector_t new_size);
 
 /*
@@ -102,12 +102,12 @@ int dm_pool_get_held_metadata_root(struct dm_pool_metadata *pmd,
 /*
  * Opening the same device more than once will fail with -EBUSY.
  */
-int dm_pool_open_thin_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+int dm_pool_open_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
 			     struct dm_thin_device **td);
 
 int dm_pool_close_thin_device(struct dm_thin_device *td);
 
-dm_thin_dev_id_t dm_thin_dev_id(struct dm_thin_device *td);
+dm_thin_id dm_thin_dev_id(struct dm_thin_device *td);
 
 struct dm_thin_lookup_result {
 	dm_block_t block;

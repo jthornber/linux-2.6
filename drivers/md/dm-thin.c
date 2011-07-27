@@ -108,7 +108,7 @@ struct bio_prison;
 
 struct cell_key {
 	int virtual;
-	dm_thin_dev_id_t dev;
+	dm_thin_id dev;
 	dm_block_t block;
 };
 
@@ -508,7 +508,7 @@ struct pool_c {
  */
 struct thin_c {
 	struct dm_dev *pool_dev;
-	dm_thin_dev_id_t dev_id;
+	dm_thin_id dev_id;
 
 	struct pool *pool;
 	struct dm_thin_device *td;
@@ -1722,7 +1722,7 @@ static int check_arg_count(unsigned argc, unsigned args_required)
 	return 0;
 }
 
-static int read_dev_id(char *arg, dm_thin_dev_id_t *dev_id, int warning)
+static int read_dev_id(char *arg, dm_thin_id *dev_id, int warning)
 {
 	if (!kstrtoull(arg, 10, (unsigned long long *)dev_id) &&
 	    *dev_id <= MAX_DEV_ID)
@@ -1736,7 +1736,7 @@ static int read_dev_id(char *arg, dm_thin_dev_id_t *dev_id, int warning)
 
 static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_id_t dev_id;
+	dm_thin_id dev_id;
 	int r;
 
 	r = check_arg_count(argc, 2);
@@ -1759,8 +1759,8 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 
 static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_id_t dev_id;
-	dm_thin_dev_id_t origin_dev_id;
+	dm_thin_id dev_id;
+	dm_thin_id origin_dev_id;
 	int r;
 
 	r = check_arg_count(argc, 3);
@@ -1787,7 +1787,7 @@ static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *poo
 
 static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_id_t dev_id;
+	dm_thin_id dev_id;
 	int r;
 
 	r = check_arg_count(argc, 2);
@@ -1807,7 +1807,7 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 
 static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_id_t dev_id;
+	dm_thin_id dev_id;
 	sector_t new_size;
 	int r;
 
@@ -1835,7 +1835,7 @@ static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
 
 static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
 {
-	dm_thin_dev_id_t old_id, new_id;
+	dm_thin_id old_id, new_id;
 	int r;
 
 	r = check_arg_count(argc, 3);

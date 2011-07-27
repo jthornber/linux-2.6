@@ -186,7 +186,7 @@ struct dm_pool_metadata {
 struct dm_thin_device {
 	struct list_head list;
 	struct dm_pool_metadata *pmd;
-	dm_thin_dev_id_t id;
+	dm_thin_id id;
 
 	int open_count;
 	int changed;
@@ -678,7 +678,7 @@ int dm_pool_rebind_metadata_device(struct dm_pool_metadata *pmd,
 }
 
 static int __open_device(struct dm_pool_metadata *pmd,
-			 dm_thin_dev_id_t dev, int create,
+			 dm_thin_id dev, int create,
 			 struct dm_thin_device **td)
 {
 	int r, changed = 0;
@@ -736,7 +736,7 @@ static void __close_device(struct dm_thin_device *td)
 }
 
 static int __create_thin(struct dm_pool_metadata *pmd,
-			 dm_thin_dev_id_t dev)
+			 dm_thin_id dev)
 {
 	int r;
 	dm_block_t dev_root;
@@ -781,7 +781,7 @@ static int __create_thin(struct dm_pool_metadata *pmd,
 	return r;
 }
 
-int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev)
+int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_id dev)
 {
 	int r;
 
@@ -794,7 +794,7 @@ int dm_pool_create_thin(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev)
 
 static int __set_snapshot_details(struct dm_pool_metadata *pmd,
 				  struct dm_thin_device *snap,
-				  dm_thin_dev_id_t origin, uint32_t time)
+				  dm_thin_id origin, uint32_t time)
 {
 	int r;
 	struct dm_thin_device *td;
@@ -814,7 +814,7 @@ static int __set_snapshot_details(struct dm_pool_metadata *pmd,
 }
 
 static int __create_snap(struct dm_pool_metadata *pmd,
-			 dm_thin_dev_id_t dev, dm_thin_dev_id_t origin)
+			 dm_thin_id dev, dm_thin_id origin)
 {
 	int r;
 	dm_block_t origin_root, snap_root;
@@ -872,8 +872,8 @@ bad:
 }
 
 int dm_pool_create_snap(struct dm_pool_metadata *pmd,
-				 dm_thin_dev_id_t dev,
-				 dm_thin_dev_id_t origin)
+				 dm_thin_id dev,
+				 dm_thin_id origin)
 {
 	int r;
 
@@ -884,7 +884,7 @@ int dm_pool_create_snap(struct dm_pool_metadata *pmd,
 	return r;
 }
 
-static int __delete_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev)
+static int __delete_device(struct dm_pool_metadata *pmd, dm_thin_id dev)
 {
 	int r;
 	uint64_t key = dev;
@@ -917,7 +917,7 @@ static int __delete_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev)
 }
 
 int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,
-			       dm_thin_dev_id_t dev)
+			       dm_thin_id dev)
 {
 	int r;
 
@@ -945,7 +945,7 @@ static int __trim_thin_dev(struct dm_thin_device *td, sector_t new_size)
 	return dm_btree_del_gt(&pmd->info, pmd->root, key, &pmd->root);
 }
 
-int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
 			     sector_t new_size)
 {
 	int r;
@@ -1008,7 +1008,7 @@ int dm_pool_get_held_metadata_root(struct dm_pool_metadata *pmd,
 	return 0;
 }
 
-int dm_pool_open_thin_device(struct dm_pool_metadata *pmd, dm_thin_dev_id_t dev,
+int dm_pool_open_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
 			     struct dm_thin_device **td)
 {
 	int r;
@@ -1029,7 +1029,7 @@ int dm_pool_close_thin_device(struct dm_thin_device *td)
 	return 0;
 }
 
-dm_thin_dev_id_t dm_thin_dev_id(struct dm_thin_device *td)
+dm_thin_id dm_thin_dev_id(struct dm_thin_device *td)
 {
 	return td->id;
 }
