@@ -330,7 +330,7 @@ int dm_btree_lookup(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, void *value)
 {
 	unsigned level, last_level = info->levels - 1;
-	int r;
+	int r = -ENODATA;
 	uint64_t rkey;
 	__le64 internal_value;
 	struct ro_spine spine;
