@@ -141,7 +141,7 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root)
 	n->header.value_size = cpu_to_le32(info->value_type.size);
 
 	*root = dm_block_location(b);
-	return unlock_for_block(info, b);
+	return unlock_block(info, b);
 }
 EXPORT_SYMBOL_GPL(dm_btree_empty);
 
@@ -461,10 +461,10 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 		return r;
 
 	if (key < le64_to_cpu(rn->keys[0])) {
-		unlock_for_block(s->info, right);
+		unlock_block(s->info, right);
 		s->nodes[1] = left;
 	} else {
-		unlock_for_block(s->info, left);
+		unlock_block(s->info, left);
 		s->nodes[1] = right;
 	}
 
@@ -563,14 +563,14 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	 * much about the spine
 	 */
 	if (s->nodes[0] != new_parent) {
-		unlock_for_block(s->info, s->nodes[0]);
+		unlock_block(s->info, s->nodes[0]);
 		s->nodes[0] = new_parent;
 	}
 	if (key < le64_to_cpu(rn->keys[0])) {
-		unlock_for_block(s->info, right);
+		unlock_block(s->info, right);
 		s->nodes[1] = left;
 	} else {
-		unlock_for_block(s->info, left);
+		unlock_block(s->info, left);
 		s->nodes[1] = right;
 	}
 	s->count = 2;
@@ -781,7 +781,7 @@ int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
 	if (r < 0) {
 		dm_block_t location = dm_block_location(b);
 
-		unlock_for_block(info, b);
+		unlock_block(info, b);
 		dm_tm_dec(info->tm, location);
 	}
 

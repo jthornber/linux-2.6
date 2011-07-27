@@ -95,7 +95,7 @@ int new_block(struct dm_btree_info *info, struct dm_block **result)
 	return dm_tm_new_block(info->tm, &btree_node_validator, result);
 }
 
-int unlock_for_block(struct dm_btree_info *info, struct dm_block *b)
+int unlock_block(struct dm_btree_info *info, struct dm_block *b)
 {
 	return dm_tm_unlock(info->tm, b);
 }
@@ -115,7 +115,7 @@ int exit_ro_spine(struct ro_spine *s)
 	int r = 0, i;
 
 	for (i = 0; i < s->count; i++) {
-		int r2 = unlock_for_block(s->info, s->nodes[i]);
+		int r2 = unlock_block(s->info, s->nodes[i]);
 		if (r2 < 0)
 			r = r2;
 	}
@@ -128,7 +128,7 @@ int ro_step(struct ro_spine *s, dm_block_t new_child)
 	int r;
 
 	if (s->count == 2) {
-		r = unlock_for_block(s->info, s->nodes[0]);
+		r = unlock_block(s->info, s->nodes[0]);
 		if (r < 0)
 			return r;
 		s->nodes[0] = s->nodes[1];
@@ -165,7 +165,7 @@ int exit_shadow_spine(struct shadow_spine *s)
 	int r = 0, i;
 
 	for (i = 0; i < s->count; i++) {
-		int r2 = unlock_for_block(s->info, s->nodes[i]);
+		int r2 = unlock_block(s->info, s->nodes[i]);
 		if (r2 < 0)
 			r = r2;
 	}
@@ -179,7 +179,7 @@ int shadow_step(struct shadow_spine *s, dm_block_t b,
 	int r;
 
 	if (s->count == 2) {
-		r = unlock_for_block(s->info, s->nodes[0]);
+		r = unlock_block(s->info, s->nodes[0]);
 		if (r < 0)
 			return r;
 		s->nodes[0] = s->nodes[1];

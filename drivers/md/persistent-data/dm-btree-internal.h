@@ -45,7 +45,7 @@ void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt);
 
 int new_block(struct dm_btree_info *info, struct dm_block **result);
-int unlock_for_block(struct dm_btree_info *info, struct dm_block *b);
+int unlock_block(struct dm_btree_info *info, struct dm_block *b);
 
 /*
  * Spines keep track of the rolling locks.  There are 2 variants, read-only
