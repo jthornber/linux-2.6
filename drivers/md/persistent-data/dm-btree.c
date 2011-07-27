@@ -287,6 +287,7 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 	}
 
 out:
+	kfree(s);
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_btree_del);
