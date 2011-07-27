@@ -415,10 +415,8 @@ static int ds_add_work(struct deferred_set *ds, struct list_head *work)
 	else {
 		list_add(work, &ds->entries[ds->current_entry].work_items);
 		next_entry = ds_next(ds->current_entry);
-		if (!ds->entries[next_entry].count) {
-			BUG_ON(!list_empty(&ds->entries[next_entry].work_items));
+		if (!ds->entries[next_entry].count)
 			ds->current_entry = next_entry;
-		}
 	}
 	spin_unlock_irqrestore(&ds->lock, flags);
 
