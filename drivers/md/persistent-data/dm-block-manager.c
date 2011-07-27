@@ -702,7 +702,7 @@ retry:
 		if (need_read) {
 			if (b->validator && (v != b->validator)) {
 				DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
-				      b->validator->name, v->name,
+				      b->validator->name, v ? v->name : "NULL",
 				      (unsigned long long)b->where);
 				spin_unlock_irqrestore(&bm->lock, flags);
 				return -EINVAL;
