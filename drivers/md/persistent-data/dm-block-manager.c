@@ -371,7 +371,7 @@ static void __clear_errors(struct dm_block_manager *bm)
 
 #define __wait_block(wq, lock, flags, sched_fn, condition)	\
 do {								\
-	int ret = 0;						\
+	int r = 0;						\
 								\
 	DEFINE_WAIT(wait);					\
 	add_wait_queue(wq, &wait);				\
@@ -383,7 +383,7 @@ do {								\
 								\
 		spin_unlock_irqrestore(lock, flags);		\
 		if (signal_pending(current)) {			\
-			ret = -ERESTARTSYS;			\
+			r = -ERESTARTSYS;			\
 			spin_lock_irqsave(lock, flags);		\
 			break;					\
 		}						\
@@ -393,7 +393,7 @@ do {								\
 	}							\
 								\
 	finish_wait(wq, &wait);					\
-	return ret;						\
+	return r;						\
 } while (0)
 
 static int __wait_io(struct dm_block *b, unsigned long *flags)
@@ -448,7 +448,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 			 int need_read, struct dm_block_validator *v,
 			 struct dm_block **result)
 {
-	int ret = 0;
+	int r = 0;
 	struct dm_block *b;
 	unsigned long flags, available;
 
@@ -506,12 +506,12 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 			 * immediately.	 Failed writes are revealed during a commit.
 			 */
 			__transition(b, BS_EMPTY);
-			ret = -EIO;
+			r = -EIO;
 		}
 
 		if (b->validator) {
-			ret = b->validator->check(b->validator, b, bm->block_size);
-			if (ret) {
+			r = b->validator->check(b->validator, b, bm->block_size);
+			if (r) {
 				DMERR("%s validator check failed for block %llu",
 				      b->validator->name, (unsigned long long)b->where);
 				__transition(b, BS_EMPTY);
@@ -520,10 +520,10 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
 
-	if (!ret)
+	if (!r)
 		*result = b;
 
-	return ret;
+	return r;
 }
 
 /*----------------------------------------------------------------
@@ -707,7 +707,7 @@ static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 			 struct dm_block_validator *v,
 			 struct dm_block **result)
 {
-	int ret = 0;
+	int r = 0;
 	struct dm_block *b;
 	unsigned long flags;
 
@@ -728,13 +728,13 @@ retry:
 			}
 			if (!b->validator && v) {
 				b->validator = v;
-				ret = b->validator->check(b->validator, b, bm->block_size);
-				if (ret) {
+				r = b->validator->check(b->validator, b, bm->block_size);
+				if (r) {
 					DMERR("%s validator check failed for block %llu",
 					      b->validator->name,
 					      (unsigned long long)b->where);
 					spin_unlock_irqrestore(&bm->lock, flags);
-					return ret;
+					return r;
 				}
 			}
 		}
@@ -773,16 +773,16 @@ retry:
 		}
 
 	} else if (!can_block) {
-		ret = -EWOULDBLOCK;
+		r = -EWOULDBLOCK;
 		goto out;
 
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
-		ret = recycle_block(bm, block, need_read, v, &b);
+		r = recycle_block(bm, block, need_read, v, &b);
 		spin_lock_irqsave(&bm->lock, flags);
 	}
 
-	if (!ret) {
+	if (!r) {
 		switch (how) {
 		case READ:
 			b->read_lock_count++;
@@ -804,7 +804,7 @@ retry:
 out:
 	spin_unlock_irqrestore(&bm->lock, flags);
 
-	return ret;
+	return r;
 }
 
 int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
@@ -834,17 +834,17 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 			  dm_block_t b, struct dm_block_validator *v,
 			  struct dm_block **result)
 {
-	int ret = lock_internal(bm, b, WRITE, 0, 1, v, result);
+	int r = lock_internal(bm, b, WRITE, 0, 1, v, result);
 
-	if (!ret)
+	if (!r)
 		memset((*result)->data, 0, bm->block_size);
 
-	return ret;
+	return r;
 }
 
 int dm_bm_unlock(struct dm_block *b)
 {
-	int ret = 0;
+	int r = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->bm->lock, flags);
@@ -871,42 +871,42 @@ int dm_bm_unlock(struct dm_block *b)
 	default:
 		DMERR("block = %llu not locked",
 		      (unsigned long long)b->where);
-		ret = -EINVAL;
+		r = -EINVAL;
 		break;
 	}
 	spin_unlock_irqrestore(&b->bm->lock, flags);
 
-	return ret;
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_bm_unlock);
 
 static int __wait_flush(struct dm_block_manager *bm)
 {
-	int ret = 0;
+	int r = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bm->lock, flags);
 	__wait_all_writes(bm, &flags);
 
 	if (!list_empty(&bm->error_list)) {
-		ret = -EIO;
+		r = -EIO;
 		__clear_errors(bm);
 	}
 	spin_unlock_irqrestore(&bm->lock, flags);
 
-	return ret;
+	return r;
 }
 
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock)
 {
-	int ret;
+	int r;
 	unsigned long flags;
 
 	write_all_dirty(bm);
-	ret = __wait_flush(bm);
-	if (ret)
-		return ret;
+	r = __wait_flush(bm);
+	if (r)
+		return r;
 
 	spin_lock_irqsave(&bm->lock, flags);
 	superblock->io_flags = REQ_FUA | REQ_FLUSH;
