@@ -33,7 +33,6 @@ struct dm_block {
 
 	dm_block_t where;
 	struct dm_block_validator *validator;
-	void *data_actual;
 	void *data;
 	wait_queue_head_t io_q;
 	unsigned read_lock_count;
@@ -74,6 +73,9 @@ struct dm_block_manager {
 	unsigned available_count;
 	unsigned reading_count;
 	unsigned writing_count;
+
+	struct kmem_cache *block_cache;  /* struct dm_block */
+	struct kmem_cache *buffer_cache; /* the buffers that store the raw data */
 
 	/*
 	 * Hash table of cached blocks, holds everything that isn't in the
@@ -518,38 +520,22 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
  * Low level block management
  *--------------------------------------------------------------*/
 
-/* Alloc a page if block_size equals PAGE_SIZE or kmalloc it. */
-static void *_alloc_block(struct dm_block_manager *bm)
-{
-	void *r;
-
-	if (bm->block_size == PAGE_SIZE) {
-		struct page *p = alloc_page(GFP_KERNEL);
-		r = p ? page_address(p) : NULL;
-
-	} else
-		r = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL);
-
-	return r;
-}
-
 static struct dm_block *alloc_block(struct dm_block_manager *bm)
 {
-	struct dm_block *b = kmalloc(sizeof(*b), GFP_KERNEL);
+	struct dm_block *b = kmem_cache_alloc(bm->block_cache, GFP_KERNEL);
 	if (!b)
 		return NULL;
 
 	INIT_LIST_HEAD(&b->list);
 	INIT_HLIST_NODE(&b->hlist);
 
-	b->data_actual = _alloc_block(bm);
-	if (!b->data_actual) {
-		kfree(b);
+	b->data = kmem_cache_alloc(bm->buffer_cache, GFP_KERNEL);
+	if (!b->data) {
+		kmem_cache_free(bm->block_cache, b);
 		return NULL;
 	}
 
 	b->validator = NULL;
-	b->data = (void *)ALIGN((uintptr_t)b->data_actual, SECTOR_SIZE);
 	b->state = BS_EMPTY;
 	init_waitqueue_head(&b->io_q);
 	b->read_lock_count = 0;
@@ -562,12 +548,8 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 
 static void free_block(struct dm_block *b)
 {
-	if (b->bm->block_size == PAGE_SIZE)
-		free_page((unsigned long) b->data_actual);
-	else
-		kfree(b->data_actual);
-
-	kfree(b);
+	kmem_cache_free(b->bm->buffer_cache, b->data);
+	kmem_cache_free(b->bm->block_cache, b);
 }
 
 static int populate_bm(struct dm_block_manager *bm, unsigned count)
@@ -635,24 +617,43 @@ dm_block_manager_create(struct block_device *bdev,
 	bm->reading_count = 0;
 	bm->writing_count = 0;
 
+	bm->block_cache = kmem_cache_create("dm-block-manager-blocks",
+					    sizeof(struct dm_block),
+					    __alignof__(struct dm_block),
+					    SLAB_HWCACHE_ALIGN, NULL);
+	if (!bm->block_cache)
+		goto bad1;
+
+	bm->buffer_cache = kmem_cache_create("dm-block-manager-buffers",
+					     block_size,
+					     SECTOR_SIZE,
+					     0, NULL);
+	if (!bm->buffer_cache)
+		goto bad2;
+
 	bm->hash_size = hash_size;
 	bm->hash_mask = hash_size - 1;
 	for (i = 0; i < hash_size; i++)
 		INIT_HLIST_HEAD(bm->buckets + i);
 
 	bm->io = dm_io_client_create();
-	if (!bm->io) {
-		kfree(bm);
-		return NULL;
-	}
+	if (!bm->io)
+		goto bad3;
 
-	if (populate_bm(bm, cache_size) < 0) {
-		dm_io_client_destroy(bm->io);
-		kfree(bm);
-		return NULL;
-	}
+	if (populate_bm(bm, cache_size) < 0)
+		goto bad4;
 
 	return bm;
+
+bad4:
+	dm_io_client_destroy(bm->io);
+bad3:
+	kmem_cache_destroy(bm->buffer_cache);
+bad2:
+	kmem_cache_destroy(bm->block_cache);
+bad1:
+	kfree(bm);
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
@@ -671,6 +672,8 @@ void dm_block_manager_destroy(struct dm_block_manager *bm)
 	list_for_each_entry_safe(b, btmp, &bm->empty_list, list)
 		free_block(b);
 
+	kmem_cache_destroy(bm->buffer_cache);
+	kmem_cache_destroy(bm->block_cache);
 	kfree(bm);
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
