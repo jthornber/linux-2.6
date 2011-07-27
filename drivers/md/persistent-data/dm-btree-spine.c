@@ -17,31 +17,46 @@ static void node_prepare_for_write(struct dm_block_validator *v,
 				   struct dm_block *b,
 				   size_t block_size)
 {
-	struct node_header *node = dm_block_data(b);
+	struct node *n = dm_block_data(b);
+	struct node_header *h = &n->header;
 
-	node->blocknr = cpu_to_le64(dm_block_location(b));
-	node->csum = dm_block_csum_data(&node->flags,
-					block_size - sizeof(u32));
+	h->blocknr = cpu_to_le64(dm_block_location(b));
+	h->csum = dm_block_csum_data(&h->flags,	block_size - sizeof(u32));
 }
 
 static int node_check(struct dm_block_validator *v,
 		      struct dm_block *b,
 		      size_t block_size)
 {
-	struct node_header *node = dm_block_data(b);
+	struct node *n = dm_block_data(b);
+	struct node_header *h = &n->header;
+	size_t value_size;
 	__le32 csum;
 
-	if (dm_block_location(b) != le64_to_cpu(node->blocknr)) {
+	if (dm_block_location(b) != le64_to_cpu(h->blocknr)) {
 		DMERR("node_check failed blocknr %llu wanted %llu",
-		      le64_to_cpu(node->blocknr), dm_block_location(b));
+		      le64_to_cpu(h->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
 
-	csum = dm_block_csum_data(&node->flags,
-				  block_size - sizeof(u32));
-	if (csum != node->csum) {
+	csum = dm_block_csum_data(&h->flags, block_size - sizeof(u32));
+	if (csum != h->csum) {
 		DMERR("node_check failed csum %u wanted %u",
-		      le32_to_cpu(csum), le32_to_cpu(node->csum));
+		      le32_to_cpu(csum), le32_to_cpu(h->csum));
+		return -EILSEQ;
+	}
+
+	value_size = le32_to_cpu(h->value_size);
+
+	if (sizeof(struct node_header) +
+	    (sizeof(__le64) + value_size) * le32_to_cpu(h->max_entries) > block_size) {
+		DMERR("node_check failed, max_entries too large");
+		return -EILSEQ;
+	}
+
+	if (le32_to_cpu(h->nr_entries) >
+	    le32_to_cpu(h->max_entries)) {
+		DMERR("node_check failed, too many entries");
 		return -EILSEQ;
 	}
 

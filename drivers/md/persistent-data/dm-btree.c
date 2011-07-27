@@ -135,6 +135,7 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root)
 	n->header.flags = cpu_to_le32(LEAF_NODE);
 	n->header.nr_entries = cpu_to_le32(0);
 	n->header.max_entries =	cpu_to_le32(max_entries);
+	n->header.value_size = cpu_to_le32(info->value_type.size);
 
 	*root = dm_block_location(b);
 	return unlock_for_block(info, b);
@@ -426,6 +427,7 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 	r->header.flags = l->header.flags;
 	r->header.nr_entries = cpu_to_le32(nr_right);
 	r->header.max_entries = l->header.max_entries;
+	r->header.value_size = l->header.value_size;
 	memcpy(r->keys, l->keys + nr_left, nr_right * sizeof(r->keys[0]));
 
 	size = le32_to_cpu(l->header.flags) & INTERNAL_NODE ?
@@ -511,10 +513,12 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	l->header.flags = p->header.flags;
 	l->header.nr_entries = cpu_to_le32(nr_left);
 	l->header.max_entries = p->header.max_entries;
+	l->header.value_size = p->header.value_size;
 
 	r->header.flags = p->header.flags;
 	r->header.nr_entries = cpu_to_le32(nr_right);
 	r->header.max_entries = p->header.max_entries;
+	r->header.value_size = p->header.value_size;
 
 	memcpy(l->keys, p->keys, nr_left * sizeof(p->keys[0]));
 	memcpy(r->keys, p->keys + nr_left, nr_right * sizeof(p->keys[0]));
@@ -528,6 +532,11 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	/* new_parent should just point to l and r now */
 	p->header.flags = cpu_to_le32(INTERNAL_NODE);
 	p->header.nr_entries = cpu_to_le32(2);
+	p->header.max_entries = cpu_to_le32(
+		calc_max_entries(sizeof(__le64),
+				 dm_bm_block_size(
+					 dm_tm_get_bm(s->info->tm))));
+	p->header.value_size = cpu_to_le32(sizeof(__le64));
 
 	val = cpu_to_le64(dm_block_location(left));
 	__bless_for_disk(&val);
