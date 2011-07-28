@@ -1688,11 +1688,14 @@ static int pool_preresume(struct dm_target *ti)
 	return 0;
 }
 
-static void pool_presuspend(struct dm_target *ti)
+static void pool_postsuspend(struct dm_target *ti)
 {
 	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
+
+	flush_workqueue(pool->producer_wq);
+	flush_workqueue(pool->consumer_wq);
 
 	r = dm_pool_commit_metadata(pool->pmd);
 	if (r < 0) {
@@ -1700,12 +1703,6 @@ static void pool_presuspend(struct dm_target *ti)
 		      __func__, r);
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
-}
-
-static void pool_postsuspend(struct dm_target *ti)
-{
-	struct pool_c *pt = ti->private;
-	struct pool *pool = pt->pool;
 
 	pool_table_remove(pool);
 	pool->pool_md = NULL;
@@ -2006,7 +2003,6 @@ static struct target_type pool_target = {
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
 	.map = pool_map,
-	.presuspend = pool_presuspend,
 	.postsuspend = pool_postsuspend,
 	.preresume = pool_preresume,
 	.message = pool_message,
