@@ -33,6 +33,7 @@ struct node_header {
 	__le32 nr_entries;
 	__le32 max_entries;
 	__le32 value_size;
+	__le32 padding;
 } __packed;
 
 struct node {
