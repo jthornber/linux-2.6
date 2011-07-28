@@ -615,17 +615,21 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 
 	r = disk_ll_new(&smd->ll, tm);
 	if (r)
-		return ERR_PTR(r);
+		goto bad;
 
 	r = disk_ll_extend(&smd->ll, nr_blocks);
 	if (r)
-		return ERR_PTR(r);
+		goto bad;
 
 	r = sm_disk_commit(&smd->sm);
 	if (r)
-		return ERR_PTR(r);
+		goto bad;
 
 	return &smd->sm;
+
+bad:
+	kfree(smd);
+	return ERR_PTR(r);
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_create);
 
