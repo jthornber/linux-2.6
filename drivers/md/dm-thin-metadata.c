@@ -251,12 +251,12 @@ static struct dm_block_validator sb_validator = {
  * Methods for the btree value types
  *--------------------------------------------------------------*/
 
-static uint64_t pack_dm_block_time(dm_block_t b, uint32_t t)
+static uint64_t pack_block_time(dm_block_t b, uint32_t t)
 {
 	return (b << 24) | t;
 }
 
-static void unpack_dm_block_time(uint64_t v, dm_block_t *b, uint32_t *t)
+static void unpack_block_time(uint64_t v, dm_block_t *b, uint32_t *t)
 {
 	*b = v >> 24;
 	*t = v & ((1 << 24) - 1);
@@ -270,7 +270,7 @@ static void data_block_inc(void *context, void *value_le)
 	uint32_t t;
 
 	memcpy(&v_le, value_le, sizeof(v_le));
-	unpack_dm_block_time(le64_to_cpu(v_le), &b, &t);
+	unpack_block_time(le64_to_cpu(v_le), &b, &t);
 	dm_sm_inc_block(sm, b);
 }
 
@@ -282,7 +282,7 @@ static void data_block_dec(void *context, void *value_le)
 	uint32_t t;
 
 	memcpy(&v_le, value_le, sizeof(v_le));
-	unpack_dm_block_time(le64_to_cpu(v_le), &b, &t);
+	unpack_block_time(le64_to_cpu(v_le), &b, &t);
 	dm_sm_dec_block(sm, b);
 }
 
@@ -294,8 +294,8 @@ static int data_block_equal(void *context, void *value1_le, void *value2_le)
 
 	memcpy(&v1_le, value1_le, sizeof(v1_le));
 	memcpy(&v2_le, value2_le, sizeof(v2_le));
-	unpack_dm_block_time(le64_to_cpu(v1_le), &b1, &t);
-	unpack_dm_block_time(le64_to_cpu(v2_le), &b2, &t);
+	unpack_block_time(le64_to_cpu(v1_le), &b1, &t);
+	unpack_block_time(le64_to_cpu(v2_le), &b2, &t);
 
 	return b1 == b2;
 }
@@ -1043,7 +1043,7 @@ int dm_thin_find_block(struct dm_thin_device *td, dm_block_t block,
 		       int can_block, struct dm_thin_lookup_result *result)
 {
 	int r;
-	uint64_t dm_block_time = 0;
+	uint64_t block_time = 0;
 	__le64 value;
 	struct dm_pool_metadata *pmd = td->pmd;
 	dm_block_t keys[2] = { td->id, block };
@@ -1052,13 +1052,13 @@ int dm_thin_find_block(struct dm_thin_device *td, dm_block_t block,
 		down_read(&pmd->root_lock);
 		r = dm_btree_lookup(&pmd->info, pmd->root, keys, &value);
 		if (!r)
-			dm_block_time = le64_to_cpu(value);
+			block_time = le64_to_cpu(value);
 		up_read(&pmd->root_lock);
 
 	} else if (down_read_trylock(&pmd->root_lock)) {
 		r = dm_btree_lookup(&pmd->nb_info, pmd->root, keys, &value);
 		if (!r)
-			dm_block_time = le64_to_cpu(value);
+			block_time = le64_to_cpu(value);
 		up_read(&pmd->root_lock);
 
 	} else
@@ -1067,8 +1067,8 @@ int dm_thin_find_block(struct dm_thin_device *td, dm_block_t block,
 	if (!r) {
 		dm_block_t exception_block;
 		uint32_t exception_time;
-		unpack_dm_block_time(dm_block_time, &exception_block,
-				     &exception_time);
+		unpack_block_time(block_time, &exception_block,
+				  &exception_time);
 		result->block = exception_block;
 		result->shared = __snapshotted_since(td, exception_time);
 	}
@@ -1085,7 +1085,7 @@ static int __insert(struct dm_thin_device *td, dm_block_t block,
 	dm_block_t keys[2] = { td->id, block };
 
 	pmd->need_commit = 1;
-	value = cpu_to_le64(pack_dm_block_time(data_block, pmd->time));
+	value = cpu_to_le64(pack_block_time(data_block, pmd->time));
 	__dm_bless_for_disk(&value);
 
 	r = dm_btree_insert_notify(&pmd->info, pmd->root, keys, &value,
