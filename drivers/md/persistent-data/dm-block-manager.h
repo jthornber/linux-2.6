@@ -125,4 +125,8 @@ u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor);
 
 /*----------------------------------------------------------------*/
 
+unsigned dm_bm_locks_held(struct dm_block_manager *bm);
+
+/*----------------------------------------------------------------*/
+
 #endif	/* _LINUX_DM_BLOCK_MANAGER_H */

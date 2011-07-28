@@ -21,6 +21,8 @@ struct dm_space_map;
  * Clients should not fiddle with the block manager directly.
  */
 
+struct dm_transaction_manager *
+dm_tm_create(struct dm_block_manager *bm, struct dm_space_map *sm);
 void dm_tm_destroy(struct dm_transaction_manager *tm);
 
 /*

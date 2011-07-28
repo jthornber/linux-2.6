@@ -6,3 +6,24 @@ config DM_PERSISTENT_DATA
        ---help---
 	 Library providing immutable on-disk data structure support for
 	 device-mapper targets such as the thin provisioning target.
+
+config DM_PERSISTENT_DATA_BM_TESTS
+       tristate "Block manager unit tests (build these as a module)"
+       depends on BLK_DEV_DM && DM_PERSISTENT_DATA
+       ---help---
+         Unit tests specific to ejt's test machine, beware.  Loading
+         these modules will trash devices.
+
+config DM_PERSISTENT_DATA_TM_TESTS
+       tristate "Transaction manager unit tests (build these as a module)"
+       depends on BLK_DEV_DM && DM_PERSISTENT_DATA
+       ---help---
+         Unit tests specific to ejt's test machine, beware.  Loading
+         these modules will trash devices.
+
+config DM_PERSISTENT_DATA_BTREE_TESTS
+       tristate "BTree unit tests (build these as a module)"
+       depends on BLK_DEV_DM && DM_PERSISTENT_DATA
+       ---help---
+         Unit tests specific to ejt's test machine, beware.  Loading
+         these modules will trash devices.
