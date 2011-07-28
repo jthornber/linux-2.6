@@ -22,8 +22,8 @@ enum node_flags {
 };
 
 /*
- * To ease coding I'm packing all the different node types into one
- * structure.  We can optimise later.
+ * Every btree node begins with this structure.  Make sure it's a multiple
+ * of 8-bytes in size, otherwise the 64bit keys will be mis-aligned.
  */
 struct node_header {
 	__le32 csum;
