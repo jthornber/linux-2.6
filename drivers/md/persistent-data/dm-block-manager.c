@@ -83,6 +83,8 @@ struct dm_block_manager {
 	unsigned reading_count;
 	unsigned writing_count;
 
+	unsigned nr_held_locks;
+
 	struct kmem_cache *block_cache;  /* struct dm_block */
 	struct kmem_cache *buffer_cache; /* The buffers that store the raw data */
 
@@ -628,6 +630,7 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	bm->available_count = 0;
 	bm->reading_count = 0;
 	bm->writing_count = 0;
+	bm->nr_held_locks = 0;
 
 	bm->block_cache = kmem_cache_create("dm-block-manager-blocks",
 					    sizeof(struct dm_block),
@@ -802,6 +805,8 @@ retry:
 	}
 
 out:
+	if (!r)
+		bm->nr_held_locks++;
 	spin_unlock_irqrestore(&bm->lock, flags);
 
 	return r;
@@ -874,6 +879,7 @@ int dm_bm_unlock(struct dm_block *b)
 		r = -EINVAL;
 		break;
 	}
+	b->bm->nr_held_locks--;
 	spin_unlock_irqrestore(&b->bm->lock, flags);
 
 	return r;
@@ -944,3 +950,16 @@ int dm_bm_rebind_block_device(struct dm_block_manager *bm,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_rebind_block_device);
+
+unsigned dm_bm_locks_held(struct dm_block_manager *bm)
+{
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&bm->lock, flags);
+	r = bm->nr_held_locks;
+	spin_unlock_irqrestore(&bm->lock, flags);
+
+	return r;
+}
+EXPORT_SYMBOL_GPL(dm_bm_locks_held);

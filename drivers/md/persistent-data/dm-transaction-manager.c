@@ -95,8 +95,8 @@ static void wipe_shadow_table(struct dm_transaction_manager *tm)
 
 /*----------------------------------------------------------------*/
 
-static struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
-						   struct dm_space_map *sm)
+struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
+					    struct dm_space_map *sm)
 {
 	int i;
 	struct dm_transaction_manager *tm;
@@ -117,6 +117,7 @@ static struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
 
 	return tm;
 }
+EXPORT_SYMBOL_GPL(dm_tm_create);
 
 struct dm_transaction_manager *dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real)
 {
@@ -192,6 +193,7 @@ int dm_tm_new_block(struct dm_transaction_manager *tm,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(dm_tm_new_block);
 
 static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 			  struct dm_block_validator *v,
@@ -280,6 +282,7 @@ int dm_tm_read_lock(struct dm_transaction_manager *tm, dm_block_t b,
 
 	return dm_bm_read_lock(tm->bm, b, v, blk);
 }
+EXPORT_SYMBOL_GPL(dm_tm_read_lock);
 
 int dm_tm_unlock(struct dm_transaction_manager *tm, struct dm_block *b)
 {
@@ -321,6 +324,7 @@ struct dm_block_manager *dm_tm_get_bm(struct dm_transaction_manager *tm)
 {
 	return tm->bm;
 }
+EXPORT_SYMBOL_GPL(dm_tm_get_bm);
 
 /*----------------------------------------------------------------*/
 
