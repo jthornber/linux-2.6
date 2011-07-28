@@ -188,7 +188,7 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 	int r;
 	uint32_t ref_count;
 
-	if (s->top >= MAX_SPINE_DEPTH) {
+	if (s->top >= MAX_SPINE_DEPTH - 1) {
 		DMERR("btree deletion stack out of memory");
 		return -ENOMEM;
 	}
