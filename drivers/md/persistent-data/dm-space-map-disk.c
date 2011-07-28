@@ -643,12 +643,16 @@ struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 
 	r = disk_ll_open(&smd->ll, tm, root_le, len);
 	if (r)
-		return ERR_PTR(r);
+		goto bad;
 
 	r = sm_disk_commit(&smd->sm);
 	if (r)
-		return ERR_PTR(r);
+		goto bad;
 
 	return &smd->sm;
+
+bad:
+	kfree(smd);
+	return ERR_PTR(r);
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_open);
