@@ -187,18 +187,18 @@ i) Constructor
 
 ii) Status
 
-    <transaction id> <data free space in sectors>
-    <metadata free space in sectors> <held metadata root>
+    <transaction id> <free metadata space in sectors>
+    <free data space in sectors> <held metadata root>
 
     transaction id:
 	A 64-bit number used by userspace to help synchronise with metadata
 	from volume managers.
 
-    data free space in sectors:
+    free data space in sectors:
 	If this drops below the pool's low water mark a dm event will
 	be sent to userspace.  This event is edge-triggered and it
-	will occur only once so volume manager writers should register
-	for the event and then check the target's status.
+	will occur only once after each resume so volume manager writers
+	should register for the event and then check the target's status.
 
     held metadata root:
 	The location, in sectors, of the metadata root that has been

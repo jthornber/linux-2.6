@@ -475,7 +475,7 @@ struct pool {
 	struct bio_list deferred_bios;
 	struct list_head prepared_mappings;
 
-	int triggered;		/* A dm event has been sent */
+	int low_water_triggered;	/* A dm event has been sent */
 	struct bio_list retry_list;
 
 	struct deferred_set ds;	/* FIXME: move to thin_c */
@@ -864,9 +864,9 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	if (r)
 		return r;
 
-	if (free_blocks <= pool->low_water_mark && !pool->triggered) {
+	if (free_blocks <= pool->low_water_mark && !pool->low_water_triggered) {
 		spin_lock_irqsave(&pool->lock, flags);
-		pool->triggered = 1;
+		pool->low_water_triggered = 1;
 		spin_unlock_irqrestore(&pool->lock, flags);
 		dm_table_event(pool->ti->table);
 	}
@@ -1399,7 +1399,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
-	pool->triggered = 0;
+	pool->low_water_triggered = 0;
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
 
@@ -1667,7 +1667,9 @@ static int pool_preresume(struct dm_target *ti)
 	dm_block_t data_size, sb_data_size;
 	unsigned long flags;
 
-	/* take control of the pool object */
+	/*
+	 * Take control of the pool object.
+	 */
 	r = bind_control_target(pool, ti);
 	if (r)
 		return r;
@@ -1700,13 +1702,15 @@ static int pool_preresume(struct dm_target *ti)
 	}
 
 	spin_lock_irqsave(&pool->lock, flags);
-	pool->triggered = 0;
+	pool->low_water_triggered = 0;
 	__requeue_bios(pool);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_producer(pool);
 
-	/* The pool object is only present if the pool is active */
+	/*
+	 * The pool object is only present if the pool is active.
+	 */
 	pool->pool_md = dm_table_get_md(ti->table);
 	pool_table_insert(pool);
 
@@ -1926,6 +1930,11 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	return r;
 }
 
+/*
+ * Status line is:
+ *    <transaction id> <free metadata space in sectors>
+ *    <free data space in sectors> <held metadata root>
+ */
 static int pool_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
 {
@@ -1947,13 +1956,13 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		r = dm_pool_get_free_block_count(pool->pmd,
-						     &nr_free_blocks_data);
+		r = dm_pool_get_free_metadata_block_count(pool->pmd,
+							  &nr_free_blocks_metadata);
 		if (r)
 			return r;
 
-		r = dm_pool_get_free_metadata_block_count(pool->pmd,
-							      &nr_free_blocks_metadata);
+		r = dm_pool_get_free_block_count(pool->pmd,
+						 &nr_free_blocks_data);
 		if (r)
 			return r;
 
@@ -1961,9 +1970,9 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		DMEMIT("%llu %llu %llu ", transaction_id,
-		       nr_free_blocks_data * pool->sectors_per_block,
-		       nr_free_blocks_metadata * pool->sectors_per_block);
+		DMEMIT("%llu %llu %llu ", (unsigned long long)transaction_id,
+		       (unsigned long long)nr_free_blocks_metadata * pool->sectors_per_block,
+		       (unsigned long long)nr_free_blocks_data * pool->sectors_per_block);
 
 		if (held_root)
 			DMEMIT("%llu", held_root);
@@ -1973,11 +1982,11 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %lu %lu ",
+		DMEMIT("%s %s %lu %llu ",
 		       format_dev_t(buf, pt->metadata_dev->bdev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
-		       (unsigned long) pool->sectors_per_block,
-		       (unsigned long) pt->low_water_mark);
+		       (unsigned long)pool->sectors_per_block,
+		       (unsigned long long)pt->low_water_mark);
 
 		DMEMIT("%u ", !pool->zero_new_blocks);
 
