@@ -475,7 +475,7 @@ struct pool {
 	struct bio_list deferred_bios;
 	struct list_head prepared_mappings;
 
-	int triggered;		/* A dm event has been sent */
+	int low_water_triggered;	/* A dm event has been sent */
 	struct bio_list retry_list;
 
 	struct deferred_set ds;	/* FIXME: move to thin_c */
@@ -864,9 +864,9 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	if (r)
 		return r;
 
-	if (free_blocks <= pool->low_water_mark && !pool->triggered) {
+	if (free_blocks <= pool->low_water_mark && !pool->low_water_triggered) {
 		spin_lock_irqsave(&pool->lock, flags);
-		pool->triggered = 1;
+		pool->low_water_triggered = 1;
 		spin_unlock_irqrestore(&pool->lock, flags);
 		dm_table_event(pool->ti->table);
 	}
@@ -876,64 +876,6 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		return r;
 
 	return 0;
-}
-
-static void process_discard(struct thin_c *tc, struct bio *bio)
-{
-#if 0
-	int r;
-	dm_block_t block = get_bio_block(tc, bio);
-	struct dm_thin_lookup_result lookup_result;
-
-	/*
-	 * Cell busy, we back off.
-	 */
-	build_virtual_key(tc->td, block, &key);
-	if (bio_detain(tc->pool->prison, &key, bio, &cell))
-		return;
-
-	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
-	switch (r) {
-	case 0:
-		if (lookup_result.shared)
-			/*
-			 * We just ignore shared discards for now, these
-			 * are hard, and I want to get deferred
-			 * deallocation working first.
-			 */
-			cell_release_singleton(cell, bio);
-			bio_endio(bio, 0);
-
-		else {
-			r = dm_thin_remove_block(tc->td, block);
-			if (r) {
-				DMERR("dm_thin_remove_block() failed");
-				cell_error(cell);
-			} else {
-				cell_release_singleton(cell, bio);
-				remap_and_issue(tc, bio, lookup_result.block);
-			}
-		}
-		break;
-
-	case -ENODATA:
-		/*
-		 * Either this isn't provisioned, or preparation for
-		 * provisioning may be pending (we could find out by
-		 * calling bio_detain_if_occupied).  But even in this case
-		 * it's easier to just forget the discard.
-		 */
-		bio_endio(bio, 0);
-		break;
-
-	default:
-		DMERR("dm_thin_find_block() failed, error = %d", r);
-		cell_release_singleton(cell);
-		break;
-	}
-#else
-	bio_endio(bio, 0);
-#endif
 }
 
 static void no_space(struct cell *cell)
@@ -1091,11 +1033,7 @@ static void process_deferred_bios(struct pool *pool)
 
 	while ((bio = bio_list_pop(&bios))) {
 		struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
-
-		if (bio->bi_rw & REQ_DISCARD)
-			process_discard(tc, bio);
-		else
-			process_bio(tc, bio);
+		process_bio(tc, bio);
 	}
 }
 
@@ -1183,27 +1121,14 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 	struct thin_c *tc = ti->private;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_device *td = tc->td;
-	struct pool *pool = tc->pool;
 	struct dm_thin_lookup_result result;
-
-	/*
-	 * FIXME(hch): in theory higher level code should prevent this
-	 * from happening, not sure why we ever get here.
-	 */
-	if ((bio->bi_rw & REQ_DISCARD) &&
-	    bio->bi_size < (pool->sectors_per_block << SECTOR_SHIFT)) {
-		DMERR("discard IO smaller than pool block size (%llu)",
-		      (unsigned long long)pool->sectors_per_block << SECTOR_SHIFT);
-		bio_endio(bio, 0);
-		return DM_MAPIO_SUBMITTED;
-	}
 
 	/*
 	 * Save the thin context for easy access from the deferred bio later.
 	 */
 	map_context->ptr = tc;
 
-	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1399,7 +1324,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
-	pool->triggered = 0;
+	pool->low_water_triggered = 0;
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
 
@@ -1616,7 +1541,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_mark = low_water;
 	pt->zero_new_blocks = pf.zero_new_blocks;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
+	ti->num_discard_requests = 0;
 	ti->private = pt;
 
 	pt->callbacks.congested_fn = pool_is_congested;
@@ -1667,7 +1592,9 @@ static int pool_preresume(struct dm_target *ti)
 	dm_block_t data_size, sb_data_size;
 	unsigned long flags;
 
-	/* take control of the pool object */
+	/*
+	 * Take control of the pool object.
+	 */
 	r = bind_control_target(pool, ti);
 	if (r)
 		return r;
@@ -1700,13 +1627,15 @@ static int pool_preresume(struct dm_target *ti)
 	}
 
 	spin_lock_irqsave(&pool->lock, flags);
-	pool->triggered = 0;
+	pool->low_water_triggered = 0;
 	__requeue_bios(pool);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_producer(pool);
 
-	/* The pool object is only present if the pool is active */
+	/*
+	 * The pool object is only present if the pool is active.
+	 */
 	pool->pool_md = dm_table_get_md(ti->table);
 	pool_table_insert(pool);
 
@@ -1926,6 +1855,11 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	return r;
 }
 
+/*
+ * Status line is:
+ *    <transaction id> <free metadata space in sectors>
+ *    <free data space in sectors> <held metadata root>
+ */
 static int pool_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
 {
@@ -1947,13 +1881,13 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		r = dm_pool_get_free_block_count(pool->pmd,
-						     &nr_free_blocks_data);
+		r = dm_pool_get_free_metadata_block_count(pool->pmd,
+							  &nr_free_blocks_metadata);
 		if (r)
 			return r;
 
-		r = dm_pool_get_free_metadata_block_count(pool->pmd,
-							      &nr_free_blocks_metadata);
+		r = dm_pool_get_free_block_count(pool->pmd,
+						 &nr_free_blocks_data);
 		if (r)
 			return r;
 
@@ -1961,9 +1895,9 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		DMEMIT("%llu %llu %llu ", transaction_id,
-		       nr_free_blocks_data * pool->sectors_per_block,
-		       nr_free_blocks_metadata * pool->sectors_per_block);
+		DMEMIT("%llu %llu %llu ", (unsigned long long)transaction_id,
+		       (unsigned long long)nr_free_blocks_metadata * pool->sectors_per_block,
+		       (unsigned long long)nr_free_blocks_data * pool->sectors_per_block);
 
 		if (held_root)
 			DMEMIT("%llu", held_root);
@@ -1973,11 +1907,11 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %lu %lu ",
+		DMEMIT("%s %s %lu %llu ",
 		       format_dev_t(buf, pt->metadata_dev->bdev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
-		       (unsigned long) pool->sectors_per_block,
-		       (unsigned long) pt->low_water_mark);
+		       (unsigned long)pool->sectors_per_block,
+		       (unsigned long long)pt->low_water_mark);
 
 		DMEMIT("%u ", !pool->zero_new_blocks);
 
@@ -2112,12 +2046,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->split_io = tc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
-	/*
-	 * allow discards to issued to the thin device even
-	 * if the pool's data device doesn't support them.
-	 */
-	ti->discards_supported = 1;
+	ti->num_discard_requests = 0;
+	ti->discards_supported = 0;
 
 	return 0;
 
@@ -2210,13 +2140,6 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, tc->pool->sectors_per_block << SECTOR_SHIFT);
-
-	/*
-	 * Only allow discard requests aligned to our block size, and make
-	 * sure that we never get sent larger discard requests either.
-	 */
-	limits->max_discard_sectors = tc->pool->sectors_per_block;
-	limits->discard_granularity = tc->pool->sectors_per_block << SECTOR_SHIFT;
 }
 
 static struct target_type thin_target = {

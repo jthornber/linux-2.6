@@ -411,9 +411,3 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 EXPORT_SYMBOL_GPL(dm_tm_open_with_sm);
 
 /*----------------------------------------------------------------*/
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Joe Thornber");
-MODULE_DESCRIPTION("Immutable metadata library for dm");
-
-/*----------------------------------------------------------------*/
