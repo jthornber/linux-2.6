@@ -631,7 +631,7 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	bm->reading_count = 0;
 	bm->writing_count = 0;
 
-	sprintf(bm->buffer_cache_name, "dm-block-buffer-%d:%d",
+	sprintf(bm->buffer_cache_name, "dm_block_buffer-%d:%d",
 		MAJOR(disk_devt(bdev->bd_disk)),
 		MINOR(disk_devt(bdev->bd_disk)));
 	bm->buffer_cache = kmem_cache_create(bm->buffer_cache_name,
@@ -944,10 +944,7 @@ EXPORT_SYMBOL_GPL(dm_bm_rebind_block_device);
 
 static int __init init_persistent_data(void)
 {
-	block_cache = kmem_cache_create("dm-block",
-					sizeof(struct dm_block),
-					__alignof__(struct dm_block),
-					SLAB_HWCACHE_ALIGN, NULL);
+	block_cache = KMEM_CACHE(dm_block, SLAB_HWCACHE_ALIGN);
 	if (!block_cache)
 		return -ENOMEM;
 
