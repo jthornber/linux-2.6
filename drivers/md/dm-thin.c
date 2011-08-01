@@ -1524,7 +1524,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	pt = kmalloc(sizeof(*pt), GFP_KERNEL);
+	pt = kzalloc(sizeof(*pt), GFP_KERNEL);
 	if (!pt) {
 		pool_destroy(pool);
 		r = -ENOMEM;
