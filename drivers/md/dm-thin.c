@@ -878,64 +878,6 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	return 0;
 }
 
-static void process_discard(struct thin_c *tc, struct bio *bio)
-{
-#if 0
-	int r;
-	dm_block_t block = get_bio_block(tc, bio);
-	struct dm_thin_lookup_result lookup_result;
-
-	/*
-	 * Cell busy, we back off.
-	 */
-	build_virtual_key(tc->td, block, &key);
-	if (bio_detain(tc->pool->prison, &key, bio, &cell))
-		return;
-
-	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
-	switch (r) {
-	case 0:
-		if (lookup_result.shared)
-			/*
-			 * We just ignore shared discards for now, these
-			 * are hard, and I want to get deferred
-			 * deallocation working first.
-			 */
-			cell_release_singleton(cell, bio);
-			bio_endio(bio, 0);
-
-		else {
-			r = dm_thin_remove_block(tc->td, block);
-			if (r) {
-				DMERR("dm_thin_remove_block() failed");
-				cell_error(cell);
-			} else {
-				cell_release_singleton(cell, bio);
-				remap_and_issue(tc, bio, lookup_result.block);
-			}
-		}
-		break;
-
-	case -ENODATA:
-		/*
-		 * Either this isn't provisioned, or preparation for
-		 * provisioning may be pending (we could find out by
-		 * calling bio_detain_if_occupied).  But even in this case
-		 * it's easier to just forget the discard.
-		 */
-		bio_endio(bio, 0);
-		break;
-
-	default:
-		DMERR("dm_thin_find_block() failed, error = %d", r);
-		cell_release_singleton(cell);
-		break;
-	}
-#else
-	bio_endio(bio, 0);
-#endif
-}
-
 static void no_space(struct cell *cell)
 {
 	struct bio *bio;
@@ -1091,11 +1033,7 @@ static void process_deferred_bios(struct pool *pool)
 
 	while ((bio = bio_list_pop(&bios))) {
 		struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
-
-		if (bio->bi_rw & REQ_DISCARD)
-			process_discard(tc, bio);
-		else
-			process_bio(tc, bio);
+		process_bio(tc, bio);
 	}
 }
 
@@ -1183,27 +1121,14 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 	struct thin_c *tc = ti->private;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_device *td = tc->td;
-	struct pool *pool = tc->pool;
 	struct dm_thin_lookup_result result;
-
-	/*
-	 * FIXME(hch): in theory higher level code should prevent this
-	 * from happening, not sure why we ever get here.
-	 */
-	if ((bio->bi_rw & REQ_DISCARD) &&
-	    bio->bi_size < (pool->sectors_per_block << SECTOR_SHIFT)) {
-		DMERR("discard IO smaller than pool block size (%llu)",
-		      (unsigned long long)pool->sectors_per_block << SECTOR_SHIFT);
-		bio_endio(bio, 0);
-		return DM_MAPIO_SUBMITTED;
-	}
 
 	/*
 	 * Save the thin context for easy access from the deferred bio later.
 	 */
 	map_context->ptr = tc;
 
-	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1616,7 +1541,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_mark = low_water;
 	pt->zero_new_blocks = pf.zero_new_blocks;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
+	ti->num_discard_requests = 0;
 	ti->private = pt;
 
 	pt->callbacks.congested_fn = pool_is_congested;
@@ -2121,12 +2046,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->split_io = tc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
-	/*
-	 * allow discards to issued to the thin device even
-	 * if the pool's data device doesn't support them.
-	 */
-	ti->discards_supported = 1;
+	ti->num_discard_requests = 0;
+	ti->discards_supported = 0;
 
 	return 0;
 
@@ -2219,13 +2140,6 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, tc->pool->sectors_per_block << SECTOR_SHIFT);
-
-	/*
-	 * Only allow discard requests aligned to our block size, and make
-	 * sure that we never get sent larger discard requests either.
-	 */
-	limits->max_discard_sectors = tc->pool->sectors_per_block;
-	limits->discard_granularity = tc->pool->sectors_per_block << SECTOR_SHIFT;
 }
 
 static struct target_type thin_target = {
