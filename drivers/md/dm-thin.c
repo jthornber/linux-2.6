@@ -450,6 +450,7 @@ static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
  * also provides the interface for creating and destroying internal
  * devices.
  */
+struct new_mapping;
 struct pool {
 	struct list_head list;
 	struct dm_target *ti;	/* Only set if a pool target is bound */
@@ -466,10 +467,8 @@ struct pool {
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
 
-	struct workqueue_struct *producer_wq;
-	struct workqueue_struct *consumer_wq;
-	struct work_struct producer;
-	struct work_struct consumer;
+	struct workqueue_struct *wq;
+	struct work_struct worker;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -480,6 +479,7 @@ struct pool {
 
 	struct deferred_set ds;	/* FIXME: move to thin_c */
 
+	struct new_mapping *next_mapping;
 	mempool_t *mapping_pool;
 	mempool_t *endio_hook_pool;
 
@@ -601,7 +601,7 @@ static struct pool *pool_table_lookup(struct mapped_device *md)
  * This section of code contains the logic for processing a thin devices' IO.
  * Much of the code depends on pool object resources (lists, workqueues, etc)
  * but most is exclusively called from the thin target rather than the thin-pool
- * target.  wake_producer() being the most notable exception (which is also used
+ * target.  wake_worker() being the most notable exception (which is also used
  * by thin-pool to continue deferred IO processing after pool resume).
  */
 
@@ -636,9 +636,9 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 	generic_make_request(bio);
 }
 
-static void wake_producer(struct pool *pool)
+static void wake_worker(struct pool *pool)
 {
-	queue_work(pool->producer_wq, &pool->producer);
+	queue_work(pool->wq, &pool->worker);
 }
 
 static void __maybe_add_mapping(struct new_mapping *m)
@@ -647,7 +647,7 @@ static void __maybe_add_mapping(struct new_mapping *m)
 
 	if (list_empty(&m->list) && m->prepared) {
 		list_add(&m->list, &pool->prepared_mappings);
-		queue_work(pool->consumer_wq, &pool->consumer);
+		wake_worker(pool);
 	}
 }
 
@@ -710,13 +710,30 @@ static int io_covers_block(struct pool *pool, struct bio *bio)
 		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
 }
 
+static int ensure_next_mapping(struct pool *pool)
+{
+	if (pool->next_mapping)
+		return 0;
+
+	pool->next_mapping = mempool_alloc(pool->mapping_pool, GFP_ATOMIC);
+	return pool->next_mapping ? 0 : -ENOMEM;
+}
+
+static struct new_mapping *get_next_mapping(struct pool *pool)
+{
+	struct new_mapping *r = pool->next_mapping;
+	BUG_ON(!pool->next_mapping);
+	pool->next_mapping = NULL;
+	return r;
+}
+
 static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 			  dm_block_t data_origin, dm_block_t data_dest,
 			  struct cell *cell, struct bio *bio)
 {
 	int r;
 	struct pool *pool = tc->pool;
-	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
+	struct new_mapping *m = get_next_mapping(pool);
 
 	INIT_LIST_HEAD(&m->list);
 	m->prepared = 0;
@@ -765,7 +782,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 			  struct bio *bio)
 {
 	struct pool *pool = tc->pool;
-	struct new_mapping *m = mempool_alloc(pool->mapping_pool, GFP_NOIO);
+	struct new_mapping *m = get_next_mapping(pool);
 
 	INIT_LIST_HEAD(&m->list);
 	m->prepared = 0;
@@ -816,7 +833,7 @@ static void cell_defer(struct thin_c *tc, struct cell *cell,
 	cell_release(cell, &pool->deferred_bios);
 	spin_unlock_irqrestore(&tc->pool->lock, flags);
 
-	wake_producer(pool);
+	wake_worker(pool);
 }
 
 /*
@@ -839,7 +856,7 @@ static void cell_defer_except(struct thin_c *tc, struct cell *cell,
 			bio_list_add(&pool->deferred_bios, bio);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	wake_producer(pool);
+	wake_worker(pool);
 }
 
 static void retry_later(struct bio *bio)
@@ -1033,6 +1050,19 @@ static void process_deferred_bios(struct pool *pool)
 
 	while ((bio = bio_list_pop(&bios))) {
 		struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
+		if (ensure_next_mapping(pool)) {
+			/*
+			 * We've got no free new_mapping structs, and
+			 * processing this bio might require one.  So we
+			 * pause until there are some prepared mappings to
+			 * process.
+			 */
+			spin_lock_irqsave(&pool->lock, flags);
+			bio_list_merge(&pool->deferred_bios, &bios);
+			spin_unlock_irqrestore(&pool->lock, flags);
+
+			return;
+		}
 		process_bio(tc, bio);
 	}
 }
@@ -1065,7 +1095,7 @@ static void process_prepared_mapping(struct new_mapping *m)
 	} else
 		cell_defer(tc, m->cell, m->data_block);
 
-	list_del(&m->list);
+	list_del(&m->list);	/* FIXME: unnecc.? */
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -1084,18 +1114,12 @@ static void process_prepared_mappings(struct pool *pool)
 		process_prepared_mapping(m);
 }
 
-static void do_producer(struct work_struct *ws)
+static void do_worker(struct work_struct *ws)
 {
-	struct pool *pool = container_of(ws, struct pool, producer);
-
-	process_deferred_bios(pool);
-}
-
-static void do_consumer(struct work_struct *ws)
-{
-	struct pool *pool = container_of(ws, struct pool, consumer);
+	struct pool *pool = container_of(ws, struct pool, worker);
 
 	process_prepared_mappings(pool);
+	process_deferred_bios(pool);
 }
 
 static void defer_bio(struct thin_c *tc, struct bio *bio)
@@ -1107,7 +1131,7 @@ static void defer_bio(struct thin_c *tc, struct bio *bio)
 	bio_list_add(&pool->deferred_bios, bio);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	wake_producer(pool);
+	wake_worker(pool);
 }
 
 /*
@@ -1164,21 +1188,6 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	case -ENODATA:
-		/*
-		 * In future, the failed dm_thin_find_block above could
-		 * provide the hint to load the metadata into cache.
-		 *
-		 * When reading, we return zeroes regardless of the
-		 * zero_new_blocks setting.
-		 */
-		if (bio_data_dir(bio) == READ) {
-			zero_fill_bio(bio);
-			bio_endio(bio, 0);
-		} else
-			defer_bio(tc, bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
-
 	case -EWOULDBLOCK:
 		defer_bio(tc, bio);
 		r = DM_MAPIO_SUBMITTED;
@@ -1246,11 +1255,8 @@ static void pool_destroy(struct pool *pool)
 	prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
 
-	if (pool->producer_wq)
-		destroy_workqueue(pool->producer_wq);
-
-	if (pool->consumer_wq)
-		destroy_workqueue(pool->consumer_wq);
+	if (pool->wq)
+		destroy_workqueue(pool->wq);
 
 	mempool_destroy(pool->mapping_pool);
 	mempool_destroy(pool->endio_hook_pool);
@@ -1303,24 +1309,15 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	 * Create singlethreaded workqueues that will service all devices
 	 * that use this metadata.
 	 */
-	pool->producer_wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX "-producer",
-						    WQ_MEM_RECLAIM);
-	if (!pool->producer_wq) {
-		*error = "Error creating pool's producer workqueue";
+	pool->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX,
+					   WQ_MEM_RECLAIM);
+	if (!pool->wq) {
+		*error = "Error creating pool's workqueue";
 		err_p = ERR_PTR(-ENOMEM);
-		goto bad_producer_wq;
+		goto bad_wq;
 	}
 
-	pool->consumer_wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX "-consumer",
-						    WQ_MEM_RECLAIM);
-	if (!pool->consumer_wq) {
-		*error = "Error creating pool's consumer workqueue";
-		err_p = ERR_PTR(-ENOMEM);
-		goto bad_consumer_wq;
-	}
-
-	INIT_WORK(&pool->producer, do_producer);
-	INIT_WORK(&pool->consumer, do_consumer);
+	INIT_WORK(&pool->worker, do_worker);
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
@@ -1328,6 +1325,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
 
+	pool->next_mapping = NULL;
 	pool->mapping_pool =
 		mempool_create_kmalloc_pool(MAPPING_POOL_SIZE, sizeof(struct new_mapping));
 	if (!pool->mapping_pool) {
@@ -1350,10 +1348,8 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 bad_endio_hook_pool:
 	mempool_destroy(pool->mapping_pool);
 bad_mapping_pool:
-	destroy_workqueue(pool->consumer_wq);
-bad_consumer_wq:
-	destroy_workqueue(pool->producer_wq);
-bad_producer_wq:
+	destroy_workqueue(pool->wq);
+bad_wq:
 	dm_kcopyd_client_destroy(pool->copier);
 bad_kcopyd_client:
 	prison_destroy(pool->prison);
@@ -1631,7 +1627,7 @@ static int pool_preresume(struct dm_target *ti)
 	__requeue_bios(pool);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	wake_producer(pool);
+	wake_worker(pool);
 
 	/*
 	 * The pool object is only present if the pool is active.
@@ -1648,8 +1644,7 @@ static void pool_postsuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
-	flush_workqueue(pool->producer_wq);
-	flush_workqueue(pool->consumer_wq);
+	flush_workqueue(pool->wq);
 
 	r = dm_pool_commit_metadata(pool->pmd);
 	if (r < 0) {
