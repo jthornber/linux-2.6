@@ -254,33 +254,6 @@ static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 	return r;
 }
 
-static int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
-				  struct bio *inmate, struct cell **ref)
-{
-	int r;
-	unsigned long flags;
-	uint32_t hash = hash_key(prison, key);
-	struct cell *uninitialized_var(cell);
-
-	BUG_ON(hash > prison->nr_buckets);
-
-	spin_lock_irqsave(&prison->lock, flags);
-	cell = __search_bucket(prison->cells + hash, key);
-
-	if (!cell) {
-		spin_unlock_irqrestore(&prison->lock, flags);
-		return 0;
-	}
-
-	r = cell->count++;
-	bio_list_add(&cell->bios, inmate);
-	spin_unlock_irqrestore(&prison->lock, flags);
-
-	*ref = cell;
-
-	return r;
-}
-
 /*
  * @inmates must have been initialised prior to this call
  */
@@ -304,6 +277,30 @@ static void cell_release(struct cell *cell, struct bio_list *bios)
 	spin_lock_irqsave(&prison->lock, flags);
 	__cell_release(cell, bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
+}
+
+/*
+ * There are a couple of places where we put a bio into a cell briefly
+ * before taking it out again.  In these situations we know that no other
+ * bio may be in the cell.  This function releases the cell, and also does
+ * a sanity check.
+ */
+static void cell_release_singleton(struct cell *cell, struct bio *bio)
+{
+	struct bio_prison *prison = cell->prison;
+	struct bio_list bios;
+	struct bio *b;
+	unsigned long flags;
+
+	bio_list_init(&bios);
+
+	spin_lock_irqsave(&prison->lock, flags);
+	__cell_release(cell, &bios);
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	b = bio_list_pop(&bios);
+	BUG_ON(b != bio);
+	BUG_ON(!bio_list_empty(&bios));
 }
 
 static void cell_error(struct cell *cell)
@@ -806,32 +803,43 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	}
 }
 
-static void cell_remap_and_issue(struct thin_c *tc, struct cell *cell,
-				 dm_block_t data_block)
+/*
+ * This sends the bios in the cell back to the deferred_bios list.
+ */
+static void cell_defer(struct thin_c *tc, struct cell *cell,
+		       dm_block_t data_block)
 {
-	struct bio_list bios;
-	struct bio *bio;
+	struct pool *pool = tc->pool;
+	unsigned long flags;
 
-	bio_list_init(&bios);
-	cell_release(cell, &bios);
+	spin_lock_irqsave(&pool->lock, flags);
+	cell_release(cell, &pool->deferred_bios);
+	spin_unlock_irqrestore(&tc->pool->lock, flags);
 
-	while ((bio = bio_list_pop(&bios)))
-		remap_and_issue(tc, bio, data_block);
+	wake_producer(pool);
 }
 
-static void cell_remap_and_issue_except(struct thin_c *tc, struct cell *cell,
-					dm_block_t data_block,
-					struct bio *exception)
+/*
+ * Same as cell_defer, except it omits one particular detainee.
+ */
+static void cell_defer_except(struct thin_c *tc, struct cell *cell,
+			      struct bio *exception)
 {
 	struct bio_list bios;
 	struct bio *bio;
+	struct pool *pool = tc->pool;
+	unsigned long flags;
 
 	bio_list_init(&bios);
 	cell_release(cell, &bios);
 
+	spin_lock_irqsave(&pool->lock, flags);
 	while ((bio = bio_list_pop(&bios)))
 		if (bio != exception)
-			remap_and_issue(tc, bio, data_block);
+			bio_list_add(&pool->deferred_bios, bio);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	wake_producer(pool);
 }
 
 static void retry_later(struct bio *bio)
@@ -872,9 +880,17 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 
 static void process_discard(struct thin_c *tc, struct bio *bio)
 {
+#if 0
 	int r;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
+
+	/*
+	 * Cell busy, we back off.
+	 */
+	build_virtual_key(tc->td, block, &key);
+	if (bio_detain(tc->pool->prison, &key, bio, &cell))
+		return;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
@@ -885,15 +901,18 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			 * are hard, and I want to get deferred
 			 * deallocation working first.
 			 */
+			cell_release_singleton(cell, bio);
 			bio_endio(bio, 0);
 
 		else {
 			r = dm_thin_remove_block(tc->td, block);
 			if (r) {
 				DMERR("dm_thin_remove_block() failed");
-				bio_io_error(bio);
-			} else
+				cell_error(cell);
+			} else {
+				cell_release_singleton(cell, bio);
 				remap_and_issue(tc, bio, lookup_result.block);
+			}
 		}
 		break;
 
@@ -909,9 +928,12 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 
 	default:
 		DMERR("dm_thin_find_block() failed, error = %d", r);
-		bio_io_error(bio);
+		cell_release_singleton(cell);
 		break;
 	}
+#else
+	bio_endio(bio, 0);
+#endif
 }
 
 static void no_space(struct cell *cell)
@@ -928,13 +950,11 @@ static void no_space(struct cell *cell)
 
 static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
 			  struct cell_key *key,
-			  struct dm_thin_lookup_result *lookup_result)
+			  struct dm_thin_lookup_result *lookup_result,
+			  struct cell *cell)
 {
 	int r;
 	dm_block_t data_block;
-	struct cell *cell;
-
-	bio_detain(tc->pool->prison, key, bio, &cell);
 
 	r = alloc_data_block(tc, &data_block);
 	switch (r) {
@@ -959,20 +979,19 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 			       struct dm_thin_lookup_result *lookup_result)
 {
 	struct cell *cell;
-	struct cell_key key;
 	struct pool *pool = tc->pool;
+	struct cell_key key;
 
 	/*
-	 * If cell is already occupied, then sharing is already
-	 * in the process of being broken so we have nothing
-	 * further to do here.
+	 * If data_cell is already occupied, then sharing is already in the
+	 * process of being broken so we have nothing further to do here.
 	 */
 	build_data_key(tc->td, lookup_result->block, &key);
-	if (bio_detain_if_occupied(pool->prison, &key, bio, &cell))
+	if (bio_detain(pool->prison, &key, bio, &cell))
 		return;
 
 	if (bio_data_dir(bio) == WRITE)
-		break_sharing(tc, bio, block, &key, lookup_result);
+		break_sharing(tc, bio, block, &key, lookup_result, cell);
 	else {
 		struct endio_hook *h;
 		h = mempool_alloc(pool->endio_hook_pool, GFP_NOIO);
@@ -981,24 +1000,17 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 		h->entry = ds_inc(&pool->ds);
 		save_and_set_endio(bio, &h->saved_bi_end_io, shared_read_endio);
 		dm_get_mapinfo(bio)->ptr = h;
+
+		cell_release_singleton(cell, bio);
 		remap_and_issue(tc, bio, lookup_result->block);
 	}
 }
 
-static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block)
+static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block,
+			    struct cell *cell)
 {
 	int r;
 	dm_block_t data_block;
-	struct cell *cell;
-	struct cell_key key;
-
-	/*
-	 * If cell is already occupied, then the block is already
-	 * being provisioned so we have nothing further to do here.
-	 */
-	build_virtual_key(tc->td, block, &key);
-	if (bio_detain(tc->pool->prison, &key, bio, &cell))
-		return;
 
 	r = alloc_data_block(tc, &data_block);
 	switch (r) {
@@ -1021,11 +1033,32 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 {
 	int r;
 	dm_block_t block = get_bio_block(tc, bio);
+	struct cell *cell;
+	struct cell_key key;
 	struct dm_thin_lookup_result lookup_result;
+
+	/*
+	 * If cell is already occupied, then the block is already
+	 * being provisioned so we have nothing further to do here.
+	 */
+	build_virtual_key(tc->td, block, &key);
+	if (bio_detain(tc->pool->prison, &key, bio, &cell))
+		return;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
+		/*
+		 * We can release this cell now.  This thread is the only
+		 * one that puts bios into a cell, and we know there were
+		 * no preceeding bios.
+		 */
+		/*
+		 * TODO: this will probably have to change when discard goes
+		 * back in.
+		 */
+		cell_release_singleton(cell, bio);
+
 		if (lookup_result.shared)
 			process_shared_bio(tc, bio, block, &lookup_result);
 		else
@@ -1033,15 +1066,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		break;
 
 	case -ENODATA:
-		/*
-		 * When reading, we return zeroes regardless of the
-		 * zero_new_blocks setting.
-		 */
-		if (bio_data_dir(bio) == READ) {
-			zero_fill_bio(bio);
-			bio_endio(bio, 0);
-		} else
-			provision_block(tc, bio, block);
+		provision_block(tc, bio, block, cell);
 		break;
 
 	default:
@@ -1080,14 +1105,14 @@ static void process_prepared_mapping(struct new_mapping *m)
 	struct bio *bio;
 	int r;
 
+	bio = m->bio;
+	if (bio)
+		bio->bi_end_io = m->saved_bi_end_io;
+
 	if (m->err) {
 		cell_error(m->cell);
 		return;
 	}
-
-	bio = m->bio;
-	if (bio)
-		bio->bi_end_io = m->saved_bi_end_io;
 
 	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
 	if (r) {
@@ -1097,10 +1122,10 @@ static void process_prepared_mapping(struct new_mapping *m)
 	}
 
 	if (bio) {
-		cell_remap_and_issue_except(tc, m->cell, m->data_block, bio);
+		cell_defer_except(tc, m->cell, bio);
 		bio_endio(bio, 0);
 	} else
-		cell_remap_and_issue(tc, m->cell, m->data_block);
+		cell_defer(tc, m->cell, m->data_block);
 
 	list_del(&m->list);
 	mempool_free(m, tc->pool->mapping_pool);
