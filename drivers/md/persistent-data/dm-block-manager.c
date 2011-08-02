@@ -74,18 +74,18 @@ struct dm_block_manager {
 	 */
 	spinlock_t lock;
 
+	unsigned available_count;
+	unsigned reading_count;
+	unsigned writing_count;
+	unsigned nr_held_locks;
+
 	struct list_head empty_list;	/* No block assigned */
 	struct list_head clean_list;	/* Unlocked and clean */
 	struct list_head dirty_list;	/* Unlocked and dirty */
 	struct list_head error_list;
 
-	unsigned available_count;
-	unsigned reading_count;
-	unsigned writing_count;
-
-	unsigned nr_held_locks;
-
 	struct kmem_cache *block_cache;  /* struct dm_block */
+	char buffer_cache_name[32];
 	struct kmem_cache *buffer_cache; /* The buffers that store the raw data */
 
 	/*
@@ -532,9 +532,11 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
  * Low level block management
  *--------------------------------------------------------------*/
 
+static struct kmem_cache *block_cache;  /* struct dm_block */
+
 static struct dm_block *alloc_block(struct dm_block_manager *bm)
 {
-	struct dm_block *b = kmem_cache_alloc(bm->block_cache, GFP_KERNEL);
+	struct dm_block *b = kmem_cache_alloc(block_cache, GFP_KERNEL);
 
 	if (!b)
 		return NULL;
@@ -544,7 +546,7 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 
 	b->data = kmem_cache_alloc(bm->buffer_cache, GFP_KERNEL);
 	if (!b->data) {
-		kmem_cache_free(bm->block_cache, b);
+		kmem_cache_free(block_cache, b);
 		return NULL;
 	}
 
@@ -562,7 +564,7 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 static void free_block(struct dm_block *b)
 {
 	kmem_cache_free(b->bm->buffer_cache, b->data);
-	kmem_cache_free(b->bm->block_cache, b);
+	kmem_cache_free(block_cache, b);
 }
 
 static int populate_bm(struct dm_block_manager *bm, unsigned count)
@@ -632,18 +634,14 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	bm->writing_count = 0;
 	bm->nr_held_locks = 0;
 
-	bm->block_cache = kmem_cache_create("dm-block-manager-blocks",
-					    sizeof(struct dm_block),
-					    __alignof__(struct dm_block),
-					    SLAB_HWCACHE_ALIGN, NULL);
-	if (!bm->block_cache)
-		goto bad_bm;
-
-	bm->buffer_cache = kmem_cache_create("dm-block-manager-buffers",
+	sprintf(bm->buffer_cache_name, "dm_block_buffer-%d:%d",
+		MAJOR(disk_devt(bdev->bd_disk)),
+		MINOR(disk_devt(bdev->bd_disk)));
+	bm->buffer_cache = kmem_cache_create(bm->buffer_cache_name,
 					     block_size, SECTOR_SIZE,
 					     0, NULL);
 	if (!bm->buffer_cache)
-		goto bad_block_cache;
+		goto bad_bm;
 
 	bm->hash_size = hash_size;
 	bm->hash_mask = hash_size - 1;
@@ -652,19 +650,17 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 
 	bm->io = dm_io_client_create();
 	if (!bm->io)
-		goto bad_buffer_cache;
+		goto bad_io_client;
 
 	if (populate_bm(bm, cache_size) < 0)
-		goto bad_io_client;
+		goto bad_populate_bm;
 
 	return bm;
 
-bad_io_client:
+bad_populate_bm:
 	dm_io_client_destroy(bm->io);
-bad_buffer_cache:
+bad_io_client:
 	kmem_cache_destroy(bm->buffer_cache);
-bad_block_cache:
-	kmem_cache_destroy(bm->block_cache);
 bad_bm:
 	kfree(bm);
 
@@ -688,7 +684,6 @@ void dm_block_manager_destroy(struct dm_block_manager *bm)
 		free_block(b);
 
 	kmem_cache_destroy(bm->buffer_cache);
-	kmem_cache_destroy(bm->block_cache);
 
 	kfree(bm);
 }
@@ -963,3 +958,28 @@ unsigned dm_bm_locks_held(struct dm_block_manager *bm)
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_bm_locks_held);
+
+/*----------------------------------------------------------------*/
+
+static int __init init_persistent_data(void)
+{
+	block_cache = KMEM_CACHE(dm_block, SLAB_HWCACHE_ALIGN);
+	if (!block_cache)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void __exit exit_persistent_data(void)
+{
+	kmem_cache_destroy(block_cache);
+}
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
+MODULE_DESCRIPTION("Immutable metadata library for dm");
+module_init(init_persistent_data);
+module_exit(exit_persistent_data);
+
+/*----------------------------------------------------------------*/
+

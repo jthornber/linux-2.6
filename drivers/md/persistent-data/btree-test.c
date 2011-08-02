@@ -84,6 +84,7 @@ static int check_insert_commit_every(struct dm_transaction_manager *tm,
 		committed = 0;
 		key = next_rand(value);
 		value = next_rand(key);
+		__dm_bless_for_disk(&value);
 		r = dm_btree_insert(&info, root, &key, &value, &root);
 		if (r < 0) {
 			printk(KERN_ALERT "dm_btree_insert failed");
@@ -220,6 +221,7 @@ static int check_insert_h(struct dm_transaction_manager *tm)
 	}
 
 	for (i = 0; i < sizeof(table) / sizeof(*table); i++) {
+		__dm_bless_for_disk(&table[i][4]);
 		r = dm_btree_insert(&info, root, table[i], &table[i][4], &root);
 		if (r < 0) {
 			printk(KERN_ALERT "btree_insert failed");
@@ -249,6 +251,7 @@ static int check_insert_h(struct dm_transaction_manager *tm)
 		if (r < 0)
 			return r;
 
+		__dm_bless_for_disk(&v);
 		r = dm_btree_insert(&info, root, keys, &v, &root);
 		if (r < 0) {
 			printk(KERN_ALERT "btree_insert failed");
@@ -272,6 +275,7 @@ static int check_insert_h(struct dm_transaction_manager *tm)
 	/* check overwrites */
 	begin_again(tm, sb, &superblock);
 	for (i = 0; i < sizeof(overwrites) / sizeof(*overwrites); i++) {
+		__dm_bless_for_disk(&overwrites[i][4]);
 		r = dm_btree_insert(&info, root, overwrites[i], &overwrites[i][4], &root);
 		if (r < 0) {
 			printk(KERN_ALERT "btree_insert failed");
@@ -314,6 +318,7 @@ static int do_remove_scenario(struct dm_btree_info *info, dm_block_t root)
 	key[i] = 100;
 	bad_key[i] = 101;
 
+	__dm_bless_for_disk(&value);
 	r = dm_btree_insert(info, root, key, &value, &root);
 	if (r) {
 		printk(KERN_ALERT "insert failed");
@@ -414,6 +419,7 @@ static int check_removal_with_internal_nodes(struct dm_transaction_manager *tm)
 		unsigned c;
 		for (c = 0; c < 1000; c++) {
 			uint64_t k = c + 10000;
+			__dm_bless_for_disk(&value);
 			r = dm_btree_insert(&info, root, &k, &value, &root);
 			if (r) {
 				printk(KERN_ALERT "insert(%u) failed", c);
@@ -460,6 +466,7 @@ static int check_removal_in_hierarchy(struct dm_transaction_manager *tm)
 		key[1] = 1;
 		for (c = 0; c < 1000; c++) {
 			key[2] = c + 10000;
+			__dm_bless_for_disk(&value);
 			r = dm_btree_insert(&info, root, key, &value, &root);
 			if (r) {
 				printk(KERN_ALERT "insert(%u) failed", c);
@@ -503,6 +510,7 @@ static int insert_remove_many_scenario(
 
 	for (c = 0; c < count; c++) {
 		uint64_t k = order[c];
+		__dm_bless_for_disk(&value);
 		r = dm_btree_insert(&info, root, &k, &value, &root);
 		if (r) {
 			printk(KERN_ALERT "insert(%u) failed", c);
@@ -635,7 +643,7 @@ static int run_test(const char *name, test_fn fn)
 {
 	int r;
 	struct dm_space_map *sm = dm_sm_core_create(NR_BLOCKS);
-	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	fmode_t mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 	struct block_device *bdev = blkdev_get_by_path("/dev/sdb", mode, &run_test);
 	struct dm_block_manager *bm;
 	struct dm_transaction_manager *tm;

@@ -24,7 +24,7 @@ static void barf(const char *msg)
 static int run_test(const char *name, test_fn fn)
 {
 	int r;
-	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	fmode_t mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 	struct block_device *bdev = blkdev_get_by_path("/dev/sdb",
 						       mode,
 						       &run_test);

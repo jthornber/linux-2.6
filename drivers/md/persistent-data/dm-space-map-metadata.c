@@ -902,6 +902,7 @@ struct dm_space_map *dm_sm_metadata_init(void)
 
 	return &smm->sm;
 }
+EXPORT_SYMBOL_GPL(dm_sm_metadata_init);
 
 int dm_sm_metadata_create(struct dm_space_map *sm,
 			  struct dm_transaction_manager *tm,
@@ -935,6 +936,7 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 
 	return sm_metadata_commit(sm);
 }
+EXPORT_SYMBOL_GPL(dm_sm_metadata_create);
 
 int dm_sm_metadata_open(struct dm_space_map *sm,
 			struct dm_transaction_manager *tm,
@@ -954,3 +956,4 @@ int dm_sm_metadata_open(struct dm_space_map *sm,
 
 	return sm_metadata_commit(sm);
 }
+EXPORT_SYMBOL_GPL(dm_sm_metadata_open);

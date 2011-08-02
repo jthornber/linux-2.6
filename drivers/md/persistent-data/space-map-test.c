@@ -3,11 +3,11 @@
 #include <linux/kernel.h>
 #include <linux/blkdev.h>
 
-#include "md/persistent-data/dm-space-map.h"
-#include "md/persistent-data/dm-space-map-disk.h"
-#include "md/persistent-data/dm-space-map-metadata.h"
-#include "md/persistent-data/dm-transaction-manager.h"
+#include "dm-space-map.h"
 #include "dm-space-map-core.h"
+#include "dm-space-map-disk.h"
+#include "dm-space-map-metadata.h"
+#include "dm-transaction-manager.h"
 
 /*----------------------------------------------------------------*/
 
@@ -136,7 +136,7 @@ static int check_reopen_disk(void)
 {
 	int r;
 	struct dm_space_map *sm = dm_sm_core_create(NR_BLOCKS), *smd;
-	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	fmode_t mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 	struct block_device *bdev = blkdev_get_by_path("/dev/sdb", mode, &check_reopen_disk);
 	struct dm_block_manager *bm;
 	struct dm_transaction_manager *tm;
@@ -215,7 +215,6 @@ static int check_reopen_disk(void)
 	return 0;
 }
 
-
 /*----------------------------------------------------------------*/
 
 static int run_test_core(const char *name, test_fn fn)
@@ -235,7 +234,7 @@ static int run_test_disk(const char *name, test_fn fn)
 {
 	int r;
 	struct dm_space_map *sm = dm_sm_core_create(NR_BLOCKS), *smd;
-	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	fmode_t mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 	struct block_device *bdev = blkdev_get_by_path("/dev/sdb", mode, &run_test_disk);
 	struct dm_block_manager *bm;
 	struct dm_transaction_manager *tm;
@@ -273,7 +272,7 @@ static int run_test_metadata(const char *name, test_fn fn)
 {
 	int r;
 	struct dm_space_map *sm;
-	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	fmode_t mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 	struct block_device *bdev = blkdev_get_by_path("/dev/sdb", mode, &run_test_disk);
 	struct dm_block_manager *bm;
 	struct dm_transaction_manager *tm;
@@ -295,7 +294,7 @@ static int run_test_metadata(const char *name, test_fn fn)
 	if (IS_ERR(tm))
 		return -1;
 
-	r = dm_sm_metadata_create(sm, tm, NR_BLOCKS);
+	r = dm_sm_metadata_create(sm, tm, NR_BLOCKS, 0);
 	if (r) {
 		printk(KERN_ALERT "dm_sm_disk_create_recursive() failed");
 		return -1;
@@ -312,41 +311,54 @@ static int run_test_metadata(const char *name, test_fn fn)
 	return 0;
 }
 
+enum test_context {
+	TC_CORE = 1,
+	TC_DISK = 2,
+	TC_METADATA = 4,
+	TC_SELF_CONTAINED = 8
+};
+
 struct entry {
 	const char *name;
 	test_fn fn;
+	int flags;
 };
 
 static int space_map_test_init(void)
 {
 	static struct entry table_[] = {
-		{"alloc all blocks", check_alloc},
-		{"inc/dec", check_can_count},
-		{"freeing", check_freeing}
+		{"alloc all blocks", check_alloc, TC_CORE | TC_DISK},
+		{"inc/dec", check_can_count, TC_CORE | TC_DISK | TC_METADATA},
+		{"freeing", check_freeing, TC_CORE | TC_DISK | TC_METADATA},
+		{"check disk reopen", (test_fn) check_reopen_disk, TC_SELF_CONTAINED}
 	};
-
-#if 0
-	static struct entry staged_table_[] = {
-		{"alloc some blocks", check_staged_alloc},
-		{"inc/dec", check_can_count},
-	};
-#endif
 
 	int i;
 
-	printk(KERN_ALERT "running tests with core space map");
+	printk(KERN_ALERT "running tests with core space map\n");
 	for (i = 0; i < sizeof(table_) / sizeof(*table_); i++)
-		run_test_core(table_[i].name, table_[i].fn);
+		if (table_[i].flags & TC_CORE)
+			run_test_core(table_[i].name, table_[i].fn);
 
-	printk(KERN_ALERT "running tests with disk space map");
+	printk(KERN_ALERT "running tests with disk space map\n");
 	for (i = 0; i < sizeof(table_) / sizeof(*table_); i++)
-		run_test_disk(table_[i].name, table_[i].fn);
+		if (table_[i].flags & TC_DISK)
+			run_test_disk(table_[i].name, table_[i].fn);
 
-	printk(KERN_ALERT "running tests with recursive disk space map");
-	for (i = 1 /* miss out alloc all */; i < sizeof(table_) / sizeof(*table_); i++)
-		run_test_metadata(table_[i].name, table_[i].fn);
+	printk(KERN_ALERT "running tests with metadata disk space map\n");
+	for (i = 0; i < sizeof(table_) / sizeof(*table_); i++)
+		if (table_[i].flags & TC_METADATA)
+			run_test_metadata(table_[i].name, table_[i].fn);
 
-	check_reopen_disk();
+	printk(KERN_ALERT "running self contained tests\n");
+	for (i = 0; i < sizeof(table_) / sizeof(*table_); i++)
+		if (table_[i].flags & TC_SELF_CONTAINED) {
+			int r;
+
+			printk(KERN_ALERT "running %s ... ", table_[i].name);
+			r = ((int (*)(void)) table_[i].fn)();
+			printk(r == 0 ? KERN_ALERT "pass\n" : KERN_ALERT "fail\n");
+		}
 
 	return 0;
 }

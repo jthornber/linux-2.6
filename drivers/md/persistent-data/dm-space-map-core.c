@@ -38,7 +38,6 @@ static int sm_core_new_block(struct dm_space_map *sm, dm_block_t *b)
 		if (smc->counts[i] == 0) {
 			smc->counts[i] = 1;
 			*b = i;
-			printk(KERN_ALERT "allocated block %u\n", (unsigned) *b);
 			smc->maybe_first_free = i + 1;
 			smc->nr_free--;
 			return 0;

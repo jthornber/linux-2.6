@@ -12,3 +12,4 @@ dm-persistent-data-objs := \
 obj-$(CONFIG_DM_PERSISTENT_DATA_BM_TESTS) += block-manager-test.o
 obj-$(CONFIG_DM_PERSISTENT_DATA_TM_TESTS) += transaction-manager-test.o
 obj-$(CONFIG_DM_PERSISTENT_DATA_BTREE_TESTS) += btree-test.o
+obj-$(CONFIG_DM_PERSISTENT_DATA_SPACE_MAP_TESTS) += space-map-test.o

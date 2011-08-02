@@ -43,11 +43,19 @@ All tools run offline for first release.
   - [ ] resize metadata device
   - [ ] implement the btree trimming
   - [ ] external origin (read-only)
+  - [ ] Discard
   - [ ] a bug found in the userland tools, check that nr_free in the
     last index entry is being set correctly if there are fewer than a
     whole blocks worth.  Also check this is extended correctly.
+  - [ ] RHEL6.2 needs kzalloc
 
 ** Userland tools
 
   - [ ] multisnap_display
         That uses the held_root to do this for an online pool
+
+** Test suite
+
+  - [ ] We need tests with multiple pools
+  - [ ] Integrate Kabi's ramdisk tests, and use the pattern stomp
+    program he's found (http://www.scsifaq.org/RMiller_Tools/dt.html).

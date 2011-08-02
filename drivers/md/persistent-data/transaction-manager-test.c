@@ -57,7 +57,7 @@ static int run_test(const char *name, test_fn fn)
 {
 	int r;
 	struct dm_space_map *sm = dm_sm_core_create(NR_BLOCKS);
-	int mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
+	fmode_t mode = FMODE_READ | FMODE_WRITE | FMODE_EXCL;
 	struct block_device *bdev = blkdev_get_by_path("/dev/sdb", mode, &run_test);
 	struct dm_block_manager *bm;
 	struct dm_transaction_manager *tm;

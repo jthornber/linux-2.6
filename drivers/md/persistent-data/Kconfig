@@ -26,3 +26,10 @@ config DM_PERSISTENT_DATA_BTREE_TESTS
        ---help---
          Unit tests specific to ejt's test machine, beware.  Loading
          these modules will trash devices.
+
+config DM_PERSISTENT_DATA_SPACE_MAP_TESTS
+       tristate "Space map unit tests (build these as a module)"
+       depends on BLK_DEV_DM && DM_PERSISTENT_DATA
+       ---help---
+         Unit tests specific to ejt's test machine, beware.  Loading
+         these modules will trash devices.
