@@ -371,46 +371,37 @@ static void __clear_errors(struct dm_block_manager *bm)
 
 #define __wait_block(wq, lock, flags, sched_fn, condition)	\
 do {								\
-	int r = 0;						\
-								\
 	DEFINE_WAIT(wait);					\
 	add_wait_queue(wq, &wait);				\
 								\
 	for (;;) {						\
-		prepare_to_wait(wq, &wait, TASK_INTERRUPTIBLE); \
+		prepare_to_wait(wq, &wait, TASK_UNINTERRUPTIBLE); \
 		if (condition)					\
 			break;					\
 								\
 		spin_unlock_irqrestore(lock, flags);		\
-		if (signal_pending(current)) {			\
-			r = -ERESTARTSYS;			\
-			spin_lock_irqsave(lock, flags);		\
-			break;					\
-		}						\
-								\
 		sched_fn();					\
 		spin_lock_irqsave(lock, flags);			\
 	}							\
 								\
 	finish_wait(wq, &wait);					\
-	return r;						\
 } while (0)
 
-static int __wait_io(struct dm_block *b, unsigned long *flags)
+static void __wait_io(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, io_schedule,
 		     ((b->state != BS_READING) && (b->state != BS_WRITING)));
 }
 
-static int __wait_unlocked(struct dm_block *b, unsigned long *flags)
+static void __wait_unlocked(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
 		     ((b->state == BS_CLEAN) || (b->state == BS_DIRTY)));
 }
 
-static int __wait_read_lockable(struct dm_block *b, unsigned long *flags)
+static void __wait_read_lockable(struct dm_block *b, unsigned long *flags)
 	__retains(&b->bm->lock)
 {
 	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
@@ -419,21 +410,21 @@ static int __wait_read_lockable(struct dm_block *b, unsigned long *flags)
 						 b->state == BS_READ_LOCKED)));
 }
 
-static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
+static void __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     !bm->writing_count);
 }
 
-static int __wait_all_io(struct dm_block_manager *bm, unsigned long *flags)
+static void __wait_all_io(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
 		     !bm->writing_count && !bm->reading_count);
 }
 
-static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
+static void __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
 	__retains(&bm->lock)
 {
 	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
