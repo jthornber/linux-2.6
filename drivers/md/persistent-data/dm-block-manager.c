@@ -447,6 +447,7 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 	 * Wait for a block to appear on the empty or clean lists.
 	 */
 	spin_lock_irqsave(&bm->lock, flags);
+retry:
 	while (1) {
 		/*
 		 * Once we can lock and do io concurrently then we should
@@ -486,7 +487,11 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 		spin_lock_irqsave(&bm->lock, flags);
 		__wait_io(b, &flags);
 
-		/* FIXME: Can b have been recycled between io completion and here? */
+		/*
+		 * Has b been recycled whilst we were unlocked?
+		 */
+		if (b->where != where)
+			goto retry;
 
 		/*
 		 * Did the io succeed?
