@@ -604,6 +604,7 @@ static struct pool *pool_table_lookup(struct mapped_device *md)
  * target.  wake_worker() being the most notable exception (which is also used
  * by thin-pool to continue deferred IO processing after pool resume).
  */
+static void process_prepared_mapping(struct new_mapping *m);
 
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
@@ -798,11 +799,15 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	 * zeroing pre-existing data, we can issue the bio immediately.
 	 * Otherwise we use kcopyd to zero the data first.
 	 */
-	if (!pool->zero_new_blocks || io_covers_block(pool, bio)) {
+	if (!pool->zero_new_blocks)
+		process_prepared_mapping(m);
+
+	else if (io_covers_block(pool, bio)) {
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		dm_get_mapinfo(bio)->ptr = m;
 		remap_and_issue(tc, bio, data_block);
+
 	} else {
 		int r;
 		struct dm_io_region to;
