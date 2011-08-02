@@ -705,9 +705,10 @@ static void shared_read_endio(struct bio *bio, int err)
 	mempool_free(h, pool->endio_hook_pool);
 }
 
-static int io_covers_block(struct pool *pool, struct bio *bio)
+static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
-	return ((bio->bi_sector & pool->offset_mask) == 0) &&
+	return ((bio_data_dir(bio) == WRITE) &&
+		(bio->bi_sector & pool->offset_mask) == 0) &&
 		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
 }
 
@@ -751,7 +752,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	 * If the whole block of data is being overwritten, we can issue the
 	 * bio immediately. Otherwise we use kcopyd to clone the data first.
 	 */
-	if (io_covers_block(pool, bio)) {
+	if (io_overwrites_block(pool, bio)) {
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		dm_get_mapinfo(bio)->ptr = m;
@@ -802,7 +803,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	if (!pool->zero_new_blocks)
 		process_prepared_mapping(m);
 
-	else if (io_covers_block(pool, bio)) {
+	else if (io_overwrites_block(pool, bio)) {
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		dm_get_mapinfo(bio)->ptr = m;
