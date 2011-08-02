@@ -561,7 +561,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	int create;
 
 	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
-				     THIN_METADATA_CACHE_SIZE);
+				     THIN_METADATA_CACHE_SIZE, 3);
 	if (!bm) {
 		DMERR("could not create block manager");
 		return ERR_PTR(-ENOMEM);

@@ -58,7 +58,8 @@ struct dm_block {
 
 struct dm_block_manager {
 	struct block_device *bdev;
-	unsigned cache_size;	/* In bytes */
+	unsigned cache_size;
+	unsigned max_held_per_thread;
 	unsigned block_size;	/* In bytes */
 	dm_block_t nr_blocks;
 
@@ -74,6 +75,7 @@ struct dm_block_manager {
 	 */
 	spinlock_t lock;
 
+	unsigned error_count;
 	unsigned available_count;
 	unsigned reading_count;
 	unsigned writing_count;
@@ -161,8 +163,10 @@ static void __transition(struct dm_block *b, enum dm_block_state new_state)
 		b->io_flags = 0;
 		b->validator = NULL;
 
-		if (b->state == BS_ERROR)
+		if (b->state == BS_ERROR) {
+			bm->error_count--;
 			bm->available_count++;
+		}
 		break;
 
 	case BS_CLEAN:
@@ -244,6 +248,7 @@ static void __transition(struct dm_block *b, enum dm_block_state new_state)
 		/* DOT: reading -> error */
 		BUG_ON(!((b->state == BS_WRITING) ||
 			 (b->state == BS_READING)));
+		bm->error_count++;
 		list_add_tail(&b->list, &bm->error_list);
 		break;
 	}
@@ -450,6 +455,16 @@ static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
 retry:
 	while (1) {
 		/*
+		 * The calling thread may hold some locks on blocks, and
+		 * the rest be errored.  In which case we're never going to
+		 * succeed here.
+		 */
+		if (bm->error_count == bm->cache_size - bm->max_held_per_thread) {
+			spin_unlock_irqrestore(&bm->lock, flags);
+			return -ENOMEM;
+		}
+
+		/*
 		 * Once we can lock and do io concurrently then we should
 		 * probably flush at bm->cache_size / 2 and write _all_
 		 * dirty blocks.
@@ -599,7 +614,8 @@ static unsigned calc_hash_size(unsigned cache_size)
 
 struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 						 unsigned block_size,
-						 unsigned cache_size)
+						 unsigned cache_size,
+						 unsigned max_held_per_thread)
 {
 	unsigned i;
 	unsigned hash_size = calc_hash_size(cache_size);
@@ -613,6 +629,7 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 
 	bm->bdev = bdev;
 	bm->cache_size = max(MAX_CACHE_SIZE, cache_size);
+	bm->max_held_per_thread = max_held_per_thread;
 	bm->block_size = block_size;
 	bm->nr_blocks = i_size_read(bdev->bd_inode);
 	do_div(bm->nr_blocks, block_size);
@@ -623,6 +640,7 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	INIT_LIST_HEAD(&bm->clean_list);
 	INIT_LIST_HEAD(&bm->dirty_list);
 	INIT_LIST_HEAD(&bm->error_list);
+	bm->error_count = 0;
 	bm->available_count = 0;
 	bm->reading_count = 0;
 	bm->writing_count = 0;
