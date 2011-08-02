@@ -756,9 +756,15 @@ retry:
 
 				b->write_lock_pending++;
 				__wait_unlocked(b, &flags);
-				b->write_lock_pending--;
 				if (b->where != block)
+					/*
+					 * Recycled blocks have their
+					 * write_lock_pending count reset
+					 * to zero, so no need to undo the
+					 * above increment.
+					 */
 					goto retry;
+				b->write_lock_pending--;
 			}
 			break;
 		}
