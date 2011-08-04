@@ -7,7 +7,7 @@
 #include "dm-thin-metadata.h"
 #include "persistent-data/dm-btree.h"
 #include "persistent-data/dm-space-map.h"
-#include "persistent-data/dm-space-map-disk.h"
+#include "persistent-data/dm-space-map-core.h"
 #include "persistent-data/dm-transaction-manager.h"
 
 #include <linux/list.h>
@@ -378,12 +378,14 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 			return ERR_PTR(r);
 		}
 
-		data_sm = dm_sm_disk_create(tm, nr_blocks);
+		data_sm = dm_sm_core_create(nr_blocks);
 		if (IS_ERR(data_sm)) {
 			DMERR("sm_disk_create failed");
 			r = PTR_ERR(data_sm);
 			goto bad;
 		}
+		printk(KERN_ALERT "created data space map with %u blocks.\n",
+		       (unsigned) nr_blocks);
 
 		r = dm_tm_pre_commit(tm);
 		if (r < 0) {
@@ -397,6 +399,8 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 			goto bad_data_sm;
 		}
 	} else {
+		BUG_ON(1);
+#if 0
 		struct thin_disk_superblock *disk_super = NULL;
 		size_t space_map_root_offset =
 			offsetof(struct thin_disk_superblock, metadata_space_map_root);
@@ -419,6 +423,7 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 		}
 
 		dm_tm_unlock(tm, sblock);
+#endif
 	}
 
 	pmd = kmalloc(sizeof(*pmd), GFP_KERNEL);

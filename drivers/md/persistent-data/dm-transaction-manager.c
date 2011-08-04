@@ -5,8 +5,7 @@
  */
 #include "dm-transaction-manager.h"
 #include "dm-space-map.h"
-#include "dm-space-map-disk.h"
-#include "dm-space-map-metadata.h"
+#include "dm-space-map-core.h"
 #include "dm-persistent-data-internal.h"
 
 #include <linux/module.h>
@@ -341,9 +340,13 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 {
 	int r;
 
-	*sm = dm_sm_metadata_init();
+	*sm = dm_sm_core_create(dm_bm_nr_blocks(bm));
 	if (IS_ERR(*sm))
 		return PTR_ERR(*sm);
+	dm_sm_inc_block(*sm, sb_location);	/* reserve the superblock */
+
+	printk(KERN_ALERT "created metadata core sm for %u blocks\n",
+	       (unsigned) dm_bm_nr_blocks(bm));
 
 	*tm = dm_tm_create(bm, *sm);
 	if (IS_ERR(*tm)) {
@@ -359,14 +362,18 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 			goto bad1;
 		}
 
+#if 0
 		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm),
 					  sb_location);
 		if (r) {
 			DMERR("couldn't create metadata space map");
 			goto bad2;
 		}
+#endif
 
 	} else {
+		BUG_ON(1);
+#if 0
 		r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location,
 				     sb_validator, sblock);
 		if (r < 0) {
@@ -381,6 +388,7 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 			DMERR("couldn't open metadata space map");
 			goto bad2;
 		}
+#endif
 	}
 
 	return 0;
@@ -409,6 +417,7 @@ int dm_tm_open_with_sm(struct dm_block_manager *bm, dm_block_t sb_location,
 		       struct dm_transaction_manager **tm,
 		       struct dm_space_map **sm, struct dm_block **sblock)
 {
+	BUG_ON(1);
 	return dm_tm_create_internal(bm, sb_location, sb_validator, root_offset,
 				     root_max_len, tm, sm, sblock, 0);
 }
