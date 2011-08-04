@@ -1264,6 +1264,8 @@ static void pool_destroy(struct pool *pool)
 	if (pool->wq)
 		destroy_workqueue(pool->wq);
 
+	if (pool->next_mapping)
+		mempool_free(pool->next_mapping, pool->mapping_pool);
 	mempool_destroy(pool->mapping_pool);
 	mempool_destroy(pool->endio_hook_pool);
 	kfree(pool);
