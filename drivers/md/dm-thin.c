@@ -160,6 +160,10 @@ static struct bio_prison *prison_create(unsigned nr_cells)
 	spin_lock_init(&prison->lock);
 	prison->cell_pool = mempool_create_kmalloc_pool(nr_cells,
 							sizeof(struct cell));
+	if (!prison->cell_pool) {
+		kfree(prison);
+		return NULL;
+	}
 	prison->nr_buckets = nr_buckets;
 	prison->hash_mask = nr_buckets - 1;
 	prison->cells = (struct hlist_head *) (prison + 1);
