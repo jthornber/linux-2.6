@@ -2039,7 +2039,6 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_pool_lookup;
 	}
 	pool_inc(tc->pool);
-	dm_put(pool_md);
 
 	r = dm_pool_open_thin_device(tc->pool->pmd, tc->dev_id, &tc->td);
 	if (r) {
@@ -2051,6 +2050,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 0;
 	ti->discards_supported = 0;
+
+	dm_put(pool_md);
 
 	return 0;
 
