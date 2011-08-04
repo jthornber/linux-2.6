@@ -440,18 +440,19 @@ static void __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
 /*----------------------------------------------------------------
  * Finding a free block to recycle
  *--------------------------------------------------------------*/
-static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
-			 int need_read, struct dm_block_validator *v,
-			 struct dm_block **result)
+static int __recycle_block(struct dm_block_manager *bm, dm_block_t where,
+			   int need_read, struct dm_block_validator *v,
+			   unsigned long flags,
+			   struct dm_block **result)
+	__retains(&bm->lock)
 {
 	int r = 0;
 	struct dm_block *b;
-	unsigned long flags, available;
+	unsigned long available;
 
 	/*
 	 * Wait for a block to appear on the empty or clean lists.
 	 */
-	spin_lock_irqsave(&bm->lock, flags);
 retry:
 	while (1) {
 		/*
@@ -459,10 +460,8 @@ retry:
 		 * the rest be errored.  In which case we're never going to
 		 * succeed here.
 		 */
-		if (bm->error_count == bm->cache_size - bm->max_held_per_thread) {
-			spin_unlock_irqrestore(&bm->lock, flags);
+		if (bm->error_count == bm->cache_size - bm->max_held_per_thread)
 			return -ENOMEM;
-		}
 
 		/*
 		 * Once we can lock and do io concurrently then we should
@@ -490,11 +489,11 @@ retry:
 	}
 
 	b->where = where;
-	b->validator = v;
 	__transition(b, BS_READING);
 
 	if (!need_read) {
 		memset(b->data, 0, bm->block_size);
+		b->validator = v;
 		__transition(b, BS_CLEAN);
 	} else {
 		spin_unlock_irqrestore(&bm->lock, flags);
@@ -518,18 +517,23 @@ retry:
 			 */
 			__transition(b, BS_EMPTY);
 			r = -EIO;
-		}
-
-		if (b->validator) {
-			r = b->validator->check(b->validator, b, bm->block_size);
-			if (r) {
-				DMERR("%s validator check failed for block %llu",
-				      b->validator->name, (unsigned long long)b->where);
-				__transition(b, BS_EMPTY);
+		} else {
+			/*
+			 * We set the validator late, since there's a
+			 * window while we're waiting for the read where
+			 * someone could have set a different one.
+			 */
+			b->validator = v;
+			if (b->validator) {
+				r = b->validator->check(b->validator, b, bm->block_size);
+				if (r) {
+					DMERR("%s validator check failed for block %llu",
+					      b->validator->name, (unsigned long long)b->where);
+					__transition(b, BS_EMPTY);
+				}
 			}
 		}
 	}
-	spin_unlock_irqrestore(&bm->lock, flags);
 
 	if (!r)
 		*result = b;
@@ -724,29 +728,17 @@ static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
 retry:
 	b = __find_block(bm, block);
 	if (b) {
-		if (!need_read)
-			b->validator = v;
-		else {
-			if (b->validator && (v != b->validator)) {
-				DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
-				      b->validator->name, v ? v->name : "NULL",
-				      (unsigned long long)b->where);
-				spin_unlock_irqrestore(&bm->lock, flags);
-				return -EINVAL;
-
-			}
-			if (!b->validator && v) {
-				b->validator = v;
-				r = b->validator->check(b->validator, b, bm->block_size);
-				if (r) {
-					DMERR("%s validator check failed for block %llu",
-					      b->validator->name,
-					      (unsigned long long)b->where);
-					spin_unlock_irqrestore(&bm->lock, flags);
-					return r;
-				}
-			}
-		}
+		/*
+		 * The block may be in state BS_READING at this point.
+		 * Which means we're racing for this block against another
+		 * locking op.  This is fine, __wait_read_lockable() below
+		 * will do the right thing.  We do need to be careful
+		 * however that the validator isn't set until the lock is
+		 * full granted, otherwise the other thread could get the
+		 * lock, but this one's validator be used. This situation
+		 * only arises if there's a programming error in the code
+		 * driving bm.
+		 */
 
 		switch (how) {
 		case READ:
@@ -787,15 +779,36 @@ retry:
 			break;
 		}
 
+		if (!need_read)
+			b->validator = v;
+		else {
+			if (b->validator && (v != b->validator)) {
+				DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
+				      b->validator->name, v ? v->name : "NULL",
+				      (unsigned long long)b->where);
+				spin_unlock_irqrestore(&bm->lock, flags);
+				return -EINVAL;
+			}
+
+			if (!b->validator && v) {
+				b->validator = v;
+				r = b->validator->check(b->validator, b, bm->block_size);
+				if (r) {
+					DMERR("%s validator check failed for block %llu",
+					      b->validator->name,
+					      (unsigned long long)b->where);
+					spin_unlock_irqrestore(&bm->lock, flags);
+					return r;
+				}
+			}
+		}
+
 	} else if (!can_block) {
 		r = -EWOULDBLOCK;
 		goto out;
 
-	} else {
-		spin_unlock_irqrestore(&bm->lock, flags);
-		r = recycle_block(bm, block, need_read, v, &b);
-		spin_lock_irqsave(&bm->lock, flags);
-	}
+	} else
+		r = __recycle_block(bm, block, need_read, v, flags, &b);
 
 	if (!r) {
 		switch (how) {
