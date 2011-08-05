@@ -1190,7 +1190,10 @@ static int __write_changed_details(struct dm_pool_metadata *pmd)
 	return 0;
 }
 
-int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
+/*
+ * Returns 1 if commit took place, 0 if not, or < 0 for error.
+ */
+static int __maybe_commit_metadata(struct dm_pool_metadata *pmd)
 {
 	/*
 	 * FIXME: associated pool should be made read-only on
@@ -1205,7 +1208,6 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 	 */
 	BUILD_BUG_ON(sizeof(struct thin_disk_superblock) > 512);
 
-	down_write(&pmd->root_lock);
 	r = __write_changed_details(pmd);
 	if (r < 0)
 		goto out;
@@ -1237,7 +1239,20 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 		goto out;
 
 	r = dm_tm_commit(pmd->tm, pmd->sblock);
-	if (r < 0)
+	if (!r)
+		r = 1;
+out:
+	return r;
+}
+
+int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
+{
+	int r;
+
+	down_write(&pmd->root_lock);
+
+	r = __maybe_commit_metadata(pmd);
+	if (r <= 0)
 		goto out;
 
 	/*
