@@ -562,6 +562,7 @@ static struct dm_block *alloc_block(struct dm_block_manager *bm)
 		kmem_cache_free(block_cache, b);
 		return NULL;
 	}
+	BUG_ON(((unsigned long) b->data) & 511);
 
 	b->validator = NULL;
 	b->state = BS_EMPTY;
