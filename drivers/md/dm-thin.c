@@ -981,6 +981,13 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	int r;
 	dm_block_t data_block;
 
+	if (bio_data_dir(bio) == READ) {
+	        zero_fill_bio(bio);
+	        cell_release_singleton(cell, bio);
+	        bio_endio(bio, 0);
+	        return;
+	}
+
 	r = alloc_data_block(tc, &data_block);
 	switch (r) {
 	case 0:
