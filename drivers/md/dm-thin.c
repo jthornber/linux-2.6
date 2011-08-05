@@ -424,15 +424,6 @@ struct new_mapping {
 
 /*----------------------------------------------------------------*/
 
-static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
-			       bio_end_io_t *fn)
-{
-	*save = bio->bi_end_io;
-	bio->bi_end_io = fn;
-}
-
-/*----------------------------------------------------------------*/
-
 /*
  * A global list that uses a struct mapped_device as a key.
  */
@@ -534,20 +525,6 @@ static void __maybe_add_mapping(struct new_mapping *m)
 	}
 }
 
-static void overwrite_endio(struct bio *bio, int err)
-{
-	unsigned long flags;
-	struct new_mapping *m = dm_get_mapinfo(bio)->ptr;
-	struct pool *pool = m->tc->pool;
-
-	m->err = err;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	m->prepared = 1;
-	__maybe_add_mapping(m);
-	spin_unlock_irqrestore(&pool->lock, flags);
-}
-
 static void copy_complete(int read_err, unsigned long write_err, void *context)
 {
 	unsigned long flags;
@@ -560,13 +537,6 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	m->prepared = 1;
 	__maybe_add_mapping(m);
 	spin_unlock_irqrestore(&pool->lock, flags);
-}
-
-static int io_overwrites_block(struct pool *pool, struct bio *bio)
-{
-	return ((bio_data_dir(bio) == WRITE) &&
-		(bio->bi_sector & pool->offset_mask) == 0) &&
-		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
 }
 
 static int ensure_next_mapping(struct pool *pool)
@@ -602,21 +572,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	m->err = 0;
 	m->bio = NULL;
 
-	/*
-	 * If the whole block of data is being overwritten or we are not
-	 * zeroing pre-existing data, we can issue the bio immediately.
-	 * Otherwise we use kcopyd to zero the data first.
-	 */
-	if (!pool->zero_new_blocks)
-		process_prepared_mapping(m);
-
-	else if (io_overwrites_block(pool, bio)) {
-		m->bio = bio;
-		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
-		dm_get_mapinfo(bio)->ptr = m;
-		remap_and_issue(tc, bio, data_block);
-
-	} else {
+	{
 		int r;
 		struct dm_io_region to;
 
