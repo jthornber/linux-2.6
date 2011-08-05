@@ -187,6 +187,13 @@ static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
 	return (uint32_t) (hash & prison->hash_mask);
 }
 
+static int keys_equal(struct cell_key *lhs, struct cell_key *rhs)
+{
+	       return (lhs->virtual == rhs->virtual) &&
+		       (lhs->dev == rhs->dev) &&
+		       (lhs->block == rhs->block);
+}
+
 static struct cell *__search_bucket(struct hlist_head *bucket,
 				    struct cell_key *key)
 {
@@ -194,7 +201,7 @@ static struct cell *__search_bucket(struct hlist_head *bucket,
 	struct hlist_node *tmp;
 
 	hlist_for_each_entry(cell, tmp, bucket, list)
-		if (!memcmp(&cell->key, key, sizeof(cell->key)))
+		if (keys_equal(&cell->key, key))
 			return cell;
 
 	return NULL;
