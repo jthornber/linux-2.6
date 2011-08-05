@@ -19,7 +19,6 @@
 /*
  * Tunable constants
  */
-#define ENDIO_HOOK_POOL_SIZE 10240
 #define DEFERRED_SET_SIZE 64
 #define MAPPING_POOL_SIZE 1024
 #define PRISON_CELLS 1024
@@ -327,118 +326,8 @@ static void cell_error(struct cell *cell)
 /*----------------------------------------------------------------*/
 
 /*
- * We use the deferred set to keep track of pending reads to shared blocks.
- * We do this to ensure the new mapping caused by a write isn't performed
- * until these prior reads have completed.  Otherwise the insertion of the
- * new mapping could free the old block that the read bios are mapped to.
- */
-
-struct deferred_set;
-struct deferred_entry {
-	struct deferred_set *ds;
-	unsigned count;
-	struct list_head work_items;
-};
-
-struct deferred_set {
-	spinlock_t lock;
-	unsigned current_entry;
-	unsigned sweeper;
-	struct deferred_entry entries[DEFERRED_SET_SIZE];
-};
-
-static void ds_init(struct deferred_set *ds)
-{
-	int i;
-
-	spin_lock_init(&ds->lock);
-	ds->current_entry = 0;
-	ds->sweeper = 0;
-	for (i = 0; i < DEFERRED_SET_SIZE; i++) {
-		ds->entries[i].ds = ds;
-		ds->entries[i].count = 0;
-		INIT_LIST_HEAD(&ds->entries[i].work_items);
-	}
-}
-
-static struct deferred_entry *ds_inc(struct deferred_set *ds)
-{
-	unsigned long flags;
-	struct deferred_entry *entry;
-
-	spin_lock_irqsave(&ds->lock, flags);
-	entry = ds->entries + ds->current_entry;
-	entry->count++;
-	spin_unlock_irqrestore(&ds->lock, flags);
-
-	return entry;
-}
-
-static unsigned ds_next(unsigned index)
-{
-	return (index + 1) % DEFERRED_SET_SIZE;
-}
-
-static void __sweep(struct deferred_set *ds, struct list_head *head)
-{
-	while ((ds->sweeper != ds->current_entry) &&
-	       !ds->entries[ds->sweeper].count) {
-		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
-		ds->sweeper = ds_next(ds->sweeper);
-	}
-
-	if ((ds->sweeper == ds->current_entry) && !ds->entries[ds->sweeper].count)
-		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
-}
-
-static void ds_dec(struct deferred_entry *entry, struct list_head *head)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&entry->ds->lock, flags);
-	BUG_ON(!entry->count);
-	--entry->count;
-	__sweep(entry->ds, head);
-	spin_unlock_irqrestore(&entry->ds->lock, flags);
-}
-
-/*
- * Returns 1 if deferred or 0 if no pending items to delay job.
- */
-static int ds_add_work(struct deferred_set *ds, struct list_head *work)
-{
-	int r = 1;
-	unsigned long flags;
-	unsigned next_entry;
-
-	spin_lock_irqsave(&ds->lock, flags);
-	if ((ds->sweeper == ds->current_entry) &&
-	    !ds->entries[ds->current_entry].count)
-		r = 0;
-	else {
-		list_add(work, &ds->entries[ds->current_entry].work_items);
-		next_entry = ds_next(ds->current_entry);
-		if (!ds->entries[next_entry].count)
-			ds->current_entry = next_entry;
-	}
-	spin_unlock_irqrestore(&ds->lock, flags);
-
-	return r;
-}
-
-/*----------------------------------------------------------------*/
-
-/*
  * Key building.
  */
-static void build_data_key(struct dm_thin_device *td,
-			   dm_block_t b, struct cell_key *key)
-{
-	key->virtual = 0;
-	key->dev = dm_thin_dev_id(td);
-	key->block = b;
-}
-
 static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
 			      struct cell_key *key)
 {
@@ -481,11 +370,8 @@ struct pool {
 	int low_water_triggered;	/* A dm event has been sent */
 	struct bio_list retry_list;
 
-	struct deferred_set ds;	/* FIXME: move to thin_c */
-
 	struct new_mapping *next_mapping;
 	mempool_t *mapping_pool;
-	mempool_t *endio_hook_pool;
 
 	atomic_t ref_count;
 };
@@ -513,14 +399,6 @@ struct thin_c {
 
 	struct pool *pool;
 	struct dm_thin_device *td;
-};
-
-/* FIXME: Can cells and new_mappings be combined? */
-
-struct endio_hook {
-	struct thin_c *tc;
-	bio_end_io_t *saved_bi_end_io;
-	struct deferred_entry *entry;
 };
 
 struct new_mapping {
@@ -656,20 +534,6 @@ static void __maybe_add_mapping(struct new_mapping *m)
 	}
 }
 
-static void copy_complete(int read_err, unsigned long write_err, void *context)
-{
-	unsigned long flags;
-	struct new_mapping *m = context;
-	struct pool *pool = m->tc->pool;
-
-	m->err = read_err || write_err ? -EIO : 0;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	m->prepared = 1;
-	__maybe_add_mapping(m);
-	spin_unlock_irqrestore(&pool->lock, flags);
-}
-
 static void overwrite_endio(struct bio *bio, int err)
 {
 	unsigned long flags;
@@ -684,29 +548,18 @@ static void overwrite_endio(struct bio *bio, int err)
 	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
-static void shared_read_endio(struct bio *bio, int err)
+static void copy_complete(int read_err, unsigned long write_err, void *context)
 {
-	struct list_head mappings;
-	struct new_mapping *m, *tmp;
-	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	unsigned long flags;
-	struct pool *pool = h->tc->pool;
+	struct new_mapping *m = context;
+	struct pool *pool = m->tc->pool;
 
-	bio->bi_end_io = h->saved_bi_end_io;
-	bio_endio(bio, err);
-
-	INIT_LIST_HEAD(&mappings);
-	ds_dec(h->entry, &mappings);
+	m->err = read_err || write_err ? -EIO : 0;
 
 	spin_lock_irqsave(&pool->lock, flags);
-	list_for_each_entry_safe(m, tmp, &mappings, list) {
-		list_del(&m->list);
-		INIT_LIST_HEAD(&m->list);
-		__maybe_add_mapping(m);
-	}
+	m->prepared = 1;
+	__maybe_add_mapping(m);
 	spin_unlock_irqrestore(&pool->lock, flags);
-
-	mempool_free(h, pool->endio_hook_pool);
 }
 
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
@@ -731,56 +584,6 @@ static struct new_mapping *get_next_mapping(struct pool *pool)
 	BUG_ON(!pool->next_mapping);
 	pool->next_mapping = NULL;
 	return r;
-}
-
-static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
-			  dm_block_t data_origin, dm_block_t data_dest,
-			  struct cell *cell, struct bio *bio)
-{
-	int r;
-	struct pool *pool = tc->pool;
-	struct new_mapping *m = get_next_mapping(pool);
-
-	INIT_LIST_HEAD(&m->list);
-	m->prepared = 0;
-	m->tc = tc;
-	m->virt_block = virt_block;
-	m->data_block = data_dest;
-	m->cell = cell;
-	m->err = 0;
-	m->bio = NULL;
-
-	ds_add_work(&pool->ds, &m->list);
-
-	/*
-	 * If the whole block of data is being overwritten, we can issue the
-	 * bio immediately. Otherwise we use kcopyd to clone the data first.
-	 */
-	if (io_overwrites_block(pool, bio)) {
-		m->bio = bio;
-		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
-		dm_get_mapinfo(bio)->ptr = m;
-		remap_and_issue(tc, bio, data_dest);
-	} else {
-		struct dm_io_region from, to;
-
-		/* IO to pool_dev remaps to the pool target's data_dev */
-		from.bdev = tc->pool_dev->bdev;
-		from.sector = data_origin * pool->sectors_per_block;
-		from.count = pool->sectors_per_block;
-
-		to.bdev = tc->pool_dev->bdev;
-		to.sector = data_dest * pool->sectors_per_block;
-		to.count = pool->sectors_per_block;
-
-		r = dm_kcopyd_copy(pool->copier, &from, 1, &to,
-				   0, copy_complete, m);
-		if (r < 0) {
-			mempool_free(m, pool->mapping_pool);
-			DMERR("dm_kcopyd_copy() failed");
-			cell_error(cell);
-		}
-	}
 }
 
 static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
@@ -917,64 +720,6 @@ static void no_space(struct cell *cell)
 		retry_later(bio);
 }
 
-static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
-			  struct cell_key *key,
-			  struct dm_thin_lookup_result *lookup_result,
-			  struct cell *cell)
-{
-	int r;
-	dm_block_t data_block;
-
-	r = alloc_data_block(tc, &data_block);
-	switch (r) {
-	case 0:
-		schedule_copy(tc, block, lookup_result->block,
-			      data_block, cell, bio);
-		break;
-
-	case -ENOSPC:
-		no_space(cell);
-		break;
-
-	default:
-		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
-		cell_error(cell);
-		break;
-	}
-}
-
-static void process_shared_bio(struct thin_c *tc, struct bio *bio,
-			       dm_block_t block,
-			       struct dm_thin_lookup_result *lookup_result)
-{
-	struct cell *cell;
-	struct pool *pool = tc->pool;
-	struct cell_key key;
-
-	/*
-	 * If data_cell is already occupied, then sharing is already in the
-	 * process of being broken so we have nothing further to do here.
-	 */
-	build_data_key(tc->td, lookup_result->block, &key);
-	if (bio_detain(pool->prison, &key, bio, &cell))
-		return;
-
-	if (bio_data_dir(bio) == WRITE)
-		break_sharing(tc, bio, block, &key, lookup_result, cell);
-	else {
-		struct endio_hook *h;
-		h = mempool_alloc(pool->endio_hook_pool, GFP_NOIO);
-
-		h->tc = tc;
-		h->entry = ds_inc(&pool->ds);
-		save_and_set_endio(bio, &h->saved_bi_end_io, shared_read_endio);
-		dm_get_mapinfo(bio)->ptr = h;
-
-		cell_release_singleton(cell, bio);
-		remap_and_issue(tc, bio, lookup_result->block);
-	}
-}
-
 static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block,
 			    struct cell *cell)
 {
@@ -1029,7 +774,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		cell_release_singleton(cell, bio);
 
 		if (lookup_result.shared)
-			process_shared_bio(tc, bio, block, &lookup_result);
+			BUG_ON(1); /* outside test scenario */
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
 		break;
@@ -1271,7 +1016,6 @@ static void pool_destroy(struct pool *pool)
 	if (pool->next_mapping)
 		mempool_free(pool->next_mapping, pool->mapping_pool);
 	mempool_destroy(pool->mapping_pool);
-	mempool_destroy(pool->endio_hook_pool);
 	kfree(pool);
 }
 
@@ -1335,7 +1079,6 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	INIT_LIST_HEAD(&pool->prepared_mappings);
 	pool->low_water_triggered = 0;
 	bio_list_init(&pool->retry_list);
-	ds_init(&pool->ds);
 
 	pool->next_mapping = NULL;
 	pool->mapping_pool =
@@ -1346,19 +1089,10 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 		goto bad_mapping_pool;
 	}
 
-	pool->endio_hook_pool =
-		mempool_create_kmalloc_pool(ENDIO_HOOK_POOL_SIZE, sizeof(struct endio_hook));
-	if (!pool->endio_hook_pool) {
-		*error = "Error creating pool's endio_hook mempool";
-		err_p = ERR_PTR(-ENOMEM);
-		goto bad_endio_hook_pool;
-	}
 	atomic_set(&pool->ref_count, 1);
 
 	return pool;
 
-bad_endio_hook_pool:
-	mempool_destroy(pool->mapping_pool);
 bad_mapping_pool:
 	destroy_workqueue(pool->wq);
 bad_wq:
@@ -1715,111 +1449,6 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 	return 0;
 }
 
-static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *pool)
-{
-	dm_thin_id dev_id;
-	dm_thin_id origin_dev_id;
-	int r;
-
-	r = check_arg_count(argc, 3);
-	if (r)
-		return r;
-
-	r = read_dev_id(argv[1], &dev_id, 1);
-	if (r)
-		return r;
-
-	r = read_dev_id(argv[2], &origin_dev_id, 1);
-	if (r)
-		return r;
-
-	r = dm_pool_create_snap(pool->pmd, dev_id, origin_dev_id);
-	if (r) {
-		DMWARN("Creation of new snapshot %s of device %s failed.",
-		       argv[1], argv[2]);
-		return r;
-	}
-
-	return 0;
-}
-
-static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
-{
-	dm_thin_id dev_id;
-	int r;
-
-	r = check_arg_count(argc, 2);
-	if (r)
-		return r;
-
-	r = read_dev_id(argv[1], &dev_id, 1);
-	if (r)
-		return r;
-
-	r = dm_pool_delete_thin_device(pool->pmd, dev_id);
-	if (r)
-		DMWARN("Deletion of thin device %s failed.", argv[1]);
-
-	return r;
-}
-
-static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
-{
-	dm_thin_id dev_id;
-	sector_t new_size;
-	int r;
-
-	r = check_arg_count(argc, 3);
-	if (r)
-		return r;
-
-	r = read_dev_id(argv[1], &dev_id, 1);
-	if (r)
-		return r;
-
-	if (kstrtoull(argv[2], 10, (unsigned long long *)&new_size)) {
-		DMWARN("trim device %s: Invalid new size: %s sectors.",
-		       argv[1], argv[2]);
-		return -EINVAL;
-	}
-
-	r = dm_pool_trim_thin_device(pool->pmd, dev_id,
-			dm_sector_div_up(new_size, pool->sectors_per_block));
-	if (r)
-		DMWARN("Attempt to trim thin device %s failed.", argv[1]);
-
-	return r;
-}
-
-static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
-{
-	dm_thin_id old_id, new_id;
-	int r;
-
-	r = check_arg_count(argc, 3);
-	if (r)
-		return r;
-
-	if (kstrtoull(argv[1], 10, (unsigned long long *)&old_id)) {
-		DMWARN("set_transaction_id message: Unrecognised id %s.", argv[1]);
-		return -EINVAL;
-	}
-
-	if (kstrtoull(argv[2], 10, (unsigned long long *)&new_id)) {
-		DMWARN("set_transaction_id message: Unrecognised new id %s.", argv[2]);
-		return -EINVAL;
-	}
-
-	r = dm_pool_set_metadata_transaction_id(pool->pmd, old_id, new_id);
-	if (r) {
-		DMWARN("Failed to change transaction id from %s to %s.",
-		       argv[1], argv[2]);
-		return r;
-	}
-
-	return 0;
-}
-
 /*
  * Messages supported:
  *   create_thin	<dev_id>
@@ -1836,18 +1465,6 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 
 	if (!strcasecmp(argv[0], "create_thin"))
 		r = process_create_thin_mesg(argc, argv, pool);
-
-	else if (!strcasecmp(argv[0], "create_snap"))
-		r = process_create_snap_mesg(argc, argv, pool);
-
-	else if (!strcasecmp(argv[0], "delete"))
-		r = process_delete_mesg(argc, argv, pool);
-
-	else if (!strcasecmp(argv[0], "trim"))
-		r = process_trim_mesg(argc, argv, pool);
-
-	else if (!strcasecmp(argv[0], "set_transaction_id"))
-		r = process_set_transaction_id_mesg(argc, argv, pool);
 
 	else
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
