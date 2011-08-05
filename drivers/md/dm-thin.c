@@ -981,6 +981,16 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	int r;
 	dm_block_t data_block;
 
+	if (bio->bi_size == 0) {
+		/*
+		 * Remap it anywhere.  This is probably a flush, so we want
+		 * it to go through the remap_and_issue path.
+		 */
+		cell_release_singleton(cell, bio);
+		remap_and_issue(tc, bio, 0);
+		return;
+	}
+
 	if (bio_data_dir(bio) == READ) {
 	        zero_fill_bio(bio);
 	        cell_release_singleton(cell, bio);
