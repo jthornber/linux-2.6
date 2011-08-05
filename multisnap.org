@@ -49,6 +49,11 @@ All tools run offline for first release.
     whole blocks worth.  Also check this is extended correctly.
   - [ ] RHEL6.2 needs kzalloc
 
+  - [ ] disk space map must not allocate blocks within a transaction,
+    much like the metadata sm.  This is good, the more similar they
+    are the easier to factor out the common code.  It does mean we're
+    not quite crash proof atm.
+
 ** Userland tools
 
   - [ ] multisnap_display
