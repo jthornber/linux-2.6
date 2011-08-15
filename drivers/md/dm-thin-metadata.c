@@ -504,7 +504,7 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 	struct thin_disk_superblock *disk_super;
 
 	/*
-	 * __commit_transaction() resets these
+	 * __maybe_commit_transaction() resets these
 	 */
 	WARN_ON(pmd->sblock);
 	WARN_ON(pmd->need_commit);
@@ -590,7 +590,7 @@ static int __write_changed_details(struct dm_pool_metadata *pmd)
 /*
  * Returns 1 if commit took place, 0 if not, or < 0 for error.
  */
-static int __commit_transaction(struct dm_pool_metadata *pmd)
+static int __maybe_commit_transaction(struct dm_pool_metadata *pmd)
 {
 	/*
 	 * FIXME: Associated pool should be made read-only on failure.
@@ -641,6 +641,20 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 		pmd->need_commit = 0;
 	}
 out:
+	return r;
+}
+
+static int __commit_transaction(struct dm_pool_metadata *pmd)
+{
+	int r = __maybe_commit_transaction(pmd);
+	if (r > 0)
+		return 0;
+
+	if (r == 0) {
+		dm_tm_unlock(pmd->tm, pmd->sblock);
+		return 0;
+	}
+
 	return r;
 }
 
@@ -750,11 +764,9 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 
 	if (pmd->sblock) {
 		r = __commit_transaction(pmd);
-		if (r <= 0)
+		if (r < 0)
 			DMWARN("%s: __commit_transaction() failed, error = %d",
 			       __func__, r);
-		if (pmd->sblock)
-			dm_tm_unlock(pmd->tm, pmd->sblock);
 	}
 
 	dm_tm_destroy(pmd->tm);
@@ -1255,7 +1267,7 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 
 	down_write(&pmd->root_lock);
 
-	r = __commit_transaction(pmd);
+	r = __maybe_commit_transaction(pmd);
 	if (r <= 0)
 		goto out;
 
