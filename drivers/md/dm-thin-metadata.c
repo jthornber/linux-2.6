@@ -659,6 +659,8 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 		if (r)
 			DMWARN("%s: dm_pool_commit_metadata() failed, error = %d",
 			       __func__, r);
+		if (pmd->sblock)
+			dm_tm_unlock(pmd->tm, pmd->sblock);
 	}
 
 	dm_tm_destroy(pmd->tm);
