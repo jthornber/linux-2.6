@@ -71,7 +71,6 @@ void *dm_bitmap_data(struct dm_block *b)
 
 #define WORD_MASK_LOW 0x5555555555555555ULL
 #define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAAULL
-#define WORD_MASK_ALL 0xFFFFFFFFFFFFFFFFULL
 
 static unsigned bitmap_word_used(void *addr, unsigned b)
 {
@@ -79,10 +78,9 @@ static unsigned bitmap_word_used(void *addr, unsigned b)
 	__le64 *w_le = words_le + (b >> ENTRIES_SHIFT);
 
 	uint64_t bits = le64_to_cpu(*w_le);
+	uint64_t mask = (bits - WORD_MASK_LOW) & WORD_MASK_HIGH;
 
-	return ((bits & WORD_MASK_LOW) == WORD_MASK_LOW ||
-		(bits & WORD_MASK_HIGH) == WORD_MASK_HIGH ||
-		(bits & WORD_MASK_ALL) == WORD_MASK_ALL);
+	return !(~bits & mask);
 }
 
 unsigned sm_lookup_bitmap(void *addr, unsigned b)
