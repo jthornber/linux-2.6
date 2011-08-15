@@ -1432,10 +1432,12 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
 
-	dm_put_device(ti, pt->metadata_dev);
-	dm_put_device(ti, pt->data_dev);
 	unbind_control_target(pt->pool, ti);
 	pool_dec(pt->pool);
+
+	dm_put_device(ti, pt->metadata_dev);
+	dm_put_device(ti, pt->data_dev);
+
 	kfree(pt);
 }
 
