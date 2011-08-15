@@ -497,17 +497,17 @@ bad:
 	return ERR_PTR(r);
 }
 
-static int begin_transaction(struct dm_pool_metadata *pmd)
+static int __begin_transaction(struct dm_pool_metadata *pmd)
 {
 	int r;
 	u32 features;
 	struct thin_disk_superblock *disk_super;
 
 	/*
-	 * dm_pool_commit_metadata() resets pmd->sblock
+	 * __maybe_commit_metadata() resets these
 	 */
 	WARN_ON(pmd->sblock);
-	pmd->need_commit = 0;
+	WARN_ON(pmd->need_commit);
 
 	/*
 	 * superblock is unlocked via dm_tm_commit()
@@ -581,7 +581,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	pmd->bdev = bdev;
 
 	if (!create) {
-		r = begin_transaction(pmd);
+		r = __begin_transaction(pmd);
 		if (r < 0)
 			goto bad;
 		return pmd;
@@ -591,7 +591,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	 * Create.
 	 */
 	if (!pmd->sblock) {
-		r = begin_transaction(pmd);
+		r = __begin_transaction(pmd);
 		if (r < 0)
 			goto bad;
 	}
@@ -631,6 +631,8 @@ bad:
 	return ERR_PTR(r);
 }
 
+static int __maybe_commit_metadata(struct dm_pool_metadata *pmd);
+
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 {
 	int r;
@@ -655,9 +657,9 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 	}
 
 	if (pmd->sblock) {
-		r = dm_pool_commit_metadata(pmd);
-		if (r)
-			DMWARN("%s: dm_pool_commit_metadata() failed, error = %d",
+		r = __maybe_commit_metadata(pmd);
+		if (r <= 0)
+			DMWARN("%s: __maybe_commit_metadata() failed, error = %d",
 			       __func__, r);
 		if (pmd->sblock)
 			dm_tm_unlock(pmd->tm, pmd->sblock);
@@ -1198,8 +1200,7 @@ static int __write_changed_details(struct dm_pool_metadata *pmd)
 static int __maybe_commit_metadata(struct dm_pool_metadata *pmd)
 {
 	/*
-	 * FIXME: associated pool should be made read-only on
-	 * dm_pool_commit_metadata failure.
+	 * FIXME: Associated pool should be made read-only on failure.
 	 */
 	int r;
 	size_t len;
@@ -1241,8 +1242,11 @@ static int __maybe_commit_metadata(struct dm_pool_metadata *pmd)
 		goto out;
 
 	r = dm_tm_commit(pmd->tm, pmd->sblock);
-	if (!r)
+	if (!r) {
 		r = 1;
+		pmd->sblock = NULL;
+		pmd->need_commit = 0;
+	}
 out:
 	return r;
 }
@@ -1260,9 +1264,7 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 	/*
 	 * Open the next transaction.
 	 */
-	pmd->sblock = NULL;
-
-	r = begin_transaction(pmd);
+	r = __begin_transaction(pmd);
 out:
 	up_write(&pmd->root_lock);
 	return r;
