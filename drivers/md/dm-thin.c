@@ -2146,20 +2146,6 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	return 0;
 }
 
-static int thin_bvec_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-			   struct bio_vec *biovec, int max_size)
-{
-	struct thin_c *tc = ti->private;
-
-	/*
-	 * We fib here, because the space may not have been provisioned yet
-	 * we can't give a good answer.  It's better to return the block
-	 * size, and incur extra splitting in a few cases than always
-	 * return the smallest, page-sized, chunk.
-	 */
-	return tc->pool->sectors_per_block << SECTOR_SHIFT;
-}
-
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
@@ -2184,7 +2170,6 @@ static struct target_type thin_target = {
 	.dtr = thin_dtr,
 	.map = thin_map,
 	.status = thin_status,
-	.merge = thin_bvec_merge,
 	.iterate_devices = thin_iterate_devices,
 	.io_hints = thin_io_hints,
 };
