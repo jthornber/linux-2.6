@@ -504,7 +504,7 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 	struct thin_disk_superblock *disk_super;
 
 	/*
-	 * __maybe_commit_metadata() resets these
+	 * __commit_transaction() resets these
 	 */
 	WARN_ON(pmd->sblock);
 	WARN_ON(pmd->need_commit);
@@ -548,6 +548,100 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 	}
 
 	return 0;
+}
+
+static int __write_changed_details(struct dm_pool_metadata *pmd)
+{
+	int r;
+	struct dm_thin_device *td, *tmp;
+	struct disk_device_details details;
+	uint64_t key;
+
+	list_for_each_entry_safe(td, tmp, &pmd->thin_devices, list) {
+		if (!td->changed)
+			continue;
+
+		key = td->id;
+
+		details.mapped_blocks = cpu_to_le64(td->mapped_blocks);
+		details.transaction_id = cpu_to_le64(td->transaction_id);
+		details.creation_time = cpu_to_le32(td->creation_time);
+		details.snapshotted_time = cpu_to_le32(td->snapshotted_time);
+		__dm_bless_for_disk(&details);
+
+		r = dm_btree_insert(&pmd->details_info, pmd->details_root,
+				    &key, &details, &pmd->details_root);
+		if (r)
+			return r;
+
+		if (td->open_count)
+			td->changed = 0;
+		else {
+			list_del(&td->list);
+			kfree(td);
+		}
+
+		pmd->need_commit = 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Returns 1 if commit took place, 0 if not, or < 0 for error.
+ */
+static int __commit_transaction(struct dm_pool_metadata *pmd)
+{
+	/*
+	 * FIXME: Associated pool should be made read-only on failure.
+	 */
+	int r;
+	size_t len;
+	struct thin_disk_superblock *disk_super;
+
+	/*
+	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
+	 */
+	BUILD_BUG_ON(sizeof(struct thin_disk_superblock) > 512);
+
+	r = __write_changed_details(pmd);
+	if (r < 0)
+		goto out;
+
+	if (!pmd->need_commit)
+		goto out;
+
+	r = dm_tm_pre_commit(pmd->tm);
+	if (r < 0)
+		goto out;
+
+	r = dm_sm_root_size(pmd->metadata_sm, &len);
+	if (r < 0)
+		goto out;
+
+	disk_super = dm_block_data(pmd->sblock);
+	disk_super->time = cpu_to_le32(pmd->time);
+	disk_super->data_mapping_root = cpu_to_le64(pmd->root);
+	disk_super->device_details_root = cpu_to_le64(pmd->details_root);
+	disk_super->trans_id = cpu_to_le64(pmd->trans_id);
+	disk_super->flags = cpu_to_le32(pmd->flags);
+
+	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root, len);
+	if (r < 0)
+		goto out;
+
+	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root, len);
+	if (r < 0)
+		goto out;
+
+	r = dm_tm_commit(pmd->tm, pmd->sblock);
+	if (!r) {
+		r = 1;
+		pmd->sblock = NULL;
+		pmd->need_commit = 0;
+	}
+out:
+	return r;
 }
 
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
@@ -631,8 +725,6 @@ bad:
 	return ERR_PTR(r);
 }
 
-static int __maybe_commit_metadata(struct dm_pool_metadata *pmd);
-
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 {
 	int r;
@@ -657,9 +749,9 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 	}
 
 	if (pmd->sblock) {
-		r = __maybe_commit_metadata(pmd);
+		r = __commit_transaction(pmd);
 		if (r <= 0)
-			DMWARN("%s: __maybe_commit_metadata() failed, error = %d",
+			DMWARN("%s: __commit_transaction() failed, error = %d",
 			       __func__, r);
 		if (pmd->sblock)
 			dm_tm_unlock(pmd->tm, pmd->sblock);
@@ -1157,107 +1249,13 @@ int dm_pool_alloc_data_block(struct dm_pool_metadata *pmd, dm_block_t *result)
 	return r;
 }
 
-static int __write_changed_details(struct dm_pool_metadata *pmd)
-{
-	int r;
-	struct dm_thin_device *td, *tmp;
-	struct disk_device_details details;
-	uint64_t key;
-
-	list_for_each_entry_safe(td, tmp, &pmd->thin_devices, list) {
-		if (!td->changed)
-			continue;
-
-		key = td->id;
-
-		details.mapped_blocks = cpu_to_le64(td->mapped_blocks);
-		details.transaction_id = cpu_to_le64(td->transaction_id);
-		details.creation_time = cpu_to_le32(td->creation_time);
-		details.snapshotted_time = cpu_to_le32(td->snapshotted_time);
-		__dm_bless_for_disk(&details);
-
-		r = dm_btree_insert(&pmd->details_info, pmd->details_root,
-				    &key, &details, &pmd->details_root);
-		if (r)
-			return r;
-
-		if (td->open_count)
-			td->changed = 0;
-		else {
-			list_del(&td->list);
-			kfree(td);
-		}
-
-		pmd->need_commit = 1;
-	}
-
-	return 0;
-}
-
-/*
- * Returns 1 if commit took place, 0 if not, or < 0 for error.
- */
-static int __maybe_commit_metadata(struct dm_pool_metadata *pmd)
-{
-	/*
-	 * FIXME: Associated pool should be made read-only on failure.
-	 */
-	int r;
-	size_t len;
-	struct thin_disk_superblock *disk_super;
-
-	/*
-	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
-	 */
-	BUILD_BUG_ON(sizeof(struct thin_disk_superblock) > 512);
-
-	r = __write_changed_details(pmd);
-	if (r < 0)
-		goto out;
-
-	if (!pmd->need_commit)
-		goto out;
-
-	r = dm_tm_pre_commit(pmd->tm);
-	if (r < 0)
-		goto out;
-
-	r = dm_sm_root_size(pmd->metadata_sm, &len);
-	if (r < 0)
-		goto out;
-
-	disk_super = dm_block_data(pmd->sblock);
-	disk_super->time = cpu_to_le32(pmd->time);
-	disk_super->data_mapping_root = cpu_to_le64(pmd->root);
-	disk_super->device_details_root = cpu_to_le64(pmd->details_root);
-	disk_super->trans_id = cpu_to_le64(pmd->trans_id);
-	disk_super->flags = cpu_to_le32(pmd->flags);
-
-	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root, len);
-	if (r < 0)
-		goto out;
-
-	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root, len);
-	if (r < 0)
-		goto out;
-
-	r = dm_tm_commit(pmd->tm, pmd->sblock);
-	if (!r) {
-		r = 1;
-		pmd->sblock = NULL;
-		pmd->need_commit = 0;
-	}
-out:
-	return r;
-}
-
 int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
 
 	down_write(&pmd->root_lock);
 
-	r = __maybe_commit_metadata(pmd);
+	r = __commit_transaction(pmd);
 	if (r <= 0)
 		goto out;
 
