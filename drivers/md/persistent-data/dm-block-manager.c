@@ -650,9 +650,10 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	bm->reading_count = 0;
 	bm->writing_count = 0;
 
-	sprintf(bm->buffer_cache_name, "dm_block_buffer-%d:%d",
+	sprintf(bm->buffer_cache_name, "dm_block_buffer-%d-%d",
 		MAJOR(disk_devt(bdev->bd_disk)),
 		MINOR(disk_devt(bdev->bd_disk)));
+
 	bm->buffer_cache = kmem_cache_create(bm->buffer_cache_name,
 					     block_size, SECTOR_SIZE,
 					     0, NULL);
