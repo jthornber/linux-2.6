@@ -8,6 +8,7 @@
 #include "dm-space-map.h"
 #include "dm-transaction-manager.h"
 
+#include <linux/module.h>
 #include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "btree"

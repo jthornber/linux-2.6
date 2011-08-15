@@ -8,6 +8,8 @@
 #include "dm-btree-internal.h"
 #include "dm-transaction-manager.h"
 
+#include <linux/module.h>
+
 /*
  * Removing an entry from a btree
  * ==============================

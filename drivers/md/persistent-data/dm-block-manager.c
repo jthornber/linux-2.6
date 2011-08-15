@@ -7,6 +7,7 @@
 #include "dm-persistent-data-internal.h"
 
 #include <linux/dm-io.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/device-mapper.h>
 
