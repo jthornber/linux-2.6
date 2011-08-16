@@ -17,121 +17,6 @@
 
 #define DM_MSG_PREFIX "space map disk"
 
-/*
- * Bitmap validator
- */
-static void bitmap_prepare_for_write(struct dm_block_validator *v,
-				     struct dm_block *b,
-				     size_t block_size)
-{
-	struct disk_bitmap_header *disk_header = dm_block_data(b);
-
-	disk_header->blocknr = cpu_to_le64(dm_block_location(b));
-	disk_header->csum = cpu_to_le32(dm_block_csum_data(&disk_header->not_used, block_size - sizeof(__le32)));
-}
-
-static int bitmap_check(struct dm_block_validator *v,
-			struct dm_block *b,
-			size_t block_size)
-{
-	struct disk_bitmap_header *disk_header = dm_block_data(b);
-	__le32 csum_disk;
-
-	if (dm_block_location(b) != le64_to_cpu(disk_header->blocknr)) {
-		DMERR("bitmap check failed blocknr %llu wanted %llu",
-		      le64_to_cpu(disk_header->blocknr), dm_block_location(b));
-		return -ENOTBLK;
-	}
-
-	csum_disk = cpu_to_le32(dm_block_csum_data(&disk_header->not_used, block_size - sizeof(__le32)));
-	if (csum_disk != disk_header->csum) {
-		DMERR("bitmap check failed csum %u wanted %u",
-		      le32_to_cpu(csum_disk), le32_to_cpu(disk_header->csum));
-		return -EILSEQ;
-	}
-
-	return 0;
-}
-
-struct dm_block_validator dm_sm_bitmap_validator = {
-	.name = "sm_bitmap",
-	.prepare_for_write = bitmap_prepare_for_write,
-	.check = bitmap_check
-};
-
-/*----------------------------------------------------------------*/
-
-#define ENTRIES_PER_WORD 32
-#define ENTRIES_SHIFT	5
-
-void *dm_bitmap_data(struct dm_block *b)
-{
-	return dm_block_data(b) + sizeof(struct disk_bitmap_header);
-}
-
-#define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAAULL
-
-static unsigned bitmap_word_used(void *addr, unsigned b)
-{
-	__le64 *words_le = addr;
-	__le64 *w_le = words_le + (b >> ENTRIES_SHIFT);
-
-	uint64_t bits = le64_to_cpu(*w_le);
-	uint64_t mask = (bits + WORD_MASK_HIGH + 1) & WORD_MASK_HIGH;
-
-	return !(~bits & mask);
-}
-
-unsigned sm_lookup_bitmap(void *addr, unsigned b)
-{
-	__le64 *words_le = addr;
-	__le64 *w_le = words_le + (b >> ENTRIES_SHIFT);
-
-	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
-
-	return (!!test_bit_le(b, (void *) w_le) << 1) |
-		(!!test_bit_le(b + 1, (void *) w_le));
-}
-
-void sm_set_bitmap(void *addr, unsigned b, unsigned val)
-{
-	__le64 *words_le = addr;
-	__le64 *w_le = words_le + (b >> ENTRIES_SHIFT);
-
-	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
-
-	if (val & 2)
-		__set_bit_le(b, (void *) w_le);
-	else
-		__clear_bit_le(b, (void *) w_le);
-
-	if (val & 1)
-		__set_bit_le(b + 1, (void *) w_le);
-	else
-		__clear_bit_le(b + 1, (void *) w_le);
-}
-
-int sm_find_free(void *addr, unsigned begin, unsigned end,
-		 unsigned *result)
-{
-	while (begin < end) {
-		if (!(begin & (ENTRIES_PER_WORD - 1)) &&
-		    bitmap_word_used(addr, begin)) {
-			begin += ENTRIES_PER_WORD;
-			continue;
-		}
-
-		if (!sm_lookup_bitmap(addr, begin)) {
-			*result = begin;
-			return 0;
-		}
-
-		begin++;
-	}
-
-	return -ENOSPC;
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -340,3 +225,5 @@ bad:
 	return ERR_PTR(r);
 }
 EXPORT_SYMBOL_GPL(dm_sm_disk_open);
+
+/*----------------------------------------------------------------*/

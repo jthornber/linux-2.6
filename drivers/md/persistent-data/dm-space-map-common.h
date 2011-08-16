@@ -9,8 +9,9 @@
 
 #include "dm-btree.h"
 
+/*----------------------------------------------------------------*/
+
 /*
- *--------------------------------------------------------------------
  * Low level disk format
  *
  * Bitmap btree
@@ -26,7 +27,6 @@
  *
  * Any entry that has a ref count higher than 2 gets entered in the ref
  * count tree.  The leaf values for this tree is the 32-bit ref count.
- *---------------------------------------------------------------------
  */
 
 struct disk_index_entry {
@@ -92,18 +92,6 @@ struct disk_bitmap_header {
 	__le32 not_used;
 	__le64 blocknr;
 } __packed;
-
-/*
- * These bitops work on a block's worth of bits.
- */
-unsigned sm_lookup_bitmap(void *addr, unsigned b);
-void sm_set_bitmap(void *addr, unsigned b, unsigned val);
-int sm_find_free(void *addr, unsigned begin, unsigned end, unsigned *result);
-
-void *dm_bitmap_data(struct dm_block *b);
-
-/* FIXME: hide this in common ? */
-extern struct dm_block_validator dm_sm_bitmap_validator;
 
 /*----------------------------------------------------------------*/
 
