@@ -69,7 +69,6 @@ void *dm_bitmap_data(struct dm_block *b)
 	return dm_block_data(b) + sizeof(struct disk_bitmap_header);
 }
 
-#define WORD_MASK_LOW 0x5555555555555555ULL
 #define WORD_MASK_HIGH 0xAAAAAAAAAAAAAAAAULL
 
 static unsigned bitmap_word_used(void *addr, unsigned b)
@@ -78,7 +77,7 @@ static unsigned bitmap_word_used(void *addr, unsigned b)
 	__le64 *w_le = words_le + (b >> ENTRIES_SHIFT);
 
 	uint64_t bits = le64_to_cpu(*w_le);
-	uint64_t mask = (bits - WORD_MASK_LOW) & WORD_MASK_HIGH;
+	uint64_t mask = (bits + WORD_MASK_HIGH + 1) & WORD_MASK_HIGH;
 
 	return !(~bits & mask);
 }
