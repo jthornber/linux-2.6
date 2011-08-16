@@ -540,9 +540,15 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 	smm->nr_uncommitted = 0;
 
 	memcpy(&smm->sm, &bootstrap_ops, sizeof(smm->sm));
-	r = sm_ll_new(&smm->ll, tm, nr_blocks);
+
+	r = sm_ll_new_metadata(&smm->ll, tm);
 	if (r)
 		return r;
+
+	r = sm_ll_extend(&smm->ll, nr_blocks);
+	if (r)
+		return r;
+
 	memcpy(&smm->sm, &ops, sizeof(smm->sm));
 
 	/*
@@ -565,7 +571,7 @@ int dm_sm_metadata_open(struct dm_space_map *sm,
 	int r;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
-	r = sm_ll_open(&smm->ll, tm, root_le, len);
+	r = sm_ll_open_metadata(&smm->ll, tm, root_le, len);
 	if (r)
 		return r;
 
