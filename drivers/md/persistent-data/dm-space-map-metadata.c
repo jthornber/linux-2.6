@@ -65,6 +65,36 @@ static struct dm_block_validator index_validator = {
 /*
  * Low-level disk ops.
  */
+static int metadata_ll_load_ie(struct ll_disk *ll, dm_block_t index,
+			       struct disk_index_entry *ie)
+{
+	memcpy(ie, ll->mi_le.index + index, sizeof(*ie));
+	return 0;
+}
+
+static int metadata_ll_save_ie(struct ll_disk *ll, dm_block_t index,
+			       struct disk_index_entry *ie)
+{
+	memcpy(ll->mi_le.index + index, ie, sizeof(*ie));
+	return 0;
+}
+
+/* FIXME: ugly, remove */
+static int metadata_ll_first_commit(struct ll_disk *ll)
+{
+	int r;
+	struct dm_block *b;
+
+	r = dm_tm_new_block(ll->tm, &index_validator, &b);
+	if (r < 0)
+		return r;
+
+	memcpy(dm_block_data(b), &ll->mi_le, sizeof(ll->mi_le));
+	ll->bitmap_root = dm_block_location(b);
+
+	return dm_tm_unlock(ll->tm, b);
+}
+
 static int metadata_ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 {
 	ll->tm = tm;
@@ -84,10 +114,14 @@ static int metadata_ll_init(struct ll_disk *ll, struct dm_transaction_manager *t
 	}
 
 	ll->entries_per_block = (ll->block_size - sizeof(struct disk_bitmap_header)) *
-				ENTRIES_PER_BYTE;
+		ENTRIES_PER_BYTE;
 	ll->nr_blocks = 0;
 	ll->bitmap_root = 0;
 	ll->ref_count_root = 0;
+
+	ll->load_ie = metadata_ll_load_ie;
+	ll->save_ie = metadata_ll_save_ie;
+	ll->commit = metadata_ll_first_commit;
 
 	return 0;
 }
@@ -98,7 +132,6 @@ static int metadata_ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm
 	int r;
 	dm_block_t i;
 	unsigned blocks;
-	struct dm_block *index_block;
 
 	r = metadata_ll_init(ll, tm);
 	if (r < 0)
@@ -115,32 +148,30 @@ static int metadata_ll_new(struct ll_disk *ll, struct dm_transaction_manager *tm
 
 	for (i = 0; i < blocks; i++) {
 		struct dm_block *b;
-		struct disk_index_entry *idx_le = ll->mi_le.index + i;
+		struct disk_index_entry idx_le;
+		r = ll->load_ie(ll, i, &idx_le);
+		if (r < 0)
+			return r;
 
 		r = dm_tm_new_block(tm, &dm_sm_bitmap_validator, &b);
 		if (r < 0)
 			return r;
-		idx_le->blocknr = cpu_to_le64(dm_block_location(b));
+		idx_le.blocknr = cpu_to_le64(dm_block_location(b));
 
 		r = dm_tm_unlock(tm, b);
 		if (r < 0)
 			return r;
 
-		idx_le->nr_free = cpu_to_le32(ll->entries_per_block);
-		idx_le->none_free_before = 0;
+		idx_le.nr_free = cpu_to_le32(ll->entries_per_block);
+		idx_le.none_free_before = 0;
+
+		r = ll->save_ie(ll, i, &idx_le);
+		if (r < 0)
+			return r;
 	}
 
-	/*
-	 * Write the index.
-	 */
-	r = dm_tm_new_block(tm, &index_validator, &index_block);
-	if (r)
-		return r;
-
-	ll->bitmap_root = dm_block_location(index_block);
-	memcpy(dm_block_data(index_block), &ll->mi_le, sizeof(ll->mi_le));
-	r = dm_tm_unlock(tm, index_block);
-	if (r)
+	r = ll->commit(ll);
+	if (r < 0)
 		return r;
 
 	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root);
@@ -188,13 +219,15 @@ static int metadata_ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t 
 {
 	int r;
 	dm_block_t index = b;
-	struct disk_index_entry *ie_disk;
+	struct disk_index_entry ie_disk;
 	struct dm_block *blk;
 
 	b = do_div(index, ll->entries_per_block);
-	ie_disk = ll->mi_le.index + index;
+	r = ll->load_ie(ll, index, &ie_disk);
+	if (r < 0)
+		return r;
 
-	r = dm_tm_read_lock(ll->tm, le64_to_cpu(ie_disk->blocknr),
+	r = dm_tm_read_lock(ll->tm, le64_to_cpu(ie_disk.blocknr),
 			    &dm_sm_bitmap_validator, &blk);
 	if (r < 0)
 		return r;
@@ -228,7 +261,7 @@ static int metadata_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 				       dm_block_t end, dm_block_t *result)
 {
 	int r;
-	struct disk_index_entry *ie_disk;
+	struct disk_index_entry ie_disk;
 	dm_block_t i, index_begin = begin;
 	dm_block_t index_end = dm_sector_div_up(end, ll->entries_per_block);
 
@@ -243,12 +276,14 @@ static int metadata_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 		unsigned position;
 		uint32_t bit_end;
 
-		ie_disk = ll->mi_le.index + i;
+		r = ll->load_ie(ll, i, &ie_disk);
+		if (r < 0)
+			return r;
 
-		if (le32_to_cpu(ie_disk->nr_free) <= 0)
+		if (le32_to_cpu(ie_disk.nr_free) <= 0)
 			continue;
 
-		r = dm_tm_read_lock(ll->tm, le64_to_cpu(ie_disk->blocknr),
+		r = dm_tm_read_lock(ll->tm, le64_to_cpu(ie_disk.blocknr),
 				    &dm_sm_bitmap_validator, &blk);
 		if (r < 0)
 			return r;
@@ -269,7 +304,6 @@ static int metadata_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			return r;
 
 		*result = i * ll->entries_per_block + (dm_block_t) position;
-
 		return 0;
 	}
 
@@ -282,20 +316,20 @@ static int metadata_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_cou
 	uint32_t bit, old;
 	struct dm_block *nb;
 	dm_block_t index = b;
-	struct disk_index_entry *ie_disk;
+	struct disk_index_entry ie_disk;
 	void *bm_le;
 	int inc;
 
 	bit = do_div(index, ll->entries_per_block);
-	ie_disk = ll->mi_le.index + index;
+	r = ll->load_ie(ll, index, &ie_disk);
 
-	r = dm_tm_shadow_block(ll->tm, le64_to_cpu(ie_disk->blocknr),
+	r = dm_tm_shadow_block(ll->tm, le64_to_cpu(ie_disk.blocknr),
 			       &dm_sm_bitmap_validator, &nb, &inc);
 	if (r < 0) {
 		DMERR("dm_tm_shadow_block() failed");
 		return r;
 	}
-	ie_disk->blocknr = cpu_to_le64(dm_block_location(nb));
+	ie_disk.blocknr = cpu_to_le64(dm_block_location(nb));
 
 	bm_le = dm_bitmap_data(nb);
 	old = sm_lookup_bitmap(bm_le, bit);
@@ -339,16 +373,16 @@ static int metadata_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_cou
 
 	if (ref_count && !old) {
 		ll->nr_allocated++;
-		ie_disk->nr_free = cpu_to_le32(le32_to_cpu(ie_disk->nr_free) - 1);
-		if (le32_to_cpu(ie_disk->none_free_before) == b)
-			ie_disk->none_free_before = cpu_to_le32(b + 1);
+		ie_disk.nr_free = cpu_to_le32(le32_to_cpu(ie_disk.nr_free) - 1);
+		if (le32_to_cpu(ie_disk.none_free_before) == b)
+			ie_disk.none_free_before = cpu_to_le32(b + 1);
 	} else if (old && !ref_count) {
 		ll->nr_allocated--;
-		ie_disk->nr_free = cpu_to_le32(le32_to_cpu(ie_disk->nr_free) + 1);
-		ie_disk->none_free_before = cpu_to_le32(min((dm_block_t) le32_to_cpu(ie_disk->none_free_before), b));
+		ie_disk.nr_free = cpu_to_le32(le32_to_cpu(ie_disk.nr_free) + 1);
+		ie_disk.none_free_before = cpu_to_le32(min((dm_block_t) le32_to_cpu(ie_disk.none_free_before), b));
 	}
 
-	return 0;
+	return ll->save_ie(ll, index, &ie_disk);
 }
 
 static int metadata_ll_inc(struct ll_disk *ll, dm_block_t b)

@@ -45,6 +45,12 @@ struct disk_metadata_index {
 	struct disk_index_entry index[MAX_METADATA_BITMAPS];
 } __packed;
 
+struct ll_disk;
+
+typedef int (*load_ie_fn)(struct ll_disk *ll, dm_block_t index, struct disk_index_entry *result);
+typedef int (*save_ie_fn)(struct ll_disk *ll, dm_block_t index, struct disk_index_entry *ie);
+typedef int (*commit_fn)(struct ll_disk *ll);
+
 struct ll_disk {
 	struct dm_transaction_manager *tm;
 	struct dm_btree_info bitmap_info;
@@ -63,6 +69,9 @@ struct ll_disk {
 	dm_block_t ref_count_root;
 
 	struct disk_metadata_index mi_le;
+	load_ie_fn load_ie;
+	save_ie_fn save_ie;
+	commit_fn commit;
 };
 
 struct disk_sm_root {
