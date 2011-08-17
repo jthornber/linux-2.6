@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [16/22]
+** Kernel [17/24]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -26,7 +26,7 @@
         are the easier to factor out the common code.  It does mean we're
         not quite crash proof atm.
 
-  - [ ] Sometimes I'm getting kmem_cache name clashes in the block
+  - [X] Sometimes I'm getting kmem_cache name clashes in the block
         manager.  We're obviously not deleting the cache in a particular
         error path.  Recently introduced.                               :ejt:
 
