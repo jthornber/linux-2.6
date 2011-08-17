@@ -611,6 +611,10 @@ static int __maybe_commit_transaction(struct dm_pool_metadata *pmd)
 	if (!pmd->need_commit)
 		goto out;
 
+	r = dm_sm_commit(pmd->data_sm);
+	if (r < 0)
+		goto out;
+
 	r = dm_tm_pre_commit(pmd->tm);
 	if (r < 0)
 		goto out;
