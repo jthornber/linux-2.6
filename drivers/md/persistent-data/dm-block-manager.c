@@ -86,7 +86,7 @@ struct dm_block_manager {
 	struct list_head dirty_list;	/* Unlocked and dirty */
 	struct list_head error_list;
 
-	char buffer_cache_name[32];
+	char buffer_cache_name[64];
 	struct kmem_cache *buffer_cache; /* The buffers that store the raw data */
 
 	/*
@@ -617,7 +617,8 @@ static unsigned calc_hash_size(unsigned cache_size)
 	return r >> 1;
 }
 
-struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
+struct dm_block_manager *dm_block_manager_create(const char *name,
+						 struct block_device *bdev,
 						 unsigned block_size,
 						 unsigned cache_size,
 						 unsigned max_held_per_thread)
@@ -650,7 +651,8 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	bm->reading_count = 0;
 	bm->writing_count = 0;
 
-	sprintf(bm->buffer_cache_name, "dm_block_buffer-%d-%d",
+	sprintf(bm->buffer_cache_name, "dm_block_buffer-%s-%d-%d",
+		name,
 		MAJOR(disk_devt(bdev->bd_disk)),
 		MINOR(disk_devt(bdev->bd_disk)));
 

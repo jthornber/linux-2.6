@@ -361,13 +361,13 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	return dm_bm_unlock(b);
 }
 
-static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
-					  dm_block_t nr_blocks, int create)
+static int init_pmd(struct dm_pool_metadata *pmd,
+		    struct dm_block_manager *bm,
+		    dm_block_t nr_blocks, int create)
 {
 	int r;
 	struct dm_space_map *sm, *data_sm;
 	struct dm_transaction_manager *tm;
-	struct dm_pool_metadata *pmd = NULL;
 	struct dm_block *sblock;
 
 	if (create) {
@@ -375,7 +375,7 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 					 &sb_validator, &tm, &sm, &sblock);
 		if (r < 0) {
 			DMERR("tm_create_with_sm failed");
-			return ERR_PTR(r);
+			return r;
 		}
 
 		data_sm = dm_sm_disk_create(tm, nr_blocks);
@@ -406,7 +406,7 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 				       SPACE_MAP_ROOT_SIZE, &tm, &sm, &sblock);
 		if (r < 0) {
 			DMERR("tm_open_with_sm failed");
-			return ERR_PTR(r);
+			return r;
 		}
 
 		disk_super = dm_block_data(sblock);
@@ -421,13 +421,6 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 		dm_tm_unlock(tm, sblock);
 	}
 
-	pmd = kmalloc(sizeof(*pmd), GFP_KERNEL);
-	if (!pmd) {
-		DMERR("could not allocate metadata struct");
-		r = -ENOMEM;
-		goto bad_data_sm;
-	}
-
 	pmd->bm = bm;
 	pmd->metadata_sm = sm;
 	pmd->data_sm = data_sm;
@@ -436,7 +429,7 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 	if (!pmd->nb_tm) {
 		DMERR("could not create clone tm");
 		r = -ENOMEM;
-		goto bad_pmd;
+		goto bad_data_sm;
 	}
 
 	pmd->sblock = NULL;
@@ -484,17 +477,15 @@ static struct dm_pool_metadata *alloc_pmd(struct dm_block_manager *bm,
 	pmd->details_root = 0;
 	INIT_LIST_HEAD(&pmd->thin_devices);
 
-	return pmd;
+	return 0;
 
-bad_pmd:
-	kfree(pmd);
 bad_data_sm:
 	dm_sm_destroy(data_sm);
 bad:
 	dm_tm_destroy(tm);
 	dm_sm_destroy(sm);
 
-	return ERR_PTR(r);
+	return r;
 }
 
 static int __begin_transaction(struct dm_pool_metadata *pmd)
@@ -671,24 +662,36 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	sector_t bdev_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
 	struct dm_block_manager *bm;
 	int create;
+	char buffer[32];
 
-	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
+	pmd = kmalloc(sizeof(*pmd), GFP_KERNEL);
+	if (!pmd) {
+		DMERR("could not allocate metadata struct");
+		return ERR_PTR(-ENOMEM);
+	}
+
+	sprintf(buffer, "thinp-%p", pmd);
+	bm = dm_block_manager_create(buffer, bdev, THIN_METADATA_BLOCK_SIZE,
 				     THIN_METADATA_CACHE_SIZE, 3);
 	if (!bm) {
 		DMERR("could not create block manager");
+		kfree(pmd);
 		return ERR_PTR(-ENOMEM);
 	}
 
 	r = superblock_all_zeroes(bm, &create);
 	if (r) {
 		dm_block_manager_destroy(bm);
+		kfree(pmd);
 		return ERR_PTR(r);
 	}
 
-	pmd = alloc_pmd(bm, 0, create);
-	if (IS_ERR(pmd)) {
+
+	r = init_pmd(pmd, bm, 0, create);
+	if (r) {
 		dm_block_manager_destroy(bm);
-		return pmd;
+		kfree(pmd);
+		return ERR_PTR(r);
 	}
 	pmd->bdev = bdev;
 

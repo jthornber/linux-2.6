@@ -39,10 +39,14 @@ static inline uint32_t dm_block_csum_data(const void *data_le, unsigned length)
 struct dm_block_manager;
 
 /*
+ * @name should be a unique identifier for the block manager, no longer
+ * than 32 chars.
+ *
  * @max_held_per_thread should be the maximum number of locks, read or
  * write, that an individual thread holds at any one time.
  */
 struct dm_block_manager *dm_block_manager_create(
+	const char *name,
 	struct block_device *bdev, unsigned block_size,
 	unsigned cache_size, unsigned max_held_per_thread);
 void dm_block_manager_destroy(struct dm_block_manager *bm);
