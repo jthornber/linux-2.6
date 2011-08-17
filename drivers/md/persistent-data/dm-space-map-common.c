@@ -445,17 +445,7 @@ int sm_ll_dec(struct ll_disk *ll, dm_block_t b)
 
 int sm_ll_commit(struct ll_disk *ll)
 {
-	int r, inc;
-	struct dm_block *b;
-
-	r = dm_tm_shadow_block(ll->tm, ll->bitmap_root, &index_validator, &b, &inc);
-	if (r)
-		return r;
-
-	memcpy(dm_block_data(b), &ll->mi_le, sizeof(ll->mi_le));
-	ll->bitmap_root = dm_block_location(b);
-
-	return dm_tm_unlock(ll->tm, b);
+	return ll->commit(ll);
 }
 
 /*----------------------------------------------------------------*/
@@ -508,6 +498,21 @@ static dm_block_t metadata_ll_max_entries(struct ll_disk *ll)
 	return MAX_METADATA_BITMAPS;
 }
 
+static int metadata_ll_commit(struct ll_disk *ll)
+{
+	int r, inc;
+	struct dm_block *b;
+
+	r = dm_tm_shadow_block(ll->tm, ll->bitmap_root, &index_validator, &b, &inc);
+	if (r)
+		return r;
+
+	memcpy(dm_block_data(b), &ll->mi_le, sizeof(ll->mi_le));
+	ll->bitmap_root = dm_block_location(b);
+
+	return dm_tm_unlock(ll->tm, b);
+}
+
 int sm_ll_new_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm)
 {
 	int r;
@@ -521,6 +526,7 @@ int sm_ll_new_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	ll->init_index = metadata_ll_init_index;
 	ll->open_index = metadata_ll_open;
 	ll->max_entries = metadata_ll_max_entries;
+	ll->commit = metadata_ll_commit;
 
 	ll->nr_blocks = 0;
 	ll->nr_allocated = 0;
@@ -556,6 +562,7 @@ int sm_ll_open_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	ll->init_index = metadata_ll_init_index;
 	ll->open_index = metadata_ll_open;
 	ll->max_entries = metadata_ll_max_entries;
+	ll->commit = metadata_ll_commit;
 
 	ll->nr_blocks = le64_to_cpu(smr->nr_blocks);
 	ll->nr_allocated = le64_to_cpu(smr->nr_allocated);
@@ -597,6 +604,11 @@ static dm_block_t disk_ll_max_entries(struct ll_disk *ll)
 	return -1ULL;
 }
 
+static int disk_ll_commit(struct ll_disk *ll)
+{
+	return 0;
+}
+
 int sm_ll_new_disk(struct ll_disk *ll, struct dm_transaction_manager *tm)
 {
 	int r;
@@ -610,6 +622,7 @@ int sm_ll_new_disk(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	ll->init_index = disk_ll_init_index;
 	ll->open_index = disk_ll_open;
 	ll->max_entries = disk_ll_max_entries;
+	ll->commit = disk_ll_commit;
 
 	ll->nr_blocks = 0;
 	ll->nr_allocated = 0;
@@ -645,6 +658,7 @@ int sm_ll_open_disk(struct ll_disk *ll, struct dm_transaction_manager *tm,
 	ll->init_index = disk_ll_init_index;
 	ll->open_index = disk_ll_open;
 	ll->max_entries = disk_ll_max_entries;
+	ll->commit = disk_ll_commit;
 
 	ll->nr_blocks = le64_to_cpu(smr->nr_blocks);
 	ll->nr_allocated = le64_to_cpu(smr->nr_allocated);
