@@ -334,8 +334,6 @@ static int sm_metadata_commit(struct dm_space_map *sm)
 	int r;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
-	memcpy(&smm->old_ll, &smm->ll, sizeof(smm->old_ll));
-
 	r = sm_ll_commit(&smm->ll);
 	if (r)
 		return r;
