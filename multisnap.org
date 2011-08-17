@@ -33,8 +33,9 @@
   - [ ] Put discard back in                                             :ejt:
   - [ ] implement the btree trimming                                    :ejt:
   - [ ] a bug found in the userland tools, check that nr_free in the
-    last index entry is being set correctly if there are fewer than a
-    whole blocks worth.  Also check this is extended correctly.         :ejt:
+        last index entry is being set correctly if there are fewer than a
+        whole blocks worth.  Also check this is extended correctly.     :ejt:
+
   - [ ] RHEL6.2 needs kzalloc (Mike knows what this means)             :mike:
   - [ ] Check reference counts are correct somehow.			:ejt:
   - [ ] some work needs to be done to verify tearing down thin devices
