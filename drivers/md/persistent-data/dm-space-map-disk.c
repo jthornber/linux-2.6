@@ -26,6 +26,9 @@ struct sm_disk {
 	struct dm_space_map sm;
 
 	struct ll_disk ll;
+	struct ll_disk old_ll;
+
+	dm_block_t begin;
 };
 
 static void sm_disk_destroy(struct dm_space_map *sm)
@@ -108,18 +111,27 @@ static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 	int r;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
 
-	/*
-	 * FIXME: We should start the search where we left off.
-	 */
-	r = sm_ll_find_free_block(&smd->ll, 0, smd->ll.nr_blocks, b);
+	r = sm_ll_find_free_block(&smd->old_ll, smd->begin, smd->old_ll.nr_blocks, b);
 	if (r)
 		return r;
+
+	smd->begin = *b + 1;
 
 	return sm_ll_inc(&smd->ll, *b);
 }
 
 static int sm_disk_commit(struct dm_space_map *sm)
 {
+	int r;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+
+	r = sm_ll_commit(&smd->ll);
+	if (r)
+		return r;
+
+	memcpy(&smd->old_ll, &smd->ll, sizeof(smd->old_ll));
+	smd->begin = 0;
+
 	return 0;
 }
 
@@ -176,6 +188,7 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 	if (!smd)
 		return ERR_PTR(-ENOMEM);
 
+	smd->begin = 0;
 	memcpy(&smd->sm, &ops, sizeof(smd->sm));
 
 	r = sm_ll_new_disk(&smd->ll, tm);
@@ -208,6 +221,7 @@ struct dm_space_map *dm_sm_disk_open(struct dm_transaction_manager *tm,
 	if (!smd)
 		return ERR_PTR(-ENOMEM);
 
+	smd->begin = 0;
 	memcpy(&smd->sm, &ops, sizeof(smd->sm));
 
 	r = sm_ll_open_disk(&smd->ll, tm, root_le, len);
