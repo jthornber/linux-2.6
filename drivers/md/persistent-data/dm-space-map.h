@@ -16,6 +16,9 @@
 struct dm_space_map {
 	void (*destroy)(struct dm_space_map *sm);
 
+	/*
+	 * You must commit before allocating the newly added space.
+	 */
 	int (*extend)(struct dm_space_map *sm, dm_block_t extra_blocks);
 
 	int (*get_nr_blocks)(struct dm_space_map *sm, dm_block_t *count);
