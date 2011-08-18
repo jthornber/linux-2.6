@@ -52,6 +52,7 @@ typedef int (*save_ie_fn)(struct ll_disk *ll, dm_block_t index, struct disk_inde
 typedef int (*init_index_fn)(struct ll_disk *ll);
 typedef int (*open_index_fn)(struct ll_disk *ll);
 typedef dm_block_t (*max_index_entries_fn)(struct ll_disk *ll);
+typedef int (*commit_fn)(struct ll_disk *ll);
 
 struct ll_disk {
 	struct dm_transaction_manager *tm;
@@ -76,6 +77,7 @@ struct ll_disk {
 	init_index_fn init_index;
 	open_index_fn open_index;
 	max_index_entries_fn max_entries;
+	commit_fn commit;
 };
 
 struct disk_sm_root {
