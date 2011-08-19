@@ -210,6 +210,9 @@ config DM_DEBUG
 
 source "drivers/md/persistent-data/Kconfig"
 
+config DM_BUFIO
+	tristate
+
 config DM_CRYPT
 	tristate "Crypt target support"
 	depends on BLK_DEV_DM
