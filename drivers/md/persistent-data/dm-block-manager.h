@@ -10,6 +10,7 @@
 #include <linux/blkdev.h>
 #include <linux/types.h>
 #include <linux/crc32c.h>
+#include <linux/dm-bufio.h>
 
 /*----------------------------------------------------------------*/
 
@@ -21,7 +22,8 @@ typedef uint64_t dm_block_t;
 /*
  * An opaque handle to a block of data.
  */
-struct dm_block;
+#define dm_block		dm_buffer
+#define dm_block_manager	dm_bufio_client
 
 dm_block_t dm_block_location(struct dm_block *b);
 void *dm_block_data(struct dm_block *b);
@@ -36,8 +38,6 @@ static inline uint32_t dm_block_csum_data(const void *data_le, unsigned length)
 
 /*----------------------------------------------------------------*/
 
-struct dm_block_manager;
-
 /*
  * @name should be a unique identifier for the block manager, no longer
  * than 32 chars.
@@ -46,7 +46,6 @@ struct dm_block_manager;
  * write, that an individual thread holds at any one time.
  */
 struct dm_block_manager *dm_block_manager_create(
-	const char *name,
 	struct block_device *bdev, unsigned block_size,
 	unsigned cache_size, unsigned max_held_per_thread);
 void dm_block_manager_destroy(struct dm_block_manager *bm);

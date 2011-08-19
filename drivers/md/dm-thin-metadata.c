@@ -662,7 +662,6 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	sector_t bdev_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
 	struct dm_block_manager *bm;
 	int create;
-	char buffer[32];
 
 	pmd = kmalloc(sizeof(*pmd), GFP_KERNEL);
 	if (!pmd) {
@@ -670,15 +669,13 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 		return ERR_PTR(-ENOMEM);
 	}
 
-	sprintf(buffer, "thinp-%p", pmd);
-
 	/*
 	 * Max hex locks:
 	 *  1 for superblock +
 	 *  3 for btree insert +
 	 *  2 for btree lookup used within space map
 	 */
-	bm = dm_block_manager_create(buffer, bdev, THIN_METADATA_BLOCK_SIZE,
+	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
 				     THIN_METADATA_CACHE_SIZE, 6);
 	if (!bm) {
 		DMERR("could not create block manager");
