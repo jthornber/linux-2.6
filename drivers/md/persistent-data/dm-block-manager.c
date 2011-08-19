@@ -124,7 +124,6 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 	down_read(&aux->lock);
 	aux->write_locked = 0;
 
-	/* FIXME: should only check when read into the cache */
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
 		up_read(&aux->lock);
@@ -152,7 +151,6 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 	down_write(&aux->lock);
 	aux->write_locked = 1;
 
-	/* FIXME: should only check when read into the cache */
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
 		up_write(&aux->lock);
@@ -181,7 +179,6 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 	down_read(&aux->lock);
 	aux->write_locked = 0;
 
-	/* FIXME: should only check when read into the cache */
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
 		up_read(&aux->lock);
