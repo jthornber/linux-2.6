@@ -121,12 +121,13 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 		return PTR_ERR(p);
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_read_non_owner(&aux->lock);
+	down_read(&aux->lock);
 	aux->write_locked = 0;
 
+	/* FIXME: should only check when read into the cache */
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
-		up_read_non_owner(&aux->lock);
+		up_read(&aux->lock);
 		dm_bufio_release(*result);
 		return r;
 	}
@@ -148,12 +149,13 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 		return PTR_ERR(p);
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_write_non_owner(&aux->lock);
+	down_write(&aux->lock);
 	aux->write_locked = 1;
 
+	/* FIXME: should only check when read into the cache */
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
-		up_write_non_owner(&aux->lock);
+		up_write(&aux->lock);
 		dm_bufio_release(*result);
 		return r;
 	}
@@ -176,12 +178,13 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 		return -EWOULDBLOCK;
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_read_non_owner(&aux->lock);
+	down_read(&aux->lock);
 	aux->write_locked = 0;
 
+	/* FIXME: should only check when read into the cache */
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
-		up_read_non_owner(&aux->lock);
+		up_read(&aux->lock);
 		dm_bufio_release(*result);
 		return r;
 	}
@@ -202,9 +205,8 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 	memset(p, 0, dm_bm_block_size(bm));
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_write_non_owner(&aux->lock);
+	down_write(&aux->lock);
 	aux->write_locked = 1;
-
 	aux->validator = v;
 
 	return 0;
@@ -216,17 +218,12 @@ int dm_bm_unlock(struct dm_block *b)
 	aux = dm_bufio_get_aux_data(b);
 
 	if (aux->write_locked) {
-#if 0
-		if (aux->validator) {
-			aux->validator->prepare_for_write(aux->validator, b,
-			    dm_bufio_get_block_size(dm_bufio_get_client(b)));
-		}
-#endif
 		dm_bufio_mark_buffer_dirty(b);
-		up_write_non_owner(&aux->lock);
+		up_write(&aux->lock);
 	} else {
-		up_read_non_owner(&aux->lock);
+		up_read(&aux->lock);
 	}
+
 	dm_bufio_release(b);
 
 	return 0;
