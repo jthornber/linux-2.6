@@ -1285,7 +1285,7 @@ static void dm_bufio_work_fn(struct work_struct *w)
  * This is called only once for the whole dm_bufio module.
  * It initializes memory limit.
  */
-int __init dm_bufio_init(void)
+static int __init dm_bufio_init(void)
 {
 	__u64 mem;
 
@@ -1318,7 +1318,7 @@ int __init dm_bufio_init(void)
 /*
  * This is called once when unloading the dm_bufio module.
  */
-void __exit dm_bufio_exit(void)
+static void __exit dm_bufio_exit(void)
 {
 	int bug;
 
