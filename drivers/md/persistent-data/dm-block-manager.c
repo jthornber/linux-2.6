@@ -198,7 +198,7 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 	struct buffer_aux *aux;
 	void *p;
 
-	p = dm_bufio_read(bm, b, result);
+	p = dm_bufio_new(bm, b, result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 
