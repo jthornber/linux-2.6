@@ -671,8 +671,15 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	}
 
 	sprintf(buffer, "thinp-%p", pmd);
+
+	/*
+	 * Max hex locks:
+	 *  1 for superblock +
+	 *  3 for btree insert +
+	 *  2 for btree lookup used within space map
+	 */
 	bm = dm_block_manager_create(buffer, bdev, THIN_METADATA_BLOCK_SIZE,
-				     THIN_METADATA_CACHE_SIZE, 3);
+				     THIN_METADATA_CACHE_SIZE, 6);
 	if (!bm) {
 		DMERR("could not create block manager");
 		kfree(pmd);
