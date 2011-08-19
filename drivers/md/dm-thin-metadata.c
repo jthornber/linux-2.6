@@ -174,7 +174,6 @@ struct dm_pool_metadata {
 	struct rw_semaphore root_lock;
 	uint32_t time;
 	int need_commit;
-	struct dm_block *sblock;
 	dm_block_t root;
 	dm_block_t details_root;
 	struct list_head thin_devices;
@@ -432,8 +431,6 @@ static int init_pmd(struct dm_pool_metadata *pmd,
 		goto bad_data_sm;
 	}
 
-	pmd->sblock = NULL;
-
 	pmd->info.tm = tm;
 	pmd->info.levels = 2;
 	pmd->info.value_type.context = pmd->data_sm;
@@ -493,22 +490,23 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 	int r;
 	u32 features;
 	struct thin_disk_superblock *disk_super;
+	struct dm_block *sblock;
 
 	/*
 	 * __maybe_commit_transaction() resets these
 	 */
-	WARN_ON(pmd->sblock);
 	WARN_ON(pmd->need_commit);
 
 	/*
-	 * superblock is unlocked via dm_tm_commit()
+	 * We re-read the superblock every time.  Shouldn't need to do this
+	 * really.
 	 */
-	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
-			     &sb_validator, &pmd->sblock);
+	r = dm_bm_read_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			    &sb_validator, &sblock);
 	if (r)
 		return r;
 
-	disk_super = dm_block_data(pmd->sblock);
+	disk_super = dm_block_data(sblock);
 	pmd->time = le32_to_cpu(disk_super->time);
 	pmd->root = le64_to_cpu(disk_super->data_mapping_root);
 	pmd->details_root = le64_to_cpu(disk_super->device_details_root);
@@ -521,24 +519,27 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 		DMERR("could not access metadata due to "
 		      "unsupported optional features (%lx).",
 		      (unsigned long)features);
-		return -EINVAL;
+		r = -EINVAL;
+		goto out;
 	}
 
 	/*
 	 * Check for read-only metadata to skip the following RDWR checks.
 	 */
 	if (get_disk_ro(pmd->bdev->bd_disk))
-		return 0;
+		goto out;
 
 	features = le32_to_cpu(disk_super->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
 	if (features) {
 		DMERR("could not access metadata RDWR due to "
 		      "unsupported optional features (%lx).",
 		      (unsigned long)features);
-		return -EINVAL;
+		r = -EINVAL;
 	}
 
-	return 0;
+out:
+	dm_bm_unlock(sblock);
+	return r;
 }
 
 static int __write_changed_details(struct dm_pool_metadata *pmd)
@@ -578,10 +579,7 @@ static int __write_changed_details(struct dm_pool_metadata *pmd)
 	return 0;
 }
 
-/*
- * Returns 1 if commit took place, 0 if not, or < 0 for error.
- */
-static int __maybe_commit_transaction(struct dm_pool_metadata *pmd)
+static int __commit_transaction(struct dm_pool_metadata *pmd)
 {
 	/*
 	 * FIXME: Associated pool should be made read-only on failure.
@@ -589,6 +587,7 @@ static int __maybe_commit_transaction(struct dm_pool_metadata *pmd)
 	int r;
 	size_t len;
 	struct thin_disk_superblock *disk_super;
+	struct dm_block *sblock;
 
 	/*
 	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
@@ -614,7 +613,12 @@ static int __maybe_commit_transaction(struct dm_pool_metadata *pmd)
 	if (r < 0)
 		goto out;
 
-	disk_super = dm_block_data(pmd->sblock);
+	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			     &sb_validator, &sblock);
+	if (r)
+		goto out;
+
+	disk_super = dm_block_data(sblock);
 	disk_super->time = cpu_to_le32(pmd->time);
 	disk_super->data_mapping_root = cpu_to_le64(pmd->root);
 	disk_super->device_details_root = cpu_to_le64(pmd->details_root);
@@ -623,33 +627,21 @@ static int __maybe_commit_transaction(struct dm_pool_metadata *pmd)
 
 	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root, len);
 	if (r < 0)
-		goto out;
+		goto out_locked;
 
 	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root, len);
 	if (r < 0)
-		goto out;
+		goto out_locked;
 
-	r = dm_tm_commit(pmd->tm, pmd->sblock);
-	if (!r) {
-		r = 1;
-		pmd->sblock = NULL;
+	r = dm_tm_commit(pmd->tm, sblock);
+	if (!r)
 		pmd->need_commit = 0;
-	}
+
 out:
 	return r;
-}
 
-static int __commit_transaction(struct dm_pool_metadata *pmd)
-{
-	int r = __maybe_commit_transaction(pmd);
-	if (r > 0)
-		return 0;
-
-	if (r == 0) {
-		dm_tm_unlock(pmd->tm, pmd->sblock);
-		return 0;
-	}
-
+out_locked:
+	dm_bm_unlock(sblock);
 	return r;
 }
 
@@ -662,6 +654,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	sector_t bdev_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
 	struct dm_block_manager *bm;
 	int create;
+	struct dm_block *sblock;
 
 	pmd = kmalloc(sizeof(*pmd), GFP_KERNEL);
 	if (!pmd) {
@@ -671,12 +664,11 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 
 	/*
 	 * Max hex locks:
-	 *  1 for superblock +
 	 *  3 for btree insert +
 	 *  2 for btree lookup used within space map
 	 */
 	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
-				     THIN_METADATA_CACHE_SIZE, 6);
+				     THIN_METADATA_CACHE_SIZE, 5);
 	if (!bm) {
 		DMERR("could not create block manager");
 		kfree(pmd);
@@ -709,19 +701,22 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	/*
 	 * Create.
 	 */
-	if (!pmd->sblock) {
-		r = __begin_transaction(pmd);
-		if (r < 0)
-			goto bad;
-	}
+	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			     &sb_validator, &sblock);
+	if (r)
+		goto bad;
 
-	disk_super = dm_block_data(pmd->sblock);
+	disk_super = dm_block_data(sblock);
 	disk_super->magic = cpu_to_le64(THIN_SUPERBLOCK_MAGIC);
 	disk_super->version = cpu_to_le32(THIN_VERSION);
 	disk_super->time = 0;
 	disk_super->metadata_block_size = cpu_to_le32(THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->metadata_nr_blocks = cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(data_block_size);
+
+	r = dm_bm_unlock(sblock);
+	if (r < 0)
+		goto bad;
 
 	r = dm_btree_empty(&pmd->info, &pmd->root);
 	if (r < 0)
@@ -773,12 +768,10 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 		return -EBUSY;
 	}
 
-	if (pmd->sblock) {
-		r = __commit_transaction(pmd);
-		if (r < 0)
-			DMWARN("%s: __commit_transaction() failed, error = %d",
-			       __func__, r);
-	}
+	r = __commit_transaction(pmd);
+	if (r < 0)
+		DMWARN("%s: __commit_transaction() failed, error = %d",
+		       __func__, r);
 
 	dm_tm_destroy(pmd->tm);
 	dm_tm_destroy(pmd->nb_tm);
@@ -1114,17 +1107,34 @@ int dm_pool_get_metadata_transaction_id(struct dm_pool_metadata *pmd,
 	return 0;
 }
 
+static int __get_held_metadata_root(struct dm_pool_metadata *pmd,
+				    dm_block_t *result)
+{
+	int r;
+	struct thin_disk_superblock *disk_super;
+	struct dm_block *sblock;
+
+	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			     &sb_validator, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	*result = le64_to_cpu(disk_super->held_root);
+
+	return dm_bm_unlock(sblock);
+}
+
 int dm_pool_get_held_metadata_root(struct dm_pool_metadata *pmd,
 				   dm_block_t *result)
 {
-	struct thin_disk_superblock *disk_super;
+	int r;
 
 	down_read(&pmd->root_lock);
-	disk_super = dm_block_data(pmd->sblock);
-	*result = le64_to_cpu(disk_super->held_root);
+	r = __get_held_metadata_root(pmd, result);
 	up_read(&pmd->root_lock);
 
-	return 0;
+	return r;
 }
 
 int dm_pool_open_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
@@ -1278,7 +1288,7 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 
 	down_write(&pmd->root_lock);
 
-	r = __maybe_commit_transaction(pmd);
+	r = __commit_transaction(pmd);
 	if (r <= 0)
 		goto out;
 
