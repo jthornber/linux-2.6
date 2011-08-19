@@ -136,12 +136,28 @@ void down_write_nested(struct rw_semaphore *sem, int subclass)
 
 EXPORT_SYMBOL(down_write_nested);
 
+void down_write_non_owner(struct rw_semaphore *sem)
+{
+	might_sleep();
+
+	__down_write(sem);
+}
+
+EXPORT_SYMBOL(down_write_non_owner);
+
 void up_read_non_owner(struct rw_semaphore *sem)
 {
 	__up_read(sem);
 }
 
 EXPORT_SYMBOL(up_read_non_owner);
+
+void up_write_non_owner(struct rw_semaphore *sem)
+{
+	__up_write(sem);
+}
+
+EXPORT_SYMBOL(up_write_non_owner);
 
 #endif
 
