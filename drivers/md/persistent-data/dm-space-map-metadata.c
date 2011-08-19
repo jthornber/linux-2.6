@@ -578,5 +578,6 @@ int dm_sm_metadata_open(struct dm_space_map *sm,
 	smm->allocated_this_transaction = 0;
 	smm->nr_uncommitted = 0;
 
+	memcpy(&smm->old_ll, &smm->ll, sizeof(smm->old_ll));
 	return sm_metadata_commit(sm);
 }
