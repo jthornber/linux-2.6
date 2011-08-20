@@ -213,7 +213,7 @@ static void cache_size_refresh(void)
 		 * Modify dm_bufio_cache_size to report the real used cache
 		 * size to the user.
 		 */
-		cmpxchg(&dm_bufio_cache_size, 0, dm_bufio_default_cache_size);
+		(void)cmpxchg(&dm_bufio_cache_size, 0, dm_bufio_default_cache_size);
 		dm_bufio_cache_size_latch = dm_bufio_default_cache_size;
 	}
 	dm_bufio_cache_size_per_client = dm_bufio_cache_size_latch /
@@ -841,7 +841,7 @@ static void write_endio(struct bio *bio, int error)
 	b->write_error = error;
 	if (unlikely(error)) {
 		struct dm_bufio_client *c = b->c;
-		cmpxchg(&c->async_write_error, 0, error);
+		(void)cmpxchg(&c->async_write_error, 0, error);
 	}
 	BUG_ON(!test_bit(B_WRITING, &b->state));
 	smp_mb__before_clear_bit();
