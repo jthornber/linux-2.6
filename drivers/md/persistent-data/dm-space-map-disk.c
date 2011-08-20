@@ -11,7 +11,6 @@
 
 #include <linux/list.h>
 #include <linux/slab.h>
-#include <linux/bitops.h>
 #include <linux/module.h>
 #include <linux/device-mapper.h>
 
