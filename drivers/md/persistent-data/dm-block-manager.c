@@ -176,7 +176,10 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 		return -EWOULDBLOCK;
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_read(&aux->lock);
+	if (unlikely(!down_read_trylock(&aux->lock))) {
+		dm_bufio_release(*result);
+		return -EWOULDBLOCK;
+	}
 	aux->write_locked = 0;
 
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
