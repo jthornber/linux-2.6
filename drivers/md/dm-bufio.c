@@ -113,9 +113,10 @@ struct dm_bufio_client {
  * kmalloc(), __get_free_pages() or vmalloc().
  * See the comment at dm_bufio_alloc_buffer_data.
  */
-#define DATA_MODE_KMALLOC		1
-#define DATA_MODE_GET_FREE_PAGES	2
-#define DATA_MODE_VMALLOC		3
+#define DATA_MODE_KMALLOC		0
+#define DATA_MODE_GET_FREE_PAGES	1
+#define DATA_MODE_VMALLOC		2
+#define DATA_MODE_LIMIT			3
 
 struct dm_buffer {
 	struct hlist_node hash_list;
@@ -141,12 +142,34 @@ static unsigned long dm_bufio_default_cache_size = 0;
 /* Total cache size set by the user */
 static unsigned long dm_bufio_cache_size = 0;
 
-/* A copy of dm_bufio_cache_size because dm_bufio_cache_size can change anytime.   If it disagrees, the user has changed cache size */
+/* A copy of dm_bufio_cache_size because dm_bufio_cache_size can change anytime.
+   If it disagrees, the user has changed cache size */
 static unsigned long dm_bufio_cache_size_latch = 0;
 
 /* The module parameter */
-module_param(dm_bufio_cache_size, ulong, 0644);
-MODULE_PARM_DESC(dm_bufio_cache_size, "Size of metadata cache");
+module_param_named(cache_size, dm_bufio_cache_size, ulong, 0644);
+MODULE_PARM_DESC(cache_size, "Size of metadata cache");
+
+/* Buffers are freed after this timeout */
+static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE;
+module_param_named(max_age, dm_bufio_max_age, uint, 0644);
+MODULE_PARM_DESC(max_age, "Max age of a buffer in seconds");
+
+/* Total allocated memory */
+static unsigned long dm_bufio_total_allocated = 0;
+module_param_named(total_allocated, dm_bufio_total_allocated, ulong, 0444);
+MODULE_PARM_DESC(total_allocated, "Allocated memory");
+
+/* Memory allocated with kmalloc / get_free_pages / vmalloc */
+static unsigned long dm_bufio_allocated_kmalloc = 0;
+module_param_named(allocated_kmalloc, dm_bufio_allocated_kmalloc, ulong, 0444);
+MODULE_PARM_DESC(allocated_kmalloc, "Memory allocated with kmalloc");
+static unsigned long dm_bufio_allocated_get_free_pages = 0;
+module_param_named(allocated_get_free_pages, dm_bufio_allocated_get_free_pages, ulong, 0444);
+MODULE_PARM_DESC(allocated_get_free_pages, "Memory allocated with get_free_pages");
+static unsigned long dm_bufio_allocated_vmalloc = 0;
+module_param_named(allocated_vmalloc, dm_bufio_allocated_vmalloc, ulong, 0444);
+MODULE_PARM_DESC(allocated_vmalloc, "Memory allocated with vmalloc");
 
 /* Per-client cache: dm_bufio_cache_size / dm_bufio_client_count */
 static unsigned long dm_bufio_cache_size_per_client;
@@ -161,35 +184,33 @@ static LIST_HEAD(dm_bufio_all_clients);
    dm_bufio_cache_size_per_client, dm_bufio_client_count */
 static DEFINE_MUTEX(dm_bufio_clients_lock);
 
-/* Total allocated memory. We don't use atomic_t because it is signed int
-   and it could overflow on 64-bit machines. So use unsigned long and update
-   it with cmpxchg */
-static unsigned long dm_bufio_total_allocated = 0;
-
-/* Buffers are freed after this timeout */
-static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE;
-module_param(dm_bufio_max_age, uint, 0644);
-MODULE_PARM_DESC(dm_bufio_max_age, "Max age of a buffer in seconds");
-
-
 static void write_dirty_buffer(struct dm_buffer *b);
 static void dm_bufio_write_dirty_buffers_async_unlocked(
 				struct dm_bufio_client *c, int no_wait);
 
 
+static void add_atomic(unsigned long *ptr, long diff)
+{
+	unsigned long latch;
+	do {
+		latch = *ptr;
+		/* use barrier() so that *ptr is not read multiple times */
+		barrier();
+	} while (unlikely(cmpxchg(ptr, latch, latch + diff) != latch));
+}
+
 /*
  * An atomic addition to unsigned long.
  */
-static void adjust_total_allocated(int diff)
+static void adjust_total_allocated(int class, long diff)
 {
-	unsigned long  dm_bufio_total_allocated_latch;
-	do {
-		dm_bufio_total_allocated_latch = dm_bufio_total_allocated;
-		barrier();
-	} while (unlikely(cmpxchg(&dm_bufio_total_allocated,
-		                  dm_bufio_total_allocated_latch,
-				  dm_bufio_total_allocated_latch + diff)
-			  != dm_bufio_total_allocated_latch));
+	unsigned long * const class_ptr[DATA_MODE_LIMIT] = {
+		&dm_bufio_allocated_kmalloc,
+		&dm_bufio_allocated_get_free_pages,
+		&dm_bufio_allocated_vmalloc,
+	};
+	add_atomic(class_ptr[class], diff);
+	add_atomic(&dm_bufio_total_allocated, diff);
 }
 
 /*
@@ -213,7 +234,8 @@ static void cache_size_refresh(void)
 		 * Modify dm_bufio_cache_size to report the real used cache
 		 * size to the user.
 		 */
-		(void)cmpxchg(&dm_bufio_cache_size, 0, dm_bufio_default_cache_size);
+		(void)cmpxchg(&dm_bufio_cache_size, 0,
+			      dm_bufio_default_cache_size);
 		dm_bufio_cache_size_latch = dm_bufio_default_cache_size;
 	}
 	dm_bufio_cache_size_per_client = dm_bufio_cache_size_latch /
@@ -319,7 +341,7 @@ static struct dm_buffer *alloc_buffer(struct dm_bufio_client *c, gfp_t gfp_mask)
 		kfree(b);
 		return NULL;
 	}
-	adjust_total_allocated(c->block_size);
+	adjust_total_allocated(b->data_mode, (long)c->block_size);
 	return b;
 }
 
@@ -329,7 +351,7 @@ static struct dm_buffer *alloc_buffer(struct dm_bufio_client *c, gfp_t gfp_mask)
 static void free_buffer(struct dm_buffer *b)
 {
 	struct dm_bufio_client *c = b->c;
-	adjust_total_allocated(-c->block_size);
+	adjust_total_allocated(b->data_mode, -(long)c->block_size);
 	dm_bufio_free_buffer_data(c, b->data, b->data_mode);
 	kfree(b);
 }
@@ -680,7 +702,7 @@ retry_search:
 			free_buffer_wake(new_b);
 		b->hold_count++;
 		relink_lru(b, test_bit(B_DIRTY, &b->state) ||
-			   test_bit(B_WRITING, &b->state));
+			      test_bit(B_WRITING, &b->state));
 unlock_wait_ret:
 		mutex_unlock(&c->lock);
 wait_ret:
