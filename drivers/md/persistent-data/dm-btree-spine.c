@@ -78,13 +78,13 @@ static int bn_read_lock(struct dm_btree_info *info, dm_block_t b,
 
 static int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
 	      struct dm_btree_value_type *vt,
-	      struct dm_block **result, int *inc)
+	      struct dm_block **result)
 {
-	int r;
+	int r, inc;
 
 	r = dm_tm_shadow_block(info->tm, orig, &btree_node_validator,
-			       result, inc);
-	if (!r && *inc)
+			       result, &inc);
+	if (!r && inc)
 		inc_children(info->tm, dm_block_data(*result), vt);
 
 	return r;
@@ -174,7 +174,7 @@ int exit_shadow_spine(struct shadow_spine *s)
 }
 
 int shadow_step(struct shadow_spine *s, dm_block_t b,
-		struct dm_btree_value_type *vt, int *inc)
+		struct dm_btree_value_type *vt)
 {
 	int r;
 
@@ -186,7 +186,7 @@ int shadow_step(struct shadow_spine *s, dm_block_t b,
 		s->count--;
 	}
 
-	r = bn_shadow(s->info, b, vt, s->nodes + s->count, inc);
+	r = bn_shadow(s->info, b, vt, s->nodes + s->count);
 	if (!r) {
 		if (!s->count)
 			s->root = dm_block_location(s->nodes[0]);

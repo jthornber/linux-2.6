@@ -482,11 +482,11 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		      struct dm_btree_value_type *vt, dm_block_t root,
 		      uint64_t key, unsigned *index)
 {
-	int i = *index, inc, r;
+	int i = *index, r;
 	struct node *n;
 
 	for (;;) {
-		r = shadow_step(s, root, vt, &inc);
+		r = shadow_step(s, root, vt);
 		if (r < 0)
 			break;
 
@@ -502,8 +502,6 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		}
 
 		n = dm_block_data(shadow_current(s));
-		if (inc)
-			inc_children(info->tm, n, vt);
 
 		if (le32_to_cpu(n->header.flags) & LEAF_NODE)
 			return do_leaf(n, key, index);

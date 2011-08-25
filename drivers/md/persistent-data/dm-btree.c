@@ -584,17 +584,15 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 			    struct dm_btree_value_type *vt,
 			    uint64_t key, unsigned *index)
 {
-	int r, i = *index, inc, top = 1;
+	int r, i = *index, top = 1;
 	struct node *node;
 
 	for (;;) {
-		r = shadow_step(s, root, vt, &inc);
+		r = shadow_step(s, root, vt);
 		if (r < 0)
 			return r;
 
 		node = dm_block_data(shadow_current(s));
-		if (inc)
-			inc_children(s->info->tm, node, vt);
 
 		/*
 		 * We have to patch up the parent node, ugly, but I don't
@@ -640,13 +638,6 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 
 	if (i < 0 || le64_to_cpu(node->keys[i]) != key)
 		i++;
-
-	/* we're about to overwrite this value, so undo the increment for it */
-	/* FIXME: shame that inc information is leaking outside the spine.
-	 * Plus inc is just plain wrong in the event of a split */
-	if (le64_to_cpu(node->keys[i]) == key && inc)
-		if (vt->dec)
-			vt->dec(vt->context, value_ptr(node, i, vt->size));
 
 	*index = i;
 	return 0;
