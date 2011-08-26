@@ -198,11 +198,10 @@ int dm_tm_new_block(struct dm_transaction_manager *tm,
 
 static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 			  struct dm_block_validator *v,
-			  struct dm_block **result, int *inc_children)
+			  struct dm_block **result)
 {
 	int r;
 	dm_block_t new;
-	uint32_t count;
 	struct dm_block *orig_block;
 
 	r = dm_sm_new_block(tm->sm, &new);
@@ -224,15 +223,9 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 	if (r < 0)
 		goto bad_dec_block;
 
-	r = dm_sm_get_count(tm->sm, orig, &count);
-	if (r < 0)
-		goto bad;
-
 	r = dm_sm_dec_block(tm->sm, orig);
 	if (r < 0)
 		goto bad;
-
-	*inc_children = count > 1;
 
 	return 0;
 
@@ -248,24 +241,19 @@ int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		       struct dm_block_validator *v, struct dm_block **result,
 		       int *inc_children)
 {
-	int r, more_than_one;
+	int r;
 
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
-	if (is_shadow(tm, orig)) {
-		r = dm_sm_count_is_more_than_one(tm->sm, orig, &more_than_one);
-		if (r < 0)
-			return r;
+	r = dm_sm_count_is_more_than_one(tm->sm, orig, inc_children);
+	if (r < 0)
+		return r;
 
-		if (!more_than_one) {
-			*inc_children = 0;
-			return dm_bm_write_lock(tm->bm, orig, v, result);
-		}
-		/* fall through */
-	}
+	if (is_shadow(tm, orig) && !*inc_children)
+		return dm_bm_write_lock(tm->bm, orig, v, result);
 
-	r = __shadow_block(tm, orig, v, result, inc_children);
+	r = __shadow_block(tm, orig, v, result);
 	if (r < 0)
 		return r;
 	insert_shadow(tm, dm_block_location(*result));
