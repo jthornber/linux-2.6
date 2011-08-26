@@ -925,7 +925,7 @@ static int __create_snap(struct dm_pool_metadata *pmd,
 			 dm_thin_id dev, dm_thin_id origin)
 {
 	int r;
-	dm_block_t origin_root, snap_root;
+	dm_block_t origin_root;
 	uint64_t key = origin, dev_key = dev;
 	struct dm_thin_device *td;
 	struct disk_device_details details_le;
@@ -943,18 +943,16 @@ static int __create_snap(struct dm_pool_metadata *pmd,
 		return r;
 	origin_root = le64_to_cpu(value);
 
-	/* clone the origin */
-	r = dm_btree_clone(&pmd->bl_info, origin_root, &snap_root);
-	if (r)
-		return r;
+	/* clone the origin, an inc will do */
+	dm_tm_inc(pmd->tm, origin_root);
 
 	/* insert into the main mapping tree */
-	value = cpu_to_le64(snap_root);
+	value = cpu_to_le64(origin_root);
 	__dm_bless_for_disk(&value);
 	key = dev;
 	r = dm_btree_insert(&pmd->tl_info, pmd->root, &key, &value, &pmd->root);
 	if (r) {
-		dm_btree_del(&pmd->bl_info, snap_root);
+		dm_tm_dec(pmd->tm, origin_root);
 		return r;
 	}
 

@@ -758,42 +758,6 @@ EXPORT_SYMBOL_GPL(dm_btree_insert_notify);
 
 /*----------------------------------------------------------------*/
 
-int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
-		   dm_block_t *clone)
-{
-	int r;
-	struct dm_block *b, *orig_b;
-	struct node *b_node, *orig_node;
-
-	/* Copy the root node */
-	r = new_block(info, &b);
-	if (r < 0)
-		return r;
-
-	r = dm_tm_read_lock(info->tm, root, &btree_node_validator, &orig_b);
-	if (r < 0) {
-		dm_block_t location = dm_block_location(b);
-
-		unlock_block(info, b);
-		dm_tm_dec(info->tm, location);
-	}
-
-	*clone = dm_block_location(b);
-	b_node = dm_block_data(b);
-	orig_node = dm_block_data(orig_b);
-
-	memcpy(b_node, orig_node,
-	       dm_bm_block_size(dm_tm_get_bm(info->tm)));
-	dm_tm_unlock(info->tm, orig_b);
-	inc_children(info->tm, b_node, &info->value_type);
-	dm_tm_unlock(info->tm, b);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(dm_btree_clone);
-
-/*----------------------------------------------------------------*/
-
 static int find_highest_key(struct ro_spine *s, dm_block_t block,
 			    uint64_t *result_key, dm_block_t *next_block)
 {
