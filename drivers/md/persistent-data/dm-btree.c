@@ -584,17 +584,15 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 			    struct dm_btree_value_type *vt,
 			    uint64_t key, unsigned *index)
 {
-	int r, i = *index, inc, top = 1;
+	int r, i = *index, top = 1;
 	struct node *node;
 
 	for (;;) {
-		r = shadow_step(s, root, vt, &inc);
+		r = shadow_step(s, root, vt);
 		if (r < 0)
 			return r;
 
 		node = dm_block_data(shadow_current(s));
-		if (inc)
-			inc_children(s->info->tm, node, vt);
 
 		/*
 		 * We have to patch up the parent node, ugly, but I don't
@@ -640,13 +638,6 @@ static int btree_insert_raw(struct shadow_spine *s, dm_block_t root,
 
 	if (i < 0 || le64_to_cpu(node->keys[i]) != key)
 		i++;
-
-	/* we're about to overwrite this value, so undo the increment for it */
-	/* FIXME: shame that inc information is leaking outside the spine.
-	 * Plus inc is just plain wrong in the event of a split */
-	if (le64_to_cpu(node->keys[i]) == key && inc)
-		if (vt->dec)
-			vt->dec(vt->context, value_ptr(node, i, vt->size));
 
 	*index = i;
 	return 0;
@@ -764,42 +755,6 @@ int dm_btree_insert_notify(struct dm_btree_info *info, dm_block_t root,
 	return insert(info, root, keys, value, new_root, inserted);
 }
 EXPORT_SYMBOL_GPL(dm_btree_insert_notify);
-
-/*----------------------------------------------------------------*/
-
-int dm_btree_clone(struct dm_btree_info *info, dm_block_t root,
-		   dm_block_t *clone)
-{
-	int r;
-	struct dm_block *b, *orig_b;
-	struct node *b_node, *orig_node;
-
-	/* Copy the root node */
-	r = new_block(info, &b);
-	if (r < 0)
-		return r;
-
-	r = dm_tm_read_lock(info->tm, root, &btree_node_validator, &orig_b);
-	if (r < 0) {
-		dm_block_t location = dm_block_location(b);
-
-		unlock_block(info, b);
-		dm_tm_dec(info->tm, location);
-	}
-
-	*clone = dm_block_location(b);
-	b_node = dm_block_data(b);
-	orig_node = dm_block_data(orig_b);
-
-	memcpy(b_node, orig_node,
-	       dm_bm_block_size(dm_tm_get_bm(info->tm)));
-	dm_tm_unlock(info->tm, orig_b);
-	inc_children(info->tm, b_node, &info->value_type);
-	dm_tm_unlock(info->tm, b);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(dm_btree_clone);
 
 /*----------------------------------------------------------------*/
 

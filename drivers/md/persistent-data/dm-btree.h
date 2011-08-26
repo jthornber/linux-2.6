@@ -143,11 +143,6 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, dm_block_t *new_root);
 
 /*
- * Clone a tree. O(1)
- */
-int dm_btree_clone(struct dm_btree_info *info, dm_block_t root, dm_block_t *clone);
-
-/*
  * Returns < 0 on failure.  Otherwise the number of key entries that have
  * been filled out.  Remember trees can have zero entries, and as such have
  * no highest key.
