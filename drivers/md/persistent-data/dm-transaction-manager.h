@@ -29,8 +29,8 @@ void dm_tm_destroy(struct dm_transaction_manager *tm);
  * You create the non-blocking variant from a normal tm.  The interface is
  * the same, except that most functions will just return -EWOULDBLOCK.
  * Methods that return void yet may block should not be called on a clone
- * viz. tm_inc, tm_dec.  Call dm_tm_destroy() as you would with a normal tm
- * when you've finished with it.  You may not destroy the original prior
+ * viz. dm_tm_inc, dm_tm_dec.  Call dm_tm_destroy() as you would with a normal
+ * tm when you've finished with it.  You may not destroy the original prior
  * to clones.
  */
 struct dm_transaction_manager *dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real);

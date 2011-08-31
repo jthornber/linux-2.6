@@ -297,6 +297,7 @@ void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 
 	dm_sm_dec_block(tm->sm, b);
 }
+EXPORT_SYMBOL_GPL(dm_tm_dec);
 
 int dm_tm_ref(struct dm_transaction_manager *tm, dm_block_t b,
 	      uint32_t *result)
