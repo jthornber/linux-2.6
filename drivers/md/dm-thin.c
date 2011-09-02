@@ -483,6 +483,7 @@ struct pool {
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
+	struct bio_list awaiting_commit;
 	struct list_head prepared_mappings;
 
 	int low_water_triggered;	/* A dm event has been sent */
@@ -634,18 +635,17 @@ static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 			    dm_block_t block)
 {
-	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
-		int r = dm_pool_commit_metadata(tc->pool->pmd);
-		if (r) {
-			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-			      __func__, r);
-			bio_io_error(bio);
-			return;
-		}
-	}
+	struct pool *pool = tc->pool;
+	unsigned long flags;
 
 	remap(tc, bio, block);
-	generic_make_request(bio);
+
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+		spin_lock_irqsave(&pool->lock, flags);
+		bio_list_add(&pool->awaiting_commit, bio);
+		spin_unlock_irqrestore(&pool->lock, flags);
+	} else
+		generic_make_request(bio);
 }
 
 static void wake_worker(struct pool *pool)
@@ -1095,9 +1095,29 @@ static void process_deferred_bios(struct pool *pool)
 			bio_list_merge(&pool->deferred_bios, &bios);
 			spin_unlock_irqrestore(&pool->lock, flags);
 
-			return;
+			break;
 		}
 		process_bio(tc, bio);
+	}
+
+	bio_list_init(&bios);
+	spin_lock_irqsave(&pool->lock, flags);
+	bio_list_merge(&bios, &pool->awaiting_commit);
+	bio_list_init(&pool->awaiting_commit);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	if (!bio_list_empty(&bios)) {
+		int r = dm_pool_commit_metadata(pool->pmd);
+		if (r) {
+			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
+			      __func__, r);
+			while ((bio = bio_list_pop(&bios)))
+				bio_io_error(bio);
+			return;
+		}
+
+		while ((bio = bio_list_pop(&bios)))
+			generic_make_request(bio);
 	}
 }
 
@@ -1356,6 +1376,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 	INIT_WORK(&pool->worker, do_worker);
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
+	bio_list_init(&pool->awaiting_commit);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
 	pool->low_water_triggered = 0;
 	bio_list_init(&pool->retry_list);
