@@ -45,6 +45,11 @@
   - [ ] some work needs to be done to verify tearing down thin devices
         when the pool has run out of space is done cleanly              :ejt:
 
+  - [ ] atm we only commit metadata when a FUA or FLUSH bio comes in
+        (or when we shutdown).  This allows too big a position to be
+        built up.  We should commit every n seconds, and make this
+        configurable.                                                   :ejt:
+
   - [ ] We need to know how many block locks can be held concurrently.
 
 	I think the worst case is:
