@@ -10,6 +10,8 @@
 #include <linux/dm-io.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/version.h>
+#include <linux/shrinker.h>
 
 #include "dm.h"
 
@@ -99,6 +101,8 @@ struct dm_bufio_client {
 	int async_write_error;
 
 	struct list_head client_list;
+
+	struct shrinker shrinker;
 };
 
 /*
@@ -155,10 +159,20 @@ static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE;
 module_param_named(max_age, dm_bufio_max_age, uint, 0644);
 MODULE_PARM_DESC(max_age, "Max age of a buffer in seconds");
 
+/* This spinlock protects:
+   dm_bufio_total_allocated, dm_bufio_peak_allocated,
+   dm_bufio_allocated_kmalloc, dm_bufio_allocated_get_free_pages,
+   dm_bufio_allocated_vmalloc */
+static DEFINE_SPINLOCK(allocated_memory_spinlock);
+
 /* Total allocated memory */
 static unsigned long dm_bufio_total_allocated = 0;
 module_param_named(total_allocated, dm_bufio_total_allocated, ulong, 0444);
 MODULE_PARM_DESC(total_allocated, "Allocated memory");
+
+static unsigned long dm_bufio_peak_allocated = 0;
+module_param_named(peak_allocated, dm_bufio_peak_allocated, ulong, 0644);
+MODULE_PARM_DESC(peak_allocated, "Maximum allocated memory");
 
 /* Memory allocated with kmalloc / get_free_pages / vmalloc */
 static unsigned long dm_bufio_allocated_kmalloc = 0;
@@ -187,30 +201,28 @@ static DEFINE_MUTEX(dm_bufio_clients_lock);
 static void write_dirty_buffer(struct dm_buffer *b);
 static void dm_bufio_write_dirty_buffers_async_unlocked(
 				struct dm_bufio_client *c, int no_wait);
-
-
-static void add_atomic(unsigned long *ptr, long diff)
-{
-	unsigned long latch;
-	do {
-		latch = *ptr;
-		/* use barrier() so that *ptr is not read multiple times */
-		barrier();
-	} while (unlikely(cmpxchg(ptr, latch, latch + diff) != latch));
-}
+static int dm_bufio_shrink(struct shrinker *shrinker,
+			   struct shrink_control *sc);
 
 /*
  * An atomic addition to unsigned long.
  */
-static void adjust_total_allocated(int class, long diff)
+static void adjust_total_allocated(int data_mode, long diff)
 {
-	unsigned long * const class_ptr[DATA_MODE_LIMIT] = {
+	static unsigned long * const class_ptr[DATA_MODE_LIMIT] = {
 		&dm_bufio_allocated_kmalloc,
 		&dm_bufio_allocated_get_free_pages,
 		&dm_bufio_allocated_vmalloc,
 	};
-	add_atomic(class_ptr[class], diff);
-	add_atomic(&dm_bufio_total_allocated, diff);
+
+	spin_lock(&allocated_memory_spinlock);
+
+	*class_ptr[data_mode] += diff;
+	dm_bufio_total_allocated += diff;
+	if (unlikely(dm_bufio_total_allocated > dm_bufio_peak_allocated))
+		dm_bufio_peak_allocated = dm_bufio_total_allocated;
+
+	spin_unlock(&allocated_memory_spinlock);
 }
 
 /*
@@ -1178,6 +1190,11 @@ dm_bufio_client_create(struct block_device *bdev, unsigned block_size,
 	cache_size_refresh();
 	mutex_unlock(&dm_bufio_clients_lock);
 
+	c->shrinker.shrink = dm_bufio_shrink;
+	c->shrinker.seeks = 1;
+	c->shrinker.batch = 0;
+	register_shrinker(&c->shrinker);
+
 	return c;
 
 bad_buffer:
@@ -1205,6 +1222,8 @@ void dm_bufio_client_destroy(struct dm_bufio_client *c)
 {
 	unsigned i;
 	dm_bufio_drop_buffers(c);
+
+	unregister_shrinker(&c->shrinker);
 
 	mutex_lock(&dm_bufio_clients_lock);
 	list_del(&c->client_list);
@@ -1239,19 +1258,22 @@ EXPORT_SYMBOL(dm_bufio_client_destroy);
 
 /*
  * Test if the buffer is unused and too old, and commit it.
- * At this point we must not do any I/O because we hold dm_bufio_clients_lock
- * and we would risk deadlock if the I/O gets rerouted to different bufio
- * client.
+ * At if noio is set, we must not do any I/O because we hold
+ * dm_bufio_clients_lock and we would risk deadlock if the I/O gets rerouted to
+ * different bufio client.
  */
-static int cleanup_old_buffer(struct dm_buffer *b, unsigned long max_age)
+static int cleanup_old_buffer(struct dm_buffer *b, gfp_t gfp,
+			      unsigned long max_age)
 {
 	if (jiffies - b->last_accessed < max_age)
 		return 1;
 
-	if (unlikely(test_bit(B_READING, &b->state)) ||
-	    unlikely(test_bit(B_WRITING, &b->state)) ||
-	    unlikely(test_bit(B_DIRTY, &b->state)))
-		return 1;
+	if (likely(!(gfp & __GFP_IO))) {
+		if (unlikely(test_bit(B_READING, &b->state)) ||
+		    unlikely(test_bit(B_WRITING, &b->state)) ||
+		    unlikely(test_bit(B_DIRTY, &b->state)))
+			return 1;
+	}
 
 	if (unlikely(b->hold_count != 0))
 		return 1;
@@ -1276,15 +1298,14 @@ static void cleanup_old_buffers(void)
 
 	mutex_lock(&dm_bufio_clients_lock);
 	list_for_each_entry(c, &dm_bufio_all_clients, client_list) {
-		struct dm_buffer *b;
-
 		if (!mutex_trylock(&c->lock))
 			continue;
 
 		while (!list_empty(&c->lru[LIST_CLEAN])) {
+			struct dm_buffer *b;
 			b = list_entry(c->lru[LIST_CLEAN].prev,
 				       struct dm_buffer, lru_list);
-			if (cleanup_old_buffer(b, max_age))
+			if (unlikely(cleanup_old_buffer(b, 0, max_age)))
 				break;
 		}
 
@@ -1303,11 +1324,50 @@ static void dm_bufio_work_fn(struct work_struct *w)
 	queue_delayed_work(dm_bufio_wq, &dm_bufio_work, DM_BUFIO_WORK_TIMER * HZ);
 }
 
+static int dm_bufio_shrink(struct shrinker *shrinker, struct shrink_control *sc)
+{
+	struct dm_bufio_client *c =
+		container_of(shrinker, struct dm_bufio_client, shrinker);
+	int l;
+	unsigned long ret_val;
+	unsigned long nr_to_scan = sc->nr_to_scan;
+
+	if (sc->gfp_mask & __GFP_IO) {
+		mutex_lock(&c->lock);
+	} else {
+		if (!mutex_trylock(&c->lock))
+			return !nr_to_scan ? 0 : -1;
+	}
+
+	if (!nr_to_scan)
+		goto skip_scan;
+
+	for (l = 0; l < LIST_N; l++) {
+		struct dm_buffer *b, *tmp;
+		list_for_each_entry_safe_reverse(b, tmp, &c->lru[l], lru_list) {
+			if (likely(!cleanup_old_buffer(b, sc->gfp_mask, 0))) {
+				nr_to_scan--;
+				if (!nr_to_scan)
+					goto skip_scan;
+			}
+		}
+	}
+
+skip_scan:
+	ret_val = c->n_buffers[LIST_CLEAN] + c->n_buffers[LIST_DIRTY];
+	if (unlikely(ret_val > INT_MAX))
+		ret_val = INT_MAX;
+
+	mutex_unlock(&c->lock);
+
+	return ret_val;
+}
+
 /*
  * This is called only once for the whole dm_bufio module.
  * It initializes memory limit.
  */
-static int __init dm_bufio_init(void)
+int __init dm_bufio_init(void)
 {
 	__u64 mem;
 
@@ -1340,7 +1400,7 @@ static int __init dm_bufio_init(void)
 /*
  * This is called once when unloading the dm_bufio module.
  */
-static void __exit dm_bufio_exit(void)
+void __exit dm_bufio_exit(void)
 {
 	int bug;
 
@@ -1355,6 +1415,21 @@ static void __exit dm_bufio_exit(void)
 	}
 	if (dm_bufio_total_allocated != 0) {
 		printk(KERN_CRIT "%s: dm_bufio_total_allocated leaked: %lu",
+			__func__, dm_bufio_total_allocated);
+		bug = 1;
+	}
+	if (dm_bufio_allocated_kmalloc != 0) {
+		printk(KERN_CRIT "%s: dm_bufio_allocated_kmalloc leaked: %lu",
+			__func__, dm_bufio_total_allocated);
+		bug = 1;
+	}
+	if (dm_bufio_allocated_get_free_pages != 0) {
+		printk(KERN_CRIT "%s: dm_bufio_allocated_get_free_pages leaked: %lu",
+			__func__, dm_bufio_total_allocated);
+		bug = 1;
+	}
+	if (dm_bufio_allocated_vmalloc != 0) {
+		printk(KERN_CRIT "%s: dm_bufio_vmalloc leaked: %lu",
 			__func__, dm_bufio_total_allocated);
 		bug = 1;
 	}
