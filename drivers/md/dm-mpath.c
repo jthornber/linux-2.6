@@ -19,7 +19,7 @@
 #include <linux/time.h>
 #include <linux/workqueue.h>
 #include <scsi/scsi_dh.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #define DM_MSG_PREFIX "multipath"
 #define DM_PG_INIT_DELAY_MSECS 2000
@@ -1460,7 +1460,7 @@ static int multipath_message(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	if (!!strcasecmp(argv[0], "disable_group")) {
+	if (!strcasecmp(argv[0], "disable_group")) {
 		r = bypass_pg_num(m, argv[1], 1);
 		goto out;
 	} else if (!strcasecmp(argv[0], "enable_group")) {

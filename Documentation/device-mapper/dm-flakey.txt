@@ -51,5 +51,3 @@ Examples:
 
   corrupt_bio_byte 224 w 0 32
 	- replaces the 224th byte of REQ_META (=32) bios with the value 0
-
-

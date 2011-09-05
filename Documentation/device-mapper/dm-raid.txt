@@ -11,6 +11,7 @@ The target is named "raid" and it accepts the following parameters:
     <#raid_devs> <metadata_dev0> <dev0> [.. <metadata_devN> <devN>]
 
 <raid_type>:
+  raid1		RAID1 mirroring
   raid4		RAID4 dedicated parity disk
   raid5_la	RAID5 left asymmetric
 		- rotating parity 0 with data continuation
@@ -50,14 +51,18 @@ The target is named "raid" and it accepts the following parameters:
 
 	[min_recovery_rate <kB/sec/disk>]  Throttle RAID initialization
 	[max_recovery_rate <kB/sec/disk>]  Throttle RAID initialization
+	[write_mostly <idx>]		   Drive index is write-mostly
 	[max_write_behind <sectors>]       See '-write-behind=' (man mdadm)
 	[stripe_cache <sectors>]           Stripe cache size (higher RAIDs only)
+	[region_size <sectors>]
+		The region_size multiplied by the number of regions is the
+		logical size of the array.  The bitmap records the device
+		synchronisation state for each region.
 
 <#raid_devs>: The number of devices composing the array.
 	Each device consists of two entries.  The first is the device
 	containing the metadata (if any); the second is the one containing the
-	data.  Currently, separate metadata devices are not supported and '-'
-	is required in place of the metadata device.
+	data.
 
 	If a drive has failed or is missing at creation time, a '-' can be
 	given for both the metadata and data drives for a given position.
@@ -65,7 +70,7 @@ The target is named "raid" and it accepts the following parameters:
 
 Example tables
 --------------
-# RAID4 - 4 data drives, 1 parity
+# RAID4 - 4 data drives, 1 parity (no metadata devices)
 # No metadata devices specified to hold superblock/bitmap info
 # Chunk size of 1MiB
 # (Lines separated for easy reading)
@@ -74,18 +79,19 @@ Example tables
         raid4 1 2048 \
         5 - 8:17 - 8:33 - 8:49 - 8:65 - 8:81
 
-# RAID4 - 4 data drives, 1 parity (no metadata devices)
+# RAID4 - 4 data drives, 1 parity (with metadata devices)
 # Chunk size of 1MiB, force RAID initialization,
 #       min recovery rate at 20 kiB/sec/disk
 
 0 1960893648 raid \
-        raid4 4 2048 min_recovery_rate 20 sync\
-        5 - 8:17 - 8:33 - 8:49 - 8:65 - 8:81
+        raid4 4 2048 sync min_recovery_rate 20 \
+        5 8:17 8:18 8:33 8:34 8:49 8:50 8:65 8:66 8:81 8:82
 
 'dmsetup table' displays the table used to construct the mapping.
-The optional parameters will always be printed in the order listed
+The optional parameters are always printed in the order listed
 above with "sync" or "nosync" always output ahead of the other
 arguments, regardless of the order used when originally loading the table.
+Arguments that can be repeated are ordered by value.
 
 'dmsetup status' yields information on the state and health of the
 array.
@@ -100,4 +106,3 @@ Here we can see the RAID type is raid4, there are 5 devices - all of
 which are 'A'live, and the array is 2/490221568 complete with recovery.
 Faulty or missing devices are marked 'D'.  Devices that are out-of-sync
 are marked 'a'.
-
