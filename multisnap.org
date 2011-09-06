@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [19/25]
+** Kernel [20/26]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -40,7 +40,7 @@
         last index entry is being set correctly if there are fewer than a
         whole blocks worth.  Also check this is extended correctly.     :ejt:
 
-  - [ ] RHEL6.2 needs kzalloc (Mike knows what this means)             :mike:
+  - [X] RHEL6.2 needs kzalloc (Mike knows what this means)             :mike:
 
   - [ ] some work needs to be done to verify tearing down thin devices
         when the pool has run out of space is done cleanly              :ejt:
