@@ -23,6 +23,7 @@
 #define DEFERRED_SET_SIZE 64
 #define MAPPING_POOL_SIZE 1024
 #define PRISON_CELLS 1024
+#define COMMIT_PERIOD (60 * HZ)
 
 /*
  * The block size of the device holding pool data must be
@@ -479,7 +480,7 @@ struct pool {
 	struct dm_kcopyd_client *copier;
 
 	struct workqueue_struct *wq;
-	struct work_struct worker;
+	struct delayed_work worker;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -496,6 +497,7 @@ struct pool {
 	mempool_t *endio_hook_pool;
 
 	atomic_t ref_count;
+	unsigned long last_commit_jiffies;
 };
 
 /*
@@ -650,7 +652,7 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 
 static void wake_worker(struct pool *pool)
 {
-	queue_work(pool->wq, &pool->worker);
+	queue_work(pool->wq, &pool->worker.work);
 }
 
 static void __maybe_add_mapping(struct new_mapping *m)
@@ -1069,6 +1071,12 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	}
 }
 
+static int need_commit_due_to_time(struct pool *pool)
+{
+	return jiffies < pool->last_commit_jiffies ||
+	       jiffies > pool->last_commit_jiffies + COMMIT_PERIOD;
+}
+
 static void process_deferred_bios(struct pool *pool)
 {
 	unsigned long flags;
@@ -1106,7 +1114,7 @@ static void process_deferred_bios(struct pool *pool)
 	bio_list_init(&pool->awaiting_commit);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	if (!bio_list_empty(&bios)) {
+	if (!bio_list_empty(&bios) || need_commit_due_to_time(pool)) {
 		int r = dm_pool_commit_metadata(pool->pmd);
 		if (r) {
 			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
@@ -1115,9 +1123,16 @@ static void process_deferred_bios(struct pool *pool)
 				bio_io_error(bio);
 			return;
 		}
+		pool->last_commit_jiffies = jiffies;
 
 		while ((bio = bio_list_pop(&bios)))
 			generic_make_request(bio);
+
+		/*
+		 * We want to commit periodically so that not too much
+		 * unwritten data builds up.
+		 */
+		queue_delayed_work(pool->wq, &pool->worker, COMMIT_PERIOD);
 	}
 }
 
@@ -1170,7 +1185,7 @@ static void process_prepared_mappings(struct pool *pool)
 
 static void do_worker(struct work_struct *ws)
 {
-	struct pool *pool = container_of(ws, struct pool, worker);
+	struct pool *pool = container_of(to_delayed_work(ws), struct pool, worker);
 
 	process_prepared_mappings(pool);
 	process_deferred_bios(pool);
@@ -1373,7 +1388,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 		goto bad_wq;
 	}
 
-	INIT_WORK(&pool->worker, do_worker);
+	INIT_DELAYED_WORK(&pool->worker, do_worker);
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
 	bio_list_init(&pool->awaiting_commit);
@@ -1399,6 +1414,7 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 		goto bad_endio_hook_pool;
 	}
 	atomic_set(&pool->ref_count, 1);
+	pool->last_commit_jiffies = jiffies;
 
 	return pool;
 
@@ -1703,6 +1719,7 @@ static void pool_postsuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
+	cancel_delayed_work(&pool->worker);
 	flush_workqueue(pool->wq);
 
 	r = dm_pool_commit_metadata(pool->pmd);
