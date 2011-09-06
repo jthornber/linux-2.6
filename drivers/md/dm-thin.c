@@ -611,6 +611,34 @@ static struct pool *pool_table_lookup(struct mapped_device *md)
 
 /*----------------------------------------------------------------*/
 
+static void __requeue_bio_list(struct thin_c *tc, struct bio_list *master)
+{
+	struct bio *bio;
+	struct bio_list bios;
+
+	bio_list_init(&bios);
+	bio_list_merge(&bios, master);
+	bio_list_init(master);
+
+	while ((bio = bio_list_pop(&bios))) {
+		if (dm_get_mapinfo(bio)->ptr == tc)
+			bio_endio(bio, DM_ENDIO_REQUEUE);
+		else
+			bio_list_add(master, bio);
+	}
+}
+
+static void requeue_io(struct thin_c *tc)
+{
+	struct pool *pool = tc->pool;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+	__requeue_bio_list(tc, &pool->deferred_bios);
+	__requeue_bio_list(tc, &pool->retry_list);
+	spin_unlock_irqrestore(&pool->lock, flags);
+}
+
 /*
  * This section of code contains the logic for processing a thin devices' IO.
  * Much of the code depends on pool object resources (lists, workqueues, etc)
@@ -2143,6 +2171,12 @@ static int thin_map(struct dm_target *ti, struct bio *bio,
 	return bio_map(ti, bio, map_context);
 }
 
+static void thin_postsuspend(struct dm_target *ti)
+{
+	if (dm_noflush_suspending(ti))
+		requeue_io((struct thin_c *)ti->private);
+}
+
 static int thin_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
 {
@@ -2207,6 +2241,7 @@ static struct target_type thin_target = {
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
 	.map = thin_map,
+	.postsuspend = thin_postsuspend,
 	.status = thin_status,
 	.iterate_devices = thin_iterate_devices,
 	.io_hints = thin_io_hints,
