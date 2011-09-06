@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [18/24]
+** Kernel [19/25]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -45,10 +45,14 @@
   - [ ] some work needs to be done to verify tearing down thin devices
         when the pool has run out of space is done cleanly              :ejt:
 
-  - [ ] atm we only commit metadata when a FUA or FLUSH bio comes in
+  - [ ] Heinz got an oops when doing a dmsetup remove_all -f                :ejt:
+
+  - [X] atm we only commit metadata when a FUA or FLUSH bio comes in
         (or when we shutdown).  This allows too big a position to be
         built up.  We should commit every n seconds, and make this
         configurable.                                                   :ejt:
+
+	Hard coded to 60 seconds for now.
 
   - [ ] We need to know how many block locks can be held concurrently.
 
