@@ -245,6 +245,25 @@ config DM_THIN_PROVISIONING
        ---help---
          Provides thin provisioning and snapshots that share a data store.
 
+config DM_BLOCK_LOCKING
+	boolean "Strict block locking"
+	depends on DM_THIN_PROVISIONING
+	---help---
+
+	  The block locking is not absolutely neccessary.  It does
+	  however detect corrupt data and certain programming errors.
+
+	  If unsure, say Y.
+
+config DM_BLOCK_STACK_TRACING
+	boolean "Keep a stack trace of all lock holders"
+	depends on DM_BLOCK_LOCKING
+	---help---
+
+	  Helpful for debugging.
+
+	  If unsure, say N.
+
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM

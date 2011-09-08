@@ -12,8 +12,335 @@
 #include <linux/rwsem.h>
 #include <linux/device-mapper.h>
 #include <linux/dm-bufio.h>
+#include <linux/stacktrace.h>
 
 #define DM_MSG_PREFIX "block manager"
+
+/*----------------------------------------------------------------*/
+
+#ifdef CONFIG_DM_BLOCK_LOCKING
+/*
+ * This is a read/write semaphore with a couple of differences.
+ *
+ * i) There is a restriction on the number of concurrent read locks that
+ * may be held at once.  This is just an implementation detail.
+ *
+ * ii) Recursive locking attempts are detected and return EINVAL.  A stack
+ * trace is also emitted for the previous lock aquisition.
+ *
+ * iii) Priority is given to write locks.
+ */
+#define MAX_HOLDERS 4
+#define MAX_STACK 10
+
+typedef unsigned long stack_entries[MAX_STACK];
+
+struct block_lock {
+	spinlock_t lock;
+	__s32 count;
+	struct list_head waiters;
+	struct task_struct *holders[MAX_HOLDERS];
+
+#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+	struct stack_trace traces[MAX_HOLDERS];
+	stack_entries entries[MAX_HOLDERS];
+#endif
+};
+
+struct waiter {
+	struct list_head list;
+	struct task_struct *task;
+	int wants_write;
+};
+
+static unsigned __find_holder(struct block_lock *lock,
+			      struct task_struct *task)
+{
+	unsigned i;
+
+	for (i = 0; i < MAX_HOLDERS; i++)
+		if (lock->holders[i] == task)
+			break;
+
+	BUG_ON(i == MAX_HOLDERS);
+	return i;
+}
+
+/* call this *after* you increment lock->count */
+static void __add_holder(struct block_lock *lock, struct task_struct *task)
+{
+	unsigned h = __find_holder(lock, NULL);
+#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+	struct stack_trace *t;
+#endif
+
+	get_task_struct(task);
+	lock->holders[h] = task;
+
+#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+	t = lock->traces + h;
+	t->nr_entries = 0;
+	t->max_entries = MAX_STACK;
+	t->entries = lock->entries[h];
+	t->skip = 2;
+	save_stack_trace(t);
+#endif
+}
+
+/* call this *before* you decrement lock->count */
+static void __del_holder(struct block_lock *lock, struct task_struct *task)
+{
+	unsigned h = __find_holder(lock, task);
+	lock->holders[h] = NULL;
+	put_task_struct(task);
+}
+
+static int __check_holder(struct block_lock *lock)
+{
+	unsigned i;
+#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+	static struct stack_trace t;
+	static stack_entries entries;
+#endif
+
+	for (i = 0; i < MAX_HOLDERS; i++) {
+		if (lock->holders[i] == current) {
+			DMERR("recursive lock detected in pool metadata");
+#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+			DMERR("previously held here:");
+			print_stack_trace(lock->traces + i, 4);
+
+			DMERR("subsequent aquisition attempted here:");
+			t.nr_entries = 0;
+			t.max_entries = MAX_STACK;
+			t.entries = entries;
+			t.skip = 3;
+			save_stack_trace(&t);
+			print_stack_trace(&t, 4);
+#endif
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static void __wait(struct waiter *w)
+{
+	for (;;) {
+		set_task_state(current, TASK_UNINTERRUPTIBLE);
+
+		if (!w->task)
+			break;
+
+		schedule();
+	}
+
+	set_task_state(current, TASK_RUNNING);
+}
+
+static void __wake_waiter(struct waiter *w)
+{
+	struct task_struct *task;
+
+	list_del(&w->list);
+	task = w->task;
+	smp_mb();
+	w->task = NULL;
+	wake_up_process(task);
+}
+
+/*
+ * We either wake a few readers or a single writer.
+ */
+static void __wake_many(struct block_lock *lock)
+{
+	struct waiter *w, *tmp;
+
+	BUG_ON(lock->count < 0);
+	list_for_each_entry_safe (w, tmp, &lock->waiters, list) {
+		if (lock->count >= MAX_HOLDERS)
+			return;
+
+		if (w->wants_write) {
+			if (lock->count > 0)
+				return; /* still read locked */
+
+			lock->count = -1;
+			__add_holder(lock, w->task);
+			__wake_waiter(w);
+			return;
+		}
+
+		lock->count++;
+		__add_holder(lock, w->task);
+		__wake_waiter(w);
+	}
+}
+
+static void bl_init(struct block_lock *lock)
+{
+	int i;
+
+	spin_lock_init(&lock->lock);
+	lock->count = 0;
+	INIT_LIST_HEAD(&lock->waiters);
+	for (i = 0; i < MAX_HOLDERS; i++)
+		lock->holders[i] = NULL;
+}
+
+static int __available_for_read(struct block_lock *lock)
+{
+	return lock->count >= 0 &&
+		lock->count < MAX_HOLDERS &&
+		list_empty(&lock->waiters);
+}
+
+static int bl_down_read(struct block_lock *lock)
+{
+	int r;
+	struct waiter w;
+	unsigned long flags;
+
+	spin_lock_irqsave(&lock->lock, flags);
+	r = __check_holder(lock);
+	if (r) {
+		spin_unlock_irqrestore(&lock->lock, flags);
+		return r;
+	}
+
+	if (__available_for_read(lock)) {
+		lock->count++;
+		__add_holder(lock, current);
+		spin_unlock_irqrestore(&lock->lock, flags);
+		return 0;
+	}
+
+	get_task_struct(current);
+
+	w.task = current;
+	w.wants_write = 0;
+	list_add_tail(&w.list, &lock->waiters);
+	spin_unlock_irqrestore(&lock->lock, flags);
+
+	__wait(&w);
+	put_task_struct(current);
+	return 0;
+}
+
+static int bl_down_read_nonblock(struct block_lock *lock)
+{
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&lock->lock, flags);
+	r = __check_holder(lock);
+	if (r)
+		goto out;
+
+	if (__available_for_read(lock)) {
+		lock->count++;
+		__add_holder(lock, current);
+		r = 0;
+	} else
+		r = -EWOULDBLOCK;
+
+out:
+	spin_unlock_irqrestore(&lock->lock, flags);
+	return r;
+}
+
+static void bl_up_read(struct block_lock *lock)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&lock->lock, flags);
+	BUG_ON(lock->count <= 0);
+	__del_holder(lock, current);
+	--lock->count;
+	if (!list_empty(&lock->waiters))
+		__wake_many(lock);
+	spin_unlock_irqrestore(&lock->lock, flags);
+}
+
+static int bl_down_write(struct block_lock *lock)
+{
+	int r;
+	struct waiter w;
+	unsigned long flags;
+
+	spin_lock_irqsave(&lock->lock, flags);
+	r = __check_holder(lock);
+	if (r) {
+		spin_unlock_irqrestore(&lock->lock, flags);
+		return r;
+	}
+
+	if (lock->count == 0 && list_empty(&lock->waiters)) {
+		lock->count = -1;
+		__add_holder(lock, current);
+		spin_unlock_irqrestore(&lock->lock, flags);
+		return 0;
+	}
+
+	get_task_struct(current);
+	w.task = current;
+	w.wants_write = 1;
+
+	/* writers given priority, we know there's only one mutator in the system, so ignoring the ordering reversal */
+	list_add(&w.list, &lock->waiters);
+	spin_unlock_irqrestore(&lock->lock, flags);
+
+	__wait(&w);
+	put_task_struct(current);
+
+	return 0;
+}
+
+static void bl_up_write(struct block_lock *lock)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&lock->lock, flags);
+	__del_holder(lock, current);
+	lock->count = 0;
+	if (!list_empty(&lock->waiters))
+		__wake_many(lock);
+	spin_unlock_irqrestore(&lock->lock, flags);
+}
+
+static void report_recursive_bug(dm_block_t b, int r)
+{
+	if (r == -EINVAL)
+		DMERR("recursive acquisition of block %llu requested.",
+		      (unsigned long long) b);
+}
+
+#else
+struct block_lock {
+};
+
+#define bl_init(lock)
+#define bl_up_read(lock)
+#define bl_up_write(lock)
+#define report_recursive_bug(b, r)
+
+static int bl_down_read(struct block_lock *lock)
+{
+	return 0;
+}
+
+static int bl_down_read_nonblock(struct block_lock *lock)
+{
+	return 0;
+}
+
+static int bl_down_write(struct block_lock *lock)
+{
+	return 0;
+}
+
+#endif
 
 /*----------------------------------------------------------------*/
 
@@ -31,7 +358,7 @@ EXPORT_SYMBOL_GPL(dm_block_data);
 
 struct buffer_aux {
 	struct dm_block_validator *validator;
-	struct rw_semaphore lock;
+	struct block_lock lock;
 	int write_locked;
 };
 
@@ -39,7 +366,7 @@ static void dm_block_manager_alloc_callback(struct dm_buffer *buf)
 {
 	struct buffer_aux *aux = dm_bufio_get_aux_data(buf);
 	aux->validator = NULL;
-	init_rwsem(&aux->lock);
+	bl_init(&aux->lock);
 }
 
 static void dm_block_manager_write_callback(struct dm_buffer *buf)
@@ -121,12 +448,18 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 		return PTR_ERR(p);
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_read(&aux->lock);
+	r = bl_down_read(&aux->lock);
+	if (unlikely(r)) {
+		dm_bufio_release(*result);
+		report_recursive_bug(b, r);
+		return r;
+	}
+
 	aux->write_locked = 0;
 
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
-		up_read(&aux->lock);
+		bl_up_read(&aux->lock);
 		dm_bufio_release(*result);
 		return r;
 	}
@@ -148,15 +481,22 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 		return PTR_ERR(p);
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_write(&aux->lock);
+	r = bl_down_write(&aux->lock);
+	if (r) {
+		dm_bufio_release(*result);
+		report_recursive_bug(b, r);
+		return r;
+	}
+
 	aux->write_locked = 1;
 
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
-		up_write(&aux->lock);
+		bl_up_write(&aux->lock);
 		dm_bufio_release(*result);
 		return r;
 	}
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_write_lock);
@@ -176,18 +516,21 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 		return -EWOULDBLOCK;
 
 	aux = dm_bufio_get_aux_data(*result);
-	if (unlikely(!down_read_trylock(&aux->lock))) {
+	r = bl_down_read_nonblock(&aux->lock);
+	if (r < 0) {
 		dm_bufio_release(*result);
-		return -EWOULDBLOCK;
+		report_recursive_bug(b, r);
+		return r;
 	}
 	aux->write_locked = 0;
 
 	r = dm_bm_validate_buffer(bm, *result, aux, v);
 	if (unlikely(r)) {
-		up_read(&aux->lock);
+		bl_up_read(&aux->lock);
 		dm_bufio_release(*result);
 		return r;
 	}
+
 	return 0;
 }
 
@@ -195,6 +538,7 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 			  dm_block_t b, struct dm_block_validator *v,
 			  struct dm_block **result)
 {
+	int r;
 	struct buffer_aux *aux;
 	void *p;
 
@@ -205,7 +549,12 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 	memset(p, 0, dm_bm_block_size(bm));
 
 	aux = dm_bufio_get_aux_data(*result);
-	down_write(&aux->lock);
+	r = bl_down_write(&aux->lock);
+	if (r) {
+		dm_bufio_release(*result);
+		return r;
+	}
+
 	aux->write_locked = 1;
 	aux->validator = v;
 
@@ -219,10 +568,9 @@ int dm_bm_unlock(struct dm_block *b)
 
 	if (aux->write_locked) {
 		dm_bufio_mark_buffer_dirty(b);
-		up_write(&aux->lock);
-	} else {
-		up_read(&aux->lock);
-	}
+		bl_up_write(&aux->lock);
+	} else
+		bl_up_read(&aux->lock);
 
 	dm_bufio_release(b);
 
