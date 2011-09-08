@@ -1978,7 +1978,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 			return r;
 
 		DMEMIT("%llu %llu %llu ", (unsigned long long)transaction_id,
-		       (unsigned long long)nr_free_blocks_metadata * pool->sectors_per_block,
+		       (unsigned long long)nr_free_blocks_metadata * (THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT),
 		       (unsigned long long)nr_free_blocks_data * pool->sectors_per_block);
 
 		if (held_root)

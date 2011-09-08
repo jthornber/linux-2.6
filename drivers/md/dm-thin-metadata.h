@@ -9,6 +9,9 @@
 
 #include "persistent-data/dm-block-manager.h"
 
+/* FIXME: need metadata blocksize function later... */
+#define THIN_METADATA_BLOCK_SIZE 4096
+
 /*----------------------------------------------------------------*/
 
 struct dm_pool_metadata;
