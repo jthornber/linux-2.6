@@ -574,23 +574,22 @@ static struct dm_thin_pool_table {
 static void pool_table_init(void)
 {
 	mutex_init(&dm_thin_pool_table.mutex);
-
 	INIT_LIST_HEAD(&dm_thin_pool_table.pools);
 }
 
-static void pool_table_insert(struct pool *pool)
+static void __pool_table_insert(struct pool *pool)
 {
 	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 	list_add(&pool->list, &dm_thin_pool_table.pools);
 }
 
-static void pool_table_remove(struct pool *pool)
+static void __pool_table_remove(struct pool *pool)
 {
 	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 	list_del(&pool->list);
 }
 
-static struct pool *pool_table_lookup(struct mapped_device *md)
+static struct pool *__pool_table_lookup(struct mapped_device *md)
 {
 	struct pool *pool = NULL, *tmp;
 
@@ -1327,9 +1326,9 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
 /*----------------------------------------------------------------
  * Pool creation
  *--------------------------------------------------------------*/
-static void pool_destroy(struct pool *pool)
+static void __pool_destroy(struct pool *pool)
 {
-	pool_table_remove(pool);
+	__pool_table_remove(pool);
 
 	if (dm_pool_metadata_close(pool->pmd) < 0)
 		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
@@ -1429,7 +1428,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 	pool->ref_count = 1;
 	pool->pool_md = pool_md;
-	pool_table_insert(pool);
+	__pool_table_insert(pool);
 
 	return pool;
 
@@ -1450,30 +1449,30 @@ bad_pool:
 	return err_p;
 }
 
-static void pool_inc(struct pool *pool)
+static void __pool_inc(struct pool *pool)
 {
 	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 	pool->ref_count++;
 }
 
-static void pool_dec(struct pool *pool)
+static void __pool_dec(struct pool *pool)
 {
 	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 	BUG_ON(!pool->ref_count);
 	if (!--pool->ref_count)
-		pool_destroy(pool);
+		__pool_destroy(pool);
 }
 
-static struct pool *pool_find(struct mapped_device *pool_md,
-			      struct block_device *metadata_dev,
-			      unsigned long block_size,
-			      char **error)
+static struct pool *__pool_find(struct mapped_device *pool_md,
+				struct block_device *metadata_dev,
+				unsigned long block_size,
+				char **error)
 {
 	struct pool *pool;
 
-	pool = pool_table_lookup(pool_md);
+	pool = __pool_table_lookup(pool_md);
 	if (pool)
-		pool_inc(pool);
+		__pool_inc(pool);
 	else
 		pool = pool_create(pool_md, metadata_dev, block_size, error);
 
@@ -1490,7 +1489,7 @@ static void pool_dtr(struct dm_target *ti)
 	mutex_lock(&dm_thin_pool_table.mutex);
 
 	unbind_control_target(pt->pool, ti);
-	pool_dec(pt->pool);
+	__pool_dec(pt->pool);
 	dm_put_device(ti, pt->metadata_dev);
 	dm_put_device(ti, pt->data_dev);
 	kfree(pt);
@@ -1621,8 +1620,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	pool = pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
-			 block_size, &ti->error);
+	pool = __pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
+			   block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
 		goto out_free_pt;
@@ -2069,7 +2068,7 @@ static void thin_dtr(struct dm_target *ti)
 
 	mutex_lock(&dm_thin_pool_table.mutex);
 
-	pool_dec(tc->pool);
+	__pool_dec(tc->pool);
 	dm_pool_close_thin_device(tc->td);
 	dm_put_device(ti, tc->pool_dev);
 	kfree(tc);
@@ -2127,13 +2126,13 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_common;
 	}
 
-	tc->pool = pool_table_lookup(pool_md);
+	tc->pool = __pool_table_lookup(pool_md);
 	if (!tc->pool) {
 		ti->error = "Couldn't find pool object";
 		r = -EINVAL;
 		goto bad_pool_lookup;
 	}
-	pool_inc(tc->pool);
+	__pool_inc(tc->pool);
 
 	r = dm_pool_open_thin_device(tc->pool->pmd, tc->dev_id, &tc->td);
 	if (r) {
@@ -2153,7 +2152,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad_thin_open:
-	pool_dec(tc->pool);
+	__pool_dec(tc->pool);
 bad_pool_lookup:
 	dm_put(pool_md);
 bad_common:
