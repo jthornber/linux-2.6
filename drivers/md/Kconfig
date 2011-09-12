@@ -257,7 +257,8 @@ config DM_BLOCK_LOCKING
 
 config DM_BLOCK_STACK_TRACING
 	boolean "Keep a stack trace of all lock holders"
-	depends on DM_BLOCK_LOCKING
+	depends on DM_BLOCK_LOCKING && STACKTRACE_SUPPORT
+	select STACKTRACE
 	---help---
 
 	  Helpful for debugging.
