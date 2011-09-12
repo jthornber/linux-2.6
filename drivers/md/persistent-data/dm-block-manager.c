@@ -200,19 +200,18 @@ static int bl_down_read(struct block_lock *lock)
 {
 	int r;
 	struct waiter w;
-	unsigned long flags;
 
-	spin_lock_irqsave(&lock->lock, flags);
+	spin_lock(&lock->lock);
 	r = __check_holder(lock);
 	if (r) {
-		spin_unlock_irqrestore(&lock->lock, flags);
+		spin_unlock(&lock->lock);
 		return r;
 	}
 
 	if (__available_for_read(lock)) {
 		lock->count++;
 		__add_holder(lock, current);
-		spin_unlock_irqrestore(&lock->lock, flags);
+		spin_unlock(&lock->lock);
 		return 0;
 	}
 
@@ -221,7 +220,7 @@ static int bl_down_read(struct block_lock *lock)
 	w.task = current;
 	w.wants_write = 0;
 	list_add_tail(&w.list, &lock->waiters);
-	spin_unlock_irqrestore(&lock->lock, flags);
+	spin_unlock(&lock->lock);
 
 	__wait(&w);
 	put_task_struct(current);
@@ -231,9 +230,8 @@ static int bl_down_read(struct block_lock *lock)
 static int bl_down_read_nonblock(struct block_lock *lock)
 {
 	int r;
-	unsigned long flags;
 
-	spin_lock_irqsave(&lock->lock, flags);
+	spin_lock(&lock->lock);
 	r = __check_holder(lock);
 	if (r)
 		goto out;
@@ -246,40 +244,37 @@ static int bl_down_read_nonblock(struct block_lock *lock)
 		r = -EWOULDBLOCK;
 
 out:
-	spin_unlock_irqrestore(&lock->lock, flags);
+	spin_unlock(&lock->lock);
 	return r;
 }
 
 static void bl_up_read(struct block_lock *lock)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&lock->lock, flags);
+	spin_lock(&lock->lock);
 	BUG_ON(lock->count <= 0);
 	__del_holder(lock, current);
 	--lock->count;
 	if (!list_empty(&lock->waiters))
 		__wake_many(lock);
-	spin_unlock_irqrestore(&lock->lock, flags);
+	spin_unlock(&lock->lock);
 }
 
 static int bl_down_write(struct block_lock *lock)
 {
 	int r;
 	struct waiter w;
-	unsigned long flags;
 
-	spin_lock_irqsave(&lock->lock, flags);
+	spin_lock(&lock->lock);
 	r = __check_holder(lock);
 	if (r) {
-		spin_unlock_irqrestore(&lock->lock, flags);
+		spin_unlock(&lock->lock);
 		return r;
 	}
 
 	if (lock->count == 0 && list_empty(&lock->waiters)) {
 		lock->count = -1;
 		__add_holder(lock, current);
-		spin_unlock_irqrestore(&lock->lock, flags);
+		spin_unlock(&lock->lock);
 		return 0;
 	}
 
@@ -289,7 +284,7 @@ static int bl_down_write(struct block_lock *lock)
 
 	/* writers given priority, we know there's only one mutator in the system, so ignoring the ordering reversal */
 	list_add(&w.list, &lock->waiters);
-	spin_unlock_irqrestore(&lock->lock, flags);
+	spin_unlock(&lock->lock);
 
 	__wait(&w);
 	put_task_struct(current);
@@ -299,14 +294,12 @@ static int bl_down_write(struct block_lock *lock)
 
 static void bl_up_write(struct block_lock *lock)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&lock->lock, flags);
+	spin_lock(&lock->lock);
 	__del_holder(lock, current);
 	lock->count = 0;
 	if (!list_empty(&lock->waiters))
 		__wake_many(lock);
-	spin_unlock_irqrestore(&lock->lock, flags);
+	spin_unlock(&lock->lock);
 }
 
 static void report_recursive_bug(dm_block_t b, int r)
