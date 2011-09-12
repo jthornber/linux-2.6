@@ -9,7 +9,6 @@
 
 #include <linux/blkdev.h>
 #include <linux/types.h>
-#include <linux/crc32c.h>
 #include <linux/dm-bufio.h>
 
 /*----------------------------------------------------------------*/
@@ -27,14 +26,6 @@ typedef uint64_t dm_block_t;
 
 dm_block_t dm_block_location(struct dm_block *b);
 void *dm_block_data(struct dm_block *b);
-
-/*
- * Use CRC32 checksumming on data blocks.
- */
-static inline uint32_t dm_block_csum_data(const void *data_le, unsigned length)
-{
-	return crc32c(~(u32)0, data_le, length);
-}
 
 /*----------------------------------------------------------------*/
 

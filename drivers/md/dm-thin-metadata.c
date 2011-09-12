@@ -10,6 +10,7 @@
 #include "persistent-data/dm-space-map-disk.h"
 #include "persistent-data/dm-transaction-manager.h"
 
+#include <linux/crc32c.h>
 #include <linux/list.h>
 #include <linux/device-mapper.h>
 #include <linux/workqueue.h>
@@ -198,6 +199,8 @@ struct dm_thin_device {
  * superblock validator
  *--------------------------------------------------------------*/
 
+#define SUPERBLOCK_CSUM_SEED 160774
+
 static void sb_prepare_for_write(struct dm_block_validator *v,
 				 struct dm_block *b,
 				 size_t block_size)
@@ -205,7 +208,9 @@ static void sb_prepare_for_write(struct dm_block_validator *v,
 	struct thin_disk_superblock *disk_super = dm_block_data(b);
 
 	disk_super->blocknr = cpu_to_le64(dm_block_location(b));
-	disk_super->csum = cpu_to_le32(dm_block_csum_data(&disk_super->flags, sizeof(*disk_super) - sizeof(__le32)));
+	disk_super->csum = cpu_to_le32(
+		crc32c(SUPERBLOCK_CSUM_SEED, &disk_super->flags,
+		       sizeof(*disk_super) - sizeof(__le32)));
 }
 
 static int sb_check(struct dm_block_validator *v,
@@ -229,7 +234,9 @@ static int sb_check(struct dm_block_validator *v,
 		return -EILSEQ;
 	}
 
-	csum_le = cpu_to_le32(dm_block_csum_data(&disk_super->flags, sizeof(*disk_super) - sizeof(__le32)));
+	csum_le = cpu_to_le32(crc32c(SUPERBLOCK_CSUM_SEED,
+				     &disk_super->flags,
+				     sizeof(*disk_super) - sizeof(__le32)));
 	if (csum_le != disk_super->csum) {
 		DMERR("sb_check failed: csum %u: wanted %u",
 		      le32_to_cpu(csum_le), le32_to_cpu(disk_super->csum));
