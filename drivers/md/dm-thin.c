@@ -495,7 +495,7 @@ struct pool {
 	mempool_t *mapping_pool;
 	mempool_t *endio_hook_pool;
 
-	atomic_t ref_count;
+	unsigned ref_count;
 };
 
 /*
@@ -567,42 +567,40 @@ static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
  * A global list that uses a struct mapped_device as a key.
  */
 static struct dm_thin_pool_table {
-	spinlock_t lock;
+	struct mutex mutex;
 	struct list_head pools;
 } dm_thin_pool_table;
 
 static void pool_table_init(void)
 {
-	spin_lock_init(&dm_thin_pool_table.lock);
+	mutex_init(&dm_thin_pool_table.mutex);
 
 	INIT_LIST_HEAD(&dm_thin_pool_table.pools);
 }
 
 static void pool_table_insert(struct pool *pool)
 {
-	spin_lock(&dm_thin_pool_table.lock);
+	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 	list_add(&pool->list, &dm_thin_pool_table.pools);
-	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static void pool_table_remove(struct pool *pool)
 {
-	spin_lock(&dm_thin_pool_table.lock);
+	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 	list_del(&pool->list);
-	spin_unlock(&dm_thin_pool_table.lock);
 }
 
 static struct pool *pool_table_lookup(struct mapped_device *md)
 {
 	struct pool *pool = NULL, *tmp;
 
-	spin_lock(&dm_thin_pool_table.lock);
+	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
+
 	list_for_each_entry(tmp, &dm_thin_pool_table.pools, list)
 		if (tmp->pool_md == md) {
 			pool = tmp;
 			break;
 		}
-	spin_unlock(&dm_thin_pool_table.lock);
 
 	return pool;
 }
@@ -1331,6 +1329,8 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
  *--------------------------------------------------------------*/
 static void pool_destroy(struct pool *pool)
 {
+	pool_table_remove(pool);
+
 	if (dm_pool_metadata_close(pool->pmd) < 0)
 		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
 
@@ -1347,7 +1347,8 @@ static void pool_destroy(struct pool *pool)
 	kfree(pool);
 }
 
-static struct pool *pool_create(struct block_device *metadata_dev,
+static struct pool *pool_create(struct mapped_device *pool_md,
+				struct block_device *metadata_dev,
 				unsigned long block_size, char **error)
 {
 	int r;
@@ -1426,7 +1427,9 @@ static struct pool *pool_create(struct block_device *metadata_dev,
 		err_p = ERR_PTR(-ENOMEM);
 		goto bad_endio_hook_pool;
 	}
-	atomic_set(&pool->ref_count, 1);
+	pool->ref_count = 1;
+	pool->pool_md = pool_md;
+	pool_table_insert(pool);
 
 	return pool;
 
@@ -1449,12 +1452,15 @@ bad_pool:
 
 static void pool_inc(struct pool *pool)
 {
-	atomic_inc(&pool->ref_count);
+	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
+	pool->ref_count++;
 }
 
 static void pool_dec(struct pool *pool)
 {
-	if (atomic_dec_and_test(&pool->ref_count))
+	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
+	BUG_ON(!pool->ref_count);
+	if (!--pool->ref_count)
 		pool_destroy(pool);
 }
 
@@ -1469,7 +1475,7 @@ static struct pool *pool_find(struct mapped_device *pool_md,
 	if (pool)
 		pool_inc(pool);
 	else
-		pool = pool_create(metadata_dev, block_size, error);
+		pool = pool_create(pool_md, metadata_dev, block_size, error);
 
 	return pool;
 }
@@ -1481,13 +1487,15 @@ static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
 
+	mutex_lock(&dm_thin_pool_table.mutex);
+
 	unbind_control_target(pt->pool, ti);
 	pool_dec(pt->pool);
-
 	dm_put_device(ti, pt->metadata_dev);
 	dm_put_device(ti, pt->data_dev);
-
 	kfree(pt);
+
+	mutex_unlock(&dm_thin_pool_table.mutex);
 }
 
 struct pool_features {
@@ -1551,9 +1559,12 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_dev *metadata_dev;
 	sector_t metadata_dev_size;
 
+	mutex_lock(&dm_thin_pool_table.mutex);
+
 	if (argc < 4) {
 		ti->error = "Invalid argument count";
-		return -EINVAL;
+		r = -EINVAL;
+		goto out_unlock;
 	}
 	as.argc = argc;
 	as.argv = argv;
@@ -1561,7 +1572,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
 	if (r) {
 		ti->error = "Error opening metadata block device";
-		return r;
+		goto out_unlock;
 	}
 
 	metadata_dev_size = i_size_read(metadata_dev->bdev->bd_inode) >> SECTOR_SHIFT;
@@ -1604,19 +1615,19 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
+	pt = kzalloc(sizeof(*pt), GFP_KERNEL);
+	if (!pt) {
+		r = -ENOMEM;
+		goto out;
+	}
+
 	pool = pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
 			 block_size, &ti->error);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
-		goto out;
+		goto out_free_pt;
 	}
 
-	pt = kzalloc(sizeof(*pt), GFP_KERNEL);
-	if (!pt) {
-		pool_destroy(pool);
-		r = -ENOMEM;
-		goto out;
-	}
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->metadata_dev = metadata_dev;
@@ -1630,12 +1641,18 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->callbacks.congested_fn = pool_is_congested;
 	dm_table_add_target_callbacks(ti->table, &pt->callbacks);
 
+	mutex_unlock(&dm_thin_pool_table.mutex);
+
 	return 0;
 
+out_free_pt:
+	kfree(pt);
 out:
 	dm_put_device(ti, data_dev);
 out_metadata:
 	dm_put_device(ti, metadata_dev);
+out_unlock:
+	mutex_unlock(&dm_thin_pool_table.mutex);
 
 	return r;
 }
@@ -1716,12 +1733,6 @@ static int pool_preresume(struct dm_target *ti)
 
 	wake_worker(pool);
 
-	/*
-	 * The pool object is only present if the pool is active.
-	 */
-	pool->pool_md = dm_table_get_md(ti->table);
-	pool_table_insert(pool);
-
 	return 0;
 }
 
@@ -1739,9 +1750,6 @@ static void pool_postsuspend(struct dm_target *ti)
 		      __func__, r);
 		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
 	}
-
-	pool_table_remove(pool);
-	pool->pool_md = NULL;
 }
 
 static int check_arg_count(unsigned argc, unsigned args_required)
@@ -2059,10 +2067,14 @@ static void thin_dtr(struct dm_target *ti)
 {
 	struct thin_c *tc = ti->private;
 
+	mutex_lock(&dm_thin_pool_table.mutex);
+
 	pool_dec(tc->pool);
 	dm_pool_close_thin_device(tc->td);
 	dm_put_device(ti, tc->pool_dev);
 	kfree(tc);
+
+	mutex_unlock(&dm_thin_pool_table.mutex);
 }
 
 /*
@@ -2080,15 +2092,19 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_dev *pool_dev;
 	struct mapped_device *pool_md;
 
+	mutex_lock(&dm_thin_pool_table.mutex);
+
 	if (argc != 2) {
 		ti->error = "Invalid argument count";
-		return -EINVAL;
+		r = -EINVAL;
+		goto out_unlock;
 	}
 
 	tc = ti->private = kzalloc(sizeof(*tc), GFP_KERNEL);
 	if (!tc) {
 		ti->error = "Out of memory";
-		return -ENOMEM;
+		r = -ENOMEM;
+		goto out_unlock;
 	}
 
 	r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &pool_dev);
@@ -2132,6 +2148,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	dm_put(pool_md);
 
+	mutex_unlock(&dm_thin_pool_table.mutex);
+
 	return 0;
 
 bad_thin_open:
@@ -2142,6 +2160,8 @@ bad_common:
 	dm_put_device(ti, tc->pool_dev);
 bad_pool_dev:
 	kfree(tc);
+out_unlock:
+	mutex_unlock(&dm_thin_pool_table.mutex);
 
 	return r;
 }
