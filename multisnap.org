@@ -1,6 +1,6 @@
 * First release
 
-** Kernel [20/26]
+** Kernel [21/27]
 
   - [X] CRC bitmaps 						        :ejt:
   - [X] pool_destroy ref counting isn't right 				:ejt:
@@ -31,6 +31,8 @@
         error path.  Recently introduced.                               :ejt:
   - [X] Check reference counts are correct somehow.			:ejt:
 	thin_repair now checks this
+
+  - [X] detect recursive block locks                                    :ejt:
 
   - [ ] Put discard back in                                             :ejt:
 
