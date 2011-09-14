@@ -319,7 +319,6 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	 * Rebalance
 	 */
 	target = (nr_left + nr_center + nr_right) / 3;
-	BUG_ON(target == nr_center);
 
 	/*
 	 * Adjust the left node
