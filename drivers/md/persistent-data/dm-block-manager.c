@@ -6,6 +6,7 @@
 #include "dm-block-manager.h"
 #include "dm-persistent-data-internal.h"
 
+#include <linux/crc32c.h>
 #include <linux/dm-io.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -604,6 +605,12 @@ int dm_bm_rebind_block_device(struct dm_block_manager *bm,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_rebind_block_device);
+
+u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor)
+{
+	return crc32c(~(u32) 0, data, len) ^ init_xor;
+}
+EXPORT_SYMBOL_GPL(dm_bm_checksum);
 
 /*----------------------------------------------------------------*/
 

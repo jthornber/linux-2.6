@@ -2,7 +2,6 @@
 #include "dm-transaction-manager.h"
 
 #include <linux/bitops.h>
-#include <linux/crc32c.h>
 #include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "space map common"
@@ -12,7 +11,7 @@
 /*
  * Index validator.
  */
-#define INDEX_CSUM_SEED 160478
+#define INDEX_CSUM_XOR 160478
 
 static void index_prepare_for_write(struct dm_block_validator *v,
 				    struct dm_block *b,
@@ -21,9 +20,9 @@ static void index_prepare_for_write(struct dm_block_validator *v,
 	struct disk_metadata_index *mi_le = dm_block_data(b);
 
 	mi_le->blocknr = cpu_to_le64(dm_block_location(b));
-	mi_le->csum = cpu_to_le32(
-		crc32c(INDEX_CSUM_SEED, &mi_le->padding,
-		       block_size - sizeof(__le32)));
+	mi_le->csum = cpu_to_le32(dm_bm_checksum(&mi_le->padding,
+						 block_size - sizeof(__le32),
+						 INDEX_CSUM_XOR));
 }
 
 static int index_check(struct dm_block_validator *v,
@@ -39,8 +38,9 @@ static int index_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	csum_disk = cpu_to_le32(crc32c(INDEX_CSUM_SEED, &mi_le->padding,
-				       block_size - sizeof(__le32)));
+	csum_disk = cpu_to_le32(dm_bm_checksum(&mi_le->padding,
+					       block_size - sizeof(__le32),
+					       INDEX_CSUM_XOR));
 	if (csum_disk != mi_le->csum) {
 		DMERR("index_check failed csum %u wanted %u",
 		      le32_to_cpu(csum_disk), le32_to_cpu(mi_le->csum));
@@ -61,7 +61,7 @@ static struct dm_block_validator index_validator = {
 /*
  * Bitmap validator
  */
-#define BITMAP_CSUM_SEED 240779
+#define BITMAP_CSUM_XOR 240779
 
 static void bitmap_prepare_for_write(struct dm_block_validator *v,
 				     struct dm_block *b,
@@ -70,9 +70,9 @@ static void bitmap_prepare_for_write(struct dm_block_validator *v,
 	struct disk_bitmap_header *disk_header = dm_block_data(b);
 
 	disk_header->blocknr = cpu_to_le64(dm_block_location(b));
-	disk_header->csum = cpu_to_le32(
-		crc32c(BITMAP_CSUM_SEED, &disk_header->not_used,
-		       block_size - sizeof(__le32)));
+	disk_header->csum = cpu_to_le32(dm_bm_checksum(&disk_header->not_used,
+						       block_size - sizeof(__le32),
+						       BITMAP_CSUM_XOR));
 }
 
 static int bitmap_check(struct dm_block_validator *v,
@@ -88,9 +88,9 @@ static int bitmap_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	csum_disk = cpu_to_le32(
-		crc32c(BITMAP_CSUM_SEED, &disk_header->not_used,
-		       block_size - sizeof(__le32)));
+	csum_disk = cpu_to_le32(dm_bm_checksum(&disk_header->not_used,
+					       block_size - sizeof(__le32),
+					       BITMAP_CSUM_XOR));
 	if (csum_disk != disk_header->csum) {
 		DMERR("bitmap check failed csum %u wanted %u",
 		      le32_to_cpu(csum_disk), le32_to_cpu(disk_header->csum));

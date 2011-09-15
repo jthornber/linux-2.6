@@ -7,14 +7,13 @@
 #include "dm-btree-internal.h"
 #include "dm-transaction-manager.h"
 
-#include <linux/crc32c.h>
 #include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "btree spine"
 
 /*----------------------------------------------------------------*/
 
-#define BTREE_CSUM_SEED 121107
+#define BTREE_CSUM_XOR 121107
 
 static void node_prepare_for_write(struct dm_block_validator *v,
 				   struct dm_block *b,
@@ -24,9 +23,9 @@ static void node_prepare_for_write(struct dm_block_validator *v,
 	struct node_header *h = &n->header;
 
 	h->blocknr = cpu_to_le64(dm_block_location(b));
-	h->csum = cpu_to_le32(
-		crc32c(BTREE_CSUM_SEED, &h->flags,
-		       block_size - sizeof(__le32)));
+	h->csum = cpu_to_le32(dm_bm_checksum(&h->flags,
+					     block_size - sizeof(__le32),
+					     BTREE_CSUM_XOR));
 }
 
 static int node_check(struct dm_block_validator *v,
@@ -44,9 +43,9 @@ static int node_check(struct dm_block_validator *v,
 		return -ENOTBLK;
 	}
 
-	csum_disk = cpu_to_le32(
-		crc32c(BTREE_CSUM_SEED, &h->flags,
-		       block_size - sizeof(__le32)));
+	csum_disk = cpu_to_le32(dm_bm_checksum(&h->flags,
+					       block_size - sizeof(__le32),
+					       BTREE_CSUM_XOR));
 	if (csum_disk != h->csum) {
 		DMERR("node_check failed csum %u wanted %u",
 		      le32_to_cpu(csum_disk), le32_to_cpu(h->csum));

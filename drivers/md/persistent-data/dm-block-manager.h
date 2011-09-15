@@ -125,4 +125,8 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 int dm_bm_rebind_block_device(struct dm_block_manager *bm,
 			      struct block_device *bdev);
 
+u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor);
+
+/*----------------------------------------------------------------*/
+
 #endif	/* _LINUX_DM_BLOCK_MANAGER_H */
