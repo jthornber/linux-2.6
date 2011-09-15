@@ -56,54 +56,59 @@
 static void node_shift(struct node *n, int shift)
 {
 	uint32_t nr_entries = le32_to_cpu(n->header.nr_entries);
+	uint32_t value_size = le32_to_cpu(n->header.value_size);
 
 	if (shift < 0) {
 		shift = -shift;
 		memmove(key_ptr(n, 0),
 			key_ptr(n, shift),
 			(nr_entries - shift) * sizeof(__le64));
-		memmove(value_ptr(n, 0, sizeof(__le64)),
-			value_ptr(n, shift, sizeof(__le64)),
-			(nr_entries - shift) * sizeof(__le64));
+		memmove(value_ptr(n, 0, value_size),
+			value_ptr(n, shift, value_size),
+			(nr_entries - shift) * value_size);
 	} else {
 		memmove(key_ptr(n, shift),
 			key_ptr(n, 0),
 			nr_entries * sizeof(__le64));
-		memmove(value_ptr(n, shift, sizeof(__le64)),
-			value_ptr(n, 0, sizeof(__le64)),
-			nr_entries * sizeof(__le64));
+		memmove(value_ptr(n, shift, value_size),
+			value_ptr(n, 0, value_size),
+			nr_entries * value_size);
 	}
 }
 
 static void node_copy(struct node *left, struct node *right, int shift)
 {
 	uint32_t nr_left = le32_to_cpu(left->header.nr_entries);
+	uint32_t value_size = le32_to_cpu(left->header.value_size);
+	BUG_ON(value_size != le32_to_cpu(right->header.value_size));
 
 	if (shift < 0) {
 		shift = -shift;
 		memcpy(key_ptr(left, nr_left),
 		       key_ptr(right, 0),
 		       shift * sizeof(__le64));
-		memcpy(value_ptr(left, nr_left, sizeof(__le64)),
-		       value_ptr(right, 0, sizeof(__le64)),
-		       shift * sizeof(__le64));
+		memcpy(value_ptr(left, nr_left, value_size),
+		       value_ptr(right, 0, value_size),
+		       shift * value_size);
 	} else {
 		memcpy(key_ptr(right, 0),
 		       key_ptr(left, nr_left - shift),
 		       shift * sizeof(__le64));
-		memcpy(value_ptr(right, 0, sizeof(__le64)),
-		       value_ptr(left, nr_left - shift, sizeof(__le64)),
-		       shift * sizeof(__le64));
+		memcpy(value_ptr(right, 0, value_size),
+		       value_ptr(left, nr_left - shift, value_size),
+		       shift * value_size);
 	}
 }
 
 /*
  * Delete a specific entry from a leaf node.
  */
-static void delete_at(struct node *n, unsigned index, size_t value_size)
+static void delete_at(struct node *n, unsigned index)
 {
 	unsigned nr_entries = le32_to_cpu(n->header.nr_entries);
 	unsigned nr_to_copy = nr_entries - (index + 1);
+	uint32_t value_size = le32_to_cpu(n->header.value_size);
+	BUG_ON(index >= nr_entries);
 
 	if (nr_to_copy) {
 		memmove(key_ptr(n, index),
@@ -210,7 +215,7 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 
 		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
 			cpu_to_le64(dm_block_location(l->block));
-		delete_at(parent, r->index, sizeof(__le64));
+		delete_at(parent, r->index);
 
 		/*
 		 * We need to decrement the right block, but not it's
@@ -259,11 +264,7 @@ static int rebalance2(struct shadow_spine *s, struct dm_btree_info *info,
 		return r;
 	}
 
-	r = exit_child(info, &right);
-	if (r)
-		return r;
-
-	return 0;
+	return exit_child(info, &right);
 }
 
 static void __rebalance3(struct dm_btree_info *info, struct node *parent,
@@ -295,6 +296,7 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 
 		if (shift != nr_center) {
 			shift = nr_center - shift;
+			BUG_ON((nr_right + shift) >= max_entries);
 			node_shift(right, shift);
 			node_copy(center, right, shift);
 			right->header.nr_entries = cpu_to_le32(nr_right + shift);
@@ -306,7 +308,7 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 			cpu_to_le64(dm_block_location(r->block));
 		*key_ptr(parent, r->index) = right->keys[0];
 
-		delete_at(parent, c->index, sizeof(__le64));
+		delete_at(parent, c->index);
 		r->index--;
 
 		dm_tm_dec(info->tm, dm_block_location(c->block));
@@ -330,6 +332,7 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	 */
 	shift(center, right, target - nr_right);
 
+	/* FIXME: I think this patching should be done at the same time as the shadowing. */
 	*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
 		cpu_to_le64(dm_block_location(l->block));
 	*((__le64 *) value_ptr(parent, c->index, sizeof(__le64))) =
@@ -427,9 +430,11 @@ static int rebalance_children(struct shadow_spine *s,
 		memcpy(n, dm_block_data(child),
 		       dm_bm_block_size(dm_tm_get_bm(info->tm)));
 		r = dm_tm_unlock(info->tm, child);
-		dm_tm_dec(info->tm, dm_block_location(child));
+		if (r)
+			return r;
 
-		return r;
+		dm_tm_dec(info->tm, dm_block_location(child));
+		return 0;
 	}
 
 	i = lower_bound(n, key);
@@ -443,9 +448,8 @@ static int rebalance_children(struct shadow_spine *s,
 	if (child_entries > del_threshold(n))
 		return 0;
 
-	has_left_sibling = i > 0 ? 1 : 0;
-	has_right_sibling =
-		(i >= (le32_to_cpu(n->header.nr_entries) - 1)) ? 0 : 1;
+	has_left_sibling = i > 0;
+	has_right_sibling = i < (le32_to_cpu(n->header.nr_entries) - 1);
 
 	if (!has_left_sibling)
 		r = rebalance2(s, info, i);
@@ -475,7 +479,7 @@ static int do_leaf(struct node *n, uint64_t key, unsigned *index)
 
 /*
  * Prepares for removal from one level of the hierarchy.  The caller must
- * actually call delete_at() to remove the entry at index.
+ * call delete_at() to remove the entry at index.
  */
 static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		      struct dm_btree_value_type *vt, dm_block_t root,
@@ -496,7 +500,7 @@ static int remove_raw(struct shadow_spine *s, struct dm_btree_info *info,
 		 */
 		if (shadow_has_parent(s)) {
 			__le64 location = cpu_to_le64(dm_block_location(shadow_current(s)));
-			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(uint64_t)),
+			memcpy(value_ptr(dm_block_data(shadow_parent(s)), i, sizeof(__le64)),
 			       &location, sizeof(__le64));
 		}
 
@@ -555,12 +559,10 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 			info->value_type.dec(info->value_type.context,
 					     value_ptr(n, index, info->value_type.size));
 
-		delete_at(n, index, info->value_type.size);
-
-		r = 0;
-		*new_root = shadow_root(&spine);
+		delete_at(n, index);
 	}
 
+	*new_root = shadow_root(&spine);
 	exit_shadow_spine(&spine);
 
 	return r;
