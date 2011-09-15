@@ -390,11 +390,14 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 			return r;
 
 		if (old > 2) {
+#if 0
+			/* FIXME: something bad happening here */
 			r = dm_btree_remove(&ll->ref_count_info,
 					    ll->ref_count_root,
 					    &b, &ll->ref_count_root);
 			if (r)
 				return r;
+#endif
 		}
 
 	} else {
