@@ -170,6 +170,9 @@ static int init_child(struct dm_btree_info *info, struct node *parent,
 	if (inc)
 		inc_children(info->tm, result->n, &le64_type);
 
+	*((__le64 *) value_ptr(parent, index, sizeof(__le64))) =
+		cpu_to_le64(dm_block_location(result->block));
+
 	return 0;
 }
 
@@ -193,9 +196,11 @@ static void shift(struct node *left, struct node *right, int count)
 
 	left->header.nr_entries =
 		cpu_to_le32(le32_to_cpu(left->header.nr_entries) - count);
+	BUG_ON(le32_to_cpu(left->header.nr_entries) - count >= le32_to_cpu(left->header.max_entries));
 
 	right->header.nr_entries =
 		cpu_to_le32(le32_to_cpu(right->header.nr_entries) + count);
+	BUG_ON(le32_to_cpu(right->header.nr_entries) + count >= le32_to_cpu(right->header.max_entries));
 }
 
 static void __rebalance2(struct dm_btree_info *info, struct node *parent,
@@ -212,9 +217,6 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 		 */
 		node_copy(left, right, -nr_right);
 		left->header.nr_entries = cpu_to_le32(nr_left + nr_right);
-
-		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(l->block));
 		delete_at(parent, r->index);
 
 		/*
@@ -229,10 +231,6 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 		unsigned target_left = (nr_left + nr_right) / 2;
 
 		shift(left, right, nr_left - target_left);
-		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(l->block));
-		*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(r->block));
 		*key_ptr(parent, r->index) = right->keys[0];
 	}
 }
@@ -301,11 +299,6 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 			node_copy(center, right, shift);
 			right->header.nr_entries = cpu_to_le32(nr_right + shift);
 		}
-
-		*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(l->block));
-		*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-			cpu_to_le64(dm_block_location(r->block));
 		*key_ptr(parent, r->index) = right->keys[0];
 
 		delete_at(parent, c->index);
@@ -331,15 +324,6 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	 * Adjust the right node
 	 */
 	shift(center, right, target - nr_right);
-
-	/* FIXME: I think this patching should be done at the same time as the shadowing. */
-	*((__le64 *) value_ptr(parent, l->index, sizeof(__le64))) =
-		cpu_to_le64(dm_block_location(l->block));
-	*((__le64 *) value_ptr(parent, c->index, sizeof(__le64))) =
-		cpu_to_le64(dm_block_location(c->block));
-	*((__le64 *) value_ptr(parent, r->index, sizeof(__le64))) =
-		cpu_to_le64(dm_block_location(r->block));
-
 	*key_ptr(parent, c->index) = center->keys[0];
 	*key_ptr(parent, r->index) = right->keys[0];
 }
