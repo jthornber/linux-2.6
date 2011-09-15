@@ -476,6 +476,7 @@ struct pool {
 
 	unsigned zero_new_blocks:1;
 	unsigned low_water_triggered:1;	/* A dm event has been sent */
+	unsigned no_free_space:1;	/* An -ENOSPC warning has been issued */
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -924,8 +925,16 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	if (r)
 		return r;
 
-	if (free_blocks == 0)
+	if (free_blocks == 0) {
+		if (!pool->no_free_space) {
+			DMWARN("%s: no free space available.",
+			       dm_device_name(pool->pool_md));
+			spin_lock_irqsave(&pool->lock, flags);
+			pool->no_free_space = 1;
+			spin_unlock_irqrestore(&pool->lock, flags);
+		}
 		return -ENOSPC;
+	}
 
 	if (free_blocks <= pool->low_water_mark && !pool->low_water_triggered) {
 		DMWARN("%s: reached low water mark, sending event.",
@@ -1413,6 +1422,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	bio_list_init(&pool->awaiting_commit);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
 	pool->low_water_triggered = 0;
+	pool->no_free_space = 0;
 	bio_list_init(&pool->retry_list);
 	ds_init(&pool->ds);
 
@@ -1733,6 +1743,7 @@ static int pool_preresume(struct dm_target *ti)
 
 	spin_lock_irqsave(&pool->lock, flags);
 	pool->low_water_triggered = 0;
+	pool->no_free_space = 0;
 	__requeue_bios(pool);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
