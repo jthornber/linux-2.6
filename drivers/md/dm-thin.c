@@ -473,7 +473,9 @@ struct pool {
 	unsigned block_shift;
 	dm_block_t offset_mask;
 	dm_block_t low_water_mark;
+
 	unsigned zero_new_blocks:1;
+	unsigned low_water_triggered:1;	/* A dm event has been sent */
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -481,12 +483,13 @@ struct pool {
 	struct workqueue_struct *wq;
 	struct work_struct worker;
 
+	unsigned ref_count;
+
 	spinlock_t lock;
 	struct bio_list deferred_bios;
 	struct bio_list awaiting_commit;
 	struct list_head prepared_mappings;
 
-	int low_water_triggered;	/* A dm event has been sent */
 	struct bio_list retry_list;
 
 	struct deferred_set ds;	/* FIXME: move to thin_c */
@@ -494,8 +497,6 @@ struct pool {
 	struct new_mapping *next_mapping;
 	mempool_t *mapping_pool;
 	mempool_t *endio_hook_pool;
-
-	unsigned ref_count;
 };
 
 /*
