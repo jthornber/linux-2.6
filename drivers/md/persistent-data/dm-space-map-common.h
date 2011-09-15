@@ -117,24 +117,4 @@ int sm_ll_open_disk(struct ll_disk *ll, struct dm_transaction_manager *tm,
 
 /*----------------------------------------------------------------*/
 
-int sm_ll_extend(struct ll_disk *ll, dm_block_t extra_blocks);
-int sm_ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result);
-int sm_ll_lookup(struct ll_disk *ll, dm_block_t b, uint32_t *result);
-int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
-			  dm_block_t end, dm_block_t *result);
-int sm_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count);
-int sm_ll_inc(struct ll_disk *ll, dm_block_t b);
-int sm_ll_dec(struct ll_disk *ll, dm_block_t b);
-int sm_ll_commit(struct ll_disk *ll);
-
-int sm_ll_new_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm);
-int sm_ll_open_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm,
-			void *root_le, size_t len);
-
-int sm_ll_new_disk(struct ll_disk *ll, struct dm_transaction_manager *tm);
-int sm_ll_open_disk(struct ll_disk *ll, struct dm_transaction_manager *tm,
-		    void *root_le, size_t len);
-
-/*----------------------------------------------------------------*/
-
 #endif	/* DM_SPACE_MAP_COMMON_H */
