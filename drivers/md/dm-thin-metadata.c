@@ -590,7 +590,7 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 	 * FIXME: Associated pool should be made read-only on failure.
 	 */
 	int r;
-	size_t len;
+	size_t metadata_len, data_len;
 	struct thin_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
@@ -614,7 +614,11 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 	if (r < 0)
 		goto out;
 
-	r = dm_sm_root_size(pmd->metadata_sm, &len);
+	r = dm_sm_root_size(pmd->metadata_sm, &metadata_len);
+	if (r < 0)
+		goto out;
+
+	r = dm_sm_root_size(pmd->metadata_sm, &data_len);
 	if (r < 0)
 		goto out;
 
@@ -630,11 +634,13 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 	disk_super->trans_id = cpu_to_le64(pmd->trans_id);
 	disk_super->flags = cpu_to_le32(pmd->flags);
 
-	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root, len);
+	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root,
+			    metadata_len);
 	if (r < 0)
 		goto out_locked;
 
-	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root, len);
+	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root,
+			    data_len);
 	if (r < 0)
 		goto out_locked;
 
