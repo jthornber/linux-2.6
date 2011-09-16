@@ -925,6 +925,15 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	if (r)
 		return r;
 
+	if (free_blocks <= pool->low_water_mark && !pool->low_water_triggered) {
+		DMWARN("%s: reached low water mark, sending event.",
+		       dm_device_name(pool->pool_md));
+		spin_lock_irqsave(&pool->lock, flags);
+		pool->low_water_triggered = 1;
+		spin_unlock_irqrestore(&pool->lock, flags);
+		dm_table_event(pool->ti->table);
+	}
+
 	if (free_blocks == 0) {
 		if (!pool->no_free_space) {
 			DMWARN("%s: no free space available.",
@@ -934,15 +943,6 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 			spin_unlock_irqrestore(&pool->lock, flags);
 		}
 		return -ENOSPC;
-	}
-
-	if (free_blocks <= pool->low_water_mark && !pool->low_water_triggered) {
-		DMWARN("%s: reached low water mark, sending event.",
-		       dm_device_name(pool->pool_md));
-		spin_lock_irqsave(&pool->lock, flags);
-		pool->low_water_triggered = 1;
-		spin_unlock_irqrestore(&pool->lock, flags);
-		dm_table_event(pool->ti->table);
 	}
 
 	r = dm_pool_alloc_data_block(pool->pmd, result);
