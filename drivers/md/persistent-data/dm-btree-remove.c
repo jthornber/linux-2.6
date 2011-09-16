@@ -60,6 +60,7 @@ static void node_shift(struct node *n, int shift)
 
 	if (shift < 0) {
 		shift = -shift;
+		BUG_ON(shift > nr_entries);
 		memmove(key_ptr(n, 0),
 			key_ptr(n, shift),
 			(nr_entries - shift) * sizeof(__le64));
@@ -67,6 +68,7 @@ static void node_shift(struct node *n, int shift)
 			value_ptr(n, shift, value_size),
 			(nr_entries - shift) * value_size);
 	} else {
+		BUG_ON(nr_entries + shift > le32_to_cpu(n->header.max_entries));
 		memmove(key_ptr(n, shift),
 			key_ptr(n, 0),
 			nr_entries * sizeof(__le64));
@@ -84,6 +86,7 @@ static void node_copy(struct node *left, struct node *right, int shift)
 
 	if (shift < 0) {
 		shift = -shift;
+		BUG_ON(nr_left + shift > le32_to_cpu(left->header.max_entries));
 		memcpy(key_ptr(left, nr_left),
 		       key_ptr(right, 0),
 		       shift * sizeof(__le64));
@@ -91,6 +94,7 @@ static void node_copy(struct node *left, struct node *right, int shift)
 		       value_ptr(right, 0, value_size),
 		       shift * value_size);
 	} else {
+		BUG_ON(shift > le32_to_cpu(right->header.max_entries));
 		memcpy(key_ptr(right, 0),
 		       key_ptr(left, nr_left - shift),
 		       shift * sizeof(__le64));
