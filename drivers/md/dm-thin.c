@@ -467,6 +467,7 @@ struct pool {
 	struct dm_target *ti;	/* Only set if a pool target is bound */
 
 	struct mapped_device *pool_md;
+	struct block_device *md_dev;
 	struct dm_pool_metadata *pmd;
 
 	uint32_t sectors_per_block;
@@ -597,11 +598,28 @@ static struct pool *__pool_table_lookup(struct mapped_device *md)
 
 	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
 
-	list_for_each_entry(tmp, &dm_thin_pool_table.pools, list)
+	list_for_each_entry(tmp, &dm_thin_pool_table.pools, list) {
 		if (tmp->pool_md == md) {
 			pool = tmp;
 			break;
 		}
+	}
+
+	return pool;
+}
+
+static struct pool *__pool_table_lookup_metadata_dev(struct block_device *md_dev)
+{
+	struct pool *pool = NULL, *tmp;
+
+	BUG_ON(!mutex_is_locked(&dm_thin_pool_table.mutex));
+
+	list_for_each_entry(tmp, &dm_thin_pool_table.pools, list) {
+		if (tmp->md_dev == md_dev) {
+			pool = tmp;
+			break;
+		}
+	}
 
 	return pool;
 }
@@ -1444,6 +1462,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 	pool->ref_count = 1;
 	pool->pool_md = pool_md;
+	pool->md_dev = metadata_dev;
 	__pool_table_insert(pool);
 
 	return pool;
@@ -1486,11 +1505,21 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 {
 	struct pool *pool;
 
-	pool = __pool_table_lookup(pool_md);
-	if (pool)
+	pool = __pool_table_lookup_metadata_dev(metadata_dev);
+	if (pool && pool->pool_md != pool_md)
+		return ERR_PTR(-EBUSY);
+
+	else if (pool)
 		__pool_inc(pool);
-	else
-		pool = pool_create(pool_md, metadata_dev, block_size, error);
+
+	else {
+		pool = __pool_table_lookup(pool_md);
+		if (pool)
+			__pool_inc(pool);
+
+		else
+			pool = pool_create(pool_md, metadata_dev, block_size, error);
+	}
 
 	return pool;
 }
