@@ -54,6 +54,9 @@ static int ca_set_count(struct count_array *ca, dm_block_t b, uint32_t count)
 
 static int ca_inc_block(struct count_array *ca, dm_block_t b)
 {
+	if (b >= ca->nr)
+		return -EINVAL;
+
 	ca_set_count(ca, b, ca->counts[b] + 1);
 	return 0;
 }
@@ -135,6 +138,7 @@ static int ca_commit(struct count_array *old, struct count_array *new)
 		ca_extend(old, new->nr - old->nr);
 	}
 
+	BUG_ON(old->nr != new->nr);
 	old->nr_free = new->nr_free;
 	memcpy(old->counts, new->counts, sizeof(*old->counts) * old->nr);
 	return 0;
@@ -196,6 +200,8 @@ static int sm_checker_new_block(struct dm_space_map *sm, dm_block_t *b)
 	if (!r) {
 		BUG_ON(*b >= smc->old_counts.nr);
 		BUG_ON(smc->old_counts.counts[*b] != 0);
+		BUG_ON(*b >= smc->counts.nr);
+		BUG_ON(smc->counts.counts[*b] != 0);
 		ca_set_count(&smc->counts, *b, 1);
 		smc->nr_allocated++;
 	}
@@ -208,9 +214,9 @@ static int sm_checker_inc_block(struct dm_space_map *sm, dm_block_t b)
 	struct sm_checker *smc = container_of(sm, struct sm_checker, sm);
 	int r = dm_sm_inc_block(smc->real_sm, b);
 	int r2 = ca_inc_block(&smc->counts, b);
-	if (smc->counts.counts[b] == 1)
-		smc->nr_allocated++;
 	BUG_ON(r != r2);
+	if (!r2 && smc->counts.counts[b] == 1)
+		smc->nr_allocated++;
 	return r;
 }
 
@@ -220,6 +226,8 @@ static int sm_checker_dec_block(struct dm_space_map *sm, dm_block_t b)
 	int r = dm_sm_dec_block(smc->real_sm, b);
 	int r2 = ca_dec_block(&smc->counts, b);
 	BUG_ON(r != r2);
+	if (!r2 && !smc->counts.counts[b])
+		smc->nr_allocated--;
 	return r;
 }
 
@@ -260,8 +268,12 @@ static int sm_checker_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t 
 	old_rc = smc->counts.counts[b];
 	r2 = ca_set_count(&smc->counts, b, count);
 	BUG_ON(r != r2);
-	if (!r2 && !old_rc && count)
-		smc->nr_allocated++;
+	if (!r2) {
+		if (!old_rc && count)
+			smc->nr_allocated++;
+		else if (!count && old_rc)
+			smc->nr_allocated--;
+	}
 
 	return r;
 }
