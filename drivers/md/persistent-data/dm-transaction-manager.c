@@ -353,7 +353,7 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 			goto bad2;
 		}
 
-		*sm = dm_sm_checker_create_fresh(inner);
+		*sm = dm_sm_checker_create(inner);
 		if (!*sm)
 			goto bad2;
 
