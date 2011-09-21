@@ -388,18 +388,6 @@ static int init_pmd(struct dm_pool_metadata *pmd,
 			r = PTR_ERR(data_sm);
 			goto bad;
 		}
-
-		r = dm_tm_pre_commit(tm);
-		if (r < 0) {
-			DMERR("couldn't pre commit");
-			goto bad_data_sm;
-		}
-
-		r = dm_tm_commit(tm, sblock);
-		if (r < 0) {
-			DMERR("couldn't commit");
-			goto bad_data_sm;
-		}
 	} else {
 		struct thin_disk_superblock *disk_super = NULL;
 		size_t space_map_root_offset =
@@ -421,8 +409,13 @@ static int init_pmd(struct dm_pool_metadata *pmd,
 			r = PTR_ERR(data_sm);
 			goto bad;
 		}
+	}
 
-		dm_tm_unlock(tm, sblock);
+
+	r = dm_tm_unlock(tm, sblock);
+	if (r < 0) {
+		DMERR("couldn't unlock superblock");
+		goto bad_data_sm;
 	}
 
 	pmd->bm = bm;
