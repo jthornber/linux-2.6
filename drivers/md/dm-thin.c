@@ -953,14 +953,37 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	}
 
 	if (free_blocks == 0) {
-		if (!pool->no_free_space) {
-			DMWARN("%s: no free space available.",
-			       dm_device_name(pool->pool_md));
-			spin_lock_irqsave(&pool->lock, flags);
-			pool->no_free_space = 1;
-			spin_unlock_irqrestore(&pool->lock, flags);
+		if (pool->no_free_space)
+			return -ENOSPC;
+		else {
+			/*
+			 * Try and commit to see if that will free up some
+			 * more space.
+			 */
+			r = dm_pool_commit_metadata(pool->pmd);
+			if (r) {
+				DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
+				      __func__, r);
+				return r;
+			}
+
+			r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
+			if (r)
+				return r;
+
+			/*
+			 * If we still have no space we set a flag to avoid
+			 * doing all this checking and return -ENOSPC.
+			 */
+			if (free_blocks == 0) {
+				DMWARN("%s: no free space available.",
+				       dm_device_name(pool->pool_md));
+				spin_lock_irqsave(&pool->lock, flags);
+				pool->no_free_space = 1;
+				spin_unlock_irqrestore(&pool->lock, flags);
+				return -ENOSPC;
+			}
 		}
-		return -ENOSPC;
 	}
 
 	r = dm_pool_alloc_data_block(pool->pmd, result);
