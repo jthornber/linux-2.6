@@ -75,14 +75,15 @@ static int add_bop(struct sm_metadata *smm, enum block_op_type type, dm_block_t 
 static int commit_bop(struct sm_metadata *smm, struct block_op *op)
 {
 	int r = 0;
+	enum allocation_event ev;
 
 	switch (op->type) {
 	case BOP_INC:
-		r = sm_ll_inc(&smm->ll, op->block);
+		r = sm_ll_inc(&smm->ll, op->block, &ev);
 		break;
 
 	case BOP_DEC:
-		r = sm_ll_dec(&smm->ll, op->block);
+		r = sm_ll_dec(&smm->ll, op->block, &ev);
 		break;
 	}
 
@@ -257,6 +258,7 @@ static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
 				 uint32_t count)
 {
 	int r, r2;
+	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	if (smm->recursion_count) {
@@ -265,7 +267,7 @@ static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
 	}
 
 	in(smm);
-	r = sm_ll_insert(&smm->ll, b, count);
+	r = sm_ll_insert(&smm->ll, b, count, &ev);
 	r2 = out(smm);
 
 	return combine_errors(r, r2);
@@ -274,13 +276,14 @@ static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
 static int sm_metadata_inc_block(struct dm_space_map *sm, dm_block_t b)
 {
 	int r, r2 = 0;
+	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	if (recursing(smm))
 		r = add_bop(smm, BOP_INC, b);
 	else {
 		in(smm);
-		r = sm_ll_inc(&smm->ll, b);
+		r = sm_ll_inc(&smm->ll, b, &ev);
 		r2 = out(smm);
 	}
 
@@ -290,13 +293,14 @@ static int sm_metadata_inc_block(struct dm_space_map *sm, dm_block_t b)
 static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 {
 	int r, r2 = 0;
+	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	if (recursing(smm))
 		r = add_bop(smm, BOP_DEC, b);
 	else {
 		in(smm);
-		r = sm_ll_dec(&smm->ll, b);
+		r = sm_ll_dec(&smm->ll, b, &ev);
 		r2 = out(smm);
 	}
 
@@ -306,6 +310,7 @@ static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 static int sm_metadata_new_block_(struct dm_space_map *sm, dm_block_t *b)
 {
 	int r, r2 = 0;
+	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	r = sm_ll_find_free_block(&smm->old_ll, smm->begin, smm->old_ll.nr_blocks, b);
@@ -318,7 +323,7 @@ static int sm_metadata_new_block_(struct dm_space_map *sm, dm_block_t *b)
 		r = add_bop(smm, BOP_INC, *b);
 	else {
 		in(smm);
-		r = sm_ll_inc(&smm->ll, *b);
+		r = sm_ll_inc(&smm->ll, *b, &ev);
 		r2 = out(smm);
 	}
 
@@ -537,6 +542,7 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 {
 	int r;
 	dm_block_t i;
+	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	smm->begin = superblock + 1;
@@ -561,7 +567,7 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 	 * allocated blocks that they were built from.
 	 */
 	for (i = superblock; !r && i < smm->begin; i++)
-		r = sm_ll_inc(&smm->ll, i);
+		r = sm_ll_inc(&smm->ll, i, &ev);
 
 	if (r)
 		return r;
