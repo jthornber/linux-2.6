@@ -340,7 +340,15 @@ int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 		r = sm_find_free(dm_bitmap_data(blk),
 				 max((unsigned) begin, (unsigned) le32_to_cpu(ie_disk.none_free_before)),
 				 bit_end, &position);
-		if (r < 0) {
+		if (r == -ENOSPC) {
+			/*
+			 * This might happen because we started searching
+			 * part way through the bitmap.
+			 */
+			dm_tm_unlock(ll->tm, blk);
+			continue;
+
+		} else if (r < 0) {
 			dm_tm_unlock(ll->tm, blk);
 			return r;
 		}
