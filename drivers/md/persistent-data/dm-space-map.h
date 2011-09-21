@@ -21,6 +21,10 @@ struct dm_space_map {
 	 */
 	int (*extend)(struct dm_space_map *sm, dm_block_t extra_blocks);
 
+	/*
+	 * Extensions do not appear in this count until after commit has
+	 * been called.
+	 */
 	int (*get_nr_blocks)(struct dm_space_map *sm, dm_block_t *count);
 
 	/*
