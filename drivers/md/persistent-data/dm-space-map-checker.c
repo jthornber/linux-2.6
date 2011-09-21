@@ -156,7 +156,6 @@ struct sm_checker {
 
 	struct count_array old_counts;
 	struct count_array counts;
-	dm_block_t nr_allocated;
 
 	struct dm_space_map *real_sm;
 };
@@ -176,7 +175,7 @@ static int sm_checker_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
 	struct sm_checker *smc = container_of(sm, struct sm_checker, sm);
 	int r = dm_sm_get_nr_blocks(smc->real_sm, count);
 	if (!r)
-		BUG_ON(smc->counts.nr != *count);
+		BUG_ON(smc->old_counts.nr != *count);
 	return r;
 }
 
@@ -184,11 +183,22 @@ static int sm_checker_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 {
 	struct sm_checker *smc = container_of(sm, struct sm_checker, sm);
 	int r = dm_sm_get_nr_free(smc->real_sm, count);
-#if 0
-	/* FIXME: need to update the other space maps to be consistent with this */
-	if (!r)
-		BUG_ON((smc->old_counts.nr_free - smc->nr_allocated) != *count);
-#endif
+	if (!r) {
+		/*
+		 * Slow, but we know it's correct.
+		 */
+		dm_block_t b, n = 0;
+		for (b = 0; b < smc->old_counts.nr; b++)
+			if (smc->old_counts.counts[b] == 0 &&
+			    smc->counts.counts[b] == 0)
+				n++;
+
+		if (n != *count) {
+			DMERR("free block counts differ, checker %u, sm-disk:%u",
+			      (unsigned) n, (unsigned) *count);
+			BUG();
+		}
+	}
 	return r;
 }
 
@@ -203,7 +213,6 @@ static int sm_checker_new_block(struct dm_space_map *sm, dm_block_t *b)
 		BUG_ON(*b >= smc->counts.nr);
 		BUG_ON(smc->counts.counts[*b] != 0);
 		ca_set_count(&smc->counts, *b, 1);
-		smc->nr_allocated++;
 	}
 
 	return r;
@@ -215,8 +224,6 @@ static int sm_checker_inc_block(struct dm_space_map *sm, dm_block_t b)
 	int r = dm_sm_inc_block(smc->real_sm, b);
 	int r2 = ca_inc_block(&smc->counts, b);
 	BUG_ON(r != r2);
-	if (!r2 && smc->counts.counts[b] == 1)
-		smc->nr_allocated++;
 	return r;
 }
 
@@ -226,8 +233,6 @@ static int sm_checker_dec_block(struct dm_space_map *sm, dm_block_t b)
 	int r = dm_sm_dec_block(smc->real_sm, b);
 	int r2 = ca_dec_block(&smc->counts, b);
 	BUG_ON(r != r2);
-	if (!r2 && !smc->counts.counts[b])
-		smc->nr_allocated--;
 	return r;
 }
 
@@ -268,12 +273,6 @@ static int sm_checker_set_count(struct dm_space_map *sm, dm_block_t b, uint32_t 
 	old_rc = smc->counts.counts[b];
 	r2 = ca_set_count(&smc->counts, b, count);
 	BUG_ON(r != r2);
-	if (!r2) {
-		if (!old_rc && count)
-			smc->nr_allocated++;
-		else if (!count && old_rc)
-			smc->nr_allocated--;
-	}
 
 	return r;
 }
@@ -290,7 +289,6 @@ static int sm_checker_commit(struct dm_space_map *sm)
 	r = ca_commit(&smc->old_counts, &smc->counts);
 	if (r)
 		return r;
-	smc->nr_allocated = 0;
 
 	return 0;
 }
@@ -360,7 +358,6 @@ struct dm_space_map *dm_sm_checker_create(struct dm_space_map *sm)
 		kfree(smc);
 		return NULL;
 	}
-	smc->nr_allocated = 0;
 
 	smc->real_sm = sm;
 
@@ -409,7 +406,6 @@ struct dm_space_map *dm_sm_checker_create_fresh(struct dm_space_map *sm)
 		kfree(smc);
 		return NULL;
 	}
-	smc->nr_allocated = 0;
 
 	smc->real_sm = sm;
 	return &smc->sm;
