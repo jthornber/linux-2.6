@@ -61,6 +61,7 @@ static void node_shift(struct node *n, int shift)
 	if (shift < 0) {
 		shift = -shift;
 		BUG_ON(shift > nr_entries);
+		BUG_ON((void *) key_ptr(n, shift) >= value_ptr(n, shift, value_size));
 		memmove(key_ptr(n, 0),
 			key_ptr(n, shift),
 			(nr_entries - shift) * sizeof(__le64));
@@ -200,11 +201,11 @@ static void shift(struct node *left, struct node *right, int count)
 
 	left->header.nr_entries =
 		cpu_to_le32(le32_to_cpu(left->header.nr_entries) - count);
-	BUG_ON(le32_to_cpu(left->header.nr_entries) - count >= le32_to_cpu(left->header.max_entries));
+	BUG_ON(le32_to_cpu(left->header.nr_entries) > le32_to_cpu(left->header.max_entries));
 
 	right->header.nr_entries =
 		cpu_to_le32(le32_to_cpu(right->header.nr_entries) + count);
-	BUG_ON(le32_to_cpu(right->header.nr_entries) + count >= le32_to_cpu(right->header.max_entries));
+	BUG_ON(le32_to_cpu(right->header.nr_entries) > le32_to_cpu(right->header.max_entries));
 }
 
 static void __rebalance2(struct dm_btree_info *info, struct node *parent,
@@ -233,7 +234,9 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 		 * Rebalance.
 		 */
 		unsigned target_left = (nr_left + nr_right) / 2;
-
+		unsigned shift_ = nr_left - target_left;
+		BUG_ON(le32_to_cpu(left->header.max_entries) <= nr_left - shift_);
+		BUG_ON(le32_to_cpu(right->header.max_entries) <= nr_right + shift_);
 		shift(left, right, nr_left - target_left);
 		*key_ptr(parent, r->index) = right->keys[0];
 	}
@@ -283,6 +286,9 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 
 	unsigned target;
 
+	BUG_ON(left->header.max_entries != center->header.max_entries);
+	BUG_ON(center->header.max_entries != right->header.max_entries);
+
 	if (((nr_left + nr_center + nr_right) / 2) < merge_threshold(center)) {
 		/*
 		 * Delete center node:
@@ -293,6 +299,7 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 		 */
 		unsigned shift = min(max_entries - nr_left, nr_center);
 
+		BUG_ON(nr_left + shift > max_entries);
 		node_copy(left, center, -shift);
 		left->header.nr_entries = cpu_to_le32(nr_left + shift);
 
@@ -318,6 +325,7 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	 * Rebalance
 	 */
 	target = (nr_left + nr_center + nr_right) / 3;
+	BUG_ON(target > max_entries);
 
 	/*
 	 * Adjust the left node
