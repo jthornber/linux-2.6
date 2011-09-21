@@ -303,7 +303,7 @@ static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b)
 	return combine_errors(r, r2);
 }
 
-static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
+static int sm_metadata_new_block_(struct dm_space_map *sm, dm_block_t *b)
 {
 	int r, r2 = 0;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -326,6 +326,14 @@ static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 		smm->allocated_this_transaction++;
 
 	return combine_errors(r, r2);
+}
+
+static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
+{
+	int r = sm_metadata_new_block_(sm, b);
+	if (r)
+		DMERR("out of metadata space");
+	return r;
 }
 
 static int sm_metadata_commit(struct dm_space_map *sm)
