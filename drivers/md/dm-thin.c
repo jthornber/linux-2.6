@@ -1523,23 +1523,19 @@ static void __pool_dec(struct pool *pool)
 
 static struct pool *__pool_find(struct mapped_device *pool_md,
 				struct block_device *metadata_dev,
-				unsigned long block_size,
-				char **error)
+				unsigned long block_size, char **error)
 {
-	struct pool *pool;
+	struct pool *pool = __pool_table_lookup_metadata_dev(metadata_dev);
 
-	pool = __pool_table_lookup_metadata_dev(metadata_dev);
-	if (pool && pool->pool_md != pool_md)
-		return ERR_PTR(-EBUSY);
-
-	else if (pool)
+	if (pool) {
+		if (pool->pool_md != pool_md)
+			return ERR_PTR(-EBUSY);
 		__pool_inc(pool);
 
-	else {
+	} else {
 		pool = __pool_table_lookup(pool_md);
 		if (pool)
 			__pool_inc(pool);
-
 		else
 			pool = pool_create(pool_md, metadata_dev, block_size, error);
 	}
