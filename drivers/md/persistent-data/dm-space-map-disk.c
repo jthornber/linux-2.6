@@ -194,7 +194,6 @@ static int sm_disk_commit(struct dm_space_map *sm)
 	if (r)
 		return r;
 
-	printk(KERN_ALERT "committing sm-disk, nr_free is %u\n", (unsigned) nr_free);
 	r = sm_ll_commit(&smd->ll);
 	if (r)
 		return r;
@@ -206,7 +205,6 @@ static int sm_disk_commit(struct dm_space_map *sm)
 	r = sm_disk_get_nr_free(sm, &nr_free);
 	if (r)
 		return r;
-	printk(KERN_ALERT "after commit, nr_free is %u\n", (unsigned) nr_free);
 
 	return 0;
 }
