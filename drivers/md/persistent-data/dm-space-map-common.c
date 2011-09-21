@@ -356,7 +356,8 @@ int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 	return -ENOSPC;
 }
 
-int sm_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
+int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
+		 uint32_t ref_count, enum allocation_event *ev)
 {
 	int r;
 	uint32_t bit, old;
@@ -418,12 +419,14 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	}
 
 	if (ref_count && !old) {
+		*ev = SM_ALLOC;
 		ll->nr_allocated++;
 		ie_disk.nr_free = cpu_to_le32(le32_to_cpu(ie_disk.nr_free) - 1);
 		if (le32_to_cpu(ie_disk.none_free_before) == bit)
 			ie_disk.none_free_before = cpu_to_le32(bit + 1);
 
 	} else if (old && !ref_count) {
+		*ev = SM_FREE;
 		ll->nr_allocated--;
 		ie_disk.nr_free = cpu_to_le32(le32_to_cpu(ie_disk.nr_free) + 1);
 		ie_disk.none_free_before = cpu_to_le32(min(le32_to_cpu(ie_disk.none_free_before), bit));
@@ -432,7 +435,7 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b, uint32_t ref_count)
 	return ll->save_ie(ll, index, &ie_disk);
 }
 
-int sm_ll_inc(struct ll_disk *ll, dm_block_t b)
+int sm_ll_inc(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
 {
 	int r;
 	uint32_t rc;
@@ -441,10 +444,10 @@ int sm_ll_inc(struct ll_disk *ll, dm_block_t b)
 	if (r)
 		return r;
 
-	return sm_ll_insert(ll, b, rc + 1);
+	return sm_ll_insert(ll, b, rc + 1, ev);
 }
 
-int sm_ll_dec(struct ll_disk *ll, dm_block_t b)
+int sm_ll_dec(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
 {
 	int r;
 	uint32_t rc;
@@ -456,7 +459,7 @@ int sm_ll_dec(struct ll_disk *ll, dm_block_t b)
 	if (!rc)
 		return -EINVAL;
 
-	return sm_ll_insert(ll, b, rc - 1);
+	return sm_ll_insert(ll, b, rc - 1, ev);
 }
 
 int sm_ll_commit(struct ll_disk *ll)
