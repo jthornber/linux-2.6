@@ -1660,8 +1660,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	if (kstrtoull(argv[3], 10, (unsigned long long *)&low_water) ||
-	    !low_water) {
+	if (kstrtoull(argv[3], 10, (unsigned long long *)&low_water)) {
 		ti->error = "Invalid low water mark";
 		r = -EINVAL;
 		goto out;
