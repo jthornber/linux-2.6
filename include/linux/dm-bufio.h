@@ -25,8 +25,11 @@
  *	dm_bufio_new. The data pointer and dm_buffer pointer is no longer valid
  *	after this call.
  *
- * WARNING: to avoid deadlocks, the thread can hold at most one buffer. Multiple
- *	threads can hold each one buffer simultaneously.
+ * WARNING: to avoid deadlocks, this conditions are required:
+ *	At most one thread can hold at most "reserved_buffers" simultaneously
+ *	Each other threads can hold at most one buffer
+ *	Threads which call only dm_bufio_get can hold unlimited number of
+ *	buffers
  *
  * dm_bufio_mark_buffer_dirty --- mark a buffer dirty. It should be called after
  *	the buffer is modified.
