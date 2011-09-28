@@ -6,12 +6,17 @@
  * This file is released under the GPL.
  */
 
+#define DM_BUFIO_SHRINKER
+
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/version.h>
+
+#ifdef DM_BUFIO_SHRINKER
 #include <linux/shrinker.h>
+#endif
 
 #include "dm.h"
 
@@ -50,10 +55,10 @@
 #define DM_BUFIO_HASH(block)	((((block) >> DM_BUFIO_HASH_BITS) ^ (block)) & ((1 << DM_BUFIO_HASH_BITS) - 1))
 
 /*
- * Don't try to kmalloc blocks larger than this.
+ * Don't try to use kmem_cache_alloc for blocks larger than this.
  * For explanation, see dm_bufio_alloc_buffer_data below.
  */
-#define DM_BUFIO_BLOCK_SIZE_KMALLOC_LIMIT	(PAGE_SIZE >> 1)
+#define DM_BUFIO_BLOCK_SIZE_SLAB_LIMIT		(PAGE_SIZE >> 1)
 #define DM_BUFIO_BLOCK_SIZE_GFP_LIMIT		(PAGE_SIZE << (MAX_ORDER - 1))
 
 /*
@@ -86,6 +91,7 @@ struct dm_bufio_client {
 	unsigned block_size;
 	unsigned char sectors_per_block_bits;
 	unsigned char pages_per_block_bits;
+	unsigned char blocks_per_page_bits;
 	unsigned aux_size;
 	void (*alloc_callback)(struct dm_buffer *);
 	void (*write_callback)(struct dm_buffer *);
@@ -102,7 +108,9 @@ struct dm_bufio_client {
 
 	struct list_head client_list;
 
+#ifdef DM_BUFIO_SHRINKER
 	struct shrinker shrinker;
+#endif
 };
 
 /*
@@ -114,10 +122,10 @@ struct dm_bufio_client {
 
 /*
  * A method, with which the data is allocated:
- * kmalloc(), __get_free_pages() or vmalloc().
+ * kmem_cache_alloc(), __get_free_pages() or vmalloc().
  * See the comment at dm_bufio_alloc_buffer_data.
  */
-#define DATA_MODE_KMALLOC		0
+#define DATA_MODE_SLAB			0
 #define DATA_MODE_GET_FREE_PAGES	1
 #define DATA_MODE_VMALLOC		2
 #define DATA_MODE_LIMIT			3
@@ -139,6 +147,17 @@ struct dm_buffer {
 	struct bio_vec bio_vec[DM_BUFIO_INLINE_VECS];
 };
 
+static struct kmem_cache *dm_bufio_caches[PAGE_SHIFT - SECTOR_SHIFT];
+static char *dm_bufio_cache_names[PAGE_SHIFT - SECTOR_SHIFT];
+static inline int dm_bufio_cache_index(struct dm_bufio_client *c)
+{
+	unsigned ret = c->blocks_per_page_bits - 1;
+	BUG_ON(ret >= ARRAY_SIZE(dm_bufio_caches));
+	return ret;
+}
+#define DM_BUFIO_CACHE(c)	(dm_bufio_caches[dm_bufio_cache_index(c)])
+#define DM_BUFIO_CACHE_NAME(c)	(dm_bufio_cache_names[dm_bufio_cache_index(c)])
+
 
 /* Default cache size --- available memory divided by the ratio */
 static unsigned long dm_bufio_default_cache_size = 0;
@@ -151,8 +170,8 @@ static unsigned long dm_bufio_cache_size = 0;
 static unsigned long dm_bufio_cache_size_latch = 0;
 
 /* The module parameter */
-module_param_named(cache_size, dm_bufio_cache_size, ulong, 0644);
-MODULE_PARM_DESC(cache_size, "Size of metadata cache");
+module_param_named(max_allocated, dm_bufio_cache_size, ulong, 0644);
+MODULE_PARM_DESC(max_allocated, "Size of metadata cache");
 
 /* Buffers are freed after this timeout */
 static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE;
@@ -161,7 +180,7 @@ MODULE_PARM_DESC(max_age, "Max age of a buffer in seconds");
 
 /* This spinlock protects:
    dm_bufio_total_allocated, dm_bufio_peak_allocated,
-   dm_bufio_allocated_kmalloc, dm_bufio_allocated_get_free_pages,
+   dm_bufio_allocated_kmem_cache, dm_bufio_allocated_get_free_pages,
    dm_bufio_allocated_vmalloc */
 static DEFINE_SPINLOCK(allocated_memory_spinlock);
 
@@ -174,10 +193,10 @@ static unsigned long dm_bufio_peak_allocated = 0;
 module_param_named(peak_allocated, dm_bufio_peak_allocated, ulong, 0644);
 MODULE_PARM_DESC(peak_allocated, "Maximum allocated memory");
 
-/* Memory allocated with kmalloc / get_free_pages / vmalloc */
-static unsigned long dm_bufio_allocated_kmalloc = 0;
-module_param_named(allocated_kmalloc, dm_bufio_allocated_kmalloc, ulong, 0444);
-MODULE_PARM_DESC(allocated_kmalloc, "Memory allocated with kmalloc");
+/* Memory allocated with kmem_cache_alloc / get_free_pages / vmalloc */
+static unsigned long dm_bufio_allocated_kmem_cache = 0;
+module_param_named(allocated_kmem_cache, dm_bufio_allocated_kmem_cache, ulong, 0444);
+MODULE_PARM_DESC(allocated_kmem_cache, "Memory allocated with kmem_cache_alloc");
 static unsigned long dm_bufio_allocated_get_free_pages = 0;
 module_param_named(allocated_get_free_pages, dm_bufio_allocated_get_free_pages, ulong, 0444);
 MODULE_PARM_DESC(allocated_get_free_pages, "Memory allocated with get_free_pages");
@@ -201,8 +220,10 @@ static DEFINE_MUTEX(dm_bufio_clients_lock);
 static void write_dirty_buffer(struct dm_buffer *b);
 static void dm_bufio_write_dirty_buffers_async_unlocked(
 				struct dm_bufio_client *c, int no_wait);
+#ifdef DM_BUFIO_SHRINKER
 static int dm_bufio_shrink(struct shrinker *shrinker,
 			   struct shrink_control *sc);
+#endif
 
 /*
  * An atomic addition to unsigned long.
@@ -210,7 +231,7 @@ static int dm_bufio_shrink(struct shrinker *shrinker,
 static void adjust_total_allocated(int data_mode, long diff)
 {
 	static unsigned long * const class_ptr[DATA_MODE_LIMIT] = {
-		&dm_bufio_allocated_kmalloc,
+		&dm_bufio_allocated_kmem_cache,
 		&dm_bufio_allocated_get_free_pages,
 		&dm_bufio_allocated_vmalloc,
 	};
@@ -280,7 +301,7 @@ static void get_memory_limit(struct dm_bufio_client *c,
 /*
  * Allocating buffer data.
  *
- * Small buffers are allocated with kmalloc, to use space optimally.
+ * Small buffers are allocated with kmem_cache, to use space optimally.
  *
  * Large buffers:
  * We use get_free_pages or vmalloc, both have their advantages and
@@ -299,9 +320,9 @@ static void get_memory_limit(struct dm_bufio_client *c,
 static void *dm_bufio_alloc_buffer_data(struct dm_bufio_client *c,
 					gfp_t gfp_mask, char *data_mode)
 {
-	if (c->block_size <= DM_BUFIO_BLOCK_SIZE_KMALLOC_LIMIT) {
-		*data_mode = DATA_MODE_KMALLOC;
-		return kmalloc(c->block_size, gfp_mask);
+	if (c->block_size <= DM_BUFIO_BLOCK_SIZE_SLAB_LIMIT) {
+		*data_mode = DATA_MODE_SLAB;
+		return kmem_cache_alloc(DM_BUFIO_CACHE(c), gfp_mask);
 	} else if (c->block_size <= DM_BUFIO_BLOCK_SIZE_GFP_LIMIT &&
 		   gfp_mask & __GFP_NORETRY) {
 		*data_mode = DATA_MODE_GET_FREE_PAGES;
@@ -321,8 +342,8 @@ static void dm_bufio_free_buffer_data(struct dm_bufio_client *c,
 {
 	switch (data_mode) {
 
-	case DATA_MODE_KMALLOC:
-		kfree(data);
+	case DATA_MODE_SLAB:
+		kmem_cache_free(DM_BUFIO_CACHE(c), data);
 		break;
 	case DATA_MODE_GET_FREE_PAGES:
 		free_pages((unsigned long)data, c->pages_per_block_bits);
@@ -622,6 +643,10 @@ static void dm_bufio_submit_io(struct dm_buffer *b, int rw, sector_t block,
 		 */
 		ptr = b->data;
 		len = b->c->block_size;
+		if (len >= PAGE_SIZE)
+			BUG_ON((unsigned long)ptr & (PAGE_SIZE - 1));
+		else
+			BUG_ON((unsigned long)ptr & (len - 1));
 		do {
 			if (!bio_add_page(&b->bio, virt_to_page(ptr),
 					  len < PAGE_SIZE ? len : PAGE_SIZE,
@@ -707,6 +732,7 @@ static void *dm_bufio_new_read(struct dm_bufio_client *c, sector_t block,
 
 	cond_resched();
 	mutex_lock(&c->lock);
+
 retry_search:
 	b = dm_bufio_find(c, block);
 	if (b) {
@@ -1152,7 +1178,13 @@ dm_bufio_client_create(struct block_device *bdev, unsigned block_size,
 	c->block_size = block_size;
 	c->sectors_per_block_bits = ffs(block_size) - 1 - SECTOR_SHIFT;
 	c->pages_per_block_bits = (ffs(block_size) - 1 >= PAGE_SHIFT) ?
-		(ffs(block_size) - 1 - PAGE_SHIFT) : 0;
+		ffs(block_size) - 1 - PAGE_SHIFT : 0;
+	c->blocks_per_page_bits = (ffs(block_size) - 1 < PAGE_SHIFT ?
+		PAGE_SHIFT - (ffs(block_size) - 1) : 0);
+
+	printk("block size %d, page size %ld\n", block_size, PAGE_SIZE);
+	printk("pages_per_block_bits %d, blocks_per_page_bits %d\n", c->pages_per_block_bits, c->blocks_per_page_bits);
+
 	c->aux_size = aux_size;
 	c->alloc_callback = alloc_callback;
 	c->write_callback = write_callback;
@@ -1175,6 +1207,31 @@ dm_bufio_client_create(struct block_device *bdev, unsigned block_size,
 		goto bad_dm_io;
 	}
 
+	mutex_lock(&dm_bufio_clients_lock);
+	if (c->blocks_per_page_bits) {
+		if (!DM_BUFIO_CACHE_NAME(c)) {
+			DM_BUFIO_CACHE_NAME(c) = kasprintf(GFP_KERNEL,
+					"dm_bufio_cache-%u", c->block_size);
+			if (!DM_BUFIO_CACHE_NAME(c)) {
+				r = -ENOMEM;
+				mutex_unlock(&dm_bufio_clients_lock);
+				goto bad_cache;
+			}
+		}
+		if (!DM_BUFIO_CACHE(c)) {
+			DM_BUFIO_CACHE(c) = kmem_cache_create(
+							DM_BUFIO_CACHE_NAME(c),
+							c->block_size,
+							c->block_size, 0, NULL);
+			if (!DM_BUFIO_CACHE(c)) {
+				r = -ENOMEM;
+				mutex_unlock(&dm_bufio_clients_lock);
+				goto bad_cache;
+			}
+		}
+	}
+	mutex_unlock(&dm_bufio_clients_lock);
+
 	while (c->need_reserved_buffers) {
 		struct dm_buffer *b = alloc_buffer(c, GFP_KERNEL);
 		if (!b) {
@@ -1190,14 +1247,17 @@ dm_bufio_client_create(struct block_device *bdev, unsigned block_size,
 	cache_size_refresh();
 	mutex_unlock(&dm_bufio_clients_lock);
 
+#ifdef DM_BUFIO_SHRINKER
 	c->shrinker.shrink = dm_bufio_shrink;
 	c->shrinker.seeks = 1;
 	c->shrinker.batch = 0;
 	register_shrinker(&c->shrinker);
+#endif
 
 	return c;
 
 bad_buffer:
+bad_cache:
 	while (!list_empty(&c->reserved_buffers)) {
 		struct dm_buffer *b = list_entry(c->reserved_buffers.next,
 						 struct dm_buffer, lru_list);
@@ -1223,7 +1283,9 @@ void dm_bufio_client_destroy(struct dm_bufio_client *c)
 	unsigned i;
 	dm_bufio_drop_buffers(c);
 
+#ifdef DM_BUFIO_SHRINKER
 	unregister_shrinker(&c->shrinker);
+#endif
 
 	mutex_lock(&dm_bufio_clients_lock);
 	list_del(&c->client_list);
@@ -1324,6 +1386,7 @@ static void dm_bufio_work_fn(struct work_struct *w)
 	queue_delayed_work(dm_bufio_wq, &dm_bufio_work, DM_BUFIO_WORK_TIMER * HZ);
 }
 
+#ifdef DM_BUFIO_SHRINKER
 static int dm_bufio_shrink(struct shrinker *shrinker, struct shrink_control *sc)
 {
 	struct dm_bufio_client *c =
@@ -1362,14 +1425,18 @@ skip_scan:
 
 	return ret_val;
 }
+#endif
 
 /*
  * This is called only once for the whole dm_bufio module.
  * It initializes memory limit.
  */
-int __init dm_bufio_init(void)
+static int __init dm_bufio_init(void)
 {
 	__u64 mem;
+
+	memset(&dm_bufio_caches, 0, sizeof dm_bufio_caches);
+	memset(&dm_bufio_cache_names, 0, sizeof dm_bufio_cache_names);
 
 	mem = (__u64)((totalram_pages - totalhigh_pages) * DM_BUFIO_MEMORY_RATIO)
 		<< PAGE_SHIFT;
@@ -1400,12 +1467,25 @@ int __init dm_bufio_init(void)
 /*
  * This is called once when unloading the dm_bufio module.
  */
-void __exit dm_bufio_exit(void)
+static void __exit dm_bufio_exit(void)
 {
 	int bug;
+	int i;
 
 	cancel_delayed_work_sync(&dm_bufio_work);
 	destroy_workqueue(dm_bufio_wq);
+
+	for (i = 0; i < ARRAY_SIZE(dm_bufio_caches); i++) {
+		struct kmem_cache *kc = dm_bufio_caches[i];
+		if (kc)
+			kmem_cache_destroy(kc);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(dm_bufio_cache_names); i++) {
+		char *nm = dm_bufio_cache_names[i];
+		if (nm)
+			kfree(nm);
+	}
 
 	bug = 0;
 	if (dm_bufio_client_count != 0) {
@@ -1418,19 +1498,19 @@ void __exit dm_bufio_exit(void)
 			__func__, dm_bufio_total_allocated);
 		bug = 1;
 	}
-	if (dm_bufio_allocated_kmalloc != 0) {
-		printk(KERN_CRIT "%s: dm_bufio_allocated_kmalloc leaked: %lu",
-			__func__, dm_bufio_total_allocated);
+	if (dm_bufio_allocated_kmem_cache != 0) {
+		printk(KERN_CRIT "%s: dm_bufio_allocated_kmem_cache leaked: %lu",
+			__func__, dm_bufio_allocated_kmem_cache);
 		bug = 1;
 	}
 	if (dm_bufio_allocated_get_free_pages != 0) {
 		printk(KERN_CRIT "%s: dm_bufio_allocated_get_free_pages leaked: %lu",
-			__func__, dm_bufio_total_allocated);
+			__func__, dm_bufio_allocated_get_free_pages);
 		bug = 1;
 	}
 	if (dm_bufio_allocated_vmalloc != 0) {
 		printk(KERN_CRIT "%s: dm_bufio_vmalloc leaked: %lu",
-			__func__, dm_bufio_total_allocated);
+			__func__, dm_bufio_allocated_vmalloc);
 		bug = 1;
 	}
 	if (bug)
