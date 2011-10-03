@@ -1217,9 +1217,6 @@ dm_bufio_client_create(struct block_device *bdev, unsigned block_size,
 	c->blocks_per_page_bits = (ffs(block_size) - 1 < PAGE_SHIFT ?
 		PAGE_SHIFT - (ffs(block_size) - 1) : 0);
 
-	printk("block size %d, page size %ld\n", block_size, PAGE_SIZE);
-	printk("pages_per_block_bits %d, blocks_per_page_bits %d\n", c->pages_per_block_bits, c->blocks_per_page_bits);
-
 	c->aux_size = aux_size;
 	c->alloc_callback = alloc_callback;
 	c->write_callback = write_callback;
