@@ -83,6 +83,7 @@ All tools run offline for first release.
 
   - [ ] resize metadata device
   - [ ] external origin (read-only)
+  - [ ] stacked pools causes lockdep to complain about bufio
 
 ** Userland tools
 
