@@ -543,6 +543,22 @@ int dm_bm_unlock(struct dm_block *b)
 }
 EXPORT_SYMBOL_GPL(dm_bm_unlock);
 
+int dm_bm_unlock_move(struct dm_block *b, dm_block_t n)
+{
+	struct buffer_aux *aux;
+
+	aux = dm_bufio_get_aux_data(b);
+
+	if (aux->write_locked) {
+		dm_bufio_mark_buffer_dirty(b);
+		bl_up_write(&aux->lock);
+	} else
+		bl_up_read(&aux->lock);
+
+	dm_bufio_release_move(b, n);
+	return 0;
+}
+
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock)
 {
