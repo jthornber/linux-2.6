@@ -7,12 +7,10 @@
 #include "dm-persistent-data-internal.h"
 
 #include <linux/crc32c.h>
-#include <linux/dm-io.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/rwsem.h>
 #include <linux/device-mapper.h>
-#include <linux/dm-bufio.h>
 #include <linux/stacktrace.h>
 
 #define DM_MSG_PREFIX "block manager"
