@@ -17,7 +17,6 @@
 
 /*----------------------------------------------------------------*/
 
-#ifdef CONFIG_DM_BLOCK_LOCKING
 /*
  * This is a read/write semaphore with a couple of differences.
  *
@@ -40,7 +39,7 @@ struct block_lock {
 	struct list_head waiters;
 	struct task_struct *holders[MAX_HOLDERS];
 
-#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
 	struct stack_trace traces[MAX_HOLDERS];
 	stack_entries entries[MAX_HOLDERS];
 #endif
@@ -69,14 +68,14 @@ static unsigned __find_holder(struct block_lock *lock,
 static void __add_holder(struct block_lock *lock, struct task_struct *task)
 {
 	unsigned h = __find_holder(lock, NULL);
-#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
 	struct stack_trace *t;
 #endif
 
 	get_task_struct(task);
 	lock->holders[h] = task;
 
-#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
 	t = lock->traces + h;
 	t->nr_entries = 0;
 	t->max_entries = MAX_STACK;
@@ -97,7 +96,7 @@ static void __del_holder(struct block_lock *lock, struct task_struct *task)
 static int __check_holder(struct block_lock *lock)
 {
 	unsigned i;
-#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
 	static struct stack_trace t;
 	static stack_entries entries;
 #endif
@@ -105,7 +104,7 @@ static int __check_holder(struct block_lock *lock)
 	for (i = 0; i < MAX_HOLDERS; i++) {
 		if (lock->holders[i] == current) {
 			DMERR("recursive lock detected in pool metadata");
-#ifdef CONFIG_DM_BLOCK_STACK_TRACING
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
 			DMERR("previously held here:");
 			print_stack_trace(lock->traces + i, 4);
 
@@ -307,32 +306,6 @@ static void report_recursive_bug(dm_block_t b, int r)
 		DMERR("recursive acquisition of block %llu requested.",
 		      (unsigned long long) b);
 }
-
-#else
-struct block_lock {
-};
-
-#define bl_init(lock)
-#define bl_up_read(lock)
-#define bl_up_write(lock)
-#define report_recursive_bug(b, r)
-
-static int bl_down_read(struct block_lock *lock)
-{
-	return 0;
-}
-
-static int bl_down_read_nonblock(struct block_lock *lock)
-{
-	return 0;
-}
-
-static int bl_down_write(struct block_lock *lock)
-{
-	return 0;
-}
-
-#endif
 
 /*----------------------------------------------------------------*/
 
