@@ -209,33 +209,21 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 	if (r < 0)
 		return r;
 
-	r = dm_bm_write_lock_zero(tm->bm, new, v, result);
+	r = dm_sm_dec_block(tm->sm, orig);
 	if (r < 0)
-		goto bad_dec_block;
+		return r;
 
 	r = dm_bm_read_lock(tm->bm, orig, v, &orig_block);
 	if (r < 0)
-		goto bad_dec_block;
+		return r;
 
-	memcpy(dm_block_data(*result), dm_block_data(orig_block),
-	       dm_bm_block_size(tm->bm));
+	r = dm_bm_unlock_move(orig_block, new);
+	if (r < 0) {
+		dm_bm_unlock(orig_block);
+		return r;
+	}
 
-	r = dm_bm_unlock(orig_block);
-	if (r < 0)
-		goto bad_dec_block;
-
-	r = dm_sm_dec_block(tm->sm, orig);
-	if (r < 0)
-		goto bad;
-
-	return 0;
-
-bad:
-	dm_bm_unlock(*result);
-bad_dec_block:
-	dm_sm_dec_block(tm->sm, new);
-
-	return r;
+	return dm_bm_write_lock(tm->bm, new, v, result);
 }
 
 int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
