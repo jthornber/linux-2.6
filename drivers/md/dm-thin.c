@@ -2295,7 +2295,10 @@ static int thin_iterate_devices(struct dm_target *ti,
 	if (r)
 		return r;
 
-	return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block * blocks, data);
+	if (blocks)
+		return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block * blocks, data);
+
+	return 0;
 }
 
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
