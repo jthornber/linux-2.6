@@ -2287,9 +2287,15 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
+	int r;
+	dm_block_t blocks;
 	struct thin_c *tc = ti->private;
 
-	return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block, data);
+	r = dm_pool_get_data_dev_size(tc->pool->pmd, &blocks);
+	if (r)
+		return r;
+
+	return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block * blocks, data);
 }
 
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
