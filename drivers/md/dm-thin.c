@@ -1618,7 +1618,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_arg_set as;
 	struct dm_dev *data_dev;
 	unsigned long block_size;
-	dm_block_t low_water;
+	sector_t low_water;
 	struct dm_dev *metadata_dev;
 	sector_t metadata_dev_size;
 
