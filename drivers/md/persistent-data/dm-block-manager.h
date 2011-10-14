@@ -7,7 +7,7 @@
 #ifndef _LINUX_DM_BLOCK_MANAGER_H
 #define _LINUX_DM_BLOCK_MANAGER_H
 
-#include "dm-bufio.h"
+#include "../dm-bufio.h"
 
 /*----------------------------------------------------------------*/
 
