@@ -5,6 +5,7 @@
  */
 #include "dm-block-manager.h"
 #include "dm-persistent-data-internal.h"
+#include "../dm-bufio.h"
 
 #include <linux/crc32c.h>
 #include <linux/module.h>
@@ -309,15 +310,32 @@ static void report_recursive_bug(dm_block_t b, int r)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * Block manager is currently implemented using dm-bufio.  struct
+ * dm_block_manager and struct dm_block map directly onto a couple of
+ * structs in the bufio interface.  I want to retain the freedom to move
+ * away from bufio in the future.  So these structs are just cast within
+ * this .c file, rather than making it through to the public interface.
+ */
+static struct dm_buffer *to_buffer(struct dm_block *b)
+{
+	return (struct dm_buffer *) b;
+}
+
+static struct dm_bufio_client *to_bufio(struct dm_block_manager *bm)
+{
+	return (struct dm_bufio_client *) bm;
+}
+
 dm_block_t dm_block_location(struct dm_block *b)
 {
-	return dm_bufio_get_block_number(b);
+	return dm_bufio_get_block_number(to_buffer(b));
 }
 EXPORT_SYMBOL_GPL(dm_block_location);
 
 void *dm_block_data(struct dm_block *b)
 {
-	return dm_bufio_get_block_data(b);
+	return dm_bufio_get_block_data(to_buffer(b));
 }
 EXPORT_SYMBOL_GPL(dm_block_data);
 
@@ -338,7 +356,7 @@ static void dm_block_manager_write_callback(struct dm_buffer *buf)
 {
 	struct buffer_aux *aux = dm_bufio_get_aux_data(buf);
 	if (aux->validator) {
-		aux->validator->prepare_for_write(aux->validator, buf,
+		aux->validator->prepare_for_write(aux->validator, (struct dm_block *) buf,
 			 dm_bufio_get_block_size(dm_bufio_get_client(buf)));
  	}
 }
@@ -351,28 +369,29 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 						 unsigned cache_size,
 						 unsigned max_held_per_thread)
 {
-	return dm_bufio_client_create(bdev, block_size, max_held_per_thread,
-				      sizeof(struct buffer_aux),
-				      dm_block_manager_alloc_callback,
-				      dm_block_manager_write_callback);
+	return (struct dm_block_manager *)
+		dm_bufio_client_create(bdev, block_size, max_held_per_thread,
+				       sizeof(struct buffer_aux),
+				       dm_block_manager_alloc_callback,
+				       dm_block_manager_write_callback);
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
 void dm_block_manager_destroy(struct dm_block_manager *bm)
 {
-	return dm_bufio_client_destroy(bm);
+	return dm_bufio_client_destroy(to_bufio(bm));
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
 
 unsigned dm_bm_block_size(struct dm_block_manager *bm)
 {
-	return dm_bufio_get_block_size(bm);
+	return dm_bufio_get_block_size(to_bufio(bm));
 }
 EXPORT_SYMBOL_GPL(dm_bm_block_size);
 
 dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm)
 {
-	return dm_bufio_get_device_size(bm);
+	return dm_bufio_get_device_size(to_bufio(bm));
 }
 
 static int dm_bm_validate_buffer(struct dm_block_manager *bm,
@@ -384,7 +403,7 @@ static int dm_bm_validate_buffer(struct dm_block_manager *bm,
 		int r;
 		if (!v)
 			return 0;
-		r = v->check(v, buf, dm_bufio_get_block_size(bm));
+		r = v->check(v, (struct dm_block *) buf, dm_bufio_get_block_size(to_bufio(bm)));
 		if (unlikely(r))
 			return r;
 		aux->validator = v;
@@ -408,24 +427,24 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 	void *p;
 	int r;
 
-	p = dm_bufio_read(bm, b, result);
+	p = dm_bufio_read(to_bufio(bm), b, (struct dm_buffer **) result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 
-	aux = dm_bufio_get_aux_data(*result);
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
 	r = bl_down_read(&aux->lock);
 	if (unlikely(r)) {
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		report_recursive_bug(b, r);
 		return r;
 	}
 
 	aux->write_locked = 0;
 
-	r = dm_bm_validate_buffer(bm, *result, aux, v);
+	r = dm_bm_validate_buffer(bm, to_buffer(*result), aux, v);
 	if (unlikely(r)) {
 		bl_up_read(&aux->lock);
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
 
@@ -441,24 +460,24 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 	void *p;
 	int r;
 
-	p = dm_bufio_read(bm, b, result);
+	p = dm_bufio_read(to_bufio(bm), b, (struct dm_buffer **) result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 
-	aux = dm_bufio_get_aux_data(*result);
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
 	r = bl_down_write(&aux->lock);
 	if (r) {
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		report_recursive_bug(b, r);
 		return r;
 	}
 
 	aux->write_locked = 1;
 
-	r = dm_bm_validate_buffer(bm, *result, aux, v);
+	r = dm_bm_validate_buffer(bm, to_buffer(*result), aux, v);
 	if (unlikely(r)) {
 		bl_up_write(&aux->lock);
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
 
@@ -474,25 +493,25 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 	void *p;
 	int r;
 
-	p = dm_bufio_get(bm, b, result);
+	p = dm_bufio_get(to_bufio(bm), b, (struct dm_buffer **) result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 	if (unlikely(!p))
 		return -EWOULDBLOCK;
 
-	aux = dm_bufio_get_aux_data(*result);
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
 	r = bl_down_read_nonblock(&aux->lock);
 	if (r < 0) {
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		report_recursive_bug(b, r);
 		return r;
 	}
 	aux->write_locked = 0;
 
-	r = dm_bm_validate_buffer(bm, *result, aux, v);
+	r = dm_bm_validate_buffer(bm, to_buffer(*result), aux, v);
 	if (unlikely(r)) {
 		bl_up_read(&aux->lock);
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
 
@@ -507,16 +526,16 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 	struct buffer_aux *aux;
 	void *p;
 
-	p = dm_bufio_new(bm, b, result);
+	p = dm_bufio_new(to_bufio(bm), b, (struct dm_buffer **) result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 
 	memset(p, 0, dm_bm_block_size(bm));
 
-	aux = dm_bufio_get_aux_data(*result);
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
 	r = bl_down_write(&aux->lock);
 	if (r) {
-		dm_bufio_release(*result);
+		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
 
@@ -529,15 +548,15 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 int dm_bm_unlock(struct dm_block *b)
 {
 	struct buffer_aux *aux;
-	aux = dm_bufio_get_aux_data(b);
+	aux = dm_bufio_get_aux_data(to_buffer(b));
 
 	if (aux->write_locked) {
-		dm_bufio_mark_buffer_dirty(b);
+		dm_bufio_mark_buffer_dirty(to_buffer(b));
 		bl_up_write(&aux->lock);
 	} else
 		bl_up_read(&aux->lock);
 
-	dm_bufio_release(b);
+	dm_bufio_release(to_buffer(b));
 
 	return 0;
 }
@@ -547,15 +566,15 @@ int dm_bm_unlock_move(struct dm_block *b, dm_block_t n)
 {
 	struct buffer_aux *aux;
 
-	aux = dm_bufio_get_aux_data(b);
+	aux = dm_bufio_get_aux_data(to_buffer(b));
 
 	if (aux->write_locked) {
-		dm_bufio_mark_buffer_dirty(b);
+		dm_bufio_mark_buffer_dirty(to_buffer(b));
 		bl_up_write(&aux->lock);
 	} else
 		bl_up_read(&aux->lock);
 
-	dm_bufio_release_move(b, n);
+	dm_bufio_release_move(to_buffer(b), n);
 	return 0;
 }
 
@@ -564,19 +583,19 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 {
 	int r;
 
-	r = dm_bufio_write_dirty_buffers(bm);
+	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
 	if (unlikely(r))
 		return r;
-	r = dm_bufio_issue_flush(bm);
+	r = dm_bufio_issue_flush(to_bufio(bm));
 	if (unlikely(r))
 		return r;
 
 	dm_bm_unlock(superblock);
 
-	r = dm_bufio_write_dirty_buffers(bm);
+	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
 	if (unlikely(r))
 		return r;
-	r = dm_bufio_issue_flush(bm);
+	r = dm_bufio_issue_flush(to_bufio(bm));
 	if (unlikely(r))
 		return r;
 
