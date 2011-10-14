@@ -1287,6 +1287,18 @@ int dm_pool_get_free_metadata_block_count(struct dm_pool_metadata *pmd,
 	return r;
 }
 
+int dm_pool_get_metadata_dev_size(struct dm_pool_metadata *pmd,
+				  dm_block_t *result)
+{
+	int r;
+
+	down_read(&pmd->root_lock);
+	r = dm_sm_get_nr_blocks(pmd->metadata_sm, result);
+	up_read(&pmd->root_lock);
+
+	return r;
+}
+
 int dm_pool_get_data_block_size(struct dm_pool_metadata *pmd, sector_t *result)
 {
 	down_read(&pmd->root_lock);

@@ -1985,8 +1985,8 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 
 /*
  * Status line is:
- *    <transaction id> <free metadata space in sectors>
- *    <free data space in sectors> <held metadata root>
+ *    <transaction id> <used metadata sectors>/<total metadata sectors>
+ *    <used data sectors>/<total data sectors> <held metadata root>
  */
 static int pool_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
@@ -1996,6 +1996,8 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 	uint64_t transaction_id;
 	dm_block_t nr_free_blocks_data;
 	dm_block_t nr_free_blocks_metadata;
+	dm_block_t nr_blocks_data;
+	dm_block_t nr_blocks_metadata;
 	dm_block_t held_root;
 	char buf[BDEVNAME_SIZE];
 	char buf2[BDEVNAME_SIZE];
@@ -2014,8 +2016,16 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
+		r = dm_pool_get_metadata_dev_size(pool->pmd, &nr_blocks_metadata);
+		if (r)
+			return r;
+
 		r = dm_pool_get_free_block_count(pool->pmd,
 						 &nr_free_blocks_data);
+		if (r)
+			return r;
+
+		r = dm_pool_get_data_dev_size(pool->pmd, &nr_blocks_data);
 		if (r)
 			return r;
 
@@ -2023,14 +2033,18 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		DMEMIT("%llu %llu %llu ", (unsigned long long)transaction_id,
-		       (unsigned long long)nr_free_blocks_metadata * (THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT),
-		       (unsigned long long)nr_free_blocks_data * pool->sectors_per_block);
+		DMEMIT("%llu %llu/%llu %llu/%llu", (unsigned long long)transaction_id,
+		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata) *
+					   pool->sectors_per_block,
+		       (unsigned long long)nr_blocks_metadata * pool->sectors_per_block,
+		       (unsigned long long)(nr_blocks_data - nr_free_blocks_data) *
+					   pool->sectors_per_block,
+		       (unsigned long long)nr_blocks_data * pool->sectors_per_block);
 
 		if (held_root)
-			DMEMIT("%llu", held_root);
+			DMEMIT(" %llu", held_root);
 		else
-			DMEMIT("-");
+			DMEMIT(" -");
 
 		break;
 
