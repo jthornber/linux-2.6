@@ -67,14 +67,6 @@ int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,
 			       dm_thin_id dev);
 
 /*
- * Thin devices don't have a size, however they do keep track of the
- * highest mapped block.  This trimming function allows the user to remove
- * mappings above a certain virtual block.
- */
-int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
-			     sector_t new_size);
-
-/*
  * Commits _all_ metadata changes: device creation, deletion, mapping
  * updates.
  */

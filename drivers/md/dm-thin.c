@@ -1915,34 +1915,6 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 	return r;
 }
 
-static int process_trim_mesg(unsigned argc, char **argv, struct pool *pool)
-{
-	dm_thin_id dev_id;
-	sector_t new_size;
-	int r;
-
-	r = check_arg_count(argc, 3);
-	if (r)
-		return r;
-
-	r = read_dev_id(argv[1], &dev_id, 1);
-	if (r)
-		return r;
-
-	if (kstrtoull(argv[2], 10, (unsigned long long *)&new_size)) {
-		DMWARN("trim device %s: Invalid new size: %s sectors.",
-		       argv[1], argv[2]);
-		return -EINVAL;
-	}
-
-	r = dm_pool_trim_thin_device(pool->pmd, dev_id,
-			dm_sector_div_up(new_size, pool->sectors_per_block));
-	if (r)
-		DMWARN("Attempt to trim thin device %s failed.", argv[1]);
-
-	return r;
-}
-
 static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
 {
 	dm_thin_id old_id, new_id;
@@ -1994,9 +1966,6 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 
 	else if (!strcasecmp(argv[0], "delete"))
 		r = process_delete_mesg(argc, argv, pool);
-
-	else if (!strcasecmp(argv[0], "trim"))
-		r = process_trim_mesg(argc, argv, pool);
 
 	else if (!strcasecmp(argv[0], "set_transaction_id"))
 		r = process_set_transaction_id_mesg(argc, argv, pool);

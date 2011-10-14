@@ -100,14 +100,6 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root);
 int dm_btree_del(struct dm_btree_info *info, dm_block_t root);
 
 /*
- * Delete part of a tree.  This is really specific to truncation of
- * thin devices.  It only removes keys from the bottom level-btree that
- * are greater than key[info->levels - 1].
- */
-int dm_btree_del_gt(struct dm_btree_info *info, dm_block_t root, uint64_t *key,
-		    dm_block_t *new_root);
-
-/*
  * All the lookup functions return -ENODATA if the key cannot be found.
  */
 

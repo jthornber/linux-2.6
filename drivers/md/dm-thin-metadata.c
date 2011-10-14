@@ -1042,45 +1042,6 @@ int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,
 	return r;
 }
 
-static int __trim_thin_dev(struct dm_thin_device *td, sector_t new_size)
-{
-	struct dm_pool_metadata *pmd = td->pmd;
-	/* FIXME: convert new size to blocks */
-	uint64_t key[2] = { td->id, new_size - 1 };
-
-	td->changed = 1;
-
-	/*
-	 * We need to truncate all the extraneous mappings.
-	 *
-	 * FIXME: We have to be careful to do this atomically.
-	 * Perhaps clone the bottom layer first so we can revert?
-	 */
-	return dm_btree_del_gt(&pmd->info, pmd->root, key, &pmd->root);
-}
-
-int dm_pool_trim_thin_device(struct dm_pool_metadata *pmd, dm_thin_id dev,
-			     sector_t new_size)
-{
-	int r;
-	struct dm_thin_device *td;
-
-	down_write(&pmd->root_lock);
-	r = __open_device(pmd, dev, 1, &td);
-	if (r)
-		DMERR("couldn't open virtual device");
-	else {
-		r = __trim_thin_dev(td, new_size);
-		__close_device(td);
-	}
-
-	/* FIXME: update mapped_blocks */
-
-	up_write(&pmd->root_lock);
-
-	return r;
-}
-
 int dm_pool_set_metadata_transaction_id(struct dm_pool_metadata *pmd,
 					uint64_t current_id,
 					uint64_t new_id)
