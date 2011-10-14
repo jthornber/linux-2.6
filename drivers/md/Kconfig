@@ -262,7 +262,12 @@ config DM_DEBUG_SPACE_MAPS
          If unsure, say N.
 
 config DM_BUFIO
-	tristate
+       tristate
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       ---help---
+	 This interface allows you to do buffered I/O on a device and acts
+	  as a cache, holding recently-read blocks in memory and performing
+	   delayed writes.
 
 config DM_MIRROR
        tristate "Mirror target"
