@@ -151,6 +151,23 @@ static inline int dm_bufio_cache_index(struct dm_bufio_client *c)
 #define DM_BUFIO_CACHE(c)	(dm_bufio_caches[dm_bufio_cache_index(c)])
 #define DM_BUFIO_CACHE_NAME(c)	(dm_bufio_cache_names[dm_bufio_cache_index(c)])
 
+#define dm_bufio_in_request()	(!!current->bio_list)
+
+static void dm_bufio_lock(struct dm_bufio_client *c)
+{
+	mutex_lock_nested(&c->lock, dm_bufio_in_request());
+}
+
+static int dm_bufio_trylock(struct dm_bufio_client *c)
+{
+	return mutex_trylock(&c->lock);
+}
+
+static void dm_bufio_unlock(struct dm_bufio_client *c)
+{
+	mutex_unlock(&c->lock);
+}
+
 /*----------------------------------------------------------------*/
 
 /* Default cache size --- available memory divided by the ratio */
@@ -595,14 +612,14 @@ static void __wait_for_free_buffer(struct dm_bufio_client *c)
 
 	add_wait_queue(&c->free_buffer_wait, &wait);
 	set_task_state(current, TASK_UNINTERRUPTIBLE);
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 
 	io_schedule();
 
 	set_task_state(current, TASK_RUNNING);
 	remove_wait_queue(&c->free_buffer_wait, &wait);
 
-	mutex_lock(&c->lock);
+	dm_bufio_lock(c);
 }
 
 /*
@@ -836,9 +853,9 @@ static void *new_read(struct dm_bufio_client *c, sector_t block, enum new_flag n
 	int need_submit;
 	struct dm_buffer *b;
 
-	mutex_lock(&c->lock);
+	dm_bufio_lock(c);
 	b = __bufio_new(c, block, nf, bp, &need_submit);
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 
 	if (!b || IS_ERR(b))
 		return b;
@@ -868,6 +885,7 @@ EXPORT_SYMBOL_GPL(dm_bufio_get);
 void *dm_bufio_read(struct dm_bufio_client *c, sector_t block,
 		    struct dm_buffer **bp)
 {
+	BUG_ON(dm_bufio_in_request());
 	return new_read(c, block, NF_READ, bp);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_read);
@@ -875,6 +893,7 @@ EXPORT_SYMBOL_GPL(dm_bufio_read);
 void *dm_bufio_new(struct dm_bufio_client *c, sector_t block,
 		   struct dm_buffer **bp)
 {
+	BUG_ON(dm_bufio_in_request());
 	return new_read(c, block, NF_FRESH, bp);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_new);
@@ -882,7 +901,7 @@ EXPORT_SYMBOL_GPL(dm_bufio_new);
 void dm_bufio_release(struct dm_buffer *b)
 {
 	struct dm_bufio_client *c = b->c;
-	mutex_lock(&c->lock);
+	dm_bufio_lock(c);
 	BUG_ON(test_bit(B_READING, &b->state));
 	BUG_ON(!b->hold_count);
 	b->hold_count--;
@@ -901,7 +920,7 @@ void dm_bufio_release(struct dm_buffer *b)
 			__free_buffer_wake(b);
 		}
 	}
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_release);
 
@@ -909,20 +928,21 @@ void dm_bufio_mark_buffer_dirty(struct dm_buffer *b)
 {
 	struct dm_bufio_client *c = b->c;
 
-	mutex_lock(&c->lock);
+	dm_bufio_lock(c);
 
 	if (!test_and_set_bit(B_DIRTY, &b->state))
 		__relink_lru(b, LIST_DIRTY);
 
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_mark_buffer_dirty);
 
 void dm_bufio_write_dirty_buffers_async(struct dm_bufio_client *c)
 {
-	mutex_lock(&c->lock);
+	BUG_ON(dm_bufio_in_request());
+	dm_bufio_lock(c);
 	__write_dirty_buffers_async(c, 0);
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_write_dirty_buffers_async);
 
@@ -939,7 +959,7 @@ int dm_bufio_write_dirty_buffers(struct dm_bufio_client *c)
 	unsigned long buffers_processed = 0;
 	struct dm_buffer *b, *tmp;
 
-	mutex_lock(&c->lock);
+	dm_bufio_lock(c);
 	__write_dirty_buffers_async(c, 0);
 
 again:
@@ -953,10 +973,10 @@ again:
 			if (buffers_processed < c->n_buffers[LIST_DIRTY]) {
 				dropped_lock = 1;
 				b->hold_count++;
-				mutex_unlock(&c->lock);
+				dm_bufio_unlock(c);
 				wait_on_bit(&b->state, B_WRITING,
 					    do_io_schedule, TASK_UNINTERRUPTIBLE);
-				mutex_lock(&c->lock);
+				dm_bufio_lock(c);
 				b->hold_count--;
 			} else
 				wait_on_bit(&b->state, B_WRITING,
@@ -984,7 +1004,7 @@ again:
 			goto again;
 	}
 	wake_up(&c->free_buffer_wait);
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 
 	a = xchg(&c->async_write_error, 0);
 	f = dm_bufio_issue_flush(c);
@@ -1009,6 +1029,7 @@ int dm_bufio_issue_flush(struct dm_bufio_client *c)
 		.sector = 0,
 		.count = 0,
 	};
+	BUG_ON(dm_bufio_in_request());
 	return dm_io(&io_req, 1, &io_reg, NULL);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_issue_flush);
@@ -1030,7 +1051,9 @@ void dm_bufio_release_move(struct dm_buffer *b, sector_t new_block)
 	struct dm_bufio_client *c = b->c;
 	struct dm_buffer *new;
 
-	mutex_lock(&c->lock);
+	BUG_ON(dm_bufio_in_request());
+
+	dm_bufio_lock(c);
 
 retry:
 	new = __find(c, new_block);
@@ -1061,7 +1084,7 @@ retry:
 		wait_on_bit(&b->state, B_WRITING,
 			    do_io_schedule, TASK_UNINTERRUPTIBLE);
 	}
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 	dm_bufio_release(b);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_release_move);
@@ -1108,10 +1131,12 @@ static void drop_buffers(struct dm_bufio_client *c)
 	struct dm_buffer *b;
 	int i;
 
+	BUG_ON(dm_bufio_in_request());
+
 	/* an optimization ... so that the buffers are not written one-by-one */
 	dm_bufio_write_dirty_buffers_async(c);
 
-	mutex_lock(&c->lock);
+	dm_bufio_lock(c);
 	while ((b = __get_unclaimed_buffer(c)))
 		__free_buffer_wake(b);
 
@@ -1124,7 +1149,7 @@ static void drop_buffers(struct dm_bufio_client *c)
 	for (i = 0; i < LIST_N; i++)
 		BUG_ON(!list_empty(&c->lru[i]));
 
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 }
 
 /*
@@ -1180,9 +1205,9 @@ static int shrink(struct shrinker *shrinker, struct shrink_control *sc)
 	unsigned long nr_to_scan = sc->nr_to_scan;
 
 	if (sc->gfp_mask & __GFP_IO) {
-		mutex_lock(&c->lock);
+		dm_bufio_lock(c);
 	} else {
-		if (!mutex_trylock(&c->lock))
+		if (!dm_bufio_trylock(c))
 			return !nr_to_scan ? 0 : -1;
 	}
 
@@ -1193,7 +1218,7 @@ static int shrink(struct shrinker *shrinker, struct shrink_control *sc)
 	if (r > INT_MAX)
 		r = INT_MAX;
 
-	mutex_unlock(&c->lock);
+	dm_bufio_unlock(c);
 
 	return r;
 }
@@ -1372,7 +1397,7 @@ static void cleanup_old_buffers(void)
 
 	mutex_lock(&dm_bufio_clients_lock);
 	list_for_each_entry(c, &dm_bufio_all_clients, client_list) {
-		if (!mutex_trylock(&c->lock))
+		if (!dm_bufio_trylock(c))
 			continue;
 
 		while (!list_empty(&c->lru[LIST_CLEAN])) {
@@ -1383,7 +1408,7 @@ static void cleanup_old_buffers(void)
 				break;
 		}
 
-		mutex_unlock(&c->lock);
+		dm_bufio_unlock(c);
 	}
 	mutex_unlock(&dm_bufio_clients_lock);
 }
