@@ -1,7 +1,5 @@
 /*
- * Copyright (C) 2009-2011 Red Hat Czech, s.r.o.
- *
- * Mikulas Patocka <mpatocka@redhat.com>
+ * Copyright (C) 2009-2011 2011 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -17,16 +15,17 @@
 
 /*
  * Memory management policy:
- *	Limit the number of buffers to DM_BUFIO_MEMORY_RATIO of main memory or
- *	DM_BUFIO_VMALLOC_RATIO of vmalloc memory (whichever is lower).
+ *	Limit the number of buffers to DM_BUFIO_MEMORY_PERCENT of main memory
+ *	or DM_BUFIO_VMALLOC_PERCENT of vmalloc memory (whichever is lower).
  *	Always allocate at least DM_BUFIO_MIN_BUFFERS buffers.
- *	When there are DM_BUFIO_WRITEBACK_RATIO dirty buffers, start background
- *	writeback.
+ *	When there are DM_BUFIO_WRITEBACK_PERCENT dirty buffers, start
+ *	background writeback.
  */
 #define DM_BUFIO_MIN_BUFFERS		8
-#define DM_BUFIO_MEMORY_RATIO		2 / 100
-#define DM_BUFIO_VMALLOC_RATIO		1 / 4
-#define DM_BUFIO_WRITEBACK_RATIO	3 / 4
+
+#define DM_BUFIO_MEMORY_PERCENT		2
+#define DM_BUFIO_VMALLOC_PERCENT	25
+#define DM_BUFIO_WRITEBACK_PERCENT	75
 
 /* Check buffer ages in this interval (seconds) */
 #define DM_BUFIO_WORK_TIMER		10
@@ -171,26 +170,26 @@ static void dm_bufio_unlock(struct dm_bufio_client *c)
 /*----------------------------------------------------------------*/
 
 /* Default cache size --- available memory divided by the ratio */
-static unsigned long dm_bufio_default_cache_size = 0;
+static unsigned long dm_bufio_default_cache_size;
 
 /* Total cache size set by the user */
-static unsigned long dm_bufio_cache_size = 0;
+static unsigned long dm_bufio_cache_size;
 
 /*
  * A copy of dm_bufio_cache_size because dm_bufio_cache_size can change
  * anytime.  If it disagrees, the user has changed cache size
  */
-static unsigned long dm_bufio_cache_size_latch = 0;
+static unsigned long dm_bufio_cache_size_latch;
 
 static DEFINE_SPINLOCK(param_spinlock);
 
 /* Buffers are freed after this timeout */
 static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE;
-static unsigned long dm_bufio_peak_allocated = 0;
-static unsigned long dm_bufio_allocated_kmem_cache = 0;
-static unsigned long dm_bufio_allocated_get_free_pages = 0;
-static unsigned long dm_bufio_allocated_vmalloc = 0;
-static unsigned long dm_bufio_current_allocated = 0;
+static unsigned long dm_bufio_peak_allocated;
+static unsigned long dm_bufio_allocated_kmem_cache;
+static unsigned long dm_bufio_allocated_get_free_pages;
+static unsigned long dm_bufio_allocated_vmalloc;
+static unsigned long dm_bufio_current_allocated;
 
 /*----------------------------------------------------------------*/
 
@@ -728,7 +727,7 @@ static void __get_memory_limit(struct dm_bufio_client *c,
 	if (buffers < DM_BUFIO_MIN_BUFFERS)
 		buffers = DM_BUFIO_MIN_BUFFERS;
 	*limit_buffers = buffers;
-	*threshold_buffers = buffers * DM_BUFIO_WRITEBACK_RATIO;
+	*threshold_buffers = buffers * DM_BUFIO_WRITEBACK_PERCENT / 100;
 }
 
 /*
@@ -1013,6 +1012,7 @@ again:
 	return f;
 }
 EXPORT_SYMBOL_GPL(dm_bufio_write_dirty_buffers);
+
 /*
  * Use dm-io to send and empty barrier flush the device.
  */
@@ -1438,7 +1438,7 @@ static int __init dm_bufio_init(void)
 	memset(&dm_bufio_caches, 0, sizeof dm_bufio_caches);
 	memset(&dm_bufio_cache_names, 0, sizeof dm_bufio_cache_names);
 
-	mem = (__u64)((totalram_pages - totalhigh_pages) * DM_BUFIO_MEMORY_RATIO)
+	mem = (__u64)((totalram_pages - totalhigh_pages) * DM_BUFIO_MEMORY_PERCENT / 100)
 		<< PAGE_SHIFT;
 	if (mem > ULONG_MAX)
 		mem = ULONG_MAX;
@@ -1447,8 +1447,8 @@ static int __init dm_bufio_init(void)
 	 * Get the size of vmalloc space,
 	 * the same way as VMALLOC_TOTAL in fs/proc/internal.h
 	 */
-	if (mem > (VMALLOC_END - VMALLOC_START) * DM_BUFIO_VMALLOC_RATIO)
-		mem = (VMALLOC_END - VMALLOC_START) * DM_BUFIO_VMALLOC_RATIO;
+	if (mem > (VMALLOC_END - VMALLOC_START) * DM_BUFIO_VMALLOC_PERCENT / 100)
+		mem = (VMALLOC_END - VMALLOC_START) * DM_BUFIO_VMALLOC_PERCENT / 100;
 #endif
 	dm_bufio_default_cache_size = mem;
 	mutex_lock(&dm_bufio_clients_lock);
@@ -1481,11 +1481,8 @@ static void __exit dm_bufio_exit(void)
 			kmem_cache_destroy(kc);
 	}
 
-	for (i = 0; i < ARRAY_SIZE(dm_bufio_cache_names); i++) {
-		char *nm = dm_bufio_cache_names[i];
-		if (nm)
-			kfree(nm);
-	}
+	for (i = 0; i < ARRAY_SIZE(dm_bufio_cache_names); i++)
+		kfree(dm_bufio_cache_names[i]);
 
 	if (dm_bufio_client_count != 0) {
 		printk(KERN_CRIT "%s: dm_bufio_client_count leaked: %d",
@@ -1539,7 +1536,6 @@ MODULE_PARM_DESC(allocated_vmalloc_bytes, "Memory allocated with vmalloc");
 module_param_named(current_allocated_bytes, dm_bufio_current_allocated, ulong, 0444);
 MODULE_PARM_DESC(current_allocated_bytes, "Memory currently used by the cache");
 
-MODULE_AUTHOR("Mikulas Patocka <mpatocka@redhat.com>");
+MODULE_AUTHOR("Mikulas Patocka <dm-devel@redhat.com>");
 MODULE_DESCRIPTION(DM_NAME " buffered I/O library");
 MODULE_LICENSE("GPL");
-
