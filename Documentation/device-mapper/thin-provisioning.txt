@@ -88,16 +88,15 @@ Using an existing pool device
 		 $data_block_size $low_water_mark"
 
 $data_block_size gives the smallest unit of disk space that can be
-allocated at a time.  As with all sizes passed to device-mapper, this
-is expressed in units of 512-byte sectors.  People primarily
-interested in thin provisioning may want to use a value such as 1024.
-People doing lots of snapshotting may want a smaller value such as
-128.  $data_block_size must be the same for the lifetime of the
+allocated at a time expressed in units of 512-byte sectors.  People
+primarily interested in thin provisioning may want to use a value such
+as 1024.  People doing lots of snapshotting may want a smaller value
+such as 128.  $data_block_size must be the same for the lifetime of the
 metadata device.
 
-$low_water_mark is expressed in 512-byte sectors.  If free space on
-the data device drops below this level then a dm event will be
-triggered which a userspace daemon should catch allowing it to
+$low_water_mark is expressed in blocks of size $data_block_size.  If
+free space on the data device drops below this level then a dm event
+will be triggered which a userspace daemon should catch allowing it to
 extend the pool device.  Only one such event will be sent.
 
 FIXME - Do we get a second event after a table reload when you're
@@ -177,7 +176,7 @@ Reference
 i) Constructor
 
     thin-pool <metadata dev> <data dev> <data block size (sectors)> \
-	      <low water mark (sectors)> [<number of feature args> [<arg>]*]
+	      <low water mark (blocks)> [<number of feature args> [<arg>]*]
 
     Optional feature arguments:
     - 'skip_block_zeroing': skips the zeroing of newly-provisioned blocks.
@@ -187,16 +186,16 @@ i) Constructor
 
 ii) Status
 
-    <transaction id> <used metadata sectors>/<total metadata sectors>
-    <used data sectors>/<total data sectors> <held metadata root>
+    <transaction id> <used metadata blocks>/<total metadata blocks>
+    <used data blocks>/<total data blocks> <held metadata root>
 
 
     transaction id:
 	A 64-bit number used by userspace to help synchronise with metadata
 	from volume managers.
 
-    used data sectors / total data sectors
-	If the number of free sectors drops below the pool's low water mark a
+    used data blocks / total data blocks
+	If the number of free blocks drops below the pool's low water mark a
 	dm event will be sent to userspace.  This event is edge-triggered and
 	it will occur at most once after each resume so volume manager writers
 	should register for the event and then check the target's status.

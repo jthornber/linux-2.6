@@ -473,7 +473,7 @@ struct pool {
 	uint32_t sectors_per_block;
 	unsigned block_shift;
 	dm_block_t offset_mask;
-	dm_block_t low_water_mark;
+	dm_block_t low_water_blocks;
 
 	unsigned zero_new_blocks:1;
 	unsigned low_water_triggered:1;	/* A dm event has been sent */
@@ -511,7 +511,7 @@ struct pool_c {
 	struct dm_dev *metadata_dev;
 	struct dm_target_callbacks callbacks;
 
-	sector_t low_water_mark;
+	dm_block_t low_water_blocks;
 	unsigned zero_new_blocks:1;
 };
 
@@ -943,7 +943,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	if (r)
 		return r;
 
-	if (free_blocks <= pool->low_water_mark && !pool->low_water_triggered) {
+	if (free_blocks <= pool->low_water_blocks && !pool->low_water_triggered) {
 		DMWARN("%s: reached low water mark, sending event.",
 		       dm_device_name(pool->pool_md));
 		spin_lock_irqsave(&pool->lock, flags);
@@ -1365,8 +1365,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 
 	pool->ti = ti;
-	pool->low_water_mark = dm_sector_div_up(pt->low_water_mark,
-						pool->sectors_per_block);
+	pool->low_water_blocks = pt->low_water_blocks;
 	pool->zero_new_blocks = pt->zero_new_blocks;
 	dm_pool_rebind_metadata_device(pool->pmd, pt->metadata_dev->bdev);
 
@@ -1428,7 +1427,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->sectors_per_block = block_size;
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
-	pool->low_water_mark = 0;
+	pool->low_water_blocks = 0;
 	pool->zero_new_blocks = 1;
 	pool->prison = prison_create(PRISON_CELLS);
 	if (!pool->prison) {
@@ -1618,7 +1617,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_arg_set as;
 	struct dm_dev *data_dev;
 	unsigned long block_size;
-	sector_t low_water;
+	dm_block_t low_water_blocks;
 	struct dm_dev *metadata_dev;
 	sector_t metadata_dev_size;
 
@@ -1660,7 +1659,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 	}
 
-	if (kstrtoull(argv[3], 10, (unsigned long long *)&low_water)) {
+	if (kstrtoull(argv[3], 10, (unsigned long long *)&low_water_blocks)) {
 		ti->error = "Invalid low water mark";
 		r = -EINVAL;
 		goto out;
@@ -1694,7 +1693,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->ti = ti;
 	pt->metadata_dev = metadata_dev;
 	pt->data_dev = data_dev;
-	pt->low_water_mark = low_water;
+	pt->low_water_blocks = low_water_blocks;
 	pt->zero_new_blocks = pf.zero_new_blocks;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 0;
@@ -2033,18 +2032,17 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		DMEMIT("%llu %llu/%llu %llu/%llu", (unsigned long long)transaction_id,
-		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata) *
-					   pool->sectors_per_block,
-		       (unsigned long long)nr_blocks_metadata * pool->sectors_per_block,
-		       (unsigned long long)(nr_blocks_data - nr_free_blocks_data) *
-					   pool->sectors_per_block,
-		       (unsigned long long)nr_blocks_data * pool->sectors_per_block);
+		DMEMIT("%llu %llu/%llu %llu/%llu ",
+		       (unsigned long long)transaction_id,
+		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
+		       (unsigned long long)nr_blocks_metadata,
+		       (unsigned long long)(nr_blocks_data - nr_free_blocks_data),
+		       (unsigned long long)nr_blocks_data);
 
 		if (held_root)
-			DMEMIT(" %llu", held_root);
+			DMEMIT("%llu", held_root);
 		else
-			DMEMIT(" -");
+			DMEMIT("-");
 
 		break;
 
@@ -2053,7 +2051,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       format_dev_t(buf, pt->metadata_dev->bdev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long)pool->sectors_per_block,
-		       (unsigned long long)pt->low_water_mark);
+		       (unsigned long long)pt->low_water_blocks);
 
 		DMEMIT("%u ", !pool->zero_new_blocks);
 
