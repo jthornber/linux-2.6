@@ -1752,7 +1752,6 @@ static int pool_preresume(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 	dm_block_t data_size, sb_data_size;
-	unsigned long flags;
 
 	/*
 	 * Take control of the pool object.
@@ -1788,6 +1787,15 @@ static int pool_preresume(struct dm_target *ti)
 		}
 	}
 
+	return 0;
+}
+
+static void pool_resume(struct dm_target *ti)
+{
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+	unsigned long flags;
+
 	spin_lock_irqsave(&pool->lock, flags);
 	pool->low_water_triggered = 0;
 	pool->no_free_space = 0;
@@ -1795,8 +1803,6 @@ static int pool_preresume(struct dm_target *ti)
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_worker(pool);
-
-	return 0;
 }
 
 static void pool_postsuspend(struct dm_target *ti)
@@ -2117,6 +2123,7 @@ static struct target_type pool_target = {
 	.map = pool_map,
 	.postsuspend = pool_postsuspend,
 	.preresume = pool_preresume,
+	.resume = pool_resume,
 	.message = pool_message,
 	.status = pool_status,
 	.merge = pool_merge,
