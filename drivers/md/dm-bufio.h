@@ -1,7 +1,7 @@
 /*
- * Copyright (C) 2009-2011 Red Hat Czech, s.r.o.
+ * Copyright (C) 2009-2011 Red Hat, Inc.
  *
- * Mikulas Patocka <mpatocka@redhat.com>
+ * Author: Mikulas Patocka <mpatocka@redhat.com>
  *
  * This file is released under the GPL.
  */
