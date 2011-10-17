@@ -573,7 +573,7 @@ static void __make_buffer_clean(struct dm_buffer *b)
 
 /*
  * Find some buffer that is not held by anybody, clean it, unlink it and
- * return it.  If "wait" is zero, try less hard and don't block.
+ * return it.
  */
 static struct dm_buffer *__get_unclaimed_buffer(struct dm_bufio_client *c)
 {
