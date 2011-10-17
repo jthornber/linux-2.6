@@ -1602,7 +1602,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 /*
  * thin-pool <metadata dev> <data dev>
  *           <data block size (sectors)>
- *           <low water mark (sectors)>
+ *           <low water mark (blocks)>
  *           [<#feature args> [<arg>]*]
  *
  * Optional feature arguments are:
