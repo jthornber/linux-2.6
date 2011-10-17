@@ -133,11 +133,12 @@ static unsigned sm_lookup_bitmap(void *addr, unsigned b)
 {
 	__le64 *words_le = addr;
 	__le64 *w_le = words_le + (b >> ENTRIES_SHIFT);
+	unsigned hi, lo;
 
 	b = (b & (ENTRIES_PER_WORD - 1)) << 1;
-
-	return (!!test_bit_le(b, (void *) w_le) << 1) |
-		(!!test_bit_le(b + 1, (void *) w_le));
+	hi = !!test_bit_le(b, (void *) w_le);
+	lo = !!test_bit_le(b + 1, (void *) w_le);
+	return (hi << 1) | lo;
 }
 
 static void sm_set_bitmap(void *addr, unsigned b, unsigned val)
