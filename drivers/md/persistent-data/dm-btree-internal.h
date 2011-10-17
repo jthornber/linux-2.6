@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2011 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -108,7 +108,9 @@ static inline void *value_base(struct node *n)
 	return &n->keys[le32_to_cpu(n->header.max_entries)];
 }
 
-/* FIXME: now that value size is stored in the node we don't need the third param */
+/*
+ * FIXME: Now that value size is stored in node we don't need the third parm.
+ */
 static inline void *value_ptr(struct node *n, uint32_t index, size_t value_size)
 {
 	BUG_ON(value_size != le32_to_cpu(n->header.value_size));

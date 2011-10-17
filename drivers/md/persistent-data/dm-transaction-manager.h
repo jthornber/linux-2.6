@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2011 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */

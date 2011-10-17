@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2011 Red Hat, Inc.
+ *
+ * This file is released under the GPL.
+ */
+
 #include "dm-space-map-common.h"
 #include "dm-transaction-manager.h"
 
@@ -339,7 +345,7 @@ int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 		bit_end = (i == index_end - 1) ?  end : ll->entries_per_block;
 
 		r = sm_find_free(dm_bitmap_data(blk),
-				 max((unsigned) begin, (unsigned) le32_to_cpu(ie_disk.none_free_before)),
+				 max_t(unsigned, begin, le32_to_cpu(ie_disk.none_free_before)),
 				 bit_end, &position);
 		if (r == -ENOSPC) {
 			/*

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2011 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -157,7 +157,7 @@ static void __wake_many(struct block_lock *lock)
 	struct waiter *w, *tmp;
 
 	BUG_ON(lock->count < 0);
-	list_for_each_entry_safe (w, tmp, &lock->waiters, list) {
+	list_for_each_entry_safe(w, tmp, &lock->waiters, list) {
 		if (lock->count >= MAX_HOLDERS)
 			return;
 
@@ -281,7 +281,10 @@ static int bl_down_write(struct block_lock *lock)
 	w.task = current;
 	w.wants_write = 1;
 
-	/* writers given priority, we know there's only one mutator in the system, so ignoring the ordering reversal */
+	/*
+	 * Writers given priority. We know there's only one mutator in the
+	 * system, so ignoring the ordering reversal.
+	 */
 	list_add(&w.list, &lock->waiters);
 	spin_unlock(&lock->lock);
 
@@ -358,7 +361,7 @@ static void dm_block_manager_write_callback(struct dm_buffer *buf)
 	if (aux->validator) {
 		aux->validator->prepare_for_write(aux->validator, (struct dm_block *) buf,
 			 dm_bufio_get_block_size(dm_bufio_get_client(buf)));
- 	}
+	}
 }
 
 /*----------------------------------------------------------------
@@ -414,7 +417,7 @@ static int dm_bm_validate_buffer(struct dm_block_manager *bm,
 				(unsigned long long)
 					dm_bufio_get_block_number(buf));
 			return -EINVAL;
- 		}
+		}
 	}
 
 	return 0;

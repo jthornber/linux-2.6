@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2011 Red Hat, Inc.
+ *
+ * This file is released under the GPL.
+ */
+
 #include "dm-space-map-checker.h"
 
 #include <linux/device-mapper.h>
@@ -193,11 +199,9 @@ static int sm_checker_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
 			    smc->counts.counts[b] == 0)
 				n++;
 
-		if (n != *count) {
+		if (n != *count)
 			DMERR("free block counts differ, checker %u, sm-disk:%u",
 			      (unsigned) n, (unsigned) *count);
-			// BUG();
-		}
 	}
 	return r;
 }
