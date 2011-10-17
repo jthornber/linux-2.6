@@ -494,6 +494,9 @@ static void use_inline_bio(struct dm_buffer *b, int rw, sector_t block,
 static void submit_io(struct dm_buffer *b, int rw, sector_t block,
 		      bio_end_io_t *end_io)
 {
+	if (rw == WRITE && b->c->write_callback)
+		b->c->write_callback(b);
+
 	if (b->c->block_size <= DM_BUFIO_INLINE_VECS * PAGE_SIZE &&
 	    b->data_mode != DATA_MODE_VMALLOC)
 		use_inline_bio(b, rw, block, end_io);
@@ -551,8 +554,6 @@ static void __write_dirty_buffer(struct dm_buffer *b)
 	clear_bit(B_DIRTY, &b->state);
 	wait_on_bit_lock(&b->state, B_WRITING,
 			 do_io_schedule, TASK_UNINTERRUPTIBLE);
-	if (b->c->write_callback)
-		b->c->write_callback(b);
 	submit_io(b, WRITE, b->block, write_endio);
 }
 
