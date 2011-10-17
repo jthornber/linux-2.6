@@ -671,7 +671,7 @@ static struct dm_buffer *__alloc_buffer_wait_no_callback(struct dm_bufio_client 
 static struct dm_buffer *__alloc_buffer_wait(struct dm_bufio_client *c)
 {
 	struct dm_buffer *b = __alloc_buffer_wait_no_callback(c);
-	if (b && c->alloc_callback)
+	if (c->alloc_callback)
 		c->alloc_callback(b);
 	return b;
 }
