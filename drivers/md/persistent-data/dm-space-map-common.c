@@ -406,14 +406,11 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
 			return r;
 
 		if (old > 2) {
-#if 0
-			/* FIXME: bug in dm_btree_remove causes corruption */
 			r = dm_btree_remove(&ll->ref_count_info,
 					    ll->ref_count_root,
 					    &b, &ll->ref_count_root);
 			if (r)
 				return r;
-#endif
 		}
 
 	} else {
