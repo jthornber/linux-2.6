@@ -789,12 +789,6 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 	return 0;
 }
 
-int dm_pool_rebind_metadata_device(struct dm_pool_metadata *pmd,
-					 struct block_device *bdev)
-{
-	return dm_bm_rebind_block_device(pmd->bm, bdev);
-}
-
 static int __open_device(struct dm_pool_metadata *pmd,
 			 dm_thin_id dev, int create,
 			 struct dm_thin_device **td)

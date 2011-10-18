@@ -605,16 +605,6 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	return 0;
 }
 
-int dm_bm_rebind_block_device(struct dm_block_manager *bm,
-			      struct block_device *bdev)
-{
-	/*
-	 * !!! FIXME: remove this. It is supposedly unused.
-	 */
-	return 0;
-}
-EXPORT_SYMBOL_GPL(dm_bm_rebind_block_device);
-
 u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor)
 {
 	return crc32c(~(u32) 0, data, len) ^ init_xor;

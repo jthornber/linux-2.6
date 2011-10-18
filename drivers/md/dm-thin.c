@@ -1428,7 +1428,6 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->ti = ti;
 	pool->low_water_blocks = pt->low_water_blocks;
 	pool->zero_new_blocks = pt->zero_new_blocks;
-	dm_pool_rebind_metadata_device(pool->pmd, pt->metadata_dev->bdev);
 
 	return 0;
 }
@@ -1593,9 +1592,12 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 
 	} else {
 		pool = __pool_table_lookup(pool_md);
-		if (pool)
+		if (pool) {
+			if (pool->md_dev != metadata_dev)
+				return ERR_PTR(-EINVAL);
 			__pool_inc(pool);
-		else
+
+		} else
 			pool = pool_create(pool_md, metadata_dev, block_size, error);
 	}
 
@@ -2161,7 +2163,8 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type pool_target = {
 	.name = "thin-pool",
-	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE,
+	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
+		    DM_TARGET_IMMUTABLE,
 	.version = {1, 0, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,

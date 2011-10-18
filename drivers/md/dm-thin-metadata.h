@@ -31,12 +31,6 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd);
 
 /*
- * This does not currently resize the metadata device, but should eventually.
- */
-int dm_pool_rebind_metadata_device(struct dm_pool_metadata *pmd,
-				   struct block_device *bdev);
-
-/*
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the thin metadata.
  */
