@@ -164,6 +164,7 @@ static struct bio_prison *prison_create(unsigned nr_cells)
 		kfree(prison);
 		return NULL;
 	}
+
 	prison->nr_buckets = nr_buckets;
 	prison->hash_mask = nr_buckets - 1;
 	prison->cells = (struct hlist_head *) (prison + 1);
@@ -477,7 +478,7 @@ struct pool {
 
 	unsigned zero_new_blocks:1;
 	unsigned low_water_triggered:1;	/* A dm event has been sent */
-	unsigned no_free_space:1;	/* An -ENOSPC warning has been issued */
+	unsigned no_free_space:1;	/* A -ENOSPC warning has been issued */
 
 	struct bio_prison *prison;
 	struct dm_kcopyd_client *copier;
@@ -526,8 +527,6 @@ struct thin_c {
 	struct dm_thin_device *td;
 };
 
-/* FIXME: Can cells and new_mappings be combined? */
-
 struct endio_hook {
 	struct thin_c *tc;
 	bio_end_io_t *saved_bi_end_io;
@@ -567,7 +566,7 @@ static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
 /*----------------------------------------------------------------*/
 
 /*
- * A global list that uses a struct mapped_device as a key.
+ * A global list of pools that uses a struct mapped_device as a key.
  */
 static struct dm_thin_pool_table {
 	struct mutex mutex;
@@ -655,11 +654,10 @@ static void requeue_io(struct thin_c *tc)
 }
 
 /*
- * This section of code contains the logic for processing a thin devices' IO.
+ * This section of code contains the logic for processing a thin device's IO.
  * Much of the code depends on pool object resources (lists, workqueues, etc)
  * but most is exclusively called from the thin target rather than the thin-pool
- * target.  wake_worker() being the most notable exception (which is also used
- * by thin-pool to continue deferred IO processing after pool resume).
+ * target.
  */
 static void process_prepared_mapping(struct new_mapping *m);
 
@@ -685,6 +683,10 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 
 	remap(tc, bio, block);
 
+	/*
+	 * Batch together any FUA/FLUSH bios we find and then issue
+	 * a single commit for them in process_deferred_bios().
+	 */
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		spin_lock_irqsave(&pool->lock, flags);
 		bio_list_add(&pool->deferred_flush_bios, bio);
@@ -693,6 +695,10 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 		generic_make_request(bio);
 }
 
+/*
+ * wake_worker() is used when new work is queued and when pool_resume is
+ * ready to continue deferred IO processing.
+ */
 static void wake_worker(struct pool *pool)
 {
 	queue_work(pool->wq, &pool->worker);
@@ -764,7 +770,7 @@ static void shared_read_endio(struct bio *bio, int err)
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
 	return ((bio_data_dir(bio) == WRITE) &&
-		(bio->bi_sector & pool->offset_mask) == 0) &&
+		!(bio->bi_sector & pool->offset_mask)) &&
 		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
 }
 
@@ -774,14 +780,18 @@ static int ensure_next_mapping(struct pool *pool)
 		return 0;
 
 	pool->next_mapping = mempool_alloc(pool->mapping_pool, GFP_ATOMIC);
+
 	return pool->next_mapping ? 0 : -ENOMEM;
 }
 
 static struct new_mapping *get_next_mapping(struct pool *pool)
 {
 	struct new_mapping *r = pool->next_mapping;
+
 	BUG_ON(!pool->next_mapping);
+
 	pool->next_mapping = NULL;
+
 	return r;
 }
 
@@ -805,6 +815,8 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	ds_add_work(&pool->ds, &m->list);
 
 	/*
+	 * IO to pool_dev remaps to the pool target's data_dev.
+	 *
 	 * If the whole block of data is being overwritten, we can issue the
 	 * bio immediately. Otherwise we use kcopyd to clone the data first.
 	 */
@@ -816,7 +828,6 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	} else {
 		struct dm_io_region from, to;
 
-		/* IO to pool_dev remaps to the pool target's data_dev */
 		from.bdev = tc->pool_dev->bdev;
 		from.sector = data_origin * pool->sectors_per_block;
 		from.count = pool->sectors_per_block;
@@ -899,7 +910,8 @@ static void cell_defer(struct thin_c *tc, struct cell *cell,
 }
 
 /*
- * Same as cell_defer, except it omits one particular detainee.
+ * Same as cell_defer above, except it omits one particular detainee,
+ * a write bio that covers the block and has already been processed.
  */
 static void cell_defer_except(struct thin_c *tc, struct cell *cell,
 			      struct bio *exception)
@@ -921,6 +933,10 @@ static void cell_defer_except(struct thin_c *tc, struct cell *cell,
 	wake_worker(pool);
 }
 
+/*
+ * If we have run out of space, queue bios until the device is
+ * resumed, presumably after having been reloaded with more space.
+ */
 static void retry_on_resume(struct bio *bio)
 {
 	struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
@@ -952,12 +968,12 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		dm_table_event(pool->ti->table);
 	}
 
-	if (free_blocks == 0) {
+	if (!free_blocks) {
 		if (pool->no_free_space)
 			return -ENOSPC;
 		else {
 			/*
-			 * Try and commit to see if that will free up some
+			 * Try to commit to see if that will free up some
 			 * more space.
 			 */
 			r = dm_pool_commit_metadata(pool->pmd);
@@ -975,7 +991,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 			 * If we still have no space we set a flag to avoid
 			 * doing all this checking and return -ENOSPC.
 			 */
-			if (free_blocks == 0) {
+			if (!free_blocks) {
 				DMWARN("%s: no free space available.",
 				       dm_device_name(pool->pool_md));
 				spin_lock_irqsave(&pool->lock, flags);
@@ -1040,8 +1056,8 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	struct cell_key key;
 
 	/*
-	 * If data_cell is already occupied, then sharing is already in the
-	 * process of being broken so we have nothing further to do here.
+	 * If cell is already occupied, then sharing is already in the process
+	 * of being broken so we have nothing further to do here.
 	 */
 	build_data_key(tc->td, lookup_result->block, &key);
 	if (bio_detain(pool->prison, &key, bio, &cell))
@@ -1069,16 +1085,18 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	int r;
 	dm_block_t data_block;
 
-	if (bio->bi_size == 0) {
-		/*
-		 * Remap it anywhere.  This is probably a flush, so we want
-		 * it to go through the remap_and_issue path.
-		 */
+	/*
+	 * Remap empty bios (flushes) immediately, without provisioning.
+	 */
+	if (!bio->bi_size) {
 		cell_release_singleton(cell, bio);
 		remap_and_issue(tc, bio, 0);
 		return;
 	}
 
+	/*
+	 * Fill read bios with zeroes and complete them immediately.
+	 */
 	if (bio_data_dir(bio) == READ) {
 		zero_fill_bio(bio);
 		cell_release_singleton(cell, bio);
@@ -1125,7 +1143,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		/*
 		 * We can release this cell now.  This thread is the only
 		 * one that puts bios into a cell, and we know there were
-		 * no preceeding bios.
+		 * no preceding bios.
 		 */
 		/*
 		 * TODO: this will probably have to change when discard goes
@@ -1155,6 +1173,7 @@ static void process_deferred_bios(struct pool *pool)
 	unsigned long flags;
 	struct bio *bio;
 	struct bio_list bios;
+	int r;
 
 	bio_list_init(&bios);
 
@@ -1165,13 +1184,12 @@ static void process_deferred_bios(struct pool *pool)
 
 	while ((bio = bio_list_pop(&bios))) {
 		struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
+		/*
+		 * If we've got no free new_mapping structs, and processing
+		 * this bio might require one, we pause until there are some
+		 * prepared mappings to process.
+		 */
 		if (ensure_next_mapping(pool)) {
-			/*
-			 * We've got no free new_mapping structs, and
-			 * processing this bio might require one.  So we
-			 * pause until there are some prepared mappings to
-			 * process.
-			 */
 			spin_lock_irqsave(&pool->lock, flags);
 			bio_list_merge(&pool->deferred_bios, &bios);
 			spin_unlock_irqrestore(&pool->lock, flags);
@@ -1181,25 +1199,30 @@ static void process_deferred_bios(struct pool *pool)
 		process_bio(tc, bio);
 	}
 
+	/*
+	 * If there are any deferred flush bios, we must commit
+	 * the metadata before issuing them.
+	 */
 	bio_list_init(&bios);
 	spin_lock_irqsave(&pool->lock, flags);
 	bio_list_merge(&bios, &pool->deferred_flush_bios);
 	bio_list_init(&pool->deferred_flush_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	if (!bio_list_empty(&bios)) {
-		int r = dm_pool_commit_metadata(pool->pmd);
-		if (r) {
-			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-			      __func__, r);
-			while ((bio = bio_list_pop(&bios)))
-				bio_io_error(bio);
-			return;
-		}
+	if (bio_list_empty(&bios))
+		return;
 
+	r = dm_pool_commit_metadata(pool->pmd);
+	if (r) {
+		DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
+		      __func__, r);
 		while ((bio = bio_list_pop(&bios)))
-			generic_make_request(bio);
+			bio_io_error(bio);
+		return;
 	}
+
+	while ((bio = bio_list_pop(&bios)))
+		generic_make_request(bio);
 }
 
 static void process_prepared_mapping(struct new_mapping *m)
@@ -1217,6 +1240,11 @@ static void process_prepared_mapping(struct new_mapping *m)
 		return;
 	}
 
+	/*
+	 * Commit the prepared block into the mapping btree.
+	 * Any I/O for this block arriving after this point will get
+	 * remapped to it directly.
+	 */
 	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
 	if (r) {
 		DMERR("dm_thin_insert_block() failed");
@@ -1224,6 +1252,12 @@ static void process_prepared_mapping(struct new_mapping *m)
 		return;
 	}
 
+	/*
+	 * Release any bios held while the block was being provisioned.
+	 * If we are processing a write bio that completely covers the block,
+	 * we already processed it so can ignore it now when processing
+	 * the bios in the cell.
+	 */
 	if (bio) {
 		cell_defer_except(tc, m->cell, bio);
 		bio_endio(bio, 0);
@@ -1257,6 +1291,9 @@ static void do_worker(struct work_struct *ws)
 	process_deferred_bios(pool);
 }
 
+/*
+ * Called only while mapping a thin bio to hand it over to the workqueue.
+ */
 static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 {
 	unsigned long flags;
@@ -1270,8 +1307,7 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 }
 
 /*
- * Non-blocking function designed to be called from the target's map
- * function.
+ * Non-blocking function called from the thin target's map function.
  */
 static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 			union map_info *map_context)
@@ -1311,7 +1347,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 			 * ensure a consistent application view
 			 * (i.e. lockfs).
 			 *
-			 * More distant ancestors are irrelevant, the
+			 * More distant ancestors are irrelevant. The
 			 * shared flag will be set in their case.
 			 */
 			thin_defer_bio(tc, bio);
@@ -1323,6 +1359,10 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	case -ENODATA:
+		/*
+		 * In future, the failed dm_thin_find_block above could
+		 * provide the hint to load the metadata into cache.
+		 */
 	case -EWOULDBLOCK:
 		thin_defer_bio(tc, bio);
 		r = DM_MAPIO_SUBMITTED;
@@ -1445,11 +1485,10 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 
 	/*
-	 * Create singlethreaded workqueues that will service all devices
+	 * Create singlethreaded workqueue that will service all devices
 	 * that use this metadata.
 	 */
-	pool->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX,
-					   WQ_MEM_RECLAIM);
+	pool->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
 	if (!pool->wq) {
 		*error = "Error creating pool's workqueue";
 		err_p = ERR_PTR(-ENOMEM);
@@ -1575,7 +1614,9 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 		{0, 1, "Invalid number of pool feature arguments"},
 	};
 
-	/* No feature arguments supplied. */
+	/*
+	 * No feature arguments supplied.
+	 */
 	if (!as->argc)
 		return 0;
 
@@ -1726,6 +1767,9 @@ static int pool_map(struct dm_target *ti, struct bio *bio,
 	struct pool *pool = pt->pool;
 	unsigned long flags;
 
+	/*
+	 * As this is a singleton target, ti->begin is always zero.
+	 */
 	spin_lock_irqsave(&pool->lock, flags);
 	bio->bi_bdev = pt->data_dev->bdev;
 	r = DM_MAPIO_REMAPPED;
@@ -2112,8 +2156,9 @@ static struct target_type pool_target = {
 	.io_hints = pool_io_hints,
 };
 
-/*----------------------------------------------------------------*/
-
+/*----------------------------------------------------------------
+ * Thin target methods
+ *--------------------------------------------------------------*/
 static void thin_dtr(struct dm_target *ti)
 {
 	struct thin_c *tc = ti->private;
@@ -2231,6 +2276,9 @@ static void thin_postsuspend(struct dm_target *ti)
 		requeue_io((struct thin_c *)ti->private);
 }
 
+/*
+ * <nr mapped sectors> <highest mapped sector>
+ */
 static int thin_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
 {
@@ -2240,7 +2288,9 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	char buf[BDEVNAME_SIZE];
 	struct thin_c *tc = ti->private;
 
-	if (tc->td) {
+	if (!tc->td)
+		DMEMIT("-");
+	else {
 		switch (type) {
 		case STATUSTYPE_INFO:
 			r = dm_thin_get_mapped_count(tc->td, &mapped);
@@ -2265,8 +2315,6 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 			       (unsigned long) tc->dev_id);
 			break;
 		}
-	} else {
-		DMEMIT("-");
 	}
 
 	return 0;
