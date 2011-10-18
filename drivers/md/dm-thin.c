@@ -529,15 +529,6 @@ struct thin_c {
 
 /*----------------------------------------------------------------*/
 
-static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
-			       bio_end_io_t *fn)
-{
-	*save = bio->bi_end_io;
-	bio->bi_end_io = fn;
-}
-
-/*----------------------------------------------------------------*/
-
 /*
  * A global list of pools that uses a struct mapped_device as a key.
  */
@@ -632,7 +623,6 @@ static void requeue_io(struct thin_c *tc)
  * but most is exclusively called from the thin target rather than the thin-pool
  * target.
  */
-static void process_prepared_mapping(struct new_mapping *m);
 
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
@@ -774,11 +764,127 @@ static void shared_read_endio(struct bio *bio, int err)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * Workqueue.
+ */
+
+/*
+ * Prepared mapping jobs.
+ */
+
+/*
+ * This sends the bios in the cell back to the deferred_bios list.
+ */
+static void cell_defer(struct thin_c *tc, struct cell *cell,
+		       dm_block_t data_block)
+{
+	struct pool *pool = tc->pool;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+	cell_release(cell, &pool->deferred_bios);
+	spin_unlock_irqrestore(&tc->pool->lock, flags);
+
+	wake_worker(pool);
+}
+
+/*
+ * Same as cell_defer above, except it omits one particular detainee,
+ * a write bio that covers the block and has already been processed.
+ */
+static void cell_defer_except(struct thin_c *tc, struct cell *cell,
+			      struct bio *exception)
+{
+	struct bio_list bios;
+	struct bio *bio;
+	struct pool *pool = tc->pool;
+	unsigned long flags;
+
+	bio_list_init(&bios);
+	cell_release(cell, &bios);
+
+	spin_lock_irqsave(&pool->lock, flags);
+	while ((bio = bio_list_pop(&bios)))
+		if (bio != exception)
+			bio_list_add(&pool->deferred_bios, bio);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	wake_worker(pool);
+}
+
+static void process_prepared_mapping(struct new_mapping *m)
+{
+	struct thin_c *tc = m->tc;
+	struct bio *bio;
+	int r;
+
+	bio = m->bio;
+	if (bio)
+		bio->bi_end_io = m->saved_bi_end_io;
+
+	if (m->err) {
+		cell_error(m->cell);
+		return;
+	}
+
+	/*
+	 * Commit the prepared block into the mapping btree.
+	 * Any I/O for this block arriving after this point will get
+	 * remapped to it directly.
+	 */
+	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
+	if (r) {
+		DMERR("dm_thin_insert_block() failed");
+		cell_error(m->cell);
+		return;
+	}
+
+	/*
+	 * Release any bios held while the block was being provisioned.
+	 * If we are processing a write bio that completely covers the block,
+	 * we already processed it so can ignore it now when processing
+	 * the bios in the cell.
+	 */
+	if (bio) {
+		cell_defer_except(tc, m->cell, bio);
+		bio_endio(bio, 0);
+	} else
+		cell_defer(tc, m->cell, m->data_block);
+
+	list_del(&m->list);
+	mempool_free(m, tc->pool->mapping_pool);
+}
+
+static void process_prepared_mappings(struct pool *pool)
+{
+	unsigned long flags;
+	struct list_head maps;
+	struct new_mapping *m, *tmp;
+
+	INIT_LIST_HEAD(&maps);
+	spin_lock_irqsave(&pool->lock, flags);
+	list_splice_init(&pool->prepared_mappings, &maps);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	list_for_each_entry_safe(m, tmp, &maps, list)
+		process_prepared_mapping(m);
+}
+
+/*
+ * Deferred bio jobs.
+ */
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
 	return ((bio_data_dir(bio) == WRITE) &&
 		!(bio->bi_sector & pool->offset_mask)) &&
 		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
+}
+
+static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
+			       bio_end_io_t *fn)
+{
+	*save = bio->bi_end_io;
+	bio->bi_end_io = fn;
 }
 
 static int ensure_next_mapping(struct pool *pool)
@@ -900,61 +1006,6 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	}
 }
 
-/*
- * This sends the bios in the cell back to the deferred_bios list.
- */
-static void cell_defer(struct thin_c *tc, struct cell *cell,
-		       dm_block_t data_block)
-{
-	struct pool *pool = tc->pool;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	cell_release(cell, &pool->deferred_bios);
-	spin_unlock_irqrestore(&tc->pool->lock, flags);
-
-	wake_worker(pool);
-}
-
-/*
- * Same as cell_defer above, except it omits one particular detainee,
- * a write bio that covers the block and has already been processed.
- */
-static void cell_defer_except(struct thin_c *tc, struct cell *cell,
-			      struct bio *exception)
-{
-	struct bio_list bios;
-	struct bio *bio;
-	struct pool *pool = tc->pool;
-	unsigned long flags;
-
-	bio_list_init(&bios);
-	cell_release(cell, &bios);
-
-	spin_lock_irqsave(&pool->lock, flags);
-	while ((bio = bio_list_pop(&bios)))
-		if (bio != exception)
-			bio_list_add(&pool->deferred_bios, bio);
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	wake_worker(pool);
-}
-
-/*
- * If we have run out of space, queue bios until the device is
- * resumed, presumably after having been reloaded with more space.
- */
-static void retry_on_resume(struct bio *bio)
-{
-	struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
-	struct pool *pool = tc->pool;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	bio_list_add(&pool->retry_on_resume_list, bio);
-	spin_unlock_irqrestore(&pool->lock, flags);
-}
-
 static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 {
 	int r;
@@ -1014,6 +1065,21 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		return r;
 
 	return 0;
+}
+
+/*
+ * If we have run out of space, queue bios until the device is
+ * resumed, presumably after having been reloaded with more space.
+ */
+static void retry_on_resume(struct bio *bio)
+{
+	struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
+	struct pool *pool = tc->pool;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+	bio_list_add(&pool->retry_on_resume_list, bio);
+	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
 static void no_space(struct cell *cell)
@@ -1232,64 +1298,6 @@ static void process_deferred_bios(struct pool *pool)
 		generic_make_request(bio);
 }
 
-static void process_prepared_mapping(struct new_mapping *m)
-{
-	struct thin_c *tc = m->tc;
-	struct bio *bio;
-	int r;
-
-	bio = m->bio;
-	if (bio)
-		bio->bi_end_io = m->saved_bi_end_io;
-
-	if (m->err) {
-		cell_error(m->cell);
-		return;
-	}
-
-	/*
-	 * Commit the prepared block into the mapping btree.
-	 * Any I/O for this block arriving after this point will get
-	 * remapped to it directly.
-	 */
-	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
-	if (r) {
-		DMERR("dm_thin_insert_block() failed");
-		cell_error(m->cell);
-		return;
-	}
-
-	/*
-	 * Release any bios held while the block was being provisioned.
-	 * If we are processing a write bio that completely covers the block,
-	 * we already processed it so can ignore it now when processing
-	 * the bios in the cell.
-	 */
-	if (bio) {
-		cell_defer_except(tc, m->cell, bio);
-		bio_endio(bio, 0);
-	} else
-		cell_defer(tc, m->cell, m->data_block);
-
-	list_del(&m->list);
-	mempool_free(m, tc->pool->mapping_pool);
-}
-
-static void process_prepared_mappings(struct pool *pool)
-{
-	unsigned long flags;
-	struct list_head maps;
-	struct new_mapping *m, *tmp;
-
-	INIT_LIST_HEAD(&maps);
-	spin_lock_irqsave(&pool->lock, flags);
-	list_splice_init(&pool->prepared_mappings, &maps);
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	list_for_each_entry_safe(m, tmp, &maps, list)
-		process_prepared_mapping(m);
-}
-
 static void do_worker(struct work_struct *ws)
 {
 	struct pool *pool = container_of(ws, struct pool, worker);
@@ -1297,6 +1305,12 @@ static void do_worker(struct work_struct *ws)
 	process_prepared_mappings(pool);
 	process_deferred_bios(pool);
 }
+
+/*----------------------------------------------------------------*/
+
+/*
+ * Mapping functions.
+ */
 
 /*
  * Called only while mapping a thin bio to hand it over to the workqueue.
