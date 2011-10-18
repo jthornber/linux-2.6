@@ -470,6 +470,8 @@ static int init_pmd(struct dm_pool_metadata *pmd,
 	pmd->time = 0;
 	pmd->need_commit = 0;
 	pmd->details_root = 0;
+	pmd->trans_id = 0;
+	pmd->flags = 0;
 	INIT_LIST_HEAD(&pmd->thin_devices);
 
 	return 0;
