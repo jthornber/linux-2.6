@@ -489,10 +489,10 @@ struct pool {
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
-	struct bio_list awaiting_commit;
+	struct bio_list deferred_flush_bios;
 	struct list_head prepared_mappings;
 
-	struct bio_list retry_list;
+	struct bio_list retry_on_resume_list;
 
 	struct deferred_set ds;	/* FIXME: move to thin_c */
 
@@ -650,7 +650,7 @@ static void requeue_io(struct thin_c *tc)
 
 	spin_lock_irqsave(&pool->lock, flags);
 	__requeue_bio_list(tc, &pool->deferred_bios);
-	__requeue_bio_list(tc, &pool->retry_list);
+	__requeue_bio_list(tc, &pool->retry_on_resume_list);
 	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
@@ -687,7 +687,7 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		spin_lock_irqsave(&pool->lock, flags);
-		bio_list_add(&pool->awaiting_commit, bio);
+		bio_list_add(&pool->deferred_flush_bios, bio);
 		spin_unlock_irqrestore(&pool->lock, flags);
 	} else
 		generic_make_request(bio);
@@ -921,14 +921,14 @@ static void cell_defer_except(struct thin_c *tc, struct cell *cell,
 	wake_worker(pool);
 }
 
-static void retry_later(struct bio *bio)
+static void retry_on_resume(struct bio *bio)
 {
 	struct thin_c *tc = dm_get_mapinfo(bio)->ptr;
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
 	spin_lock_irqsave(&pool->lock, flags);
-	bio_list_add(&pool->retry_list, bio);
+	bio_list_add(&pool->retry_on_resume_list, bio);
 	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
@@ -1002,7 +1002,7 @@ static void no_space(struct cell *cell)
 	cell_release(cell, &bios);
 
 	while ((bio = bio_list_pop(&bios)))
-		retry_later(bio);
+		retry_on_resume(bio);
 }
 
 static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
@@ -1183,8 +1183,8 @@ static void process_deferred_bios(struct pool *pool)
 
 	bio_list_init(&bios);
 	spin_lock_irqsave(&pool->lock, flags);
-	bio_list_merge(&bios, &pool->awaiting_commit);
-	bio_list_init(&pool->awaiting_commit);
+	bio_list_merge(&bios, &pool->deferred_flush_bios);
+	bio_list_init(&pool->deferred_flush_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	if (!bio_list_empty(&bios)) {
@@ -1257,7 +1257,7 @@ static void do_worker(struct work_struct *ws)
 	process_deferred_bios(pool);
 }
 
-static void defer_bio(struct thin_c *tc, struct bio *bio)
+static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 {
 	unsigned long flags;
 	struct pool *pool = tc->pool;
@@ -1273,8 +1273,8 @@ static void defer_bio(struct thin_c *tc, struct bio *bio)
  * Non-blocking function designed to be called from the target's map
  * function.
  */
-static int bio_map(struct dm_target *ti, struct bio *bio,
-		   union map_info *map_context)
+static int thin_bio_map(struct dm_target *ti, struct bio *bio,
+			union map_info *map_context)
 {
 	int r;
 	struct thin_c *tc = ti->private;
@@ -1288,7 +1288,7 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 	map_context->ptr = tc;
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
-		defer_bio(tc, bio);
+		thin_defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
@@ -1314,7 +1314,7 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 			 * More distant ancestors are irrelevant, the
 			 * shared flag will be set in their case.
 			 */
-			defer_bio(tc, bio);
+			thin_defer_bio(tc, bio);
 			r = DM_MAPIO_SUBMITTED;
 		} else {
 			remap(tc, bio, result.block);
@@ -1324,7 +1324,7 @@ static int bio_map(struct dm_target *ti, struct bio *bio,
 
 	case -ENODATA:
 	case -EWOULDBLOCK:
-		defer_bio(tc, bio);
+		thin_defer_bio(tc, bio);
 		r = DM_MAPIO_SUBMITTED;
 		break;
 	}
@@ -1339,7 +1339,7 @@ static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 	struct pool_c *pt = container_of(cb, struct pool_c, callbacks);
 
 	spin_lock_irqsave(&pt->pool->lock, flags);
-	r = !bio_list_empty(&pt->pool->retry_list);
+	r = !bio_list_empty(&pt->pool->retry_on_resume_list);
 	spin_unlock_irqrestore(&pt->pool->lock, flags);
 
 	if (!r) {
@@ -1352,8 +1352,8 @@ static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 
 static void __requeue_bios(struct pool *pool)
 {
-	bio_list_merge(&pool->deferred_bios, &pool->retry_list);
-	bio_list_init(&pool->retry_list);
+	bio_list_merge(&pool->deferred_bios, &pool->retry_on_resume_list);
+	bio_list_init(&pool->retry_on_resume_list);
 }
 
 /*----------------------------------------------------------------
@@ -1459,11 +1459,11 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	INIT_WORK(&pool->worker, do_worker);
 	spin_lock_init(&pool->lock);
 	bio_list_init(&pool->deferred_bios);
-	bio_list_init(&pool->awaiting_commit);
+	bio_list_init(&pool->deferred_flush_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
 	pool->low_water_triggered = 0;
 	pool->no_free_space = 0;
-	bio_list_init(&pool->retry_list);
+	bio_list_init(&pool->retry_on_resume_list);
 	ds_init(&pool->ds);
 
 	pool->next_mapping = NULL;
@@ -2222,7 +2222,7 @@ static int thin_map(struct dm_target *ti, struct bio *bio,
 {
 	bio->bi_sector -= ti->begin;
 
-	return bio_map(ti, bio, map_context);
+	return thin_bio_map(ti, bio, map_context);
 }
 
 static void thin_postsuspend(struct dm_target *ti)
