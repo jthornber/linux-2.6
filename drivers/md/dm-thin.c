@@ -527,33 +527,6 @@ struct thin_c {
 	struct dm_thin_device *td;
 };
 
-struct endio_hook {
-	struct thin_c *tc;
-	bio_end_io_t *saved_bi_end_io;
-	struct deferred_entry *entry;
-};
-
-struct new_mapping {
-	struct list_head list;
-
-	int prepared;
-
-	struct thin_c *tc;
-	dm_block_t virt_block;
-	dm_block_t data_block;
-	struct cell *cell;
-	int err;
-
-	/*
-	 * If the bio covers the whole area of a block then we can avoid
-	 * zeroing or copying.  Instead this bio is hooked.  The bio will
-	 * still be in the cell, so care has to be taken to avoid issuing
-	 * the bio twice.
-	 */
-	struct bio *bio;
-	bio_end_io_t *saved_bi_end_io;
-};
-
 /*----------------------------------------------------------------*/
 
 static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
@@ -704,6 +677,38 @@ static void wake_worker(struct pool *pool)
 	queue_work(pool->wq, &pool->worker);
 }
 
+/*----------------------------------------------------------------*/
+
+/*
+ * Bio endio functions.
+ */
+struct endio_hook {
+	struct thin_c *tc;
+	bio_end_io_t *saved_bi_end_io;
+	struct deferred_entry *entry;
+};
+
+struct new_mapping {
+	struct list_head list;
+
+	int prepared;
+
+	struct thin_c *tc;
+	dm_block_t virt_block;
+	dm_block_t data_block;
+	struct cell *cell;
+	int err;
+
+	/*
+	 * If the bio covers the whole area of a block then we can avoid
+	 * zeroing or copying.  Instead this bio is hooked.  The bio will
+	 * still be in the cell, so care has to be taken to avoid issuing
+	 * the bio twice.
+	 */
+	struct bio *bio;
+	bio_end_io_t *saved_bi_end_io;
+};
+
 static void __maybe_add_mapping(struct new_mapping *m)
 {
 	struct pool *pool = m->tc->pool;
@@ -766,6 +771,8 @@ static void shared_read_endio(struct bio *bio, int err)
 
 	mempool_free(h, pool->endio_hook_pool);
 }
+
+/*----------------------------------------------------------------*/
 
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
