@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Red Hat UK.  All rights reserved.
+ * Copyright (C) 2011 Red Hat UK.
  *
  * This file is released under the GPL.
  */
@@ -1080,10 +1080,10 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	}
 
 	if (bio_data_dir(bio) == READ) {
-	        zero_fill_bio(bio);
-	        cell_release_singleton(cell, bio);
-	        bio_endio(bio, 0);
-	        return;
+		zero_fill_bio(bio);
+		cell_release_singleton(cell, bio);
+		bio_endio(bio, 0);
+		return;
 	}
 
 	r = alloc_data_block(tc, &data_block);
@@ -1230,7 +1230,7 @@ static void process_prepared_mapping(struct new_mapping *m)
 	} else
 		cell_defer(tc, m->cell, m->data_block);
 
-	list_del(&m->list);	/* FIXME: unnecc.? */
+	list_del(&m->list);
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -1601,12 +1601,12 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 
 /*
  * thin-pool <metadata dev> <data dev>
- *           <data block size (sectors)>
- *           <low water mark (blocks)>
- *           [<#feature args> [<arg>]*]
+ *	     <data block size (sectors)>
+ *	     <low water mark (blocks)>
+ *	     [<#feature args> [<arg>]*]
  *
  * Optional feature arguments are:
- *           skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
+ *	     skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
