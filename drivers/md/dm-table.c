@@ -781,13 +781,13 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 		return -EINVAL;
 	}
 
-	if (t->immutable_target_type && (t->immutable_target_type != tgt->type)) {
-		DMERR("%s: immutable target type %s cannot be mixed with other target types",
-		      dm_device_name(t->md), t->immutable_target_type->name);
-		return -EINVAL;
-	}
-
-	if (dm_target_is_immutable(tgt->type)) {
+	if (t->immutable_target_type) {
+		if (t->immutable_target_type != tgt->type) {
+			DMERR("%s: immutable target type %s cannot be mixed with other target types",
+			      dm_device_name(t->md), t->immutable_target_type->name);
+			return -EINVAL;
+		}
+	} else if (dm_target_is_immutable(tgt->type)) {
 		if (t->num_targets) {
 			DMERR("%s: immutable target type %s cannot be mixed with other target types",
 			      dm_device_name(t->md), tgt->type->name);
