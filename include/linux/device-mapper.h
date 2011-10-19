@@ -213,6 +213,11 @@ struct dm_target {
 	 * whether or not its underlying devices have support.
 	 */
 	unsigned discards_supported:1;
+
+	/*
+	 * Set if this target does not return zeroes on discarded blocks.
+	 */
+	unsigned discard_zeroes_data_unsupported:1;
 };
 
 /* Each target can link one of these into the table */
