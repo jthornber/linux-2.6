@@ -183,6 +183,16 @@ static void dm_bufio_unlock(struct dm_bufio_client *c)
 	mutex_unlock(&c->lock);
 }
 
+#ifdef CONFIG_PREEMPT_VOLUNTARY
+#define dm_bufio_cond_resched()                	\
+do {						\
+	if (unlikely(need_resched()))		\
+		_cond_resched();		\
+} while (0)
+#else
+#define dm_bufio_cond_resched()                do { } while (0)
+#endif
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -644,6 +654,7 @@ static struct dm_buffer *__get_unclaimed_buffer(struct dm_bufio_client *c)
 			__unlink_buffer(b);
 			return b;
 		}
+		dm_bufio_cond_resched();
 	}
 
 	list_for_each_entry_reverse(b, &c->lru[LIST_DIRTY], lru_list) {
@@ -654,6 +665,7 @@ static struct dm_buffer *__get_unclaimed_buffer(struct dm_bufio_client *c)
 			__unlink_buffer(b);
 			return b;
 		}
+		dm_bufio_cond_resched();
 	}
 
 	return NULL;
@@ -772,6 +784,7 @@ static void __write_dirty_buffers_async(struct dm_bufio_client *c, int no_wait)
 			return;
 
 		__write_dirty_buffer(b);
+		dm_bufio_cond_resched();
 	}
 }
 
@@ -820,6 +833,7 @@ static void __check_watermark(struct dm_bufio_client *c)
 			return;
 
 		__free_buffer_wake(b);
+		dm_bufio_cond_resched();
 	}
 
 	if (c->n_buffers[LIST_DIRTY] > threshold_buffers)
@@ -835,9 +849,11 @@ static struct dm_buffer *__find(struct dm_bufio_client *c, sector_t block)
 	struct hlist_node *hn;
 
 	hlist_for_each_entry(b, hn, &c->cache_hash[DM_BUFIO_HASH(block)],
-			     hash_list)
+			     hash_list) {
+		dm_bufio_cond_resched();
 		if (b->block == block)
 			return b;
+	}
 
 	return NULL;
 }
@@ -1084,6 +1100,8 @@ again:
 		    !test_bit(B_WRITING, &b->state))
 			__relink_lru(b, LIST_CLEAN);
 
+		dm_bufio_cond_resched();
+
 		/*
 		 * If we dropped the lock, the list is no longer consistent,
 		 * so we must restart the search.
@@ -1310,11 +1328,13 @@ static void __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
 	int l;
 	struct dm_buffer *b, *tmp;
 
-	for (l = 0; l < LIST_SIZE; l++)
+	for (l = 0; l < LIST_SIZE; l++) {
 		list_for_each_entry_safe_reverse(b, tmp, &c->lru[l], lru_list)
 			if (!__cleanup_old_buffer(b, sc->gfp_mask, 0) &&
 			    !--nr_to_scan)
 				return;
+		dm_bufio_cond_resched();
+	}
 }
 
 static int shrink(struct shrinker *shrinker, struct shrink_control *sc)
@@ -1531,9 +1551,11 @@ static void cleanup_old_buffers(void)
 				       struct dm_buffer, lru_list);
 			if (__cleanup_old_buffer(b, 0, max_age * HZ))
 				break;
+			dm_bufio_cond_resched();
 		}
 
 		dm_bufio_unlock(c);
+		dm_bufio_cond_resched();
 	}
 	mutex_unlock(&dm_bufio_clients_lock);
 }
