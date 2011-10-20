@@ -1185,11 +1185,24 @@ retry:
 		__unlink_buffer(b);
 		__link_buffer(b, new_block, LIST_DIRTY);
 	} else {
+		sector_t old_block;
 		wait_on_bit_lock(&b->state, B_WRITING,
 				 do_io_schedule, TASK_UNINTERRUPTIBLE);
+		/*
+		 * Relink buffer to "new_block" so that write_callback
+		 * sees "new_block" as a block number.
+		 * After the write, link the buffer back to old_block.
+		 * All this must be done in bufio lock, so that block number
+		 * change isn't visible to other threads.
+		 */
+		old_block = b->block;
+		__unlink_buffer(b);
+		__link_buffer(b, new_block, b->list_mode);
 		submit_io(b, WRITE, new_block, write_endio);
 		wait_on_bit(&b->state, B_WRITING,
 			    do_io_schedule, TASK_UNINTERRUPTIBLE);
+		__unlink_buffer(b);
+		__link_buffer(b, old_block, b->list_mode);
 	}
 
 	dm_bufio_unlock(c);
