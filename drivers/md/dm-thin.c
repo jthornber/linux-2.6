@@ -31,7 +31,15 @@
 #define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (64 * 1024 >> SECTOR_SHIFT)
 #define DATA_DEV_BLOCK_SIZE_MAX_SECTORS (1024 * 1024 * 1024 >> SECTOR_SHIFT)
 
-#define METADATA_DEV_MAX_SECTORS (255 * (1 << 14) * 8)
+/*
+ * The metadata device is currently limited in size.  The limitation is
+ * checked lower down in dm-space-map-metadata, but we also check it here
+ * so we can fail early.
+ *
+ * We have one block of index, which can hold 255 index entries.  Each
+ * index entry contains allocation info about 16k metadata blocks.
+ */
+#define METADATA_DEV_MAX_SECTORS (255 * (1 << 14) * (THIN_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
 /*
  * Device id is restricted to 24 bits.
