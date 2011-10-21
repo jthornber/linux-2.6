@@ -2359,10 +2359,14 @@ static int thin_iterate_devices(struct dm_target *ti,
 	dm_block_t blocks;
 	struct thin_c *tc = ti->private;
 
-	r = dm_pool_get_data_dev_size(tc->pool->pmd, &blocks);
-	if (r)
-		return r;
+	/*
+	 * We can't call dm_pool_get_data_dev_size() since that blocks.  So
+	 * we follow a more convoluted path through to the pool's target.
+	 */
+	if (!tc->pool->ti)
+		return 0;	/* nothing is bound */
 
+	blocks = tc->pool->ti->len >> tc->pool->block_shift;
 	if (blocks)
 		return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block * blocks, data);
 
