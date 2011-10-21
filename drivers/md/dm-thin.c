@@ -2354,7 +2354,6 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
-	int r;
 	dm_block_t blocks;
 	struct thin_c *tc = ti->private;
 
