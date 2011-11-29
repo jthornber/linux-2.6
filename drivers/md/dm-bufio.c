@@ -14,6 +14,7 @@
 #include <linux/vmalloc.h>
 #include <linux/version.h>
 #include <linux/shrinker.h>
+#include <linux/module.h>
 
 #define DM_MSG_PREFIX "bufio"
 
@@ -183,14 +184,18 @@ static void dm_bufio_unlock(struct dm_bufio_client *c)
 	mutex_unlock(&c->lock);
 }
 
+/*
+ * FIXME Move to sched.h?
+ */
 #ifdef CONFIG_PREEMPT_VOLUNTARY
-#define dm_bufio_cond_resched()                	\
+#  define dm_bufio_cond_resched()		\
+
 do {						\
 	if (unlikely(need_resched()))		\
 		_cond_resched();		\
 } while (0)
 #else
-#define dm_bufio_cond_resched()                do { } while (0)
+#  define dm_bufio_cond_resched()                do { } while (0)
 #endif
 
 /*----------------------------------------------------------------*/

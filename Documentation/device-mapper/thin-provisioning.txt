@@ -69,7 +69,16 @@ make one by zeroing the first 4k to indicate empty metadata.
 
     dd if=/dev/zero of=$metadata_dev bs=4096 count=1
 
-FIXME How big must $metadata_dev be?
+The amount of metadata you need will vary according to how many blocks
+are shared between thin devices (i.e. through snapshots).  If you have
+less sharing than average you'll need a larger-than-average metadata device.
+
+As a guide, we suggest you calculate the number of bytes to use in the
+metadata device as 48 * $data_dev_size / $data_block_size but round it up
+to 2MB if the answer is smaller.  The largest size supported is 16GB.
+
+If you're creating large numbers of snapshots which are recording large
+amounts of change, you may need find you need to increase this.
 
 Reloading a pool table
 ----------------------
@@ -90,17 +99,19 @@ Using an existing pool device
 $data_block_size gives the smallest unit of disk space that can be
 allocated at a time expressed in units of 512-byte sectors.  People
 primarily interested in thin provisioning may want to use a value such
-as 1024.  People doing lots of snapshotting may want a smaller value
-such as 128.  $data_block_size must be the same for the lifetime of the
+as 1024 (512KB).  People doing lots of snapshotting may want a smaller value
+such as 128 (64KB).  If you are not zeroing newly-allocated data,
+a larger $data_block_size in the region of 256000 (128MB) is suggested.
+$data_block_size must be the same for the lifetime of the
 metadata device.
 
 $low_water_mark is expressed in blocks of size $data_block_size.  If
 free space on the data device drops below this level then a dm event
 will be triggered which a userspace daemon should catch allowing it to
 extend the pool device.  Only one such event will be sent.
-
-FIXME - Do we get a second event after a table reload when you're
-already over the threshold?
+Resuming a device with a new table itself triggers an event so the
+userspace daemon can use this to detect a situation where a new table
+already exceeds the threshold.
 
 Thin provisioning
 -----------------
@@ -114,8 +125,7 @@ i) Creating a new thinly-provisioned volume.
 
   Here '0' is an identifier for the volume, a 24-bit number.  It's up
   to the caller to allocate and manage these identifiers.  If the
-  identifier is already in use, the message will fail.
-FIXME With what error?
+  identifier is already in use, the message will fail with -EEXIST.
 
 ii) Using a thinly-provisioned volume.
 
@@ -132,9 +142,9 @@ i) Creating an internal snapshot.
 
   Snapshots are created with another message to the pool.
 
-  If the origin device that you wish to snapshot is active, you must
-  suspend it before creating the snapshot.
-FIXME What happens if you don't?
+  N.B.  If the origin device that you wish to snapshot is active, you
+  must suspend it before creating the snapshot to avoid corruption.
+  This is NOT enforced at the moment, so please be careful!
 
     dmsetup suspend /dev/mapper/thin
     dmsetup message /dev/mapper/pool 0 "create_snap 1 0"
@@ -184,6 +194,7 @@ i) Constructor
     Data block size must be between 64KB (128 sectors) and 1GB
     (2097152 sectors) inclusive.
 
+
 ii) Status
 
     <transaction id> <used metadata blocks>/<total metadata blocks>
@@ -197,7 +208,7 @@ ii) Status
     used data blocks / total data blocks
 	If the number of free blocks drops below the pool's low water mark a
 	dm event will be sent to userspace.  This event is edge-triggered and
-	it will occur at most once after each resume so volume manager writers
+	it will occur only once after each resume so volume manager writers
 	should register for the event and then check the target's status.
 
     held metadata root:
@@ -216,7 +227,7 @@ iii) Messages
 
     create_snap <dev id> <origin id>
 
-   	Create a new snapshot of another thinly-provisioned device.
+	Create a new snapshot of another thinly-provisioned device.
 	<dev id> is an arbitrary unique 24-bit identifier chosen by
 	the caller.
 	<origin id> is the identifier of the thinly-provisioned device
@@ -225,6 +236,16 @@ iii) Messages
     delete <dev id>
 
 	Deletes a thin device.  Irreversible.
+
+    trim <dev id> <new size in sectors>
+
+	Delete mappings from the end of a thin device.  Irreversible.
+	You might want to use this if you're reducing the size of
+	your thinly-provisioned device.  In many cases, due to the
+	sharing of blocks between devices, it is not possible to
+	determine in advance how much space 'trim' will release.  (In
+	future a userspace tool might be able to perform this
+	calculation.)
 
     set_transaction_id <current id> <new id>
 

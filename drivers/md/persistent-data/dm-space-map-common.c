@@ -405,15 +405,16 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
 		if (r < 0)
 			return r;
 
-		if (old > 2) {
 #if 0
+		/* FIXME: dm_btree_remove doesn't handle this yet */
+		if (old > 2) {
 			r = dm_btree_remove(&ll->ref_count_info,
 					    ll->ref_count_root,
 					    &b, &ll->ref_count_root);
 			if (r)
 				return r;
-#endif
 		}
+#endif
 
 	} else {
 		__le32 le_rc = cpu_to_le32(ref_count);
