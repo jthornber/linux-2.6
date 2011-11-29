@@ -66,6 +66,8 @@
         But it would be nice to have a static analysis tool that could
         check this.
 
+  - [ ] Make snapshot message fail if the origin isn't suspended.
+
 ** Userland tools [0/5]
 
 All tools run offline for first release.
