@@ -480,8 +480,6 @@ struct pool {
 	struct dm_pool_metadata *pmd;
 
 	uint32_t sectors_per_block;
-	unsigned block_shift;
-	dm_block_t offset_mask;
 	dm_block_t low_water_blocks;
 
 	unsigned zero_new_blocks:1;
@@ -634,16 +632,19 @@ static void requeue_io(struct thin_c *tc)
 
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
-	return bio->bi_sector >> tc->pool->block_shift;
+	sector_t r = bio->bi_sector;
+	do_div(r, tc->pool->sectors_per_block);
+	return r;
 }
 
 static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 {
 	struct pool *pool = tc->pool;
+	sector_t rem;
 
 	bio->bi_bdev = tc->pool_dev->bdev;
-	bio->bi_sector = (block << pool->block_shift) +
-		(bio->bi_sector & pool->offset_mask);
+	rem = do_div(bio->bi_sector, pool->sectors_per_block);
+	bio->bi_sector = (block * pool->sectors_per_block) + rem;
 }
 
 static void remap_and_issue(struct thin_c *tc, struct bio *bio,
@@ -883,9 +884,11 @@ static void process_prepared_mappings(struct pool *pool)
  */
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
-	return ((bio_data_dir(bio) == WRITE) &&
-		!(bio->bi_sector & pool->offset_mask)) &&
-		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
+	sector_t s = bio->bi_sector;
+	sector_t offset = do_div(s, pool->sectors_per_block);
+
+	return ((bio_data_dir(bio) == WRITE) &&	!offset &&
+		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT)));
 }
 
 static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
@@ -1492,8 +1495,6 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 
 	pool->pmd = pmd;
 	pool->sectors_per_block = block_size;
-	pool->block_shift = ffs(block_size) - 1;
-	pool->offset_mask = block_size - 1;
 	pool->low_water_blocks = 0;
 	pool->zero_new_blocks = 1;
 	pool->prison = prison_create(PRISON_CELLS);
@@ -1724,7 +1725,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (kstrtoul(argv[2], 10, &block_size) || !block_size ||
 	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
 	    block_size > DATA_DEV_BLOCK_SIZE_MAX_SECTORS ||
-	    !is_power_of_2(block_size)) {
+	    block_size % 128) {
 		ti->error = "Invalid block size";
 		r = -EINVAL;
 		goto out;
@@ -1825,6 +1826,7 @@ static int pool_preresume(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 	dm_block_t data_size, sb_data_size;
+	sector_t len;
 
 	/*
 	 * Take control of the pool object.
@@ -1833,7 +1835,9 @@ static int pool_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	data_size = ti->len >> pool->block_shift;
+	len = ti->len;
+	do_div(len, pool->sectors_per_block);
+	data_size = len;
 	r = dm_pool_get_data_dev_size(pool->pmd, &sb_data_size);
 	if (r) {
 		DMERR("failed to retrieve data device size");
@@ -2364,7 +2368,8 @@ static int thin_iterate_devices(struct dm_target *ti,
 	if (!tc->pool->ti)
 		return 0;	/* nothing is bound */
 
-	blocks = tc->pool->ti->len >> tc->pool->block_shift;
+	blocks = tc->pool->ti->len;
+	do_div(blocks, tc->pool->sectors_per_block);
 	if (blocks)
 		return fn(ti, tc->pool_dev, 0, tc->pool->sectors_per_block * blocks, data);
 
