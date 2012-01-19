@@ -18,6 +18,7 @@
 
 /*----------------------------------------------------------------*/
 
+#if 0
 /*
  * This is a read/write semaphore with a couple of differences.
  *
@@ -303,6 +304,40 @@ static void bl_up_write(struct block_lock *lock)
 		__wake_many(lock);
 	spin_unlock(&lock->lock);
 }
+
+#else
+struct block_lock {
+};
+
+static void bl_init(struct block_lock *lock)
+{
+}
+
+static int bl_down_read(struct block_lock *lock)
+{
+	return 0;
+}
+
+static int bl_down_read_nonblock(struct block_lock *lock)
+{
+	return 0;
+}
+
+static void bl_up_read(struct block_lock *lock)
+{
+}
+
+static int bl_down_write(struct block_lock *lock)
+{
+	return 0;
+}
+
+static void bl_up_write(struct block_lock *lock)
+{
+}
+#endif
+
+/*----------------------------------------------------------------*/
 
 static void report_recursive_bug(dm_block_t b, int r)
 {
