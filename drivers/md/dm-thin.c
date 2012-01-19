@@ -17,6 +17,12 @@
 #define	DM_MSG_PREFIX	"thin"
 
 /*
+ * Module params
+ */
+static unsigned long dm_thin_deferred_count = 0;
+static DEFINE_SPINLOCK(dm_param_lock);
+
+/*
  * Tunable constants
  */
 #define ENDIO_HOOK_POOL_SIZE 10240
@@ -1328,6 +1334,10 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 
+	spin_lock(&dm_param_lock);
+	dm_thin_deferred_count++;
+	spin_unlock(&dm_param_lock);
+
 	spin_lock_irqsave(&pool->lock, flags);
 	bio_list_add(&pool->deferred_bios, bio);
 	spin_unlock_irqrestore(&pool->lock, flags);
@@ -2419,6 +2429,9 @@ static void dm_thin_exit(void)
 
 module_init(dm_thin_init);
 module_exit(dm_thin_exit);
+
+module_param_named(deferred_io_count, dm_thin_deferred_count, ulong, S_IRUGO);
+MODULE_PARM_DESC(deferred_io_count, "Number of bios that took the slow path");
 
 MODULE_DESCRIPTION(DM_NAME "device-mapper thin provisioning target");
 MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
