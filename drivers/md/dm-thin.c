@@ -20,6 +20,8 @@
  * Module params
  */
 static unsigned long dm_thin_deferred_count = 0;
+static unsigned long dm_thin_read_cache_hits = 0;
+static unsigned long dm_thin_read_cache_total = 0;
 static DEFINE_SPINLOCK(dm_param_lock);
 
 /*
@@ -533,12 +535,21 @@ struct pool_c {
 /*
  * Target context for a thin.
  */
+#define THIN_CACHE_SIZE 128
+#define THIN_CACHE_MASK (THIN_CACHE_SIZE - 1)
+
 struct thin_c {
 	struct dm_dev *pool_dev;
 	dm_thin_id dev_id;
 
 	struct pool *pool;
 	struct dm_thin_device *td;
+
+	spinlock_t cache_lock;
+	struct {
+		dm_block_t virtual;
+		dm_block_t actual;
+	} cache[THIN_CACHE_SIZE];
 };
 
 /*----------------------------------------------------------------*/
@@ -1367,6 +1378,25 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 		return DM_MAPIO_SUBMITTED;
 	}
 
+	/*
+	 * Check the little local cache.
+	 * FIXME: this shouldn't improve things - debugging a read issue.
+	 */
+	if (bio_data_dir(bio) == READ) {
+		dm_block_t v;
+
+		spin_lock(&tc->cache_lock);
+		dm_thin_read_cache_total++;
+		v = tc->cache[block & THIN_CACHE_MASK].virtual;
+		if (v != 0 && v == block) {
+			dm_thin_read_cache_hits++;
+			spin_unlock(&tc->cache_lock);
+			remap(tc, bio, tc->cache[block & THIN_CACHE_MASK].actual);
+			return DM_MAPIO_REMAPPED;
+		}
+		spin_unlock(&tc->cache_lock);
+	}
+
 	r = dm_thin_find_block(td, block, 0, &result);
 
 	/*
@@ -1393,6 +1423,10 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 			r = DM_MAPIO_SUBMITTED;
 		} else {
 			remap(tc, bio, result.block);
+			spin_lock(&tc->cache_lock);
+			tc->cache[block & THIN_CACHE_MASK].virtual = block;
+			tc->cache[block & THIN_CACHE_MASK].actual = result.block;
+			spin_unlock(&tc->cache_lock);
 			r = DM_MAPIO_REMAPPED;
 		}
 		break;
@@ -2244,6 +2278,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_unlock;
 	}
 
+	spin_lock_init(&tc->cache_lock);
+
 	r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &pool_dev);
 	if (r) {
 		ti->error = "Error opening pool device";
@@ -2432,6 +2468,13 @@ module_exit(dm_thin_exit);
 
 module_param_named(deferred_io_count, dm_thin_deferred_count, ulong, S_IRUGO);
 MODULE_PARM_DESC(deferred_io_count, "Number of bios that took the slow path");
+
+module_param_named(read_cache_hit, dm_thin_read_cache_hits, ulong, S_IRUGO);
+MODULE_PARM_DESC(read_cache_hit, "Read hits");
+
+module_param_named(read_cache_total, dm_thin_read_cache_total, ulong, S_IRUGO);
+MODULE_PARM_DESC(read_cache_total, "Read total");
+
 
 MODULE_DESCRIPTION(DM_NAME "device-mapper thin provisioning target");
 MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
