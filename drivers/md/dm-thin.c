@@ -529,6 +529,7 @@ struct pool_c {
  */
 struct thin_c {
 	struct dm_dev *pool_dev;
+	struct dm_dev *origin_dev;
 	dm_thin_id dev_id;
 
 	struct pool *pool;
@@ -646,13 +647,15 @@ static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 		(bio->bi_sector & pool->offset_mask);
 }
 
-static void remap_and_issue(struct thin_c *tc, struct bio *bio,
-			    dm_block_t block)
+static void remap_to_origin(struct thin_c *tc, struct bio *bio)
+{
+	bio->bi_bdev = tc->origin_dev->bdev;
+}
+
+static void issue(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
-
-	remap(tc, bio, block);
 
 	/*
 	 * Batch together any FUA/FLUSH bios we find and then issue
@@ -664,6 +667,19 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 		spin_unlock_irqrestore(&pool->lock, flags);
 	} else
 		generic_make_request(bio);
+}
+
+static void remap_to_origin_and_issue(struct thin_c *tc, struct bio *bio)
+{
+	remap_to_origin(tc, bio);
+	issue(tc, bio);
+}
+
+static void remap_and_issue(struct thin_c *tc, struct bio *bio,
+			    dm_block_t block)
+{
+	remap(tc, bio, block);
+	issue(tc, bio);
 }
 
 /*
@@ -917,7 +933,8 @@ static struct new_mapping *get_next_mapping(struct pool *pool)
 }
 
 static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
-			  dm_block_t data_origin, dm_block_t data_dest,
+			  struct dm_dev *origin, dm_block_t data_origin,
+			  dm_block_t data_dest,
 			  struct cell *cell, struct bio *bio)
 {
 	int r;
@@ -949,7 +966,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	} else {
 		struct dm_io_region from, to;
 
-		from.bdev = tc->pool_dev->bdev;
+		from.bdev = origin->bdev;
 		from.sector = data_origin * pool->sectors_per_block;
 		from.count = pool->sectors_per_block;
 
@@ -965,6 +982,22 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 			cell_error(cell);
 		}
 	}
+}
+
+static void schedule_internal_copy(struct thin_c *tc, dm_block_t virt_block,
+				   dm_block_t data_origin, dm_block_t data_dest,
+				   struct cell *cell, struct bio *bio)
+{
+	schedule_copy(tc, virt_block, tc->pool_dev,
+		      data_origin, data_dest, cell, bio);
+}
+
+static void schedule_external_copy(struct thin_c *tc, dm_block_t virt_block,
+				   dm_block_t data_dest,
+				   struct cell *cell, struct bio *bio)
+{
+	schedule_copy(tc, virt_block, tc->origin_dev,
+		      virt_block, data_dest, cell, bio);
 }
 
 static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
@@ -1113,8 +1146,8 @@ static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
 	r = alloc_data_block(tc, &data_block);
 	switch (r) {
 	case 0:
-		schedule_copy(tc, block, lookup_result->block,
-			      data_block, cell, bio);
+		schedule_internal_copy(tc, block, lookup_result->block,
+				       data_block, cell, bio);
 		break;
 
 	case -ENOSPC:
@@ -1188,7 +1221,10 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	r = alloc_data_block(tc, &data_block);
 	switch (r) {
 	case 0:
-		schedule_zero(tc, block, data_block, cell, bio);
+		if (tc->origin_dev)
+			schedule_external_copy(tc, block, data_block, cell, bio);
+		else
+			schedule_zero(tc, block, data_block, cell, bio);
 		break;
 
 	case -ENOSPC:
@@ -1239,7 +1275,11 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		break;
 
 	case -ENODATA:
-		provision_block(tc, bio, block, cell);
+		if (bio_data_dir(bio) == READ && tc->origin_dev) {
+			cell_release_singleton(cell, bio);
+			remap_to_origin_and_issue(tc, bio);
+		} else
+			provision_block(tc, bio, block, cell);
 		break;
 
 	default:
@@ -2199,6 +2239,8 @@ static void thin_dtr(struct dm_target *ti)
 	__pool_dec(tc->pool);
 	dm_pool_close_thin_device(tc->td);
 	dm_put_device(ti, tc->pool_dev);
+	if (tc->origin_dev)
+		dm_put_device(ti, tc->origin_dev);
 	kfree(tc);
 
 	mutex_unlock(&dm_thin_pool_table.mutex);
@@ -2207,21 +2249,22 @@ static void thin_dtr(struct dm_target *ti)
 /*
  * Thin target parameters:
  *
- * <pool_dev> <dev_id>
+ * <pool_dev> <dev_id> [origin_dev]
  *
  * pool_dev: the path to the pool (eg, /dev/mapper/my_pool)
  * dev_id: the internal device identifier
+ * origin_dev: a device external to the pool that should act as the origin
  */
 static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	struct thin_c *tc;
-	struct dm_dev *pool_dev;
+	struct dm_dev *pool_dev, *origin_dev;
 	struct mapped_device *pool_md;
 
 	mutex_lock(&dm_thin_pool_table.mutex);
 
-	if (argc != 2) {
+	if (argc != 2 && argc != 3) {
 		ti->error = "Invalid argument count";
 		r = -EINVAL;
 		goto out_unlock;
@@ -2232,6 +2275,15 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Out of memory";
 		r = -ENOMEM;
 		goto out_unlock;
+	}
+
+	if (argc == 3) {
+		r = dm_get_device(ti, argv[2], FMODE_READ, &origin_dev);
+		if (r) {
+			ti->error = "Error opening origin device";
+			goto bad_origin_dev;
+		}
+		tc->origin_dev = origin_dev;
 	}
 
 	r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &pool_dev);
@@ -2286,6 +2338,9 @@ bad_pool_lookup:
 bad_common:
 	dm_put_device(ti, tc->pool_dev);
 bad_pool_dev:
+	if (tc->origin_dev)
+		dm_put_device(ti, tc->origin_dev);
+bad_origin_dev:
 	kfree(tc);
 out_unlock:
 	mutex_unlock(&dm_thin_pool_table.mutex);
