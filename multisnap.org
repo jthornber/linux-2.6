@@ -1,4 +1,4 @@
-* Kernel [0/8]
+* Kernel [1/12]
 
   - [ ] resize metadata device. [RHEV, 1 week]
 
@@ -17,7 +17,7 @@
         built up.  We should commit every n seconds, and make this
         configurable.
 
-  - [ ] external origin (read-only)
+  - [X] external origin (read-only)
 
   - [ ] suspend a consistent, suite of thinps?  How do RHEV do this?
 
