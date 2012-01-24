@@ -234,9 +234,6 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 		 * Rebalance.
 		 */
 		unsigned target_left = (nr_left + nr_right) / 2;
-		unsigned shift_ = nr_left - target_left;
-		BUG_ON(le32_to_cpu(left->header.max_entries) <= nr_left - shift_);
-		BUG_ON(le32_to_cpu(right->header.max_entries) <= nr_right + shift_);
 		shift(left, right, nr_left - target_left);
 		*key_ptr(parent, r->index) = right->keys[0];
 	}
