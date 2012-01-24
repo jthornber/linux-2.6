@@ -1,4 +1,4 @@
-* Kernel [1/12]
+* Kernel [2/12]
 
   - [ ] resize metadata device. [RHEV, 1 week]
 
@@ -10,7 +10,7 @@
 
   - [ ] implement the btree trimming.
 
-  - [ ] Investigate btree_remove issue in ref_count tree.
+  - [X] Investigate btree_remove issue in ref_count tree.
 
   - [ ] atm we only commit metadata when a FUA or FLUSH bio comes in
         (or when we shutdown).  This allows too big a position to be
