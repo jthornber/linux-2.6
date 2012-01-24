@@ -128,18 +128,9 @@ static void delete_at(struct node *n, unsigned index)
 	n->header.nr_entries = cpu_to_le32(nr_entries - 1);
 }
 
-static unsigned del_threshold(struct node *n)
-{
-	return le32_to_cpu(n->header.max_entries) / 3;
-}
-
 static unsigned merge_threshold(struct node *n)
 {
-	/*
-	 * The extra one is because we know we're potentially going to
-	 * delete an entry.
-	 */
-	return 2 * (le32_to_cpu(n->header.max_entries) / 3) + 1;
+	return le32_to_cpu(n->header.max_entries) / 3;
 }
 
 struct child {
@@ -215,8 +206,9 @@ static void __rebalance2(struct dm_btree_info *info, struct node *parent,
 	struct node *right = r->n;
 	uint32_t nr_left = le32_to_cpu(left->header.nr_entries);
 	uint32_t nr_right = le32_to_cpu(right->header.nr_entries);
+	unsigned threshold = 2 * merge_threshold(left) + 1;
 
-	if (nr_left + nr_right <= merge_threshold(left)) {
+	if (nr_left + nr_right < threshold) {
 		/*
 		 * Merge
 		 */
@@ -331,10 +323,12 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	uint32_t nr_center = le32_to_cpu(center->header.nr_entries);
 	uint32_t nr_right = le32_to_cpu(right->header.nr_entries);
 
+	unsigned threshold = merge_threshold(left) * 4 + 1;
+
 	BUG_ON(left->header.max_entries != center->header.max_entries);
 	BUG_ON(center->header.max_entries != right->header.max_entries);
 
-	if (((nr_left + nr_center + nr_right) / 2) < merge_threshold(center))
+	if ((nr_left + nr_center + nr_right) / 2 < threshold)
 		delete_center_node(info, parent, l, c, r, left, center, right,
 				   nr_left, nr_center, nr_right);
 	else
@@ -442,9 +436,6 @@ static int rebalance_children(struct shadow_spine *s,
 	r = get_nr_entries(info->tm, value64(n, i), &child_entries);
 	if (r)
 		return r;
-
-	if (child_entries > del_threshold(n))
-		return 0;
 
 	has_left_sibling = i > 0;
 	has_right_sibling = i < (le32_to_cpu(n->header.nr_entries) - 1);
