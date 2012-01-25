@@ -280,7 +280,7 @@ static void delete_center_node(struct dm_btree_info *info, struct node *parent,
 
 	if (shift != nr_center) {
 		shift = nr_center - shift;
-		BUG_ON((nr_right + shift) >= max_entries);
+		BUG_ON((nr_right + shift) > max_entries);
 		node_shift(right, shift);
 		node_copy(center, right, shift);
 		right->header.nr_entries = cpu_to_le32(nr_right + shift);
@@ -328,7 +328,7 @@ static void __rebalance3(struct dm_btree_info *info, struct node *parent,
 	BUG_ON(left->header.max_entries != center->header.max_entries);
 	BUG_ON(center->header.max_entries != right->header.max_entries);
 
-	if ((nr_left + nr_center + nr_right) / 2 < threshold)
+	if ((nr_left + nr_center + nr_right) < threshold)
 		delete_center_node(info, parent, l, c, r, left, center, right,
 				   nr_left, nr_center, nr_right);
 	else
