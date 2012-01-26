@@ -749,6 +749,20 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
+static void overwrite_endio(struct bio *bio, int err)
+{
+	unsigned long flags;
+	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct new_mapping *m = h->overwrite_mapping;
+	struct pool *pool = m->tc->pool;
+
+	m->err = err;
+	spin_lock_irqsave(&pool->lock, flags);
+	m->prepared = 1;
+	__maybe_add_mapping(m);
+	spin_unlock_irqrestore(&pool->lock, flags);
+}
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -868,6 +882,13 @@ static int io_overwrites_block(struct pool *pool, struct bio *bio)
 		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
 }
 
+static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
+			       bio_end_io_t *fn)
+{
+	*save = bio->bi_end_io;
+	bio->bi_end_io = fn;
+}
+
 static int ensure_next_mapping(struct pool *pool)
 {
 	if (pool->next_mapping)
@@ -920,6 +941,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 		struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 		h->overwrite_mapping = m;
 		m->bio = bio;
+		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		remap_and_issue(tc, bio, data_dest);
 
 	} else {
@@ -2343,16 +2365,6 @@ static int thin_endio(struct dm_target *ti,
 			m->quiesced = 1;
 			__maybe_add_mapping(m);
 		}
-		spin_unlock_irqrestore(&pool->lock, flags);
-	}
-
-	if (h->overwrite_mapping) {
-		struct new_mapping *m = h->overwrite_mapping;
-		m->err = err;
-
-		spin_lock_irqsave(&pool->lock, flags);
-		m->prepared = 1;
-		__maybe_add_mapping(m);
 		spin_unlock_irqrestore(&pool->lock, flags);
 	}
 
