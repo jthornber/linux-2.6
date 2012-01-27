@@ -500,10 +500,12 @@ struct pool {
 	struct bio_list deferred_bios;
 	struct bio_list deferred_flush_bios;
 	struct list_head prepared_mappings;
+	struct list_head prepared_discards;
 
 	struct bio_list retry_on_resume_list;
 
 	struct deferred_set shared_read_ds;
+	struct deferred_set all_io_ds;
 
 	struct new_mapping *next_mapping;
 	mempool_t *mapping_pool;
@@ -601,6 +603,7 @@ static struct pool *__pool_table_lookup_metadata_dev(struct block_device *md_dev
 struct endio_hook {
 	struct thin_c *tc;
 	struct deferred_entry *shared_read_entry;
+	struct deferred_entry *all_io_entry;
 	struct new_mapping *overwrite_mapping;
 };
 
@@ -708,11 +711,12 @@ struct new_mapping {
 
 	unsigned quiesced:1;
 	unsigned prepared:1;
+	unsigned pass_discard:1;
 
 	struct thin_c *tc;
 	dm_block_t virt_block;
 	dm_block_t data_block;
-	struct cell *cell;
+	struct cell *cell, *cell2;
 	int err;
 
 	/*
@@ -857,7 +861,30 @@ static void process_prepared_mapping(struct new_mapping *m)
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
-static void process_prepared_mappings(struct pool *pool)
+static void process_prepared_discard(struct new_mapping *m)
+{
+	int r;
+	struct thin_c *tc = m->tc;
+
+	r = dm_thin_remove_block(tc->td, m->virt_block);
+	if (r)
+		DMERR("dm_thin_metadata_remove() failed");
+
+	/*
+	 * Pass the discard down to the underlying device?
+	 */
+	if (m->pass_discard)
+		remap_and_issue(tc, m->bio, m->data_block);
+	else
+		bio_endio(m->bio, 0);
+
+	cell_defer_except(tc, m->cell, m->bio);
+	cell_defer_except(tc, m->cell2, m->bio);
+	mempool_free(m, tc->pool->mapping_pool);
+}
+
+static void process_prepared(struct pool *pool, struct list_head *head,
+			     void (*fn)(struct new_mapping *))
 {
 	unsigned long flags;
 	struct list_head maps;
@@ -865,11 +892,11 @@ static void process_prepared_mappings(struct pool *pool)
 
 	INIT_LIST_HEAD(&maps);
 	spin_lock_irqsave(&pool->lock, flags);
-	list_splice_init(&pool->prepared_mappings, &maps);
+	list_splice_init(head, &maps);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	list_for_each_entry_safe(m, tmp, &maps, list)
-		process_prepared_mapping(m);
+		fn(m);
 }
 
 /*
@@ -1118,6 +1145,68 @@ static void no_space(struct cell *cell)
 		retry_on_resume(bio);
 }
 
+static void process_discard(struct thin_c *tc, struct bio *bio)
+{
+	int r;
+	struct pool *pool = tc->pool;
+	struct cell *cell, *cell2;
+	struct cell_key key, key2;
+	dm_block_t block = get_bio_block(tc, bio);
+	struct dm_thin_lookup_result lookup_result;
+	struct new_mapping *m;
+
+	build_virtual_key(tc->td, block, &key);
+	if (bio_detain(tc->pool->prison, &key, bio, &cell))
+		return;
+
+	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
+	switch (r) {
+	case 0:
+		/*
+		 * Check nobody is fiddling with this pool block.  This can
+		 * happen if someone's in the process of breaking sharing
+		 * on this block.
+		 */
+		build_data_key(tc->td, lookup_result.block, &key2);
+		if (bio_detain(tc->pool->prison, &key2, bio, &cell2)) {
+			cell_release_singleton(cell, bio);
+			break;
+		}
+
+		/*
+		 * IO may still be going to the destination block.  We must
+		 * quiesce before we can do the removal.
+		 */
+		m = get_next_mapping(pool);
+		m->tc = tc;
+		m->pass_discard = !lookup_result.shared;
+		m->virt_block = block;
+		m->data_block = lookup_result.block;
+		m->cell = cell;
+		m->cell2 = cell2;
+		m->err = 0;
+		m->bio = bio;
+
+		if (!ds_add_work(&pool->all_io_ds, &m->list))
+			list_add(&m->list, &pool->prepared_discards);
+		break;
+
+	case -ENODATA:
+		/*
+		 * It isn't provisioned, just forget it.
+		 */
+		cell_release_singleton(cell, bio);
+		bio_endio(bio, 0);
+		break;
+
+	default:
+		DMERR("discard: find block unexpectedly returned %d\n", r);
+		cell_release_singleton(cell, bio);
+		bio_io_error(bio);
+		break;
+	}
+}
+
 static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
 			  struct cell_key *key,
 			  struct dm_thin_lookup_result *lookup_result,
@@ -1263,6 +1352,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	default:
 		DMERR("dm_thin_find_block() failed, error = %d", r);
+		cell_release_singleton(cell, bio);
 		bio_io_error(bio);
 		break;
 	}
@@ -1298,7 +1388,11 @@ static void process_deferred_bios(struct pool *pool)
 
 			break;
 		}
-		process_bio(tc, bio);
+
+		if (bio->bi_rw & REQ_DISCARD)
+			process_discard(tc, bio);
+		else
+			process_bio(tc, bio);
 	}
 
 	/*
@@ -1331,7 +1425,8 @@ static void do_worker(struct work_struct *ws)
 {
 	struct pool *pool = container_of(ws, struct pool, worker);
 
-	process_prepared_mappings(pool);
+	process_prepared(pool, &pool->prepared_mappings, process_prepared_mapping);
+	process_prepared(pool, &pool->prepared_discards, process_prepared_discard);
 	process_deferred_bios(pool);
 }
 
@@ -1363,6 +1458,7 @@ static struct endio_hook *thin_hook_bio(struct thin_c *tc, struct bio *bio)
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
+	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : ds_inc(&pool->all_io_ds);
 	h->overwrite_mapping = NULL;
 
 	return h;
@@ -1381,7 +1477,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 	struct dm_thin_lookup_result result;
 
 	map_context->ptr = thin_hook_bio(tc, bio);
-	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
 		thin_defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1556,10 +1652,12 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	bio_list_init(&pool->deferred_bios);
 	bio_list_init(&pool->deferred_flush_bios);
 	INIT_LIST_HEAD(&pool->prepared_mappings);
+	INIT_LIST_HEAD(&pool->prepared_discards);
 	pool->low_water_triggered = 0;
 	pool->no_free_space = 0;
 	bio_list_init(&pool->retry_on_resume_list);
 	ds_init(&pool->shared_read_ds);
+	ds_init(&pool->all_io_ds);
 
 	pool->next_mapping = NULL;
 	pool->mapping_pool =
@@ -1796,7 +1894,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_blocks = low_water_blocks;
 	pt->zero_new_blocks = pf.zero_new_blocks;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 0;
+	ti->num_discard_requests = 1;
+	ti->discards_supported = 1;
 	ti->private = pt;
 
 	pt->callbacks.congested_fn = pool_is_congested;
@@ -2311,8 +2410,8 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->split_io = tc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 0;
-	ti->discards_supported = 0;
+	ti->num_discard_requests = 1;
+	ti->discards_supported = 1;
 
 	dm_put(pool_md);
 
@@ -2368,6 +2467,14 @@ static int thin_endio(struct dm_target *ti,
 		spin_unlock_irqrestore(&pool->lock, flags);
 	}
 
+	if (h->all_io_entry) {
+		INIT_LIST_HEAD(&work);
+		ds_dec(h->all_io_entry, &work);
+		list_for_each_entry_safe(m, tmp, &work, list)
+			list_add(&m->list, &pool->prepared_discards);
+	}
+
+	mempool_free(h, pool->endio_hook_pool);
 	return 0;
 }
 
@@ -2444,9 +2551,17 @@ static int thin_iterate_devices(struct dm_target *ti,
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct thin_c *tc = ti->private;
+	struct pool *pool = tc->pool;
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, tc->pool->sectors_per_block << SECTOR_SHIFT);
+	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+
+	/*
+	 * Only allow discard requests aligned to our block size, and make
+	 * sure that we never get sent larger discard requests either.
+	 */
+	limits->max_discard_sectors = pool->sectors_per_block;
+	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
 }
 
 static struct target_type thin_target = {
