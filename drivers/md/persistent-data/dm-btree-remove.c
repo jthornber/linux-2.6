@@ -179,6 +179,15 @@ static int exit_child(struct dm_btree_info *info, struct child *c)
 
 static void shift(struct node *left, struct node *right, int count)
 {
+	uint32_t nr_left = le32_to_cpu(left->header.nr_entries);
+	uint32_t nr_right = le32_to_cpu(right->header.nr_entries);
+	uint32_t max_entries = le32_to_cpu(left->header.max_entries);
+	uint32_t r_max_entries = le32_to_cpu(right->header.max_entries);
+
+	BUG_ON(max_entries != r_max_entries);
+	BUG_ON(nr_left - count > max_entries);
+	BUG_ON(nr_right + count > max_entries);
+
 	if (!count)
 		return;
 
@@ -190,13 +199,8 @@ static void shift(struct node *left, struct node *right, int count)
 		node_shift(right, count);
 	}
 
-	left->header.nr_entries =
-		cpu_to_le32(le32_to_cpu(left->header.nr_entries) - count);
-	BUG_ON(le32_to_cpu(left->header.nr_entries) > le32_to_cpu(left->header.max_entries));
-
-	right->header.nr_entries =
-		cpu_to_le32(le32_to_cpu(right->header.nr_entries) + count);
-	BUG_ON(le32_to_cpu(right->header.nr_entries) > le32_to_cpu(right->header.max_entries));
+	left->header.nr_entries = cpu_to_le32(nr_left - count);
+	right->header.nr_entries = cpu_to_le32(nr_right + count);
 }
 
 static void __rebalance2(struct dm_btree_info *info, struct node *parent,
@@ -302,12 +306,39 @@ static void redistribute3(struct dm_btree_info *info, struct node *parent,
 			  struct node *left, struct node *center, struct node *right,
 			  uint32_t nr_left, uint32_t nr_center, uint32_t nr_right)
 {
+	int s;
 	uint32_t max_entries = le32_to_cpu(left->header.max_entries);
 	unsigned target = (nr_left + nr_center + nr_right) / 3;
 	BUG_ON(target > max_entries);
 
-	shift(left, center, nr_left - target);
-	shift(center, right, target - nr_right);
+	if (nr_left < nr_right) {
+		s = nr_left - target;
+
+		if (s < 0 && nr_center < -s) {
+			/* not enough in central node */
+			shift(left, center, nr_center);
+			s = nr_center - target;
+			shift(left, right, s);
+			nr_right += s;
+		} else
+			shift(left, center, s);
+
+		shift(center, right, target - nr_right);
+
+	} else {
+		s = target - nr_right;
+		if (s > 0 && nr_center < s) {
+			/* not enough in central node */
+			shift(center, right, nr_center);
+			s = target - nr_center;
+			shift(left, right, s);
+			nr_left -= s;
+		} else
+			shift(center, right, s);
+
+		shift(left, center, nr_left - target);
+	}
+
 	*key_ptr(parent, c->index) = center->keys[0];
 	*key_ptr(parent, r->index) = right->keys[0];
 }
