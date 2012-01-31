@@ -902,11 +902,17 @@ static void process_prepared(struct pool *pool, struct list_head *head,
 /*
  * Deferred bio jobs.
  */
+static int io_overlaps_block(struct pool *pool, struct bio *bio)
+{
+	return !(bio->bi_sector & pool->offset_mask) &&
+		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
+
+}
+
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
-	return ((bio_data_dir(bio) == WRITE) &&
-		!(bio->bi_sector & pool->offset_mask)) &&
-		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
+	return (bio_data_dir(bio) == WRITE) &&
+		io_overlaps_block(pool, bio);
 }
 
 static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
@@ -1173,23 +1179,39 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			break;
 		}
 
-		/*
-		 * IO may still be going to the destination block.  We must
-		 * quiesce before we can do the removal.
-		 */
-		m = get_next_mapping(pool);
-		m->tc = tc;
-		m->pass_discard = !lookup_result.shared;
-		m->virt_block = block;
-		m->data_block = lookup_result.block;
-		m->cell = cell;
-		m->cell2 = cell2;
-		m->err = 0;
-		m->bio = bio;
+		if (io_overlaps_block(pool, bio)) {
+			/*
+			 * IO may still be going to the destination block.  We must
+			 * quiesce before we can do the removal.
+			 */
+			m = get_next_mapping(pool);
+			m->tc = tc;
+			m->pass_discard = !lookup_result.shared;
+			m->virt_block = block;
+			m->data_block = lookup_result.block;
+			m->cell = cell;
+			m->cell2 = cell2;
+			m->err = 0;
+			m->bio = bio;
 
-		if (!ds_add_work(&pool->all_io_ds, &m->list)) {
-			list_add(&m->list, &pool->prepared_discards);
-			wake_worker(pool);
+			if (!ds_add_work(&pool->all_io_ds, &m->list)) {
+				list_add(&m->list, &pool->prepared_discards);
+				wake_worker(pool);
+			}
+		} else {
+			/*
+			 * This path is hit if people are ignoring
+			 * limits->discard_granularity.  It ignores any
+			 * part of the discard that is in a subsequent
+			 * block.
+			 */
+			sector_t offset = bio->bi_sector - (block << pool->block_shift);
+			unsigned remaining = (pool->sectors_per_block - offset) << 9;
+			bio->bi_size = min(bio->bi_size, remaining);
+
+			cell_release_singleton(cell, bio);
+			cell_release_singleton(cell2, bio);
+			remap_and_issue(tc, bio, lookup_result.block);
 		}
 		break;
 
@@ -2289,6 +2311,17 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
+static void set_discard_limits(struct pool *pool, struct queue_limits *limits)
+{
+	limits->max_discard_sectors = pool->sectors_per_block;
+
+	/*
+	 * This is just a hint, and not enforced.  We have to cope with
+	 * bios that overlap 2 blocks.
+	 */
+	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+}
+
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pt = ti->private;
@@ -2296,6 +2329,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+	set_discard_limits(pool, limits);
 }
 
 static struct target_type pool_target = {
@@ -2557,13 +2591,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
-
-	/*
-	 * Only allow discard requests aligned to our block size, and make
-	 * sure that we never get sent larger discard requests either.
-	 */
-	limits->max_discard_sectors = pool->sectors_per_block;
-	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+	set_discard_limits(pool, limits);
 }
 
 static struct target_type thin_target = {
