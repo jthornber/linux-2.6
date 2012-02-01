@@ -124,7 +124,7 @@ struct cell {
 	struct hlist_node list;
 	struct bio_prison *prison;
 	struct cell_key key;
-	unsigned count;
+	struct bio *holder;
 	struct bio_list bios;
 };
 
@@ -220,8 +220,8 @@ static struct cell *__search_bucket(struct hlist_head *bucket,
  * This may block if a new cell needs allocating.  You must ensure that
  * cells will be unlocked even if the calling thread is blocked.
  *
- * Returns the number of entries in the cell prior to the new addition
- * or < 0 on failure.
+ * Returns 1 if the cell was already held, 0 if @inmate is the new holder,
+ * or < 0 on error.
  */
 static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 		      struct bio *inmate, struct cell **ref)
@@ -256,21 +256,25 @@ static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 
 			cell->prison = prison;
 			memcpy(&cell->key, key, sizeof(cell->key));
-			cell->count = 0;
+			cell->holder = inmate;
 			bio_list_init(&cell->bios);
 			hlist_add_head(&cell->list, prison->cells + hash);
-		}
-	}
+			r = 0;
 
-	r = cell->count++;
-	bio_list_add(&cell->bios, inmate);
+		} else {
+			mempool_free(cell2, prison->cell_pool);
+			cell2 = NULL;
+			r = 1;
+			bio_list_add(&cell->bios, inmate);
+		}
+
+	} else {
+		r = 1;
+		bio_list_add(&cell->bios, inmate);
+	}
 	spin_unlock_irqrestore(&prison->lock, flags);
 
-	if (cell2)
-		mempool_free(cell2, prison->cell_pool);
-
 	*ref = cell;
-
 	return r;
 }
 
@@ -286,6 +290,7 @@ static void __cell_release(struct cell *cell, struct bio_list *inmates)
 	if (inmates)
 		bio_list_merge(inmates, &cell->bios);
 
+	bio_list_add_head(inmates, cell->holder);
 	mempool_free(cell, prison->cell_pool);
 }
 
@@ -675,8 +680,10 @@ static void issue(struct thin_c *tc, struct bio *bio)
 		spin_lock_irqsave(&pool->lock, flags);
 		bio_list_add(&pool->deferred_flush_bios, bio);
 		spin_unlock_irqrestore(&pool->lock, flags);
-	} else
+	} else {
+		BUG_ON(bio->bi_next);
 		generic_make_request(bio);
+	}
 }
 
 static void remap_to_origin_and_issue(struct thin_c *tc, struct bio *bio)
@@ -972,6 +979,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	 */
 	if (io_overwrites_block(pool, bio)) {
 		struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+
 		h->overwrite_mapping = m;
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
@@ -1441,8 +1449,10 @@ static void process_deferred_bios(struct pool *pool)
 		return;
 	}
 
-	while ((bio = bio_list_pop(&bios)))
+	while ((bio = bio_list_pop(&bios))) {
+		BUG_ON(bio->bi_next);
 		generic_make_request(bio);
+	}
 }
 
 static void do_worker(struct work_struct *ws)
