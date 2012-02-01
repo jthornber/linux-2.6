@@ -1051,6 +1051,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 		struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 		h->overwrite_mapping = m;
 		m->bio = bio;
+		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		remap_and_issue(tc, bio, data_block);
 
 	} else {
