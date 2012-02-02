@@ -771,6 +771,7 @@ static void overwrite_endio(struct bio *bio, int err)
 	struct pool *pool = m->tc->pool;
 
 	m->err = err;
+
 	spin_lock_irqsave(&pool->lock, flags);
 	m->prepared = 1;
 	__maybe_add_mapping(m);
@@ -867,7 +868,6 @@ static void process_prepared_mapping(struct new_mapping *m)
 		cell_defer(tc, m->cell, m->data_block);
 
 	list_del(&m->list);
-
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -945,7 +945,6 @@ static int ensure_next_mapping(struct pool *pool)
 static struct new_mapping *get_next_mapping(struct pool *pool)
 {
 	struct new_mapping *r = pool->next_mapping;
-
 	BUG_ON(!pool->next_mapping);
 	pool->next_mapping = NULL;
 
@@ -982,12 +981,10 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	 */
 	if (io_overwrites_block(pool, bio)) {
 		struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-
 		h->overwrite_mapping = m;
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		remap_and_issue(tc, bio, data_dest);
-
 	} else {
 		struct dm_io_region from, to;
 
@@ -1877,6 +1874,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_dev *metadata_dev;
 	sector_t metadata_dev_size;
 
+	/*
+	 * FIXME Remove validation from scope of lock.
+	 */
 	mutex_lock(&dm_thin_pool_table.mutex);
 
 	if (argc < 4) {

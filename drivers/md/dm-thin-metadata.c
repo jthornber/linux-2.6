@@ -1262,8 +1262,6 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
 
-	printk(KERN_ALERT "committing\n");
-
 	down_write(&pmd->root_lock);
 
 	r = __commit_transaction(pmd);

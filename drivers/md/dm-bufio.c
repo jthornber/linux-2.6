@@ -189,7 +189,6 @@ static void dm_bufio_unlock(struct dm_bufio_client *c)
  */
 #ifdef CONFIG_PREEMPT_VOLUNTARY
 #  define dm_bufio_cond_resched()		\
-
 do {						\
 	if (unlikely(need_resched()))		\
 		_cond_resched();		\
