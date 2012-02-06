@@ -79,6 +79,7 @@ int dm_pool_get_metadata_transaction_id(struct dm_pool_metadata *pmd,
  * Hold/get root for userspace transaction.
  */
 int dm_pool_hold_metadata_root(struct dm_pool_metadata *pmd);
+int dm_pool_release_metadata_root(struct dm_pool_metadata *pmd);
 
 int dm_pool_get_held_metadata_root(struct dm_pool_metadata *pmd,
 				   dm_block_t *result);

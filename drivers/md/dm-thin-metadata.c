@@ -1081,6 +1081,80 @@ int dm_pool_get_metadata_transaction_id(struct dm_pool_metadata *pmd,
 	return 0;
 }
 
+static int __hold_metadata_root(struct dm_pool_metadata *pmd)
+{
+	int r, r2;
+	struct thin_disk_superblock *disk_super;
+	struct dm_block *sblock;
+
+	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			     &sb_validator, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	if (le64_to_cpu(disk_super->held_root)) {
+		DMWARN("pool already has a held root");
+		r = -EBUSY;
+	} else {
+		__le64 root = disk_super->data_mapping_root;
+		dm_sm_inc_block(pmd->metadata_sm, le64_to_cpu(root));
+		disk_super->held_root = root;
+		pmd->need_commit = 1;
+	}
+
+	r2 = dm_bm_unlock(sblock);
+	return r ? r : r2;
+}
+
+int dm_pool_hold_metadata_root(struct dm_pool_metadata *pmd)
+{
+	int r;
+
+	down_write(&pmd->root_lock);
+	r = __hold_metadata_root(pmd);
+	up_write(&pmd->root_lock);
+
+	return r;
+}
+
+static int __release_metadata_root(struct dm_pool_metadata *pmd)
+{
+	int r, r2;
+	struct thin_disk_superblock *disk_super;
+	struct dm_block *sblock;
+
+	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			     &sb_validator, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	if (!le64_to_cpu(disk_super->held_root)) {
+		DMWARN("pool has no held root");
+		r = -EINVAL;
+	} else {
+		__le64 root = disk_super->held_root;
+		dm_sm_dec_block(pmd->metadata_sm, le64_to_cpu(root));
+		disk_super->held_root = cpu_to_le64(0ULL);
+		pmd->need_commit = 1;
+	}
+
+	r2 = dm_bm_unlock(sblock);
+	return r ? r : r2;
+}
+
+int dm_pool_release_metadata_root(struct dm_pool_metadata *pmd)
+{
+	int r;
+
+	down_write(&pmd->root_lock);
+	r = __release_metadata_root(pmd);
+	up_write(&pmd->root_lock);
+
+	return r;
+}
+
 static int __get_held_metadata_root(struct dm_pool_metadata *pmd,
 				    dm_block_t *result)
 {
@@ -1088,8 +1162,8 @@ static int __get_held_metadata_root(struct dm_pool_metadata *pmd,
 	struct thin_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
-	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
-			     &sb_validator, &sblock);
+	r = dm_bm_read_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			    &sb_validator, &sblock);
 	if (r)
 		return r;
 

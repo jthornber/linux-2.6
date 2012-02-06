@@ -2204,6 +2204,36 @@ static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct po
 	return 0;
 }
 
+static int process_hold_root_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	int r;
+
+	r = check_arg_count(argc, 1);
+	if (r)
+		return r;
+
+	r = dm_pool_hold_metadata_root(pool->pmd);
+	if (r)
+		DMWARN("hold root request failed");
+
+	return r;
+}
+
+static int process_release_root_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	int r;
+
+	r = check_arg_count(argc, 1);
+	if (r)
+		return r;
+
+	r = dm_pool_release_metadata_root(pool->pmd);
+	if (r)
+		DMWARN("release root request failed");
+
+	return r;
+}
+
 /*
  * Messages supported:
  *   create_thin	<dev_id>
@@ -2211,6 +2241,8 @@ static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct po
  *   delete		<dev_id>
  *   trim		<dev_id> <new_size_in_sectors>
  *   set_transaction_id <current_trans_id> <new_trans_id>
+ *   hold_root
+ *   release_root
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2229,6 +2261,12 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 
 	else if (!strcasecmp(argv[0], "set_transaction_id"))
 		r = process_set_transaction_id_mesg(argc, argv, pool);
+
+	else if (!strcasecmp(argv[0], "hold_root"))
+		r = process_hold_root_mesg(argc, argv, pool);
+
+	else if (!strcasecmp(argv[0], "release_root"))
+		r = process_release_root_mesg(argc, argv, pool);
 
 	else
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
