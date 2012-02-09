@@ -477,6 +477,13 @@ static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
  * devices.
  */
 struct new_mapping;
+
+struct pool_features {
+	unsigned zero_new_blocks:1;
+	unsigned discard_enabled:1;
+	unsigned discard_passdown:1;
+};
+
 struct pool {
 	struct list_head list;
 	struct dm_target *ti;	/* Only set if a pool target is bound */
@@ -490,7 +497,7 @@ struct pool {
 	dm_block_t offset_mask;
 	dm_block_t low_water_blocks;
 
-	unsigned zero_new_blocks:1;
+	struct pool_features pf;
 	unsigned low_water_triggered:1;	/* A dm event has been sent */
 	unsigned no_free_space:1;	/* A -ENOSPC warning has been issued */
 
@@ -531,7 +538,7 @@ struct pool_c {
 	struct dm_target_callbacks callbacks;
 
 	dm_block_t low_water_blocks;
-	unsigned zero_new_blocks:1;
+	struct pool_features pf;
 };
 
 /*
@@ -700,6 +707,19 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 {
 	remap(tc, bio, block);
 	issue(tc, bio);
+}
+
+static void remap_and_issue_discard(struct thin_c *tc, struct bio *bio,
+				    dm_block_t block)
+{
+	if (tc->pool->pf.discard_passdown) {
+		printk(KERN_ALERT "remapping discard\n");
+		remap(tc, bio, block);
+		issue(tc, bio);
+	} else {
+		printk(KERN_ALERT "not handing down discard\n");
+		bio_endio(bio, 0);
+	}
 }
 
 /*
@@ -884,9 +904,11 @@ static void process_prepared_discard(struct new_mapping *m)
 	 * Pass the discard down to the underlying device?
 	 */
 	if (m->pass_discard)
-		remap_and_issue(tc, m->bio, m->data_block);
-	else
+		remap_and_issue_discard(tc, m->bio, m->data_block);
+	else {
+		printk(KERN_ALERT "not passing discard down since block shared\n");
 		bio_endio(m->bio, 0);
+	}
 
 	cell_defer_except(tc, m->cell, m->bio);
 	cell_defer_except(tc, m->cell2, m->bio);
@@ -1044,7 +1066,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	 * zeroing pre-existing data, we can issue the bio immediately.
 	 * Otherwise we use kcopyd to zero the data first.
 	 */
-	if (!pool->zero_new_blocks)
+	if (!pool->pf.zero_new_blocks)
 		process_prepared_mapping(m);
 
 	else if (io_overwrites_block(pool, bio)) {
@@ -1170,6 +1192,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 	struct dm_thin_lookup_result lookup_result;
 	struct new_mapping *m;
 
+	printk(KERN_ALERT "pool = %p: process_discard %p\n", pool, bio);
 	build_virtual_key(tc->td, block, &key);
 	if (bio_detain(tc->pool->prison, &key, bio, &cell))
 		return;
@@ -1220,7 +1243,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 
 			cell_release_singleton(cell, bio);
 			cell_release_singleton(cell2, bio);
-			remap_and_issue(tc, bio, lookup_result.block);
+			remap_and_issue_discard(tc, bio, lookup_result.block);
 		}
 		break;
 
@@ -1228,6 +1251,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		/*
 		 * It isn't provisioned, just forget it.
 		 */
+		printk(KERN_ALERT "ignoring discard, not provisioned\n");
 		cell_release_singleton(cell, bio);
 		bio_endio(bio, 0);
 		break;
@@ -1612,7 +1636,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 
 	pool->ti = ti;
 	pool->low_water_blocks = pt->low_water_blocks;
-	pool->zero_new_blocks = pt->zero_new_blocks;
+	pool->pf = pt->pf;
 
 	return 0;
 }
@@ -1626,6 +1650,14 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
 /*----------------------------------------------------------------
  * Pool creation
  *--------------------------------------------------------------*/
+/* Initialize pool features. */
+static void pool_features_init(struct pool_features *pf)
+{
+	pf->zero_new_blocks = 1;
+	pf->discard_enabled = 1;
+	pf->discard_passdown = 1;
+}
+
 static void __pool_destroy(struct pool *pool)
 {
 	__pool_table_remove(pool);
@@ -1673,7 +1705,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->block_shift = ffs(block_size) - 1;
 	pool->offset_mask = block_size - 1;
 	pool->low_water_blocks = 0;
-	pool->zero_new_blocks = 1;
+	pool_features_init(&pool->pf);
 	pool->prison = prison_create(PRISON_CELLS);
 	if (!pool->prison) {
 		*error = "Error creating pool's bio prison";
@@ -1811,10 +1843,6 @@ static void pool_dtr(struct dm_target *ti)
 	mutex_unlock(&dm_thin_pool_table.mutex);
 }
 
-struct pool_features {
-	unsigned zero_new_blocks:1;
-};
-
 static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 			       struct dm_target *ti)
 {
@@ -1823,7 +1851,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "Invalid number of pool feature arguments"},
+		{0, 3, "Invalid number of pool feature arguments"},
 	};
 
 	/*
@@ -1838,10 +1866,20 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 
 	while (argc && !r) {
 		arg_name = dm_shift_arg(as);
+		printk(KERN_ALERT "arg_name = %s\n", arg_name);
 		argc--;
 
 		if (!strcasecmp(arg_name, "skip_block_zeroing")) {
+			printk(KERN_ALERT "parsed skip\n");
 			pf->zero_new_blocks = 0;
+			continue;
+		} else if (!strcasecmp(arg_name, "skip_discard")) {
+			printk(KERN_ALERT "parsed discard_enabled\n");
+			pf->discard_enabled = 0;
+			continue;
+		} else if (!strcasecmp(arg_name, "skip_discard_passdown")) {
+			printk(KERN_ALERT "parsed passdown\n");
+			pf->discard_passdown = 0;
 			continue;
 		}
 
@@ -1860,6 +1898,9 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
  *
  * Optional feature arguments are:
  *	     skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
+ *           skip_pool_discard: skip discarding pool blocks
+ *           skip_pass_discard_on: skip passing discards on to the underlying
+ *                                 device (auto-disabled on skip_pool_discard)
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1924,13 +1965,21 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	/*
 	 * Set default pool features.
 	 */
-	memset(&pf, 0, sizeof(pf));
-	pf.zero_new_blocks = 1;
+	pool_features_init(&pf);
 
 	dm_consume_args(&as, 4);
+	printk(KERN_ALERT "after consume, as->argc = %d\n", as.argc);
 	r = parse_pool_features(&as, &pf, ti);
 	if (r)
 		goto out;
+
+	/*
+	 * If disacrds are disabled for the pool, we
+	 * have to disable passing them on as well.
+	 * FIXME: this shouldn't be needed
+	 */
+	if (!pf.discard_enabled)
+		pf.discard_passdown = 0;
 
 	pt = kzalloc(sizeof(*pt), GFP_KERNEL);
 	if (!pt) {
@@ -1950,10 +1999,12 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->metadata_dev = metadata_dev;
 	pt->data_dev = data_dev;
 	pt->low_water_blocks = low_water_blocks;
-	pt->zero_new_blocks = pf.zero_new_blocks;
+	pt->pf = pf;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
-	ti->discards_supported = 1;
+	if (pf.discard_enabled) {
+		ti->discards_supported = 1;
+		ti->num_discard_requests = 1;
+	}
 	ti->private = pt;
 
 	pt->callbacks.congested_fn = pool_is_congested;
@@ -2352,9 +2403,9 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long)pool->sectors_per_block,
 		       (unsigned long long)pt->low_water_blocks);
 
-		DMEMIT("%u ", !pool->zero_new_blocks);
+		DMEMIT("%u ", !pool->pf.zero_new_blocks);
 
-		if (!pool->zero_new_blocks)
+		if (!pool->pf.zero_new_blocks)
 			DMEMIT("skip_block_zeroing ");
 		break;
 	}
@@ -2402,7 +2453,8 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
-	set_discard_limits(pool, limits);
+	if (pool->pf.discard_enabled)
+		set_discard_limits(pool, limits);
 }
 
 static struct target_type pool_target = {
@@ -2451,6 +2503,8 @@ static void thin_dtr(struct dm_target *ti)
  * pool_dev: the path to the pool (eg, /dev/mapper/my_pool)
  * dev_id: the internal device identifier
  * origin_dev: a device external to the pool that should act as the origin
+ *
+ * If the pool has discards disabled, they get disabled for the thin as well.
  */
 static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2519,8 +2573,12 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->split_io = tc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
-	ti->discards_supported = 1;
+
+	/* In case the pool supports discards, pass them on. */
+	if (tc->pool->pf.discard_enabled) {
+		ti->discards_supported = 1;
+		ti->num_discard_requests = 1;
+	}
 
 	dm_put(pool_md);
 
