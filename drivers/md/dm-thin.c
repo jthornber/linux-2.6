@@ -713,13 +713,10 @@ static void remap_and_issue_discard(struct thin_c *tc, struct bio *bio,
 				    dm_block_t block)
 {
 	if (tc->pool->pf.discard_passdown) {
-		printk(KERN_ALERT "remapping discard\n");
 		remap(tc, bio, block);
 		issue(tc, bio);
-	} else {
-		printk(KERN_ALERT "not handing down discard\n");
+	} else
 		bio_endio(bio, 0);
-	}
 }
 
 /*
@@ -905,10 +902,8 @@ static void process_prepared_discard(struct new_mapping *m)
 	 */
 	if (m->pass_discard)
 		remap_and_issue_discard(tc, m->bio, m->data_block);
-	else {
-		printk(KERN_ALERT "not passing discard down since block shared\n");
+	else
 		bio_endio(m->bio, 0);
-	}
 
 	cell_defer_except(tc, m->cell, m->bio);
 	cell_defer_except(tc, m->cell2, m->bio);
@@ -1192,7 +1187,6 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 	struct dm_thin_lookup_result lookup_result;
 	struct new_mapping *m;
 
-	printk(KERN_ALERT "pool = %p: process_discard %p\n", pool, bio);
 	build_virtual_key(tc->td, block, &key);
 	if (bio_detain(tc->pool->prison, &key, bio, &cell))
 		return;
@@ -1251,7 +1245,6 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		/*
 		 * It isn't provisioned, just forget it.
 		 */
-		printk(KERN_ALERT "ignoring discard, not provisioned\n");
 		cell_release_singleton(cell, bio);
 		bio_endio(bio, 0);
 		break;
@@ -1866,19 +1859,15 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 
 	while (argc && !r) {
 		arg_name = dm_shift_arg(as);
-		printk(KERN_ALERT "arg_name = %s\n", arg_name);
 		argc--;
 
 		if (!strcasecmp(arg_name, "skip_block_zeroing")) {
-			printk(KERN_ALERT "parsed skip\n");
 			pf->zero_new_blocks = 0;
 			continue;
 		} else if (!strcasecmp(arg_name, "skip_discard")) {
-			printk(KERN_ALERT "parsed discard_enabled\n");
 			pf->discard_enabled = 0;
 			continue;
 		} else if (!strcasecmp(arg_name, "skip_discard_passdown")) {
-			printk(KERN_ALERT "parsed passdown\n");
 			pf->discard_passdown = 0;
 			continue;
 		}
@@ -1898,9 +1887,8 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
  *
  * Optional feature arguments are:
  *	     skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
- *           skip_pool_discard: skip discarding pool blocks
- *           skip_pass_discard_on: skip passing discards on to the underlying
- *                                 device (auto-disabled on skip_pool_discard)
+ *           skip_discard: disable discard
+ *           skip_discard_passdown: don't pass discards down to the data device
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1968,7 +1956,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pool_features_init(&pf);
 
 	dm_consume_args(&as, 4);
-	printk(KERN_ALERT "after consume, as->argc = %d\n", as.argc);
 	r = parse_pool_features(&as, &pf, ti);
 	if (r)
 		goto out;
