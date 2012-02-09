@@ -709,16 +709,6 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 	issue(tc, bio);
 }
 
-static void remap_and_issue_discard(struct thin_c *tc, struct bio *bio,
-				    dm_block_t block)
-{
-	if (tc->pool->pf.discard_passdown) {
-		remap(tc, bio, block);
-		issue(tc, bio);
-	} else
-		bio_endio(bio, 0);
-}
-
 /*
  * wake_worker() is used when new work is queued and when pool_resume is
  * ready to continue deferred IO processing.
@@ -901,7 +891,7 @@ static void process_prepared_discard(struct new_mapping *m)
 	 * Pass the discard down to the underlying device?
 	 */
 	if (m->pass_discard)
-		remap_and_issue_discard(tc, m->bio, m->data_block);
+		remap_and_issue(tc, m->bio, m->data_block);
 	else
 		bio_endio(m->bio, 0);
 
@@ -1237,7 +1227,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 
 			cell_release_singleton(cell, bio);
 			cell_release_singleton(cell2, bio);
-			remap_and_issue_discard(tc, bio, lookup_result.block);
+			remap_and_issue(tc, bio, lookup_result.block);
 		}
 		break;
 
@@ -1960,14 +1950,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (r)
 		goto out;
 
-	/*
-	 * If disacrds are disabled for the pool, we
-	 * have to disable passing them on as well.
-	 * FIXME: this shouldn't be needed
-	 */
-	if (!pf.discard_enabled)
-		pf.discard_passdown = 0;
-
 	pt = kzalloc(sizeof(*pt), GFP_KERNEL);
 	if (!pt) {
 		r = -ENOMEM;
@@ -1988,7 +1970,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_blocks = low_water_blocks;
 	pt->pf = pf;
 	ti->num_flush_requests = 1;
-	if (pf.discard_enabled) {
+	if (pf.discard_enabled && pf.discard_passdown) {
 		ti->discards_supported = 1;
 		ti->num_discard_requests = 1;
 	}
@@ -2327,7 +2309,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 static int pool_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
 {
-	int r;
+	int r, count;
 	unsigned sz = 0;
 	uint64_t transaction_id;
 	dm_block_t nr_free_blocks_data;
@@ -2390,10 +2372,18 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long)pool->sectors_per_block,
 		       (unsigned long long)pt->low_water_blocks);
 
-		DMEMIT("%u ", !pool->pf.zero_new_blocks);
+		count = !pool->pf.zero_new_blocks + !pool->pf.discard_enabled + !pool->pf.discard_passdown;
+		DMEMIT("%u ", count);
 
 		if (!pool->pf.zero_new_blocks)
 			DMEMIT("skip_block_zeroing ");
+
+		if (!pool->pf.discard_enabled)
+			DMEMIT("skip_discard ");
+
+		if (!pool->pf.discard_passdown)
+			DMEMIT("skip_discard_passdown");
+
 		break;
 	}
 
