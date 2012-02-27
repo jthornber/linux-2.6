@@ -2346,7 +2346,9 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 			return r;
 
 		/*
-		 * Try to commit to see if that will free up some more space.
+		 * If we're in the middle of a transaction the free block
+		 * counts can be quite out of date, so we do a quick
+		 * commit.
 		 */
 		r = dm_pool_commit_metadata(pool->pmd);
 		if (r)
