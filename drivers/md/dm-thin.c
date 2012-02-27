@@ -73,7 +73,7 @@
  * missed out if the io covers the block. (schedule_copy).
  *
  * iv) insert the new mapping into the origin's btree
- * (process_prepared_mappings).  This act of inserting breaks some
+ * (process_prepared_mapping).  This act of inserting breaks some
  * sharing of btree nodes between the two devices.  Breaking sharing only
  * effects the btree of that specific device.  Btrees for the other
  * devices that share the block never change.  The btree for the origin
@@ -901,7 +901,7 @@ static void process_prepared_discard(struct new_mapping *m)
 
 	r = dm_thin_remove_block(tc->td, m->virt_block);
 	if (r)
-		DMERR("dm_thin_metadata_remove() failed");
+		DMERR("dm_thin_remove_block() failed");
 
 	/*
 	 * Pass the discard down to the underlying device?
@@ -1480,10 +1480,8 @@ static void process_deferred_bios(struct pool *pool)
 	}
 	pool->last_commit_jiffies = jiffies;
 
-	while ((bio = bio_list_pop(&bios))) {
-		BUG_ON(bio->bi_next);
+	while ((bio = bio_list_pop(&bios)))
 		generic_make_request(bio);
-	}
 }
 
 static void do_worker(struct work_struct *ws)
