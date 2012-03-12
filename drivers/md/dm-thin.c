@@ -2662,6 +2662,7 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	ssize_t sz = 0;
 	dm_block_t mapped, highest;
 	char buf[BDEVNAME_SIZE];
+	char buf2[BDEVNAME_SIZE];
 	struct thin_c *tc = ti->private;
 
 	if (!tc->td)
@@ -2689,6 +2690,8 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 			DMEMIT("%s %lu",
 			       format_dev_t(buf, tc->pool_dev->bdev->bd_dev),
 			       (unsigned long) tc->dev_id);
+			if (tc->origin_dev)
+				DMEMIT(" %s", format_dev_t(buf2, tc->origin_dev->bdev->bd_dev));
 			break;
 		}
 	}
