@@ -222,8 +222,8 @@ i) Constructor
 
     Optional feature arguments:
     - 'skip_block_zeroing': skips the zeroing of newly-provisioned blocks.
-      'skip_discard': disable discard support
-      'skip_discard_passdown': don't pass discards down to the underlying data device
+      'ignore_discard': disable discard support
+      'no_discard_passdown': don't pass discards down to the underlying data device
 
     Data block size must be between 64KB (128 sectors) and 1GB
     (2097152 sectors) inclusive.

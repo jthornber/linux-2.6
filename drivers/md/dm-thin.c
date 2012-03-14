@@ -1868,10 +1868,10 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 		if (!strcasecmp(arg_name, "skip_block_zeroing")) {
 			pf->zero_new_blocks = 0;
 			continue;
-		} else if (!strcasecmp(arg_name, "skip_discard")) {
+		} else if (!strcasecmp(arg_name, "ignore_discard")) {
 			pf->discard_enabled = 0;
 			continue;
-		} else if (!strcasecmp(arg_name, "skip_discard_passdown")) {
+		} else if (!strcasecmp(arg_name, "no_discard_passdown")) {
 			pf->discard_passdown = 0;
 			continue;
 		}
@@ -1891,8 +1891,8 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
  *
  * Optional feature arguments are:
  *	     skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
- *           skip_discard: disable discard
- *           skip_discard_passdown: don't pass discards down to the data device
+ *           ignore_discard: disable discard
+ *           no_discard_passdown: don't pass discards down to the data device
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
