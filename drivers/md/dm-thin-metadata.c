@@ -791,9 +791,9 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 }
 
 /*
- * __open_device: lookup @td if already open, allocate @td on first open.
- * on success, return @td with an incremented reference count.
- * on failure, @td is not initialized.
+ * __open_device: Returns @td corresponding to device with id @dev,
+ * creating it if @create is set and incrementing @td->open_count.
+ * On failure, @td is undefined.
  */
 static int __open_device(struct dm_pool_metadata *pmd,
 			 dm_thin_id dev, int create,
@@ -805,17 +805,16 @@ static int __open_device(struct dm_pool_metadata *pmd,
 	struct disk_device_details details_le;
 
 	/*
-	 * Check the device isn't already open.
+	 * If the device is already open, return it.
 	 */
 	list_for_each_entry(td2, &pmd->thin_devices, list)
 		if (td2->id == dev) {
-			if (create) {
-				/*
-				 * inconsistency if looking to create
-				 * an already open device.
-				 */
-				return -EINVAL;
-			}
+			/*
+			 * May not create an already-open device.
+			 */
+			if (create)
+				return -EEXIST;
+
 			td2->open_count++;
 			*td = td2;
 			return 0;
@@ -831,7 +830,7 @@ static int __open_device(struct dm_pool_metadata *pmd,
 			return r;
 
 		/*
-		 * Open is for device creation.
+		 * Create new device.
 		 */
 		changed = 1;
 		details_le.mapped_blocks = 0;
@@ -981,12 +980,11 @@ static int __create_snap(struct dm_pool_metadata *pmd,
 		goto bad;
 
 	r = __set_snapshot_details(pmd, td, origin, pmd->time);
-	if (r) {
-		__close_device(td);
-		goto bad;
-	}
-
 	__close_device(td);
+
+	if (r)
+		goto bad;
+
 	return 0;
 
 bad:
