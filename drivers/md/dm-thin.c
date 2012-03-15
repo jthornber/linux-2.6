@@ -2305,6 +2305,15 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
+		/*
+		 * If we're in the middle of a transaction the free block
+		 * counts can be quite out of date, so we do a quick
+		 * commit.
+		 */
+		r = dm_pool_commit_metadata(pool->pmd);
+		if (r)
+			return r;
+
 		r = dm_pool_get_free_metadata_block_count(pool->pmd,
 							  &nr_free_blocks_metadata);
 		if (r)
