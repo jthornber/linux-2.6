@@ -167,6 +167,38 @@ ii) Using an internal snapshot.
 
     dmsetup create snap --table "0 2097152 thin /dev/mapper/pool 1"
 
+External snapshots
+------------------
+
+You can use an external, _read only_, device as an origin for a thin
+device.  Any read to an unprovisioned area of the thin device will be
+passed through to the origin.  Writes trigger allocation of new blocks
+as usual.
+
+One possible use case for this would be VM hosts who want to run
+guests on thinp volumes, but have the base image on another device
+(possibly shared between many VMs).
+
+You must not write to the origin device if you use this technique!  Of
+course you can write to the thin device, and take internal snapshots
+of the thin.
+
+i) Creating an external snapshot
+
+  Same as creating a thin device.  You don't need to mention the
+  origin at this stage.
+
+    dmsetup message /dev/mapper/pool 0 "create_thin 0"
+
+ii) Using an external snapshot.
+
+  Add an extra parameter to the thin target specifying the origin:
+
+    dmsetup create snap --table "0 2097152 thin /dev/mapper/pool 0 /dev/image"
+
+  All descendants (internal snapshots) of an external snapshot will
+  need the extra origin argument.
+
 Deactivation
 ------------
 
@@ -252,7 +284,7 @@ iii) Messages
 
 i) Constructor
 
-    thin <pool dev> <dev id>
+    thin <pool dev> <dev id> [external origin id]
 
     pool dev:
 	the thin-pool device, e.g. /dev/mapper/my_pool or 253:0
@@ -260,6 +292,10 @@ i) Constructor
     dev id:
 	the internal device identifier of the device to be
 	activated.
+
+    external origin dev:
+        a block device; reads to unprovisioned areas of the thin target
+        will be mapped to here.
 
 The pool doesn't store any size against the thin devices.  If you
 load a thin target that is smaller than you've been using previously,
