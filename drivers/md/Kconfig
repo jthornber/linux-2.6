@@ -216,6 +216,12 @@ config DM_BUFIO
 	 as a cache, holding recently-read blocks in memory and performing
 	 delayed writes.
 
+config DM_PRISON
+       tristate
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       ---help---
+         Some locking schemes use in a couple of the targets.
+
 source "drivers/md/persistent-data/Kconfig"
 
 config DM_CRYPT
@@ -247,6 +253,7 @@ config DM_THIN_PROVISIONING
        tristate "Thin provisioning target (EXPERIMENTAL)"
        depends on BLK_DEV_DM && EXPERIMENTAL
        select DM_PERSISTENT_DATA
+       select DM_PRISON
        ---help---
          Provides thin provisioning and snapshots that share a data store.
 
@@ -268,6 +275,14 @@ config DM_DEBUG_SPACE_MAPS
 	  space maps used by thin provisioning.
 
           If unsure, say N.
+
+config DM_CACHE
+       tristate "Cache target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       select DM_PERSISTENT_DATA
+       select DM_PRISON
+       ---help---
+         Use and SSD to speed up a slower device.
 
 config DM_MIRROR
        tristate "Mirror target"
