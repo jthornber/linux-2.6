@@ -826,7 +826,7 @@ static int __init lp5523_init_engine(struct lp5523_engine *engine, int id)
 	return 0;
 }
 
-static int __init lp5523_init_led(struct lp5523_led *led, struct device *dev,
+static int __devinit lp5523_init_led(struct lp5523_led *led, struct device *dev,
 			   int chan, struct lp5523_platform_data *pdata)
 {
 	char name[32];
@@ -870,9 +870,7 @@ static int __init lp5523_init_led(struct lp5523_led *led, struct device *dev,
 	return 0;
 }
 
-static struct i2c_driver lp5523_driver;
-
-static int lp5523_probe(struct i2c_client *client,
+static int __devinit lp5523_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct lp5523_chip		*chip;
@@ -1021,25 +1019,7 @@ static struct i2c_driver lp5523_driver = {
 	.id_table	= lp5523_id,
 };
 
-static int __init lp5523_init(void)
-{
-	int ret;
-
-	ret = i2c_add_driver(&lp5523_driver);
-
-	if (ret < 0)
-		printk(KERN_ALERT "Adding lp5523 driver failed\n");
-
-	return ret;
-}
-
-static void __exit lp5523_exit(void)
-{
-	i2c_del_driver(&lp5523_driver);
-}
-
-module_init(lp5523_init);
-module_exit(lp5523_exit);
+module_i2c_driver(lp5523_driver);
 
 MODULE_AUTHOR("Mathias Nyman <mathias.nyman@nokia.com>");
 MODULE_DESCRIPTION("LP5523 LED engine");

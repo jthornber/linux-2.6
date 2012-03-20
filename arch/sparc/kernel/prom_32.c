@@ -20,7 +20,6 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/bootmem.h>
-#include <linux/module.h>
 
 #include <asm/prom.h>
 #include <asm/oplib.h>
@@ -326,7 +325,6 @@ void __init of_console_init(void)
 			of_console_options = NULL;
 	}
 
-	prom_printf(msg, of_console_path);
 	printk(msg, of_console_path);
 }
 

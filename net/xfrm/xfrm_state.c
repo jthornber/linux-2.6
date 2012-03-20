@@ -1035,16 +1035,12 @@ static struct xfrm_state *__find_acq_core(struct net *net, struct xfrm_mark *m,
 			break;
 
 		case AF_INET6:
-			ipv6_addr_copy((struct in6_addr *)x->sel.daddr.a6,
-				       (const struct in6_addr *)daddr);
-			ipv6_addr_copy((struct in6_addr *)x->sel.saddr.a6,
-				       (const struct in6_addr *)saddr);
+			*(struct in6_addr *)x->sel.daddr.a6 = *(struct in6_addr *)daddr;
+			*(struct in6_addr *)x->sel.saddr.a6 = *(struct in6_addr *)saddr;
 			x->sel.prefixlen_d = 128;
 			x->sel.prefixlen_s = 128;
-			ipv6_addr_copy((struct in6_addr *)x->props.saddr.a6,
-				       (const struct in6_addr *)saddr);
-			ipv6_addr_copy((struct in6_addr *)x->id.daddr.a6,
-				       (const struct in6_addr *)daddr);
+			*(struct in6_addr *)x->props.saddr.a6 = *(struct in6_addr *)saddr;
+			*(struct in6_addr *)x->id.daddr.a6 = *(struct in6_addr *)daddr;
 			break;
 		}
 
@@ -1345,6 +1341,8 @@ out:
 			xfrm_state_check_expire(x1);
 
 		err = 0;
+		x->km.state = XFRM_STATE_DEAD;
+		__xfrm_state_put(x);
 	}
 	spin_unlock_bh(&x1->lock);
 

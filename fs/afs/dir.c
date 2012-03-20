@@ -28,9 +28,9 @@ static int afs_d_delete(const struct dentry *dentry);
 static void afs_d_release(struct dentry *dentry);
 static int afs_lookup_filldir(void *_cookie, const char *name, int nlen,
 				  loff_t fpos, u64 ino, unsigned dtype);
-static int afs_create(struct inode *dir, struct dentry *dentry, int mode,
+static int afs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 		      struct nameidata *nd);
-static int afs_mkdir(struct inode *dir, struct dentry *dentry, int mode);
+static int afs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
 static int afs_rmdir(struct inode *dir, struct dentry *dentry);
 static int afs_unlink(struct inode *dir, struct dentry *dentry);
 static int afs_link(struct dentry *from, struct inode *dir,
@@ -584,11 +584,11 @@ static struct dentry *afs_lookup(struct inode *dir, struct dentry *dentry,
 
 success:
 	d_add(dentry, inode);
-	_leave(" = 0 { vn=%u u=%u } -> { ino=%lu v=%llu }",
+	_leave(" = 0 { vn=%u u=%u } -> { ino=%lu v=%u }",
 	       fid.vnode,
 	       fid.unique,
 	       dentry->d_inode->i_ino,
-	       (unsigned long long)dentry->d_inode->i_version);
+	       dentry->d_inode->i_generation);
 
 	return NULL;
 }
@@ -671,10 +671,10 @@ static int afs_d_revalidate(struct dentry *dentry, struct nameidata *nd)
 		 * been deleted and replaced, and the original vnode ID has
 		 * been reused */
 		if (fid.unique != vnode->fid.unique) {
-			_debug("%s: file deleted (uq %u -> %u I:%llu)",
+			_debug("%s: file deleted (uq %u -> %u I:%u)",
 			       dentry->d_name.name, fid.unique,
 			       vnode->fid.unique,
-			       (unsigned long long)dentry->d_inode->i_version);
+			       dentry->d_inode->i_generation);
 			spin_lock(&vnode->lock);
 			set_bit(AFS_VNODE_DELETED, &vnode->flags);
 			spin_unlock(&vnode->lock);
@@ -764,7 +764,7 @@ static void afs_d_release(struct dentry *dentry)
 /*
  * create a directory on an AFS filesystem
  */
-static int afs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+static int afs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	struct afs_file_status status;
 	struct afs_callback cb;
@@ -777,7 +777,7 @@ static int afs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 
 	dvnode = AFS_FS_I(dir);
 
-	_enter("{%x:%u},{%s},%o",
+	_enter("{%x:%u},{%s},%ho",
 	       dvnode->fid.vid, dvnode->fid.vnode, dentry->d_name.name, mode);
 
 	ret = -ENAMETOOLONG;
@@ -948,7 +948,7 @@ error:
 /*
  * create a regular file on an AFS filesystem
  */
-static int afs_create(struct inode *dir, struct dentry *dentry, int mode,
+static int afs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 		      struct nameidata *nd)
 {
 	struct afs_file_status status;
@@ -962,7 +962,7 @@ static int afs_create(struct inode *dir, struct dentry *dentry, int mode,
 
 	dvnode = AFS_FS_I(dir);
 
-	_enter("{%x:%u},{%s},%o,",
+	_enter("{%x:%u},{%s},%ho,",
 	       dvnode->fid.vid, dvnode->fid.vnode, dentry->d_name.name, mode);
 
 	ret = -ENAMETOOLONG;

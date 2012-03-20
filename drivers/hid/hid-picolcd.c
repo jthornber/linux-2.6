@@ -36,6 +36,7 @@
 
 #include <linux/completion.h>
 #include <linux/uaccess.h>
+#include <linux/module.h>
 
 #define PICOLCD_NAME "PicoLCD (graphic)"
 
@@ -632,7 +633,7 @@ struct picolcd_fb_cleanup_item {
 	struct picolcd_fb_cleanup_item *next;
 };
 static struct picolcd_fb_cleanup_item *fb_pending;
-DEFINE_SPINLOCK(fb_pending_lock);
+static DEFINE_SPINLOCK(fb_pending_lock);
 
 static void picolcd_fb_do_cleanup(struct work_struct *data)
 {
@@ -657,7 +658,7 @@ static void picolcd_fb_do_cleanup(struct work_struct *data)
 	} while (item);
 }
 
-DECLARE_WORK(picolcd_fb_cleanup, picolcd_fb_do_cleanup);
+static DECLARE_WORK(picolcd_fb_cleanup, picolcd_fb_do_cleanup);
 
 static int picolcd_fb_open(struct fb_info *info, int u)
 {
@@ -1585,11 +1586,11 @@ static ssize_t picolcd_debug_eeprom_write(struct file *f, const char __user *u,
 	memset(raw_data, 0, sizeof(raw_data));
 	raw_data[0] = *off & 0xff;
 	raw_data[1] = (*off >> 8) & 0xff;
-	raw_data[2] = s < 20 ? s : 20;
+	raw_data[2] = min((size_t)20, s);
 	if (*off + raw_data[2] > 0xff)
 		raw_data[2] = 0x100 - *off;
 
-	if (copy_from_user(raw_data+3, u, raw_data[2]))
+	if (copy_from_user(raw_data+3, u, min((u8)20, raw_data[2])))
 		return -EFAULT;
 	resp = picolcd_send_and_wait(data->hdev, REPORT_EE_WRITE, raw_data,
 			sizeof(raw_data));
@@ -2409,7 +2410,7 @@ static int picolcd_raw_event(struct hid_device *hdev,
 #ifdef CONFIG_PM
 static int picolcd_suspend(struct hid_device *hdev, pm_message_t message)
 {
-	if (message.event & PM_EVENT_AUTO)
+	if (PMSG_IS_AUTO(message))
 		return 0;
 
 	picolcd_suspend_backlight(hid_get_drvdata(hdev));

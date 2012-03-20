@@ -12,8 +12,11 @@ adis16130-y             := adis16130_core.o
 obj-$(CONFIG_ADIS16130) += adis16130.o
 
 adis16260-y             := adis16260_core.o
-adis16260-$(CONFIG_IIO_RING_BUFFER) += adis16260_ring.o adis16260_trigger.o
+adis16260-$(CONFIG_IIO_BUFFER) += adis16260_ring.o adis16260_trigger.o
 obj-$(CONFIG_ADIS16260) += adis16260.o
 
 adis16251-y             := adis16251_core.o
 obj-$(CONFIG_ADIS16251) += adis16251.o
+
+adxrs450-y             := adxrs450_core.o
+obj-$(CONFIG_ADXRS450) += adxrs450.o

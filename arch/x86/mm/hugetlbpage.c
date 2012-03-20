@@ -72,7 +72,7 @@ static void huge_pmd_share(struct mm_struct *mm, unsigned long addr, pud_t *pud)
 	if (!vma_shareable(vma, addr))
 		return;
 
-	spin_lock(&mapping->i_mmap_lock);
+	mutex_lock(&mapping->i_mmap_mutex);
 	vma_prio_tree_foreach(svma, &iter, &mapping->i_mmap, idx, idx) {
 		if (svma == vma)
 			continue;
@@ -97,7 +97,7 @@ static void huge_pmd_share(struct mm_struct *mm, unsigned long addr, pud_t *pud)
 		put_page(virt_to_page(spte));
 	spin_unlock(&mm->page_table_lock);
 out:
-	spin_unlock(&mapping->i_mmap_lock);
+	mutex_unlock(&mapping->i_mmap_mutex);
 }
 
 /*
@@ -333,13 +333,15 @@ try_again:
 		 * Lookup failure means no vma is above this address,
 		 * i.e. return with success:
 		 */
-		if (!(vma = find_vma_prev(mm, addr, &prev_vma)))
+		vma = find_vma(mm, addr);
+		if (!vma)
 			return addr;
 
 		/*
 		 * new region fits between prev_vma->vm_end and
 		 * vma->vm_start, use it:
 		 */
+		prev_vma = vma->vm_prev;
 		if (addr + len <= vma->vm_start &&
 		            (!prev_vma || (addr >= prev_vma->vm_end))) {
 			/* remember the address as a hint for next time */

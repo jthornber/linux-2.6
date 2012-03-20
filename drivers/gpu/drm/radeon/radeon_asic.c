@@ -138,14 +138,18 @@ static struct radeon_asic r100_asic = {
 	.asic_reset = &r100_asic_reset,
 	.gart_tlb_flush = &r100_pci_gart_tlb_flush,
 	.gart_set_page = &r100_pci_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r100_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r100_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r100_irq_set,
 	.irq_process = &r100_irq_process,
 	.get_vblank_counter = &r100_get_vblank_counter,
-	.fence_ring_emit = &r100_fence_ring_emit,
 	.cs_parse = &r100_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = NULL,
@@ -186,14 +190,18 @@ static struct radeon_asic r200_asic = {
 	.asic_reset = &r100_asic_reset,
 	.gart_tlb_flush = &r100_pci_gart_tlb_flush,
 	.gart_set_page = &r100_pci_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r100_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r100_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r100_irq_set,
 	.irq_process = &r100_irq_process,
 	.get_vblank_counter = &r100_get_vblank_counter,
-	.fence_ring_emit = &r100_fence_ring_emit,
 	.cs_parse = &r100_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -233,14 +241,18 @@ static struct radeon_asic r300_asic = {
 	.asic_reset = &r300_asic_reset,
 	.gart_tlb_flush = &r100_pci_gart_tlb_flush,
 	.gart_set_page = &r100_pci_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r300_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r100_irq_set,
 	.irq_process = &r100_irq_process,
 	.get_vblank_counter = &r100_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -281,14 +293,18 @@ static struct radeon_asic r300_asic_pcie = {
 	.asic_reset = &r300_asic_reset,
 	.gart_tlb_flush = &rv370_pcie_gart_tlb_flush,
 	.gart_set_page = &rv370_pcie_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r300_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r100_irq_set,
 	.irq_process = &r100_irq_process,
 	.get_vblank_counter = &r100_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -328,14 +344,18 @@ static struct radeon_asic r420_asic = {
 	.asic_reset = &r300_asic_reset,
 	.gart_tlb_flush = &rv370_pcie_gart_tlb_flush,
 	.gart_set_page = &rv370_pcie_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r300_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r100_irq_set,
 	.irq_process = &r100_irq_process,
 	.get_vblank_counter = &r100_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -376,14 +396,18 @@ static struct radeon_asic rs400_asic = {
 	.asic_reset = &r300_asic_reset,
 	.gart_tlb_flush = &rs400_gart_tlb_flush,
 	.gart_set_page = &rs400_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r300_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r100_irq_set,
 	.irq_process = &r100_irq_process,
 	.get_vblank_counter = &r100_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -424,14 +448,18 @@ static struct radeon_asic rs600_asic = {
 	.asic_reset = &rs600_asic_reset,
 	.gart_tlb_flush = &rs600_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r300_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &rs600_irq_set,
 	.irq_process = &rs600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -472,14 +500,18 @@ static struct radeon_asic rs690_asic = {
 	.asic_reset = &rs600_asic_reset,
 	.gart_tlb_flush = &rs400_gart_tlb_flush,
 	.gart_set_page = &rs400_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &r300_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &rs600_irq_set,
 	.irq_process = &rs600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -520,14 +552,18 @@ static struct radeon_asic rv515_asic = {
 	.asic_reset = &rs600_asic_reset,
 	.gart_tlb_flush = &rv370_pcie_gart_tlb_flush,
 	.gart_set_page = &rv370_pcie_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &rv515_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &rs600_irq_set,
 	.irq_process = &rs600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -568,14 +604,18 @@ static struct radeon_asic r520_asic = {
 	.asic_reset = &rs600_asic_reset,
 	.gart_tlb_flush = &rv370_pcie_gart_tlb_flush,
 	.gart_set_page = &rv370_pcie_gart_set_page,
-	.cp_commit = &r100_cp_commit,
 	.ring_start = &rv515_ring_start,
 	.ring_test = &r100_ring_test,
-	.ring_ib_execute = &r100_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r100_ring_ib_execute,
+			.emit_fence = &r300_fence_ring_emit,
+			.emit_semaphore = &r100_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &rs600_irq_set,
 	.irq_process = &rs600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r300_fence_ring_emit,
 	.cs_parse = &r300_cs_parse,
 	.copy_blit = &r100_copy_blit,
 	.copy_dma = &r200_copy_dma,
@@ -611,21 +651,25 @@ static struct radeon_asic r600_asic = {
 	.fini = &r600_fini,
 	.suspend = &r600_suspend,
 	.resume = &r600_resume,
-	.cp_commit = &r600_cp_commit,
 	.vga_set_state = &r600_vga_set_state,
 	.gpu_is_lockup = &r600_gpu_is_lockup,
 	.asic_reset = &r600_asic_reset,
 	.gart_tlb_flush = &r600_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &r600_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r600_ring_ib_execute,
+			.emit_fence = &r600_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r600_irq_set,
 	.irq_process = &r600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &r600_cs_parse,
 	.copy_blit = &r600_copy_blit,
-	.copy_dma = &r600_copy_blit,
+	.copy_dma = NULL,
 	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
@@ -658,21 +702,25 @@ static struct radeon_asic rs780_asic = {
 	.fini = &r600_fini,
 	.suspend = &r600_suspend,
 	.resume = &r600_resume,
-	.cp_commit = &r600_cp_commit,
 	.gpu_is_lockup = &r600_gpu_is_lockup,
 	.vga_set_state = &r600_vga_set_state,
 	.asic_reset = &r600_asic_reset,
 	.gart_tlb_flush = &r600_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &r600_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r600_ring_ib_execute,
+			.emit_fence = &r600_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r600_irq_set,
 	.irq_process = &r600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &r600_cs_parse,
 	.copy_blit = &r600_copy_blit,
-	.copy_dma = &r600_copy_blit,
+	.copy_dma = NULL,
 	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
@@ -705,21 +753,25 @@ static struct radeon_asic rv770_asic = {
 	.fini = &rv770_fini,
 	.suspend = &rv770_suspend,
 	.resume = &rv770_resume,
-	.cp_commit = &r600_cp_commit,
 	.asic_reset = &r600_asic_reset,
 	.gpu_is_lockup = &r600_gpu_is_lockup,
 	.vga_set_state = &r600_vga_set_state,
 	.gart_tlb_flush = &r600_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &r600_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &r600_ring_ib_execute,
+			.emit_fence = &r600_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &r600_irq_set,
 	.irq_process = &r600_irq_process,
 	.get_vblank_counter = &rs600_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &r600_cs_parse,
 	.copy_blit = &r600_copy_blit,
-	.copy_dma = &r600_copy_blit,
+	.copy_dma = NULL,
 	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
@@ -752,22 +804,26 @@ static struct radeon_asic evergreen_asic = {
 	.fini = &evergreen_fini,
 	.suspend = &evergreen_suspend,
 	.resume = &evergreen_resume,
-	.cp_commit = &r600_cp_commit,
 	.gpu_is_lockup = &evergreen_gpu_is_lockup,
 	.asic_reset = &evergreen_asic_reset,
 	.vga_set_state = &r600_vga_set_state,
 	.gart_tlb_flush = &evergreen_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &evergreen_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &evergreen_ring_ib_execute,
+			.emit_fence = &r600_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &evergreen_irq_set,
 	.irq_process = &evergreen_irq_process,
 	.get_vblank_counter = &evergreen_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &evergreen_cs_parse,
-	.copy_blit = &evergreen_copy_blit,
-	.copy_dma = &evergreen_copy_blit,
-	.copy = &evergreen_copy_blit,
+	.copy_blit = &r600_copy_blit,
+	.copy_dma = NULL,
+	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
 	.get_memory_clock = &radeon_atom_get_memory_clock,
@@ -782,6 +838,7 @@ static struct radeon_asic evergreen_asic = {
 	.hpd_fini = &evergreen_hpd_fini,
 	.hpd_sense = &evergreen_hpd_sense,
 	.hpd_set_polarity = &evergreen_hpd_set_polarity,
+	.ioctl_wait_idle = r600_ioctl_wait_idle,
 	.gui_idle = &r600_gui_idle,
 	.pm_misc = &evergreen_pm_misc,
 	.pm_prepare = &evergreen_pm_prepare,
@@ -798,22 +855,26 @@ static struct radeon_asic sumo_asic = {
 	.fini = &evergreen_fini,
 	.suspend = &evergreen_suspend,
 	.resume = &evergreen_resume,
-	.cp_commit = &r600_cp_commit,
 	.gpu_is_lockup = &evergreen_gpu_is_lockup,
 	.asic_reset = &evergreen_asic_reset,
 	.vga_set_state = &r600_vga_set_state,
 	.gart_tlb_flush = &evergreen_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &evergreen_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &evergreen_ring_ib_execute,
+			.emit_fence = &r600_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &evergreen_irq_set,
 	.irq_process = &evergreen_irq_process,
 	.get_vblank_counter = &evergreen_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &evergreen_cs_parse,
-	.copy_blit = &evergreen_copy_blit,
-	.copy_dma = &evergreen_copy_blit,
-	.copy = &evergreen_copy_blit,
+	.copy_blit = &r600_copy_blit,
+	.copy_dma = NULL,
+	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
 	.get_memory_clock = NULL,
@@ -828,11 +889,12 @@ static struct radeon_asic sumo_asic = {
 	.hpd_fini = &evergreen_hpd_fini,
 	.hpd_sense = &evergreen_hpd_sense,
 	.hpd_set_polarity = &evergreen_hpd_set_polarity,
+	.ioctl_wait_idle = r600_ioctl_wait_idle,
 	.gui_idle = &r600_gui_idle,
 	.pm_misc = &evergreen_pm_misc,
 	.pm_prepare = &evergreen_pm_prepare,
 	.pm_finish = &evergreen_pm_finish,
-	.pm_init_profile = &rs780_pm_init_profile,
+	.pm_init_profile = &sumo_pm_init_profile,
 	.pm_get_dynpm_state = &r600_pm_get_dynpm_state,
 	.pre_page_flip = &evergreen_pre_page_flip,
 	.page_flip = &evergreen_page_flip,
@@ -844,22 +906,26 @@ static struct radeon_asic btc_asic = {
 	.fini = &evergreen_fini,
 	.suspend = &evergreen_suspend,
 	.resume = &evergreen_resume,
-	.cp_commit = &r600_cp_commit,
 	.gpu_is_lockup = &evergreen_gpu_is_lockup,
 	.asic_reset = &evergreen_asic_reset,
 	.vga_set_state = &r600_vga_set_state,
 	.gart_tlb_flush = &evergreen_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &evergreen_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &evergreen_ring_ib_execute,
+			.emit_fence = &r600_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &evergreen_irq_set,
 	.irq_process = &evergreen_irq_process,
 	.get_vblank_counter = &evergreen_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &evergreen_cs_parse,
-	.copy_blit = &evergreen_copy_blit,
-	.copy_dma = &evergreen_copy_blit,
-	.copy = &evergreen_copy_blit,
+	.copy_blit = &r600_copy_blit,
+	.copy_dma = NULL,
+	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
 	.get_memory_clock = &radeon_atom_get_memory_clock,
@@ -874,6 +940,7 @@ static struct radeon_asic btc_asic = {
 	.hpd_fini = &evergreen_hpd_fini,
 	.hpd_sense = &evergreen_hpd_sense,
 	.hpd_set_polarity = &evergreen_hpd_set_polarity,
+	.ioctl_wait_idle = r600_ioctl_wait_idle,
 	.gui_idle = &r600_gui_idle,
 	.pm_misc = &evergreen_pm_misc,
 	.pm_prepare = &evergreen_pm_prepare,
@@ -885,27 +952,54 @@ static struct radeon_asic btc_asic = {
 	.post_page_flip = &evergreen_post_page_flip,
 };
 
+static const struct radeon_vm_funcs cayman_vm_funcs = {
+	.init = &cayman_vm_init,
+	.fini = &cayman_vm_fini,
+	.bind = &cayman_vm_bind,
+	.unbind = &cayman_vm_unbind,
+	.tlb_flush = &cayman_vm_tlb_flush,
+	.page_flags = &cayman_vm_page_flags,
+	.set_page = &cayman_vm_set_page,
+};
+
 static struct radeon_asic cayman_asic = {
 	.init = &cayman_init,
 	.fini = &cayman_fini,
 	.suspend = &cayman_suspend,
 	.resume = &cayman_resume,
-	.cp_commit = &r600_cp_commit,
 	.gpu_is_lockup = &cayman_gpu_is_lockup,
 	.asic_reset = &cayman_asic_reset,
 	.vga_set_state = &r600_vga_set_state,
 	.gart_tlb_flush = &cayman_pcie_gart_tlb_flush,
 	.gart_set_page = &rs600_gart_set_page,
 	.ring_test = &r600_ring_test,
-	.ring_ib_execute = &evergreen_ring_ib_execute,
+	.ring = {
+		[RADEON_RING_TYPE_GFX_INDEX] = {
+			.ib_execute = &cayman_ring_ib_execute,
+			.ib_parse = &evergreen_ib_parse,
+			.emit_fence = &cayman_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		},
+		[CAYMAN_RING_TYPE_CP1_INDEX] = {
+			.ib_execute = &cayman_ring_ib_execute,
+			.ib_parse = &evergreen_ib_parse,
+			.emit_fence = &cayman_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		},
+		[CAYMAN_RING_TYPE_CP2_INDEX] = {
+			.ib_execute = &cayman_ring_ib_execute,
+			.ib_parse = &evergreen_ib_parse,
+			.emit_fence = &cayman_fence_ring_emit,
+			.emit_semaphore = &r600_semaphore_ring_emit,
+		}
+	},
 	.irq_set = &evergreen_irq_set,
 	.irq_process = &evergreen_irq_process,
 	.get_vblank_counter = &evergreen_get_vblank_counter,
-	.fence_ring_emit = &r600_fence_ring_emit,
 	.cs_parse = &evergreen_cs_parse,
-	.copy_blit = NULL,
+	.copy_blit = &r600_copy_blit,
 	.copy_dma = NULL,
-	.copy = NULL,
+	.copy = &r600_copy_blit,
 	.get_engine_clock = &radeon_atom_get_engine_clock,
 	.set_engine_clock = &radeon_atom_set_engine_clock,
 	.get_memory_clock = &radeon_atom_get_memory_clock,
@@ -920,6 +1014,7 @@ static struct radeon_asic cayman_asic = {
 	.hpd_fini = &evergreen_hpd_fini,
 	.hpd_sense = &evergreen_hpd_sense,
 	.hpd_set_polarity = &evergreen_hpd_set_polarity,
+	.ioctl_wait_idle = r600_ioctl_wait_idle,
 	.gui_idle = &r600_gui_idle,
 	.pm_misc = &evergreen_pm_misc,
 	.pm_prepare = &evergreen_pm_prepare,
@@ -934,6 +1029,16 @@ static struct radeon_asic cayman_asic = {
 int radeon_asic_init(struct radeon_device *rdev)
 {
 	radeon_register_accessor_init(rdev);
+
+	/* set the number of crtcs */
+	if (rdev->flags & RADEON_SINGLE_CRTC)
+		rdev->num_crtc = 1;
+	else
+		rdev->num_crtc = 2;
+
+	/* set the ring used for bo copies */
+	rdev->copy_ring = RADEON_RING_TYPE_GFX_INDEX;
+
 	switch (rdev->family) {
 	case CHIP_R100:
 	case CHIP_RV100:
@@ -1013,18 +1118,33 @@ int radeon_asic_init(struct radeon_device *rdev)
 	case CHIP_JUNIPER:
 	case CHIP_CYPRESS:
 	case CHIP_HEMLOCK:
+		/* set num crtcs */
+		if (rdev->family == CHIP_CEDAR)
+			rdev->num_crtc = 4;
+		else
+			rdev->num_crtc = 6;
 		rdev->asic = &evergreen_asic;
 		break;
 	case CHIP_PALM:
+	case CHIP_SUMO:
+	case CHIP_SUMO2:
 		rdev->asic = &sumo_asic;
 		break;
 	case CHIP_BARTS:
 	case CHIP_TURKS:
 	case CHIP_CAICOS:
+		/* set num crtcs */
+		if (rdev->family == CHIP_CAICOS)
+			rdev->num_crtc = 4;
+		else
+			rdev->num_crtc = 6;
 		rdev->asic = &btc_asic;
 		break;
 	case CHIP_CAYMAN:
 		rdev->asic = &cayman_asic;
+		/* set num crtcs */
+		rdev->num_crtc = 6;
+		rdev->vm_manager.funcs = &cayman_vm_funcs;
 		break;
 	default:
 		/* FIXME: not supported yet */
@@ -1034,18 +1154,6 @@ int radeon_asic_init(struct radeon_device *rdev)
 	if (rdev->flags & RADEON_IS_IGP) {
 		rdev->asic->get_memory_clock = NULL;
 		rdev->asic->set_memory_clock = NULL;
-	}
-
-	/* set the number of crtcs */
-	if (rdev->flags & RADEON_SINGLE_CRTC)
-		rdev->num_crtc = 1;
-	else {
-		if (ASIC_IS_DCE41(rdev))
-			rdev->num_crtc = 2;
-		else if (ASIC_IS_DCE4(rdev))
-			rdev->num_crtc = 6;
-		else
-			rdev->num_crtc = 2;
 	}
 
 	return 0;

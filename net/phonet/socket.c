@@ -31,6 +31,7 @@
 #include <net/tcp_states.h>
 
 #include <linux/phonet.h>
+#include <linux/export.h>
 #include <net/phonet/phonet.h>
 #include <net/phonet/pep.h>
 #include <net/phonet/pn_dev.h>
@@ -607,7 +608,7 @@ static int pn_sock_seq_show(struct seq_file *seq, void *v)
 		struct pn_sock *pn = pn_sk(sk);
 
 		seq_printf(seq, "%2d %04X:%04X:%02X %02X %08X:%08X %5d %lu "
-			"%d %p %d%n",
+			"%d %pK %d%n",
 			sk->sk_protocol, pn->sobject, pn->dobject,
 			pn->resource, sk->sk_state,
 			sk_wmem_alloc_get(sk), sk_rmem_alloc_get(sk),
@@ -695,7 +696,7 @@ int pn_sock_unbind_res(struct sock *sk, u8 res)
 
 	mutex_lock(&resource_mutex);
 	if (pnres.sk[res] == sk) {
-		rcu_assign_pointer(pnres.sk[res], NULL);
+		RCU_INIT_POINTER(pnres.sk[res], NULL);
 		ret = 0;
 	}
 	mutex_unlock(&resource_mutex);
@@ -714,7 +715,7 @@ void pn_sock_unbind_all_res(struct sock *sk)
 	mutex_lock(&resource_mutex);
 	for (res = 0; res < 256; res++) {
 		if (pnres.sk[res] == sk) {
-			rcu_assign_pointer(pnres.sk[res], NULL);
+			RCU_INIT_POINTER(pnres.sk[res], NULL);
 			match++;
 		}
 	}

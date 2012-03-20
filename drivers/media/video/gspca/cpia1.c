@@ -26,6 +26,8 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #define MODULE_NAME "cpia1"
 
 #include <linux/input.h>
@@ -550,8 +552,7 @@ retry:
 			      gspca_dev->usb_buf, databytes, 1000);
 
 	if (ret < 0)
-		err("usb_control_msg %02x, error %d", command[1],
-		       ret);
+		pr_err("usb_control_msg %02x, error %d\n", command[1], ret);
 
 	if (ret == -EPIPE && retries > 0) {
 		retries--;
@@ -1262,7 +1263,7 @@ static int set_flicker(struct gspca_dev *gspca_dev, int on, int apply)
 static void monitor_exposure(struct gspca_dev *gspca_dev)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
-	u8 exp_acc, bcomp, gain, coarseL, cmd[8];
+	u8 exp_acc, bcomp, cmd[8];
 	int ret, light_exp, dark_exp, very_dark_exp;
 	int old_exposure, new_exposure, framerate;
 	int setfps = 0, setexp = 0, setflicker = 0;
@@ -1279,13 +1280,11 @@ static void monitor_exposure(struct gspca_dev *gspca_dev)
 	cmd[7] = 0;
 	ret = cpia_usb_transferCmd(gspca_dev, cmd);
 	if (ret) {
-		err("ReadVPRegs(30,4,9,8) - failed: %d", ret);
+		pr_err("ReadVPRegs(30,4,9,8) - failed: %d\n", ret);
 		return;
 	}
 	exp_acc = gspca_dev->usb_buf[0];
 	bcomp = gspca_dev->usb_buf[1];
-	gain = gspca_dev->usb_buf[2];
-	coarseL = gspca_dev->usb_buf[3];
 
 	light_exp = sd->params.colourParams.brightness +
 		    TC - 50 + EXP_ACC_LIGHT;
@@ -1772,9 +1771,7 @@ static void sd_stopN(struct gspca_dev *gspca_dev)
 /* this function is called at probe and resume time */
 static int sd_init(struct gspca_dev *gspca_dev)
 {
-#ifdef GSPCA_DEBUG
 	struct sd *sd = (struct sd *) gspca_dev;
-#endif
 	int ret;
 
 	/* Start / Stop the camera to make sure we are talking to
@@ -2135,15 +2132,4 @@ static struct usb_driver sd_driver = {
 #endif
 };
 
-/* -- module insert / remove -- */
-static int __init sd_mod_init(void)
-{
-	return usb_register(&sd_driver);
-}
-static void __exit sd_mod_exit(void)
-{
-	usb_deregister(&sd_driver);
-}
-
-module_init(sd_mod_init);
-module_exit(sd_mod_exit);
+module_usb_driver(sd_driver);

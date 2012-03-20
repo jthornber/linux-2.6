@@ -21,6 +21,7 @@
 #include <linux/unistd.h>
 #include <linux/security.h>
 #include <linux/timex.h>
+#include <linux/export.h>
 #include <linux/migrate.h>
 #include <linux/posix-timers.h>
 #include <linux/times.h>
@@ -158,6 +159,7 @@ int put_compat_timespec(const struct timespec *ts, struct compat_timespec __user
 			__put_user(ts->tv_sec, &cts->tv_sec) ||
 			__put_user(ts->tv_nsec, &cts->tv_nsec)) ? -EFAULT : 0;
 }
+EXPORT_SYMBOL_GPL(put_compat_timespec);
 
 static long compat_nanosleep_restart(struct restart_block *restart)
 {
@@ -293,6 +295,8 @@ asmlinkage long compat_sys_times(struct compat_tms __user *tbuf)
 	return compat_jiffies_to_clock_t(jiffies);
 }
 
+#ifdef __ARCH_WANT_SYS_SIGPENDING
+
 /*
  * Assumption: old_sigset_t and compat_old_sigset_t are both
  * types that can be passed to put_user()/get_user().
@@ -311,6 +315,10 @@ asmlinkage long compat_sys_sigpending(compat_old_sigset_t __user *set)
 		ret = put_user(s, set);
 	return ret;
 }
+
+#endif
+
+#ifdef __ARCH_WANT_SYS_SIGPROCMASK
 
 asmlinkage long compat_sys_sigprocmask(int how, compat_old_sigset_t __user *set,
 		compat_old_sigset_t __user *oset)
@@ -332,6 +340,8 @@ asmlinkage long compat_sys_sigprocmask(int how, compat_old_sigset_t __user *set,
 			ret = put_user(s, oset);
 	return ret;
 }
+
+#endif
 
 asmlinkage long compat_sys_setrlimit(unsigned int resource,
 		struct compat_rlimit __user *rlim)
@@ -882,6 +892,7 @@ sigset_from_compat (sigset_t *set, compat_sigset_t *compat)
 	case 1: set->sig[0] = compat->sig[0] | (((long)compat->sig[1]) << 32 );
 	}
 }
+EXPORT_SYMBOL_GPL(sigset_from_compat);
 
 asmlinkage long
 compat_sys_rt_sigtimedwait (compat_sigset_t __user *uthese,
@@ -983,11 +994,8 @@ asmlinkage long compat_sys_rt_sigsuspend(compat_sigset_t __user *unewset, compat
 	sigset_from_compat(&newset, &newset32);
 	sigdelsetmask(&newset, sigmask(SIGKILL)|sigmask(SIGSTOP));
 
-	spin_lock_irq(&current->sighand->siglock);
 	current->saved_sigmask = current->blocked;
-	current->blocked = newset;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&newset);
 
 	current->state = TASK_INTERRUPTIBLE;
 	schedule();

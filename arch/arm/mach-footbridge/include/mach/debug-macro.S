@@ -15,7 +15,7 @@
 
 #ifndef CONFIG_DEBUG_DC21285_PORT
 	/* For NetWinder debugging */
-		.macro	addruart, rp, rv
+		.macro	addruart, rp, rv, tmp
 		mov	\rp, #0x000003f8
 		orr	\rv, \rp, #0xff000000	@ virtual
 		orr	\rp, \rp, #0x7c000000	@ physical
@@ -26,18 +26,19 @@
 #include <asm/hardware/debug-8250.S>
 
 #else
+#include <mach/hardware.h>
 	/* For EBSA285 debugging */
 		.equ	dc21285_high, ARMCSR_BASE & 0xff000000
 		.equ	dc21285_low,  ARMCSR_BASE & 0x00ffffff
 
-		.macro	addruart, rp, rv
+		.macro	addruart, rp, rv, tmp
 		.if	dc21285_low
 		mov	\rp, #dc21285_low
 		.else
 		mov	\rp, #0
 		.endif
-		orr	\rv, \rp, #0x42000000
-		orr	\rp, \rp, #dc21285_high
+		orr	\rv, \rp, #dc21285_high
+		orr	\rp, \rp, #0x42000000
 		.endm
 
 		.macro	senduart,rd,rx

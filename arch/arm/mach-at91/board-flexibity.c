@@ -37,10 +37,10 @@
 
 #include "generic.h"
 
-static void __init flexibity_map_io(void)
+static void __init flexibity_init_early(void)
 {
 	/* Initialize processor: 18.432 MHz crystal */
-	at91sam9260_initialize(18432000);
+	at91_initialize(18432000);
 
 	/* DBGU on ttyS0. (Rx & Tx only) */
 	at91_register_uart(0, 0, 0);
@@ -49,20 +49,17 @@ static void __init flexibity_map_io(void)
 	at91_set_serial_console(0);
 }
 
-static void __init flexibity_init_irq(void)
-{
-	at91sam9260_init_interrupts(NULL);
-}
-
 /* USB Host port */
 static struct at91_usbh_data __initdata flexibity_usbh_data = {
 	.ports		= 2,
+	.vbus_pin	= {-EINVAL, -EINVAL},
+	.overcurrent_pin= {-EINVAL, -EINVAL},
 };
 
 /* USB Device port */
 static struct at91_udc_data __initdata flexibity_udc_data = {
 	.vbus_pin	= AT91_PIN_PC5,
-	.pullup_pin	= 0,		/* pull-up driven by UDC */
+	.pullup_pin	= -EINVAL,		/* pull-up driven by UDC */
 };
 
 /* SPI devices */
@@ -81,6 +78,7 @@ static struct at91_mmc_data __initdata flexibity_mmc_data = {
 	.wire4		= 1,
 	.det_pin	= AT91_PIN_PC9,
 	.wp_pin		= AT91_PIN_PC4,
+	.vcc_pin	= -EINVAL,
 };
 
 /* LEDs */
@@ -154,9 +152,9 @@ static void __init flexibity_board_init(void)
 
 MACHINE_START(FLEXIBITY, "Flexibity Connect")
 	/* Maintainer: Maxim Osipov */
-	.boot_params	= AT91_SDRAM_BASE + 0x100,
 	.timer		= &at91sam926x_timer,
-	.map_io		= flexibity_map_io,
-	.init_irq	= flexibity_init_irq,
+	.map_io		= at91_map_io,
+	.init_early	= flexibity_init_early,
+	.init_irq	= at91_init_irq_default,
 	.init_machine	= flexibity_board_init,
 MACHINE_END

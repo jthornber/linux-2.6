@@ -28,7 +28,7 @@
 #include "aerdrv.h"
 
 /* Override the existing corrected and uncorrected error masks */
-static int aer_mask_override;
+static bool aer_mask_override;
 module_param(aer_mask_override, bool, 0);
 
 struct aer_error_inj {
@@ -326,7 +326,7 @@ static int aer_inject(struct aer_error_inj *einj)
 	unsigned long flags;
 	unsigned int devfn = PCI_DEVFN(einj->dev, einj->fn);
 	int pos_cap_err, rp_pos_cap_err;
-	u32 sever, cor_mask, uncor_mask, cor_mask_orig, uncor_mask_orig;
+	u32 sever, cor_mask, uncor_mask, cor_mask_orig = 0, uncor_mask_orig = 0;
 	int ret = 0;
 
 	dev = pci_get_domain_bus_and_slot((int)einj->domain, einj->bus, devfn);

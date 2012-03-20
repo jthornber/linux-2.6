@@ -1,0 +1,41 @@
+* Kernel [2/12]
+
+  - [ ] resize metadata device. [RHEV, 1 week]
+
+  - [ ] Discard support. [1 week]
+
+  - [ ] read-only option on pool target line.
+
+  - [ ] Make snapshot message fail if the origin isn't suspended.
+
+  - [ ] implement the btree trimming.
+
+  - [X] Investigate btree_remove issue in ref_count tree.
+
+  - [ ] atm we only commit metadata when a FUA or FLUSH bio comes in
+        (or when we shutdown).  This allows too big a position to be
+        built up.  We should commit every n seconds, and make this
+        configurable.
+
+  - [X] external origin (read-only)
+
+  - [ ] suspend a consistent, suite of thinps?  How do RHEV do this?
+
+  - [ ] some work needs to be done to verify tearing down thin devices
+        when the pool has run out of space is done cleanly
+
+        (I think this has been done, double check)
+
+  - [ ] a bug found in the userland tools, check that nr_free in the
+        last index entry is being set correctly if there are fewer than a
+        whole blocks worth.  Also check this is extended correctly. [1 hour]
+
+  - [ ] We need to know how many block locks can be held concurrently.
+
+	I think the worst case is:
+
+        3 for insert +
+        2 for lookup in space map to allocate shadow for the insert
+
+        But it would be nice to have a static analysis tool that could
+        check this.

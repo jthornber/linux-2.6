@@ -24,17 +24,23 @@ static DEFINE_SPINLOCK(boot_lock);
 
 void __init platform_init_cpus(void)
 {
-	cpu_set(0, cpu_possible_map); /* CoreA */
-	cpu_set(1, cpu_possible_map); /* CoreB */
+	struct cpumask mask;
+
+	cpumask_set_cpu(0, &mask); /* CoreA */
+	cpumask_set_cpu(1, &mask); /* CoreB */
+	init_cpu_possible(&mask);
 }
 
 void __init platform_prepare_cpus(unsigned int max_cpus)
 {
+	struct cpumask mask;
+
 	bfin_relocate_coreb_l1_mem();
 
 	/* Both cores ought to be present on a bf561! */
-	cpu_set(0, cpu_present_map); /* CoreA */
-	cpu_set(1, cpu_present_map); /* CoreB */
+	cpumask_set_cpu(0, &mask); /* CoreA */
+	cpumask_set_cpu(1, &mask); /* CoreB */
+	init_cpu_present(&mask);
 }
 
 int __init setup_profiling_timer(unsigned int multiplier) /* not supported */
@@ -62,9 +68,6 @@ void __cpuinit platform_secondary_init(unsigned int cpu)
 	bfin_write_SICB_IWR1(IWR_DISABLE_ALL);
 	SSYNC();
 
-	/* Store CPU-private information to the cpu_data array. */
-	bfin_setup_cpudata(cpu);
-
 	/* We are done with local CPU inits, unblock the boot CPU. */
 	set_cpu_online(cpu, true);
 	spin_lock(&boot_lock);
@@ -81,7 +84,7 @@ int __cpuinit platform_boot_secondary(unsigned int cpu, struct task_struct *idle
 
 	if ((bfin_read_SYSCR() & COREB_SRAM_INIT) == 0) {
 		/* CoreB already running, sending ipi to wakeup it */
-		platform_send_ipi_cpu(cpu, IRQ_SUPPLE_0);
+		smp_send_reschedule(cpu);
 	} else {
 		/* Kick CoreB, which should start execution from CORE_SRAM_BASE. */
 		bfin_write_SYSCR(bfin_read_SYSCR() & ~COREB_SRAM_INIT);
@@ -111,7 +114,8 @@ void __init platform_request_ipi(int irq, void *handler)
 	int ret;
 	const char *name = (irq == IRQ_SUPPLE_0) ? supple0 : supple1;
 
-	ret = request_irq(irq, handler, IRQF_DISABLED | IRQF_PERCPU, name, handler);
+	ret = request_irq(irq, handler, IRQF_PERCPU | IRQF_NO_SUSPEND |
+			IRQF_FORCE_RESUME, name, handler);
 	if (ret)
 		panic("Cannot request %s for IPI service", name);
 }

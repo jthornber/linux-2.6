@@ -1,6 +1,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/dma-debug.h>
 #include <linux/dmar.h>
+#include <linux/export.h>
 #include <linux/bootmem.h>
 #include <linux/gfp.h>
 #include <linux/pci.h>
@@ -44,6 +45,15 @@ int iommu_detected __read_mostly = 0;
  */
 int iommu_pass_through __read_mostly;
 
+/*
+ * Group multi-function PCI devices into a single device-group for the
+ * iommu_device_group interface.  This tells the iommu driver to pretend
+ * it cannot distinguish between functions of a device, exposing only one
+ * group for the device.  Useful for disallowing use of individual PCI
+ * functions from userspace drivers.
+ */
+int iommu_group_mf __read_mostly;
+
 extern struct iommu_table_entry __iommu_table[], __iommu_table_end[];
 
 /* Dummy device used for NULL arguments (normally ISA). */
@@ -68,73 +78,9 @@ int dma_set_mask(struct device *dev, u64 mask)
 }
 EXPORT_SYMBOL(dma_set_mask);
 
-#if defined(CONFIG_X86_64) && !defined(CONFIG_NUMA)
-static __initdata void *dma32_bootmem_ptr;
-static unsigned long dma32_bootmem_size __initdata = (128ULL<<20);
-
-static int __init parse_dma32_size_opt(char *p)
-{
-	if (!p)
-		return -EINVAL;
-	dma32_bootmem_size = memparse(p, &p);
-	return 0;
-}
-early_param("dma32_size", parse_dma32_size_opt);
-
-void __init dma32_reserve_bootmem(void)
-{
-	unsigned long size, align;
-	if (max_pfn <= MAX_DMA32_PFN)
-		return;
-
-	/*
-	 * check aperture_64.c allocate_aperture() for reason about
-	 * using 512M as goal
-	 */
-	align = 64ULL<<20;
-	size = roundup(dma32_bootmem_size, align);
-	dma32_bootmem_ptr = __alloc_bootmem_nopanic(size, align,
-				 512ULL<<20);
-	/*
-	 * Kmemleak should not scan this block as it may not be mapped via the
-	 * kernel direct mapping.
-	 */
-	kmemleak_ignore(dma32_bootmem_ptr);
-	if (dma32_bootmem_ptr)
-		dma32_bootmem_size = size;
-	else
-		dma32_bootmem_size = 0;
-}
-static void __init dma32_free_bootmem(void)
-{
-
-	if (max_pfn <= MAX_DMA32_PFN)
-		return;
-
-	if (!dma32_bootmem_ptr)
-		return;
-
-	free_bootmem(__pa(dma32_bootmem_ptr), dma32_bootmem_size);
-
-	dma32_bootmem_ptr = NULL;
-	dma32_bootmem_size = 0;
-}
-#else
-void __init dma32_reserve_bootmem(void)
-{
-}
-static void __init dma32_free_bootmem(void)
-{
-}
-
-#endif
-
 void __init pci_iommu_alloc(void)
 {
 	struct iommu_table_entry *p;
-
-	/* free the range so iommu could get some range less than 4G */
-	dma32_free_bootmem();
 
 	sort_iommu_table(__iommu_table, __iommu_table_end);
 	check_iommu_entries(__iommu_table, __iommu_table_end);
@@ -181,8 +127,8 @@ again:
 }
 
 /*
- * See <Documentation/x86_64/boot-options.txt> for the iommu kernel parameter
- * documentation.
+ * See <Documentation/x86/x86_64/boot-options.txt> for the iommu kernel
+ * parameter documentation.
  */
 static __init int iommu_setup(char *p)
 {
@@ -232,6 +178,8 @@ static __init int iommu_setup(char *p)
 #endif
 		if (!strncmp(p, "pt", 2))
 			iommu_pass_through = 1;
+		if (!strncmp(p, "group_mf", 8))
+			iommu_group_mf = 1;
 
 		gart_parse_options(p);
 

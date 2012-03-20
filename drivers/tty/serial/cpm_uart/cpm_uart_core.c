@@ -1,6 +1,4 @@
 /*
- *  linux/drivers/serial/cpm_uart.c
- *
  *  Driver for CPM (SCC/SMC) serial ports; core driver
  *
  *  Based on arch/ppc/cpm2_io/uart.c by Dan Malek
@@ -33,6 +31,7 @@
 
 #include <linux/module.h>
 #include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/serial.h>

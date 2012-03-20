@@ -439,7 +439,7 @@ static int mgslpc_device_count = 0;
  * .text section address and breakpoint on module load.
  * This is useful for use with gdb and add-symbol-file command.
  */
-static int break_on_load=0;
+static bool break_on_load=0;
 
 /*
  * Driver major number, defaults to zero to get auto
@@ -2758,7 +2758,7 @@ static void mgslpc_remove_device(MGSLPC_INFO *remove_info)
 	}
 }
 
-static struct pcmcia_device_id mgslpc_ids[] = {
+static const struct pcmcia_device_id mgslpc_ids[] = {
 	PCMCIA_DEVICE_MANF_CARD(0x02c5, 0x0050),
 	PCMCIA_DEVICE_NULL
 };

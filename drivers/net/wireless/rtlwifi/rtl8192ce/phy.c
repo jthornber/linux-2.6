@@ -46,13 +46,12 @@ u32 rtl92c_phy_query_rf_reg(struct ieee80211_hw *hw,
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	u32 original_value, readback_value, bitshift;
 	struct rtl_phy *rtlphy = &(rtlpriv->phy);
-	unsigned long flags;
 
 	RT_TRACE(rtlpriv, COMP_RF, DBG_TRACE, ("regaddr(%#x), "
 					       "rfpath(%#x), bitmask(%#x)\n",
 					       regaddr, rfpath, bitmask));
 
-	spin_lock_irqsave(&rtlpriv->locks.rf_lock, flags);
+	spin_lock(&rtlpriv->locks.rf_lock);
 
 	if (rtlphy->rf_mode != RF_OP_BY_FW) {
 		original_value = _rtl92c_phy_rf_serial_read(hw,
@@ -65,7 +64,7 @@ u32 rtl92c_phy_query_rf_reg(struct ieee80211_hw *hw,
 	bitshift = _rtl92c_phy_calculate_bit_shift(bitmask);
 	readback_value = (original_value & bitmask) >> bitshift;
 
-	spin_unlock_irqrestore(&rtlpriv->locks.rf_lock, flags);
+	spin_unlock(&rtlpriv->locks.rf_lock);
 
 	RT_TRACE(rtlpriv, COMP_RF, DBG_TRACE,
 		 ("regaddr(%#x), rfpath(%#x), "
@@ -120,13 +119,12 @@ void rtl92ce_phy_set_rf_reg(struct ieee80211_hw *hw,
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_phy *rtlphy = &(rtlpriv->phy);
 	u32 original_value, bitshift;
-	unsigned long flags;
 
 	RT_TRACE(rtlpriv, COMP_RF, DBG_TRACE,
 		 ("regaddr(%#x), bitmask(%#x), data(%#x), rfpath(%#x)\n",
 		  regaddr, bitmask, data, rfpath));
 
-	spin_lock_irqsave(&rtlpriv->locks.rf_lock, flags);
+	spin_lock(&rtlpriv->locks.rf_lock);
 
 	if (rtlphy->rf_mode != RF_OP_BY_FW) {
 		if (bitmask != RFREG_OFFSET_MASK) {
@@ -153,7 +151,7 @@ void rtl92ce_phy_set_rf_reg(struct ieee80211_hw *hw,
 		_rtl92c_phy_fw_rf_serial_write(hw, rfpath, regaddr, data);
 	}
 
-	spin_unlock_irqrestore(&rtlpriv->locks.rf_lock, flags);
+	spin_unlock(&rtlpriv->locks.rf_lock);
 
 	RT_TRACE(rtlpriv, COMP_RF, DBG_TRACE, ("regaddr(%#x), "
 					       "bitmask(%#x), data(%#x), "
@@ -281,7 +279,6 @@ bool rtl92c_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 {
 
 	int i;
-	bool rtstatus = true;
 	u32 *radioa_array_table;
 	u32 *radiob_array_table;
 	u16 radioa_arraylen, radiob_arraylen;
@@ -308,7 +305,6 @@ bool rtl92c_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 			 ("Radio_B:RTL8192CE_RADIOB_1TARRAY\n"));
 	}
 	RT_TRACE(rtlpriv, COMP_INIT, DBG_TRACE, ("Radio No %x\n", rfpath));
-	rtstatus = true;
 	switch (rfpath) {
 	case RF90_PATH_A:
 		for (i = 0; i < radioa_arraylen; i = i + 2) {
@@ -364,6 +360,75 @@ bool rtl92c_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 		break;
 	}
 	return true;
+}
+
+void rtl92ce_phy_set_bw_mode_callback(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
+	struct rtl_phy *rtlphy = &(rtlpriv->phy);
+	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
+	u8 reg_bw_opmode;
+	u8 reg_prsr_rsc;
+
+	RT_TRACE(rtlpriv, COMP_SCAN, DBG_TRACE,
+		 ("Switch to %s bandwidth\n",
+		  rtlphy->current_chan_bw == HT_CHANNEL_WIDTH_20 ?
+		  "20MHz" : "40MHz"))
+
+	if (is_hal_stop(rtlhal)) {
+		rtlphy->set_bwmode_inprogress = false;
+		return;
+	}
+
+	reg_bw_opmode = rtl_read_byte(rtlpriv, REG_BWOPMODE);
+	reg_prsr_rsc = rtl_read_byte(rtlpriv, REG_RRSR + 2);
+
+	switch (rtlphy->current_chan_bw) {
+	case HT_CHANNEL_WIDTH_20:
+		reg_bw_opmode |= BW_OPMODE_20MHZ;
+		rtl_write_byte(rtlpriv, REG_BWOPMODE, reg_bw_opmode);
+		break;
+	case HT_CHANNEL_WIDTH_20_40:
+		reg_bw_opmode &= ~BW_OPMODE_20MHZ;
+		rtl_write_byte(rtlpriv, REG_BWOPMODE, reg_bw_opmode);
+		reg_prsr_rsc =
+		    (reg_prsr_rsc & 0x90) | (mac->cur_40_prime_sc << 5);
+		rtl_write_byte(rtlpriv, REG_RRSR + 2, reg_prsr_rsc);
+		break;
+	default:
+		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
+			 ("unknown bandwidth: %#X\n", rtlphy->current_chan_bw));
+		break;
+	}
+
+	switch (rtlphy->current_chan_bw) {
+	case HT_CHANNEL_WIDTH_20:
+		rtl_set_bbreg(hw, RFPGA0_RFMOD, BRFMOD, 0x0);
+		rtl_set_bbreg(hw, RFPGA1_RFMOD, BRFMOD, 0x0);
+		rtl_set_bbreg(hw, RFPGA0_ANALOGPARAMETER2, BIT(10), 1);
+		break;
+	case HT_CHANNEL_WIDTH_20_40:
+		rtl_set_bbreg(hw, RFPGA0_RFMOD, BRFMOD, 0x1);
+		rtl_set_bbreg(hw, RFPGA1_RFMOD, BRFMOD, 0x1);
+
+		rtl_set_bbreg(hw, RCCK0_SYSTEM, BCCK_SIDEBAND,
+			      (mac->cur_40_prime_sc >> 1));
+		rtl_set_bbreg(hw, ROFDM1_LSTF, 0xC00, mac->cur_40_prime_sc);
+		rtl_set_bbreg(hw, RFPGA0_ANALOGPARAMETER2, BIT(10), 0);
+
+		rtl_set_bbreg(hw, 0x818, (BIT(26) | BIT(27)),
+			      (mac->cur_40_prime_sc ==
+			       HAL_PRIME_CHNL_OFFSET_LOWER) ? 2 : 1);
+		break;
+	default:
+		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
+			 ("unknown bandwidth: %#X\n", rtlphy->current_chan_bw));
+		break;
+	}
+	rtl92ce_phy_rf6052_set_bandwidth(hw, rtlphy->current_chan_bw);
+	rtlphy->set_bwmode_inprogress = false;
+	RT_TRACE(rtlpriv, COMP_SCAN, DBG_TRACE, ("<==\n"));
 }
 
 void _rtl92ce_phy_lc_calibrate(struct ieee80211_hw *hw, bool is2t)
@@ -452,7 +517,6 @@ static bool _rtl92ce_phy_set_rf_power_state(struct ieee80211_hw *hw,
 	u8 i, queue_id;
 	struct rtl8192_tx_ring *ring = NULL;
 
-	ppsc->set_rfpowerstate_inprogress = true;
 	switch (rfpwr_state) {
 	case ERFON:{
 			if ((ppsc->rfpwr_state == ERFOFF) &&
@@ -505,7 +569,7 @@ static bool _rtl92ce_phy_set_rf_power_state(struct ieee80211_hw *hw,
 		}
 	case ERFSLEEP:{
 			if (ppsc->rfpwr_state == ERFOFF)
-				break;
+				return false;
 			for (queue_id = 0, i = 0;
 			     queue_id < RTL_PCI_MAX_TX_QUEUE_COUNT;) {
 				ring = &pcipriv->dev.tx_ring[queue_id];
@@ -548,7 +612,6 @@ static bool _rtl92ce_phy_set_rf_power_state(struct ieee80211_hw *hw,
 	}
 	if (bresult)
 		ppsc->rfpwr_state = rfpwr_state;
-	ppsc->set_rfpowerstate_inprogress = false;
 	return bresult;
 }
 

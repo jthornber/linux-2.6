@@ -84,11 +84,10 @@
  * Dynticks per-CPU state.
  */
 struct rcu_dynticks {
-	int dynticks_nesting;	/* Track nesting level, sort of. */
-	int dynticks;		/* Even value for dynticks-idle, else odd. */
-	int dynticks_nmi;	/* Even value for either dynticks-idle or */
-				/*  not in nmi handler, else odd.  So this */
-				/*  remains even for nmi from irq handler. */
+	long long dynticks_nesting; /* Track irq/process nesting level. */
+				    /* Process level is worth LLONG_MAX/2. */
+	int dynticks_nmi_nesting;   /* Track NMI nesting level. */
+	atomic_t dynticks;	    /* Even value for idle, else odd. */
 };
 
 /* RCU's kthread states for tracing. */
@@ -121,7 +120,9 @@ struct rcu_node {
 				/*  elements that need to drain to allow the */
 				/*  current expedited grace period to */
 				/*  complete (only for TREE_PREEMPT_RCU). */
-	unsigned long wakemask; /* CPUs whose kthread needs to be awakened. */
+	atomic_t wakemask;	/* CPUs whose kthread needs to be awakened. */
+				/*  Since this has meaning only for leaf */
+				/*  rcu_node structures, 32 bits suffices. */
 	unsigned long qsmaskinit;
 				/* Per-GP initial value for qsmask & expmask. */
 	unsigned long grpmask;	/* Mask to apply to parent qsmask. */
@@ -159,9 +160,6 @@ struct rcu_node {
 	struct task_struct *boost_kthread_task;
 				/* kthread that takes care of priority */
 				/*  boosting for this rcu_node structure. */
-	wait_queue_head_t boost_wq;
-				/* Wait queue on which to park the boost */
-				/*  kthread. */
 	unsigned int boost_kthread_status;
 				/* State of boost_kthread_task for tracing. */
 	unsigned long n_tasks_boosted;
@@ -188,9 +186,6 @@ struct rcu_node {
 				/* kthread that takes care of this rcu_node */
 				/*  structure, for example, awakening the */
 				/*  per-CPU kthreads as needed. */
-	wait_queue_head_t node_wq;
-				/* Wait queue on which to park the per-node */
-				/*  kthread. */
 	unsigned int node_kthread_status;
 				/* State of node_kthread_task for tracing. */
 } ____cacheline_internodealigned_in_smp;
@@ -236,9 +231,9 @@ struct rcu_data {
 					/*  in order to detect GP end. */
 	unsigned long	gpnum;		/* Highest gp number that this CPU */
 					/*  is aware of having started. */
-	unsigned long	passed_quiesc_completed;
-					/* Value of completed at time of qs. */
-	bool		passed_quiesc;	/* User-mode/idle loop etc. */
+	unsigned long	passed_quiesce_gpnum;
+					/* gpnum at time of quiescent state. */
+	bool		passed_quiesce;	/* User-mode/idle loop etc. */
 	bool		qs_pending;	/* Core waits for quiesc state. */
 	bool		beenonline;	/* CPU online at least once. */
 	bool		preemptible;	/* Preemptible RCU? */
@@ -280,17 +275,12 @@ struct rcu_data {
 					/* did other CPU force QS recently? */
 	long		blimit;		/* Upper limit on a processed batch */
 
-#ifdef CONFIG_NO_HZ
 	/* 3) dynticks interface. */
 	struct rcu_dynticks *dynticks;	/* Shared per-CPU dynticks state. */
 	int dynticks_snap;		/* Per-GP tracking for dynticks. */
-	int dynticks_nmi_snap;		/* Per-GP tracking for dynticks_nmi. */
-#endif /* #ifdef CONFIG_NO_HZ */
 
 	/* 4) reasons this CPU needed to be kicked by force_quiescent_state */
-#ifdef CONFIG_NO_HZ
 	unsigned long dynticks_fqs;	/* Kicked due to dynticks idle. */
-#endif /* #ifdef CONFIG_NO_HZ */
 	unsigned long offline_fqs;	/* Kicked due to being offline. */
 	unsigned long resched_ipi;	/* Sent a resched IPI. */
 
@@ -306,18 +296,15 @@ struct rcu_data {
 	unsigned long n_rp_need_nothing;
 
 	int cpu;
+	struct rcu_state *rsp;
 };
 
-/* Values for signaled field in struct rcu_state. */
+/* Values for fqs_state field in struct rcu_state. */
 #define RCU_GP_IDLE		0	/* No grace period in progress. */
 #define RCU_GP_INIT		1	/* Grace period being initialized. */
 #define RCU_SAVE_DYNTICK	2	/* Need to scan dyntick state. */
 #define RCU_FORCE_QS		3	/* Need to force quiescent state. */
-#ifdef CONFIG_NO_HZ
 #define RCU_SIGNAL_INIT		RCU_SAVE_DYNTICK
-#else /* #ifdef CONFIG_NO_HZ */
-#define RCU_SIGNAL_INIT		RCU_FORCE_QS
-#endif /* #else #ifdef CONFIG_NO_HZ */
 
 #define RCU_JIFFIES_TILL_FORCE_QS	 3	/* for rsp->jiffies_force_qs */
 
@@ -337,6 +324,16 @@ struct rcu_data {
 						/*  scheduling clock irq */
 						/*  before ratting on them. */
 
+#define rcu_wait(cond)							\
+do {									\
+	for (;;) {							\
+		set_current_state(TASK_INTERRUPTIBLE);			\
+		if (cond)						\
+			break;						\
+		schedule();						\
+	}								\
+	__set_current_state(TASK_RUNNING);				\
+} while (0)
 
 /*
  * RCU global state, including node hierarchy.  This hierarchy is
@@ -357,7 +354,7 @@ struct rcu_state {
 
 	/* The following fields are guarded by the root rcu_node's lock. */
 
-	u8	signaled ____cacheline_internodealigned_in_smp;
+	u8	fqs_state ____cacheline_internodealigned_in_smp;
 						/* Force QS state. */
 	u8	fqs_active;			/* force_quiescent_state() */
 						/*  is running. */
@@ -366,6 +363,7 @@ struct rcu_state {
 						/*  period because */
 						/*  force_quiescent_state() */
 						/*  was running. */
+	u8	boost;				/* Subject to priority boost. */
 	unsigned long gpnum;			/* Current gp number. */
 	unsigned long completed;		/* # of last completed gp. */
 
@@ -413,6 +411,13 @@ extern struct rcu_state rcu_preempt_state;
 DECLARE_PER_CPU(struct rcu_data, rcu_preempt_data);
 #endif /* #ifdef CONFIG_TREE_PREEMPT_RCU */
 
+#ifdef CONFIG_RCU_BOOST
+DECLARE_PER_CPU(unsigned int, rcu_cpu_kthread_status);
+DECLARE_PER_CPU(int, rcu_cpu_kthread_cpu);
+DECLARE_PER_CPU(unsigned int, rcu_cpu_kthread_loops);
+DECLARE_PER_CPU(char, rcu_cpu_has_work);
+#endif /* #ifdef CONFIG_RCU_BOOST */
+
 #ifndef RCU_TREE_NONCORE
 
 /* Forward declarations for rcutree_plugin.h */
@@ -423,9 +428,10 @@ static int rcu_preempt_blocked_readers_cgp(struct rcu_node *rnp);
 #ifdef CONFIG_HOTPLUG_CPU
 static void rcu_report_unblock_qs_rnp(struct rcu_node *rnp,
 				      unsigned long flags);
+static void rcu_stop_cpu_kthread(int cpu);
 #endif /* #ifdef CONFIG_HOTPLUG_CPU */
 static void rcu_print_detail_task_stall(struct rcu_state *rsp);
-static void rcu_print_task_stall(struct rcu_node *rnp);
+static int rcu_print_task_stall(struct rcu_node *rnp);
 static void rcu_preempt_stall_reset(void);
 static void rcu_preempt_check_blocked_tasks(struct rcu_node *rnp);
 #ifdef CONFIG_HOTPLUG_CPU
@@ -438,21 +444,32 @@ static void rcu_preempt_check_callbacks(int cpu);
 static void rcu_preempt_process_callbacks(void);
 void call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *rcu));
 #if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_TREE_PREEMPT_RCU)
-static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp);
+static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp,
+			       bool wake);
 #endif /* #if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_TREE_PREEMPT_RCU) */
 static int rcu_preempt_pending(int cpu);
 static int rcu_preempt_needs_cpu(int cpu);
 static void __cpuinit rcu_preempt_init_percpu_data(int cpu);
 static void rcu_preempt_send_cbs_to_online(void);
 static void __init __rcu_init_preempt(void);
-static void rcu_needs_cpu_flush(void);
-static void __init rcu_init_boost_waitqueue(struct rcu_node *rnp);
 static void rcu_initiate_boost(struct rcu_node *rnp, unsigned long flags);
+static void rcu_preempt_boost_start_gp(struct rcu_node *rnp);
+static void invoke_rcu_callbacks_kthread(void);
+static bool rcu_is_callbacks_kthread(void);
+#ifdef CONFIG_RCU_BOOST
+static void rcu_preempt_do_callbacks(void);
 static void rcu_boost_kthread_setaffinity(struct rcu_node *rnp,
 					  cpumask_var_t cm);
-static void rcu_preempt_boost_start_gp(struct rcu_node *rnp);
 static int __cpuinit rcu_spawn_one_boost_kthread(struct rcu_state *rsp,
 						 struct rcu_node *rnp,
 						 int rnp_index);
+static void invoke_rcu_node_kthread(struct rcu_node *rnp);
+static void rcu_yield(void (*f)(unsigned long), unsigned long arg);
+#endif /* #ifdef CONFIG_RCU_BOOST */
+static void rcu_cpu_kthread_setrt(int cpu, int to_rt);
+static void __cpuinit rcu_prepare_kthreads(int cpu);
+static void rcu_prepare_for_idle_init(int cpu);
+static void rcu_cleanup_after_idle(int cpu);
+static void rcu_prepare_for_idle(int cpu);
 
 #endif /* #ifndef RCU_TREE_NONCORE */

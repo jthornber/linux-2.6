@@ -65,6 +65,7 @@ enum rdma_cm_event_type {
 enum rdma_port_space {
 	RDMA_PS_SDP   = 0x0001,
 	RDMA_PS_IPOIB = 0x0002,
+	RDMA_PS_IB    = 0x013F,
 	RDMA_PS_TCP   = 0x0106,
 	RDMA_PS_UDP   = 0x0111,
 };
@@ -111,6 +112,20 @@ struct rdma_cm_event {
 	} param;
 };
 
+enum rdma_cm_state {
+	RDMA_CM_IDLE,
+	RDMA_CM_ADDR_QUERY,
+	RDMA_CM_ADDR_RESOLVED,
+	RDMA_CM_ROUTE_QUERY,
+	RDMA_CM_ROUTE_RESOLVED,
+	RDMA_CM_CONNECT,
+	RDMA_CM_DISCONNECT,
+	RDMA_CM_ADDR_BOUND,
+	RDMA_CM_LISTEN,
+	RDMA_CM_DEVICE_REMOVAL,
+	RDMA_CM_DESTROYING
+};
+
 struct rdma_cm_id;
 
 /**
@@ -130,6 +145,7 @@ struct rdma_cm_id {
 	rdma_cm_event_handler	 event_handler;
 	struct rdma_route	 route;
 	enum rdma_port_space	 ps;
+	enum ib_qp_type		 qp_type;
 	u8			 port_num;
 };
 
@@ -140,9 +156,11 @@ struct rdma_cm_id {
  *   returned rdma_id.
  * @context: User specified context associated with the id.
  * @ps: RDMA port space.
+ * @qp_type: type of queue pair associated with the id.
  */
 struct rdma_cm_id *rdma_create_id(rdma_cm_event_handler event_handler,
-				  void *context, enum rdma_port_space ps);
+				  void *context, enum rdma_port_space ps,
+				  enum ib_qp_type qp_type);
 
 /**
   * rdma_destroy_id - Destroys an RDMA identifier.

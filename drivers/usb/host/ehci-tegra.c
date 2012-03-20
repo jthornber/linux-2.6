@@ -21,7 +21,12 @@
 #include <linux/platform_data/tegra_usb.h>
 #include <linux/irq.h>
 #include <linux/usb/otg.h>
+#include <linux/gpio.h>
+#include <linux/of.h>
+#include <linux/of_gpio.h>
+
 #include <mach/usb_phy.h>
+#include <mach/iomap.h>
 
 #define TEGRA_USB_DMA_ALIGN 32
 
@@ -56,6 +61,71 @@ static void tegra_ehci_power_down(struct usb_hcd *hcd)
 	tegra_usb_phy_power_off(tegra->phy);
 	clk_disable(tegra->clk);
 	clk_disable(tegra->emc_clk);
+}
+
+static int tegra_ehci_internal_port_reset(
+	struct ehci_hcd	*ehci,
+	u32 __iomem	*portsc_reg
+)
+{
+	u32		temp;
+	unsigned long	flags;
+	int		retval = 0;
+	int		i, tries;
+	u32		saved_usbintr;
+
+	spin_lock_irqsave(&ehci->lock, flags);
+	saved_usbintr = ehci_readl(ehci, &ehci->regs->intr_enable);
+	/* disable USB interrupt */
+	ehci_writel(ehci, 0, &ehci->regs->intr_enable);
+	spin_unlock_irqrestore(&ehci->lock, flags);
+
+	/*
+	 * Here we have to do Port Reset at most twice for
+	 * Port Enable bit to be set.
+	 */
+	for (i = 0; i < 2; i++) {
+		temp = ehci_readl(ehci, portsc_reg);
+		temp |= PORT_RESET;
+		ehci_writel(ehci, temp, portsc_reg);
+		mdelay(10);
+		temp &= ~PORT_RESET;
+		ehci_writel(ehci, temp, portsc_reg);
+		mdelay(1);
+		tries = 100;
+		do {
+			mdelay(1);
+			/*
+			 * Up to this point, Port Enable bit is
+			 * expected to be set after 2 ms waiting.
+			 * USB1 usually takes extra 45 ms, for safety,
+			 * we take 100 ms as timeout.
+			 */
+			temp = ehci_readl(ehci, portsc_reg);
+		} while (!(temp & PORT_PE) && tries--);
+		if (temp & PORT_PE)
+			break;
+	}
+	if (i == 2)
+		retval = -ETIMEDOUT;
+
+	/*
+	 * Clear Connect Status Change bit if it's set.
+	 * We can't clear PORT_PEC. It will also cause PORT_PE to be cleared.
+	 */
+	if (temp & PORT_CSC)
+		ehci_writel(ehci, PORT_CSC, portsc_reg);
+
+	/*
+	 * Write to clear any interrupt status bits that might be set
+	 * during port reset.
+	 */
+	temp = ehci_readl(ehci, &ehci->regs->status);
+	ehci_writel(ehci, temp, &ehci->regs->status);
+
+	/* restore original interrupt enable bits */
+	ehci_writel(ehci, saved_usbintr, &ehci->regs->intr_enable);
+	return retval;
 }
 
 static int tegra_ehci_hub_control(
@@ -119,6 +189,13 @@ static int tegra_ehci_hub_control(
 
 		set_bit((wIndex & 0xff) - 1, &ehci->suspended_ports);
 		goto done;
+	}
+
+	/* For USB1 port we need to issue Port Reset twice internally */
+	if (tegra->phy->instance == 0 &&
+	   (typeReq == SetPortFeature && wValue == USB_PORT_FEAT_RESET)) {
+		spin_unlock_irqrestore(&ehci->lock, flags);
+		return tegra_ehci_internal_port_reset(ehci, status_reg);
 	}
 
 	/*
@@ -328,7 +405,7 @@ static int tegra_ehci_setup(struct usb_hcd *hcd)
 	/* EHCI registers start at offset 0x100 */
 	ehci->caps = hcd->regs + 0x100;
 	ehci->regs = hcd->regs + 0x100 +
-		HC_LENGTH(readl(&ehci->caps->hc_capbase));
+		HC_LENGTH(ehci, readl(&ehci->caps->hc_capbase));
 
 	dbg_hcs_params(ehci, "reset");
 	dbg_hcc_params(ehci, "reset");
@@ -502,6 +579,35 @@ static const struct hc_driver tegra_ehci_hc_driver = {
 	.port_handed_over	= ehci_port_handed_over,
 };
 
+static int setup_vbus_gpio(struct platform_device *pdev)
+{
+	int err = 0;
+	int gpio;
+
+	if (!pdev->dev.of_node)
+		return 0;
+
+	gpio = of_get_named_gpio(pdev->dev.of_node, "nvidia,vbus-gpio", 0);
+	if (!gpio_is_valid(gpio))
+		return 0;
+
+	err = gpio_request(gpio, "vbus_gpio");
+	if (err) {
+		dev_err(&pdev->dev, "can't request vbus gpio %d", gpio);
+		return err;
+	}
+	err = gpio_direction_output(gpio, 1);
+	if (err) {
+		dev_err(&pdev->dev, "can't enable vbus\n");
+		return err;
+	}
+	gpio_set_value(gpio, 1);
+
+	return err;
+}
+
+static u64 tegra_ehci_dma_mask = DMA_BIT_MASK(32);
+
 static int tegra_ehci_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -517,6 +623,15 @@ static int tegra_ehci_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Platform data missing\n");
 		return -EINVAL;
 	}
+
+	/* Right now device-tree probed devices don't get dma_mask set.
+	 * Since shared usb code relies on it, set it here for now.
+	 * Once we have dma capability bindings this can go away.
+	 */
+	if (!pdev->dev.dma_mask)
+		pdev->dev.dma_mask = &tegra_ehci_dma_mask;
+
+	setup_vbus_gpio(pdev);
 
 	tegra = kzalloc(sizeof(struct tegra_ehci_hcd), GFP_KERNEL);
 	if (!tegra)
@@ -568,6 +683,28 @@ static int tegra_ehci_probe(struct platform_device *pdev)
 		goto fail_io;
 	}
 
+	/* This is pretty ugly and needs to be fixed when we do only
+	 * device-tree probing. Old code relies on the platform_device
+	 * numbering that we lack for device-tree-instantiated devices.
+	 */
+	if (instance < 0) {
+		switch (res->start) {
+		case TEGRA_USB_BASE:
+			instance = 0;
+			break;
+		case TEGRA_USB2_BASE:
+			instance = 1;
+			break;
+		case TEGRA_USB3_BASE:
+			instance = 2;
+			break;
+		default:
+			err = -ENODEV;
+			dev_err(&pdev->dev, "unknown usb instance\n");
+			goto fail_phy;
+		}
+	}
+
 	tegra->phy = tegra_usb_phy_open(instance, hcd->regs, pdata->phy_config,
 						TEGRA_USB_PHY_MODE_HOST);
 	if (IS_ERR(tegra->phy)) {
@@ -602,7 +739,7 @@ static int tegra_ehci_probe(struct platform_device *pdev)
 	}
 #endif
 
-	err = usb_add_hcd(hcd, irq, IRQF_DISABLED | IRQF_SHARED);
+	err = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (err) {
 		dev_err(&pdev->dev, "Failed to add USB HCD\n");
 		goto fail;
@@ -701,6 +838,11 @@ static void tegra_ehci_hcd_shutdown(struct platform_device *pdev)
 		hcd->driver->shutdown(hcd);
 }
 
+static struct of_device_id tegra_ehci_of_match[] __devinitdata = {
+	{ .compatible = "nvidia,tegra20-ehci", },
+	{ },
+};
+
 static struct platform_driver tegra_ehci_driver = {
 	.probe		= tegra_ehci_probe,
 	.remove		= tegra_ehci_remove,
@@ -711,5 +853,6 @@ static struct platform_driver tegra_ehci_driver = {
 	.shutdown	= tegra_ehci_hcd_shutdown,
 	.driver		= {
 		.name	= "tegra-ehci",
+		.of_match_table = tegra_ehci_of_match,
 	}
 };

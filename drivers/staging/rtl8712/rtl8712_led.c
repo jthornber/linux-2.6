@@ -49,7 +49,7 @@
  * LED object.
  *===========================================================================
  */
-enum _LED_STATE_871x{
+enum _LED_STATE_871x {
 	LED_UNKNOWN = 0,
 	LED_ON = 1,
 	LED_OFF = 2,
@@ -1786,7 +1786,7 @@ void LedControl871x(struct _adapter *padapter, enum LED_CTL_MODE LedAction)
 {
 	struct led_priv	*ledpriv = &(padapter->ledpriv);
 
-	if (ledpriv == NULL || ledpriv->bRegUseLed == false)
+	if (ledpriv->bRegUseLed == false)
 		return;
 	switch (ledpriv->LedStrategy) {
 	case SW_LED_MODE0:

@@ -1,6 +1,6 @@
 config VT
 	bool "Virtual terminal" if EXPERT
-	depends on !S390
+	depends on !S390 && !UML
 	select INPUT
 	default y
 	---help---
@@ -60,9 +60,13 @@ config VT_CONSOLE
 
 	  If unsure, say Y.
 
+config VT_CONSOLE_SLEEP
+	def_bool y
+	depends on VT_CONSOLE && PM_SLEEP
+
 config HW_CONSOLE
 	bool
-	depends on VT && !S390 && !UML
+	depends on VT && !UML
 	default y
 
 config VT_HW_CONSOLE_BINDING
@@ -319,3 +323,68 @@ config N_GSM
 	  This line discipline provides support for the GSM MUX protocol and
 	  presents the mux as a set of 61 individual tty devices.
 
+config TRACE_ROUTER
+	tristate "Trace data router for MIPI P1149.7 cJTAG standard"
+	depends on TRACE_SINK
+	default n
+	help
+	  The trace router uses the Linux tty line discipline framework to
+	  route trace data coming from a tty port (say UART for example) to
+	  the trace sink line discipline driver and to another tty port (say
+	  USB). This is part of a solution for the MIPI P1149.7, compact JTAG,
+	  standard, which is for debugging mobile devices. The PTI driver in
+	  drivers/misc/pti.c defines the majority of this MIPI solution.
+
+	  You should select this driver if the target kernel is meant for
+	  a mobile device containing a modem.  Then you will need to select
+	  "Trace data sink for MIPI P1149.7 cJTAG standard" line discipline
+	  driver.
+
+config TRACE_SINK
+	tristate "Trace data sink for MIPI P1149.7 cJTAG standard"
+	default n
+	help
+	  The trace sink uses the Linux line discipline framework to receive
+	  trace data coming from the trace router line discipline driver
+	  to a user-defined tty port target, like USB.
+	  This is to provide a way to extract modem trace data on
+	  devices that do not have a PTI HW module, or just need modem
+	  trace data to come out of a different HW output port.
+	  This is part of a solution for the P1149.7, compact JTAG, standard.
+
+	  If you select this option, you need to select
+	  "Trace data router for MIPI P1149.7 cJTAG standard".
+
+config PPC_EPAPR_HV_BYTECHAN
+	tristate "ePAPR hypervisor byte channel driver"
+	depends on PPC
+	help
+	  This driver creates /dev entries for each ePAPR hypervisor byte
+	  channel, thereby allowing applications to communicate with byte
+	  channels as if they were serial ports.
+
+config PPC_EARLY_DEBUG_EHV_BC
+	bool "Early console (udbg) support for ePAPR hypervisors"
+	depends on PPC_EPAPR_HV_BYTECHAN=y
+	help
+	  Select this option to enable early console (a.k.a. "udbg") support
+	  via an ePAPR byte channel.  You also need to choose the byte channel
+	  handle below.
+
+config PPC_EARLY_DEBUG_EHV_BC_HANDLE
+	int "Byte channel handle for early console (udbg)"
+	depends on PPC_EARLY_DEBUG_EHV_BC
+	default 0
+	help
+	  If you want early console (udbg) output through a byte channel,
+	  specify the handle of the byte channel to use.
+
+	  For this to work, the byte channel driver must be compiled
+	  in-kernel, not as a module.
+
+	  Note that only one early console driver can be enabled, so don't
+	  enable any others if you enable this one.
+
+	  If the number you specify is not a valid byte channel handle, then
+	  there simply will be no early console output.  This is true also
+	  if you don't boot under a hypervisor at all.

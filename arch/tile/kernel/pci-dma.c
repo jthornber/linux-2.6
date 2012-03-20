@@ -15,6 +15,7 @@
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
 #include <linux/vmalloc.h>
+#include <linux/export.h>
 #include <asm/tlbflush.h>
 #include <asm/homecache.h>
 
@@ -244,7 +245,7 @@ EXPORT_SYMBOL(dma_sync_single_range_for_device);
  * dma_alloc_noncoherent() returns non-cacheable memory, so there's no
  * need to do any flushing here.
  */
-void dma_cache_sync(void *vaddr, size_t size,
+void dma_cache_sync(struct device *dev, void *vaddr, size_t size,
 		    enum dma_data_direction direction)
 {
 }

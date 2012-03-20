@@ -397,7 +397,7 @@ int diRead(struct inode *ip)
 	release_metapage(mp);
 
 	/* set the ag for the inode */
-	JFS_IP(ip)->agno = BLKTOAG(agstart, sbi);
+	JFS_IP(ip)->agstart = agstart;
 	JFS_IP(ip)->active_ag = -1;
 
 	return (rc);
@@ -457,7 +457,7 @@ struct inode *diReadSpecial(struct super_block *sb, ino_t inum, int secondary)
 	/* read the page of fixed disk inode (AIT) in raw mode */
 	mp = read_metapage(ip, address << sbi->l2nbperpage, PSIZE, 1);
 	if (mp == NULL) {
-		ip->i_nlink = 1;	/* Don't want iput() deleting it */
+		set_nlink(ip, 1);	/* Don't want iput() deleting it */
 		iput(ip);
 		return (NULL);
 	}
@@ -469,7 +469,7 @@ struct inode *diReadSpecial(struct super_block *sb, ino_t inum, int secondary)
 	/* copy on-disk inode to in-memory inode */
 	if ((copy_from_dinode(dp, ip)) != 0) {
 		/* handle bad return by returning NULL for ip */
-		ip->i_nlink = 1;	/* Don't want iput() deleting it */
+		set_nlink(ip, 1);	/* Don't want iput() deleting it */
 		iput(ip);
 		/* release the page */
 		release_metapage(mp);
@@ -901,7 +901,7 @@ int diFree(struct inode *ip)
 
 	/* get the allocation group for this ino.
 	 */
-	agno = JFS_IP(ip)->agno;
+	agno = BLKTOAG(JFS_IP(ip)->agstart, JFS_SBI(ip->i_sb));
 
 	/* Lock the AG specific inode map information
 	 */
@@ -1315,12 +1315,11 @@ int diFree(struct inode *ip)
 static inline void
 diInitInode(struct inode *ip, int iagno, int ino, int extno, struct iag * iagp)
 {
-	struct jfs_sb_info *sbi = JFS_SBI(ip->i_sb);
 	struct jfs_inode_info *jfs_ip = JFS_IP(ip);
 
 	ip->i_ino = (iagno << L2INOSPERIAG) + ino;
 	jfs_ip->ixpxd = iagp->inoext[extno];
-	jfs_ip->agno = BLKTOAG(le64_to_cpu(iagp->agstart), sbi);
+	jfs_ip->agstart = le64_to_cpu(iagp->agstart);
 	jfs_ip->active_ag = -1;
 }
 
@@ -1379,7 +1378,7 @@ int diAlloc(struct inode *pip, bool dir, struct inode *ip)
 	 */
 
 	/* get the ag number of this iag */
-	agno = JFS_IP(pip)->agno;
+	agno = BLKTOAG(JFS_IP(pip)->agstart, JFS_SBI(pip->i_sb));
 
 	if (atomic_read(&JFS_SBI(pip->i_sb)->bmap->db_active[agno])) {
 		/*
@@ -2921,10 +2920,9 @@ int diExtendFS(struct inode *ipimap, struct inode *ipbmap)
 			continue;
 		}
 
-		/* agstart that computes to the same ag is treated as same; */
 		agstart = le64_to_cpu(iagp->agstart);
-		/* iagp->agstart = agstart & ~(mp->db_agsize - 1); */
 		n = agstart >> mp->db_agl2size;
+		iagp->agstart = cpu_to_le64((s64)n << mp->db_agl2size);
 
 		/* compute backed inodes */
 		numinos = (EXTSPERIAG - le32_to_cpu(iagp->nfreeexts))
@@ -3078,7 +3076,7 @@ static int copy_from_dinode(struct dinode * dip, struct inode *ip)
 				ip->i_mode |= 0001;
 		}
 	}
-	ip->i_nlink = le32_to_cpu(dip->di_nlink);
+	set_nlink(ip, le32_to_cpu(dip->di_nlink));
 
 	jfs_ip->saved_uid = le32_to_cpu(dip->di_uid);
 	if (sbi->uid == -1)

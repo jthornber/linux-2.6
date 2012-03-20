@@ -139,8 +139,9 @@ struct mtd_info *cfi_cmdset_0020(struct map_info *map, int primary)
 		}
 
 		/* Do some byteswapping if necessary */
-		extp->FeatureSupport = cfi32_to_cpu(extp->FeatureSupport);
-		extp->BlkStatusRegMask = cfi32_to_cpu(extp->BlkStatusRegMask);
+		extp->FeatureSupport = cfi32_to_cpu(map, extp->FeatureSupport);
+		extp->BlkStatusRegMask = cfi32_to_cpu(map,
+						extp->BlkStatusRegMask);
 
 #ifdef DEBUG_CFI_FEATURES
 		/* Tell the user about it in lots of lovely detail */
@@ -296,6 +297,7 @@ static inline int do_read_onechip(struct map_info *map, struct flchip *chip, lof
 				/* make sure we're in 'read status' mode */
 				map_write(map, CMD(0x70), cmd_addr);
 				chip->state = FL_ERASING;
+				wake_up(&chip->wq);
 				mutex_unlock(&chip->mutex);
 				printk(KERN_ERR "Chip not ready after erase "
 				       "suspended: status = 0x%lx\n", status.x[0]);
@@ -697,7 +699,8 @@ cfi_staa_writev(struct mtd_info *mtd, const struct kvec *vecs,
 				continue;
 			}
 			memcpy(buffer+buflen, elem_base, ECCBUF_SIZE-buflen);
-			ret = mtd->write(mtd, to, ECCBUF_SIZE, &thislen, buffer);
+			ret = mtd_write(mtd, to, ECCBUF_SIZE, &thislen,
+					buffer);
 			totlen += thislen;
 			if (ret || thislen != ECCBUF_SIZE)
 				goto write_error;
@@ -706,7 +709,8 @@ cfi_staa_writev(struct mtd_info *mtd, const struct kvec *vecs,
 			to += ECCBUF_SIZE;
 		}
 		if (ECCBUF_DIV(elem_len)) { /* write clean aligned data */
-			ret = mtd->write(mtd, to, ECCBUF_DIV(elem_len), &thislen, elem_base);
+			ret = mtd_write(mtd, to, ECCBUF_DIV(elem_len),
+					&thislen, elem_base);
 			totlen += thislen;
 			if (ret || thislen != ECCBUF_DIV(elem_len))
 				goto write_error;
@@ -720,7 +724,7 @@ cfi_staa_writev(struct mtd_info *mtd, const struct kvec *vecs,
 	}
 	if (buflen) { /* flush last page, even if not full */
 		/* This is sometimes intended behaviour, really */
-		ret = mtd->write(mtd, to, buflen, &thislen, buffer);
+		ret = mtd_write(mtd, to, buflen, &thislen, buffer);
 		totlen += thislen;
 		if (ret || thislen != ECCBUF_SIZE)
 			goto write_error;

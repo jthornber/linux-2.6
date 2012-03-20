@@ -9,7 +9,7 @@
 #define __MACH_IRQS_BOARD_MOP500_H
 
 /* Number of AB8500 irqs is taken from header file */
-#include <linux/mfd/ab8500.h>
+#include <linux/mfd/abx500/ab8500.h>
 
 #define MOP500_AB8500_IRQ_BASE		IRQ_BOARD_START
 #define MOP500_AB8500_IRQ_END		(MOP500_AB8500_IRQ_BASE \
@@ -50,6 +50,11 @@
 
 #define MOP500_IRQ_END		MOP500_NR_IRQS
 
+/*
+ * We may have several boards, but only one will run at a
+ * time, so the one with most IRQs will bump this ahead,
+ * but the IRQ_BOARD_START remains the same for either board.
+ */
 #if MOP500_IRQ_END > IRQ_BOARD_END
 #undef IRQ_BOARD_END
 #define IRQ_BOARD_END	MOP500_IRQ_END

@@ -159,7 +159,6 @@ static void ivtv_stream_init(struct ivtv *itv, int type)
 		s->buffers = (itv->options.kilobytes[type] * 1024 + s->buf_size - 1) / s->buf_size;
 	spin_lock_init(&s->qlock);
 	init_waitqueue_head(&s->waitq);
-	s->id = -1;
 	s->sg_handle = IVTV_DMA_UNMAPPED;
 	ivtv_queue_init(&s->q_free);
 	ivtv_queue_init(&s->q_full);
@@ -214,6 +213,7 @@ static int ivtv_prep_dev(struct ivtv *itv, int type)
 	s->vdev->fops = ivtv_stream_info[type].fops;
 	s->vdev->release = video_device_release;
 	s->vdev->tvnorms = V4L2_STD_ALL;
+	s->vdev->lock = &itv->serialize_lock;
 	set_bit(V4L2_FL_USE_FH_PRIO, &s->vdev->flags);
 	ivtv_set_funcs(s->vdev);
 	return 0;
@@ -589,7 +589,7 @@ int ivtv_start_v4l2_encode_stream(struct ivtv_stream *s)
 		v4l2_subdev_call(itv->sd_audio, audio, s_stream, 1);
 		/* Avoid unpredictable PCI bus hang - disable video clocks */
 		v4l2_subdev_call(itv->sd_video, video, s_stream, 0);
-		ivtv_msleep_timeout(300, 1);
+		ivtv_msleep_timeout(300, 0);
 		ivtv_vapi(itv, CX2341X_ENC_INITIALIZE_INPUT, 0);
 		v4l2_subdev_call(itv->sd_video, video, s_stream, 1);
 	}
@@ -834,7 +834,7 @@ int ivtv_stop_v4l2_encode_stream(struct ivtv_stream *s, int gop_end)
 		}
 
 		/* Handle any pending interrupts */
-		ivtv_msleep_timeout(100, 1);
+		ivtv_msleep_timeout(100, 0);
 	}
 
 	atomic_dec(&itv->capturing);

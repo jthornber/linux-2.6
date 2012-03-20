@@ -112,6 +112,8 @@ static struct usb_device_id carl9170_usb_ids[] = {
 	{ USB_DEVICE(0x04bb, 0x093f) },
 	/* NEC WL300NU-G */
 	{ USB_DEVICE(0x0409, 0x0249) },
+	/* NEC WL300NU-AG */
+	{ USB_DEVICE(0x0409, 0x02b4) },
 	/* AVM FRITZ!WLAN USB Stick N */
 	{ USB_DEVICE(0x057c, 0x8401) },
 	/* AVM FRITZ!WLAN USB Stick N 2.4 */
@@ -1159,15 +1161,4 @@ static struct usb_driver carl9170_driver = {
 #endif /* CONFIG_PM */
 };
 
-static int __init carl9170_usb_init(void)
-{
-	return usb_register(&carl9170_driver);
-}
-
-static void __exit carl9170_usb_exit(void)
-{
-	usb_deregister(&carl9170_driver);
-}
-
-module_init(carl9170_usb_init);
-module_exit(carl9170_usb_exit);
+module_usb_driver(carl9170_driver);

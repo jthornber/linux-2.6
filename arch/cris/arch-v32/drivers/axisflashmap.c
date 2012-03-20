@@ -404,8 +404,7 @@ static int __init init_axis_flash(void)
 		 */
 		int blockstat;
 		do {
-			blockstat = main_mtd->block_isbad(main_mtd,
-				ptable_sector);
+			blockstat = mtd_block_isbad(main_mtd, ptable_sector);
 			if (blockstat < 0)
 				ptable_sector = 0; /* read error */
 			else if (blockstat)
@@ -413,8 +412,8 @@ static int __init init_axis_flash(void)
 		} while (blockstat && ptable_sector);
 #endif
 		if (ptable_sector) {
-			main_mtd->read(main_mtd, ptable_sector, PAGESIZE,
-				&len, page);
+			mtd_read(main_mtd, ptable_sector, PAGESIZE, &len,
+				 page);
 			ptable_head = &((struct partitiontable *) page)->head;
 		}
 
@@ -561,7 +560,7 @@ static int __init init_axis_flash(void)
 #ifdef CONFIG_ETRAX_AXISFLASHMAP_MTD0WHOLE
 	if (main_mtd) {
 		main_partition.size = main_mtd->size;
-		err = add_mtd_partitions(main_mtd, &main_partition, 1);
+		err = mtd_device_register(main_mtd, &main_partition, 1);
 		if (err)
 			panic("axisflashmap: Could not initialize "
 			      "partition for whole main mtd device!\n");
@@ -597,7 +596,8 @@ static int __init init_axis_flash(void)
 			mtd_ram->erasesize = (main_mtd ? main_mtd->erasesize :
 				CONFIG_ETRAX_PTABLE_SECTOR);
 		} else {
-			err = add_mtd_partitions(main_mtd, &partition[part], 1);
+			err = mtd_device_register(main_mtd, &partition[part],
+						  1);
 			if (err)
 				panic("axisflashmap: Could not add mtd "
 					"partition %d\n", part);
@@ -633,7 +633,7 @@ static int __init init_axis_flash(void)
 #ifndef CONFIG_ETRAX_VCS_SIM
 	if (aux_mtd) {
 		aux_partition.size = aux_mtd->size;
-		err = add_mtd_partitions(aux_mtd, &aux_partition, 1);
+		err = mtd_device_register(aux_mtd, &aux_partition, 1);
 		if (err)
 			panic("axisflashmap: Could not initialize "
 			      "aux mtd device!\n");

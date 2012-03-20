@@ -30,13 +30,14 @@
 #define POLICYDB_VERSION_PERMISSIVE	23
 #define POLICYDB_VERSION_BOUNDARY	24
 #define POLICYDB_VERSION_FILENAME_TRANS	25
+#define POLICYDB_VERSION_ROLETRANS	26
 
 /* Range of policy versions we understand*/
 #define POLICYDB_VERSION_MIN   POLICYDB_VERSION_BASE
 #ifdef CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX
 #define POLICYDB_VERSION_MAX	CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX_VALUE
 #else
-#define POLICYDB_VERSION_MAX	POLICYDB_VERSION_FILENAME_TRANS
+#define POLICYDB_VERSION_MAX	POLICYDB_VERSION_ROLETRANS
 #endif
 
 /* Mask for just the mount related flags */
@@ -85,7 +86,7 @@ extern int selinux_policycap_openperm;
 int security_mls_enabled(void);
 
 int security_load_policy(void *data, size_t len);
-int security_read_policy(void **data, ssize_t *len);
+int security_read_policy(void **data, size_t *len);
 size_t security_policydb_len(void);
 
 int security_policycap_supported(unsigned int req_cap);
@@ -111,8 +112,8 @@ void security_compute_av_user(u32 ssid, u32 tsid,
 int security_transition_sid(u32 ssid, u32 tsid, u16 tclass,
 			    const struct qstr *qstr, u32 *out_sid);
 
-int security_transition_sid_user(u32 ssid, u32 tsid,
-				 u16 tclass, u32 *out_sid);
+int security_transition_sid_user(u32 ssid, u32 tsid, u16 tclass,
+				 const char *objname, u32 *out_sid);
 
 int security_member_sid(u32 ssid, u32 tsid,
 	u16 tclass, u32 *out_sid);
@@ -215,6 +216,14 @@ struct selinux_kernel_status {
 
 extern void selinux_status_update_setenforce(int enforcing);
 extern void selinux_status_update_policyload(int seqno);
+extern void selinux_complete_init(void);
+extern int selinux_disable(void);
+extern void exit_sel_fs(void);
+extern struct dentry *selinux_null;
+extern struct vfsmount *selinuxfs_mount;
+extern void selnl_notify_setenforce(int val);
+extern void selnl_notify_policyload(u32 seqno);
+extern int selinux_nlmsg_lookup(u16 sclass, u16 nlmsg_type, u32 *perm);
 
 #endif /* _SELINUX_SECURITY_H_ */
 

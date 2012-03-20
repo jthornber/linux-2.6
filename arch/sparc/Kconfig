@@ -25,9 +25,15 @@ config SPARC
 	select HAVE_DMA_ATTRS
 	select HAVE_DMA_API_DEBUG
 	select HAVE_ARCH_JUMP_LABEL
+	select HAVE_GENERIC_HARDIRQS
+	select GENERIC_IRQ_SHOW
+	select USE_GENERIC_SMP_HELPERS if SMP
+	select GENERIC_PCI_IOMAP
 
 config SPARC32
 	def_bool !64BIT
+	select GENERIC_ATOMIC64
+	select CLZ_TAB
 
 config SPARC64
 	def_bool 64BIT
@@ -38,21 +44,22 @@ config SPARC64
 	select HAVE_FUNCTION_TRACE_MCOUNT_TEST
 	select HAVE_KRETPROBES
 	select HAVE_KPROBES
+	select HAVE_RCU_TABLE_FREE if SMP
 	select HAVE_MEMBLOCK
+	select HAVE_MEMBLOCK_NODE_MAP
 	select HAVE_SYSCALL_WRAPPERS
 	select HAVE_DYNAMIC_FTRACE
 	select HAVE_FTRACE_MCOUNT_RECORD
 	select HAVE_SYSCALL_TRACEPOINTS
-	select USE_GENERIC_SMP_HELPERS if SMP
 	select RTC_DRV_CMOS
 	select RTC_DRV_BQ4802
 	select RTC_DRV_SUN4V
 	select RTC_DRV_STARFIRE
 	select HAVE_PERF_EVENTS
 	select PERF_USE_VMALLOC
-	select HAVE_GENERIC_HARDIRQS
-	select GENERIC_IRQ_SHOW
 	select IRQ_PREFLOW_FASTEOI
+	select ARCH_HAVE_NMI_SAFE_CMPXCHG
+	select HAVE_C_RECORDMCOUNT
 
 config ARCH_DEFCONFIG
 	string
@@ -78,10 +85,6 @@ config GENERIC_CLOCKEVENTS
 	default y if SPARC64
 
 config IOMMU_HELPER
-	bool
-	default y if SPARC64
-
-config QUICKLIST
 	bool
 	default y if SPARC64
 
@@ -188,14 +191,6 @@ config RWSEM_GENERIC_SPINLOCK
 config RWSEM_XCHGADD_ALGORITHM
 	bool
 	default y if SPARC64
-
-config GENERIC_FIND_NEXT_BIT
-	bool
-	default y
-
-config GENERIC_FIND_BIT_LE
-	bool
-	default y
 
 config GENERIC_HWEIGHT
 	bool
@@ -361,9 +356,6 @@ config NODES_SPAN_OTHER_NODES
 	def_bool y
 	depends on NEED_MULTIPLE_NODES
 
-config ARCH_POPULATES_NODE_MAP
-	def_bool y if SPARC64
-
 config ARCH_SELECT_MEMORY_MODEL
 	def_bool y if SPARC64
 
@@ -394,9 +386,7 @@ config SCHED_MC
 	  making when dealing with multi-core CPU chips at a cost of slightly
 	  increased overhead in some places. If unsure say N here.
 
-if SPARC64
 source "kernel/Kconfig.preempt"
-endif
 
 config CMDLINE_BOOL
 	bool "Default bootloader kernel arguments"
@@ -535,6 +525,23 @@ config PCI_DOMAINS
 config PCI_SYSCALL
 	def_bool PCI
 
+config PCIC_PCI
+	bool
+	depends on PCI && SPARC32 && !SPARC_LEON
+	default y
+
+config LEON_PCI
+	bool
+	depends on PCI && SPARC_LEON
+	default y
+
+config GRPCI2
+	bool "GRPCI2 Host Bridge Support"
+	depends on LEON_PCI
+	default y
+	help
+	  Say Y here to include the GRPCI2 Host Bridge Driver.
+
 source "drivers/pci/Kconfig"
 
 source "drivers/pcmcia/Kconfig"
@@ -552,12 +559,7 @@ config SUN_OPENPROMFS
 	  Only choose N if you know in advance that you will not need to modify
 	  OpenPROM settings on the running system.
 
-# Makefile helpers
-config SPARC32_PCI
-	bool
-	default y
-	depends on SPARC32 && PCI
-
+# Makefile helper
 config SPARC64_PCI
 	bool
 	default y

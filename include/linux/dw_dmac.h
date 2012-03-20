@@ -3,6 +3,7 @@
  * AVR32 systems.)
  *
  * Copyright (C) 2007 Atmel Corporation
+ * Copyright (C) 2010-2011 ST Microelectronics
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -126,7 +127,7 @@ struct dw_cyclic_desc {
 
 struct dw_cyclic_desc *dw_dma_cyclic_prep(struct dma_chan *chan,
 		dma_addr_t buf_addr, size_t buf_len, size_t period_len,
-		enum dma_data_direction direction);
+		enum dma_transfer_direction direction);
 void dw_dma_cyclic_free(struct dma_chan *chan);
 int dw_dma_cyclic_start(struct dma_chan *chan);
 void dw_dma_cyclic_stop(struct dma_chan *chan);

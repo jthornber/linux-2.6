@@ -56,16 +56,10 @@ static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry, stru
 
 	lock_ufs(dir->i_sb);
 	ino = ufs_inode_by_name(dir, &dentry->d_name);
-	if (ino) {
+	if (ino)
 		inode = ufs_iget(dir->i_sb, ino);
-		if (IS_ERR(inode)) {
-			unlock_ufs(dir->i_sb);
-			return ERR_CAST(inode);
-		}
-	}
 	unlock_ufs(dir->i_sb);
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }
 
 /*
@@ -76,7 +70,7 @@ static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry, stru
  * If the create succeeds, we fill in the inode information
  * with d_instantiate(). 
  */
-static int ufs_create (struct inode * dir, struct dentry * dentry, int mode,
+static int ufs_create (struct inode * dir, struct dentry * dentry, umode_t mode,
 		struct nameidata *nd)
 {
 	struct inode *inode;
@@ -100,7 +94,7 @@ static int ufs_create (struct inode * dir, struct dentry * dentry, int mode,
 	return err;
 }
 
-static int ufs_mknod (struct inode * dir, struct dentry *dentry, int mode, dev_t rdev)
+static int ufs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct inode *inode;
 	int err;
@@ -186,7 +180,7 @@ static int ufs_link (struct dentry * old_dentry, struct inode * dir,
 	return error;
 }
 
-static int ufs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
+static int ufs_mkdir(struct inode * dir, struct dentry * dentry, umode_t mode)
 {
 	struct inode * inode;
 	int err = -EMLINK;

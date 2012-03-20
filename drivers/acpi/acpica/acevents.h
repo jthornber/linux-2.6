@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2011, Intel Corp.
+ * Copyright (C) 2000 - 2012, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -58,17 +58,22 @@ u32 acpi_ev_fixed_event_detect(void);
  */
 u8 acpi_ev_is_notify_object(struct acpi_namespace_node *node);
 
-acpi_status acpi_ev_acquire_global_lock(u16 timeout);
-
-acpi_status acpi_ev_release_global_lock(void);
-
-acpi_status acpi_ev_init_global_lock_handler(void);
-
 u32 acpi_ev_get_gpe_number_index(u32 gpe_number);
 
 acpi_status
 acpi_ev_queue_notify_request(struct acpi_namespace_node *node,
 			     u32 notify_value);
+
+/*
+ * evglock - Global Lock support
+ */
+acpi_status acpi_ev_init_global_lock_handler(void);
+
+acpi_status acpi_ev_acquire_global_lock(u16 timeout);
+
+acpi_status acpi_ev_release_global_lock(void);
+
+acpi_status acpi_ev_remove_global_lock_handler(void);
 
 /*
  * evgpe - Low-level GPE support
@@ -157,6 +162,7 @@ acpi_status acpi_ev_initialize_op_regions(void);
 
 acpi_status
 acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
+			       union acpi_operand_object *field_obj,
 			       u32 function,
 			       u32 region_offset, u32 bit_width, u64 *value);
 

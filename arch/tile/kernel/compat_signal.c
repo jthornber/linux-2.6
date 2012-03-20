@@ -303,10 +303,7 @@ long compat_sys_rt_sigreturn(struct pt_regs *regs)
 		goto badframe;
 
 	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext))
 		goto badframe;
@@ -317,7 +314,7 @@ long compat_sys_rt_sigreturn(struct pt_regs *regs)
 	return 0;
 
 badframe:
-	force_sig(SIGSEGV, current);
+	signal_fault("bad sigreturn frame", regs, frame, 0);
 	return 0;
 }
 
@@ -431,6 +428,6 @@ int compat_setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	return 0;
 
 give_sigsegv:
-	force_sigsegv(sig, current);
+	signal_fault("bad setup frame", regs, frame, sig);
 	return -EFAULT;
 }

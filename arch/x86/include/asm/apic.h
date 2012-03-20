@@ -8,7 +8,7 @@
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
 #include <asm/apicdef.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/fixmap.h>
 #include <asm/mpspec.h>
 #include <asm/system.h>
@@ -49,6 +49,7 @@ extern unsigned int apic_verbosity;
 extern int local_apic_timer_c2_ok;
 
 extern int disable_apic;
+extern unsigned int lapic_timer_frequency;
 
 #ifdef CONFIG_SMP
 extern void __inquire_remote_apic(int apicid);
@@ -175,6 +176,7 @@ static inline u64 native_x2apic_icr_read(void)
 }
 
 extern int x2apic_phys;
+extern int x2apic_preenabled;
 extern void check_x2apic(void);
 extern void enable_x2apic(void);
 extern void x2apic_icr_write(u32 low, u32 id);
@@ -197,6 +199,9 @@ static inline void x2apic_force_phys(void)
 	x2apic_phys = 1;
 }
 #else
+static inline void disable_x2apic(void)
+{
+}
 static inline void check_x2apic(void)
 {
 }
@@ -211,6 +216,7 @@ static inline void x2apic_force_phys(void)
 {
 }
 
+#define	nox2apic	0
 #define	x2apic_preenabled 0
 #define	x2apic_supported()	0
 #endif
@@ -381,6 +387,26 @@ struct apic {
 extern struct apic *apic;
 
 /*
+ * APIC drivers are probed based on how they are listed in the .apicdrivers
+ * section. So the order is important and enforced by the ordering
+ * of different apic driver files in the Makefile.
+ *
+ * For the files having two apic drivers, we use apic_drivers()
+ * to enforce the order with in them.
+ */
+#define apic_driver(sym)					\
+	static struct apic *__apicdrivers_##sym __used		\
+	__aligned(sizeof(struct apic *))			\
+	__section(.apicdrivers) = { &sym }
+
+#define apic_drivers(sym1, sym2)					\
+	static struct apic *__apicdrivers_##sym1##sym2[2] __used	\
+	__aligned(sizeof(struct apic *))				\
+	__section(.apicdrivers) = { &sym1, &sym2 }
+
+extern struct apic *__apicdrivers[], *__apicdrivers_end[];
+
+/*
  * APIC functionality to boot other CPUs - only used on SMP:
  */
 #ifdef CONFIG_SMP
@@ -389,6 +415,7 @@ extern int wakeup_secondary_cpu_via_nmi(int apicid, unsigned long start_eip);
 #endif
 
 #ifdef CONFIG_X86_LOCAL_APIC
+
 static inline u32 apic_read(u32 reg)
 {
 	return apic->read(reg);
@@ -458,15 +485,10 @@ static inline unsigned default_get_apic_id(unsigned long x)
 #define DEFAULT_TRAMPOLINE_PHYS_HIGH		0x469
 
 #ifdef CONFIG_X86_64
-extern struct apic apic_flat;
-extern struct apic apic_physflat;
-extern struct apic apic_x2apic_cluster;
-extern struct apic apic_x2apic_phys;
 extern int default_acpi_madt_oem_check(char *, char *);
 
 extern void apic_send_IPI_self(int vector);
 
-extern struct apic apic_x2apic_uv_x;
 DECLARE_PER_CPU(int, x2apic_extra_bits);
 
 extern int default_cpu_present_to_apicid(int mps_cpu);
@@ -515,8 +537,6 @@ extern void default_setup_apic_routing(void);
 extern struct apic apic_noop;
 
 #ifdef CONFIG_X86_32
-
-extern struct apic apic_default;
 
 static inline int noop_x86_32_early_logical_apicid(int cpu)
 {

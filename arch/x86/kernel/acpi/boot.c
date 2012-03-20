@@ -219,6 +219,8 @@ static int __init
 acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
 {
 	struct acpi_madt_local_x2apic *processor = NULL;
+	int apic_id;
+	u8 enabled;
 
 	processor = (struct acpi_madt_local_x2apic *)header;
 
@@ -227,6 +229,8 @@ acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
 
 	acpi_table_print_madt_entry(header);
 
+	apic_id = processor->local_apic_id;
+	enabled = processor->lapic_flags & ACPI_MADT_ENABLED;
 #ifdef CONFIG_X86_X2APIC
 	/*
 	 * We need to register disabled CPU as well to permit
@@ -235,8 +239,10 @@ acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
 	 * to not preallocating memory for all NR_CPUS
 	 * when we use CPU hotplug.
 	 */
-	acpi_register_lapic(processor->local_apic_id,	/* APIC ID */
-			    processor->lapic_flags & ACPI_MADT_ENABLED);
+	if (!cpu_has_x2apic && (apic_id >= 0xff) && enabled)
+		printk(KERN_WARNING PREFIX "x2apic entry ignored\n");
+	else
+		acpi_register_lapic(apic_id, enabled);
 #else
 	printk(KERN_WARNING PREFIX "x2apic entry ignored\n");
 #endif
@@ -970,7 +976,7 @@ void __init mp_override_legacy_irq(u8 bus_irq, u8 polarity, u8 trigger, u32 gsi)
 	mp_irq.irqflag = (trigger << 2) | polarity;
 	mp_irq.srcbus = MP_ISA_BUS;
 	mp_irq.srcbusirq = bus_irq;	/* IRQ */
-	mp_irq.dstapic = mp_ioapics[ioapic].apicid; /* APIC ID */
+	mp_irq.dstapic = mpc_ioapic_id(ioapic); /* APIC ID */
 	mp_irq.dstirq = pin;	/* INTIN# */
 
 	mp_save_irq(&mp_irq);
@@ -1021,7 +1027,7 @@ void __init mp_config_acpi_legacy_irqs(void)
 		if (ioapic < 0)
 			continue;
 		pin = mp_find_ioapic_pin(ioapic, gsi);
-		dstapic = mp_ioapics[ioapic].apicid;
+		dstapic = mpc_ioapic_id(ioapic);
 
 		for (idx = 0; idx < mp_irq_entries; idx++) {
 			struct mpc_intsrc *irq = mp_irqs + idx;
@@ -1082,7 +1088,7 @@ static int mp_config_acpi_gsi(struct device *dev, u32 gsi, int trigger,
 	mp_irq.srcbus = number;
 	mp_irq.srcbusirq = (((devfn >> 3) & 0x1f) << 2) | ((pin - 1) & 3);
 	ioapic = mp_find_ioapic(gsi);
-	mp_irq.dstapic = mp_ioapics[ioapic].apicid;
+	mp_irq.dstapic = mpc_ioapic_id(ioapic);
 	mp_irq.dstirq = mp_find_ioapic_pin(ioapic, gsi);
 
 	mp_save_irq(&mp_irq);
@@ -1113,7 +1119,7 @@ int mp_register_gsi(struct device *dev, u32 gsi, int trigger, int polarity)
 
 	if (ioapic_pin > MP_MAX_IOAPIC_PIN) {
 		printk(KERN_ERR "Invalid reference to IOAPIC pin "
-		       "%d-%d\n", mp_ioapics[ioapic].apicid,
+		       "%d-%d\n", mpc_ioapic_id(ioapic),
 		       ioapic_pin);
 		return gsi;
 	}

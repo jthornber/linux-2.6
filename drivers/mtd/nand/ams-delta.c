@@ -26,7 +26,7 @@
 #include <asm/io.h>
 #include <mach/hardware.h>
 #include <asm/sizes.h>
-#include <mach/gpio.h>
+#include <asm/gpio.h>
 #include <plat/board-ams-delta.h>
 
 /*
@@ -235,8 +235,8 @@ static int __devinit ams_delta_init(struct platform_device *pdev)
 	}
 
 	/* Register the partitions */
-	add_mtd_partitions(ams_delta_mtd, partition_info,
-			   ARRAY_SIZE(partition_info));
+	mtd_device_register(ams_delta_mtd, partition_info,
+			    ARRAY_SIZE(partition_info));
 
 	goto out;
 
@@ -280,17 +280,7 @@ static struct platform_driver ams_delta_nand_driver = {
 	},
 };
 
-static int __init ams_delta_nand_init(void)
-{
-	return platform_driver_register(&ams_delta_nand_driver);
-}
-module_init(ams_delta_nand_init);
-
-static void __exit ams_delta_nand_exit(void)
-{
-	platform_driver_unregister(&ams_delta_nand_driver);
-}
-module_exit(ams_delta_nand_exit);
+module_platform_driver(ams_delta_nand_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jonathan McDowell <noodles@earth.li>");

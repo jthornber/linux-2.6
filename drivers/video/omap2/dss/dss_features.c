@@ -22,7 +22,7 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 
-#include <plat/display.h>
+#include <video/omapdss.h>
 #include <plat/cpu.h>
 
 #include "dss.h"
@@ -47,12 +47,16 @@ struct omap_dss_features {
 	const int num_ovls;
 	const enum omap_display_type *supported_displays;
 	const enum omap_color_mode *supported_color_modes;
+	const enum omap_overlay_caps *overlay_caps;
 	const char * const *clksrc_names;
 	const struct dss_param_range *dss_params;
+
+	const u32 buffer_size_unit;
+	const u32 burst_size_unit;
 };
 
 /* This struct is assigned to one of the below during initialization */
-static struct omap_dss_features *omap_current_dss_features;
+static const struct omap_dss_features *omap_current_dss_features;
 
 static const struct dss_reg_field omap2_dss_reg_fields[] = {
 	[FEAT_REG_FIRHINC]			= { 11, 0 },
@@ -177,56 +181,164 @@ static const enum omap_color_mode omap3_dss_supported_color_modes[] = {
 	OMAP_DSS_COLOR_RGBA32 | OMAP_DSS_COLOR_RGBX32,
 };
 
+static const enum omap_color_mode omap4_dss_supported_color_modes[] = {
+	/* OMAP_DSS_GFX */
+	OMAP_DSS_COLOR_CLUT1 | OMAP_DSS_COLOR_CLUT2 |
+	OMAP_DSS_COLOR_CLUT4 | OMAP_DSS_COLOR_CLUT8 |
+	OMAP_DSS_COLOR_RGB12U | OMAP_DSS_COLOR_ARGB16 |
+	OMAP_DSS_COLOR_RGB16 | OMAP_DSS_COLOR_RGB24U |
+	OMAP_DSS_COLOR_RGB24P | OMAP_DSS_COLOR_ARGB32 |
+	OMAP_DSS_COLOR_RGBA32 | OMAP_DSS_COLOR_RGBX32 |
+	OMAP_DSS_COLOR_ARGB16_1555,
+
+	/* OMAP_DSS_VIDEO1 */
+	OMAP_DSS_COLOR_RGB16 | OMAP_DSS_COLOR_RGB12U |
+	OMAP_DSS_COLOR_YUV2 | OMAP_DSS_COLOR_ARGB16_1555 |
+	OMAP_DSS_COLOR_RGBA32 | OMAP_DSS_COLOR_NV12 |
+	OMAP_DSS_COLOR_RGBA16 | OMAP_DSS_COLOR_RGB24U |
+	OMAP_DSS_COLOR_RGB24P | OMAP_DSS_COLOR_UYVY |
+	OMAP_DSS_COLOR_ARGB16 | OMAP_DSS_COLOR_XRGB16_1555 |
+	OMAP_DSS_COLOR_ARGB32 | OMAP_DSS_COLOR_RGBX16 |
+	OMAP_DSS_COLOR_RGBX32,
+
+       /* OMAP_DSS_VIDEO2 */
+	OMAP_DSS_COLOR_RGB16 | OMAP_DSS_COLOR_RGB12U |
+	OMAP_DSS_COLOR_YUV2 | OMAP_DSS_COLOR_ARGB16_1555 |
+	OMAP_DSS_COLOR_RGBA32 | OMAP_DSS_COLOR_NV12 |
+	OMAP_DSS_COLOR_RGBA16 | OMAP_DSS_COLOR_RGB24U |
+	OMAP_DSS_COLOR_RGB24P | OMAP_DSS_COLOR_UYVY |
+	OMAP_DSS_COLOR_ARGB16 | OMAP_DSS_COLOR_XRGB16_1555 |
+	OMAP_DSS_COLOR_ARGB32 | OMAP_DSS_COLOR_RGBX16 |
+	OMAP_DSS_COLOR_RGBX32,
+
+	/* OMAP_DSS_VIDEO3 */
+	OMAP_DSS_COLOR_RGB16 | OMAP_DSS_COLOR_RGB12U |
+	OMAP_DSS_COLOR_YUV2 | OMAP_DSS_COLOR_ARGB16_1555 |
+	OMAP_DSS_COLOR_RGBA32 | OMAP_DSS_COLOR_NV12 |
+	OMAP_DSS_COLOR_RGBA16 | OMAP_DSS_COLOR_RGB24U |
+	OMAP_DSS_COLOR_RGB24P | OMAP_DSS_COLOR_UYVY |
+	OMAP_DSS_COLOR_ARGB16 | OMAP_DSS_COLOR_XRGB16_1555 |
+	OMAP_DSS_COLOR_ARGB32 | OMAP_DSS_COLOR_RGBX16 |
+	OMAP_DSS_COLOR_RGBX32,
+};
+
+static const enum omap_overlay_caps omap2_dss_overlay_caps[] = {
+	/* OMAP_DSS_GFX */
+	0,
+
+	/* OMAP_DSS_VIDEO1 */
+	OMAP_DSS_OVL_CAP_SCALE,
+
+	/* OMAP_DSS_VIDEO2 */
+	OMAP_DSS_OVL_CAP_SCALE,
+};
+
+static const enum omap_overlay_caps omap3430_dss_overlay_caps[] = {
+	/* OMAP_DSS_GFX */
+	OMAP_DSS_OVL_CAP_GLOBAL_ALPHA,
+
+	/* OMAP_DSS_VIDEO1 */
+	OMAP_DSS_OVL_CAP_SCALE,
+
+	/* OMAP_DSS_VIDEO2 */
+	OMAP_DSS_OVL_CAP_SCALE | OMAP_DSS_OVL_CAP_GLOBAL_ALPHA,
+};
+
+static const enum omap_overlay_caps omap3630_dss_overlay_caps[] = {
+	/* OMAP_DSS_GFX */
+	OMAP_DSS_OVL_CAP_GLOBAL_ALPHA | OMAP_DSS_OVL_CAP_PRE_MULT_ALPHA,
+
+	/* OMAP_DSS_VIDEO1 */
+	OMAP_DSS_OVL_CAP_SCALE,
+
+	/* OMAP_DSS_VIDEO2 */
+	OMAP_DSS_OVL_CAP_SCALE | OMAP_DSS_OVL_CAP_GLOBAL_ALPHA |
+		OMAP_DSS_OVL_CAP_PRE_MULT_ALPHA,
+};
+
+static const enum omap_overlay_caps omap4_dss_overlay_caps[] = {
+	/* OMAP_DSS_GFX */
+	OMAP_DSS_OVL_CAP_GLOBAL_ALPHA | OMAP_DSS_OVL_CAP_PRE_MULT_ALPHA |
+		OMAP_DSS_OVL_CAP_ZORDER,
+
+	/* OMAP_DSS_VIDEO1 */
+	OMAP_DSS_OVL_CAP_SCALE | OMAP_DSS_OVL_CAP_GLOBAL_ALPHA |
+		OMAP_DSS_OVL_CAP_PRE_MULT_ALPHA | OMAP_DSS_OVL_CAP_ZORDER,
+
+	/* OMAP_DSS_VIDEO2 */
+	OMAP_DSS_OVL_CAP_SCALE | OMAP_DSS_OVL_CAP_GLOBAL_ALPHA |
+		OMAP_DSS_OVL_CAP_PRE_MULT_ALPHA | OMAP_DSS_OVL_CAP_ZORDER,
+
+	/* OMAP_DSS_VIDEO3 */
+	OMAP_DSS_OVL_CAP_SCALE | OMAP_DSS_OVL_CAP_GLOBAL_ALPHA |
+		OMAP_DSS_OVL_CAP_PRE_MULT_ALPHA | OMAP_DSS_OVL_CAP_ZORDER,
+};
+
 static const char * const omap2_dss_clk_source_names[] = {
-	[DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC]	= "N/A",
-	[DSS_CLK_SRC_DSI_PLL_HSDIV_DSI]		= "N/A",
-	[DSS_CLK_SRC_FCK]			= "DSS_FCLK1",
+	[OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC]	= "N/A",
+	[OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DSI]	= "N/A",
+	[OMAP_DSS_CLK_SRC_FCK]			= "DSS_FCLK1",
 };
 
 static const char * const omap3_dss_clk_source_names[] = {
-	[DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC]	= "DSI1_PLL_FCLK",
-	[DSS_CLK_SRC_DSI_PLL_HSDIV_DSI]		= "DSI2_PLL_FCLK",
-	[DSS_CLK_SRC_FCK]			= "DSS1_ALWON_FCLK",
+	[OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC]	= "DSI1_PLL_FCLK",
+	[OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DSI]	= "DSI2_PLL_FCLK",
+	[OMAP_DSS_CLK_SRC_FCK]			= "DSS1_ALWON_FCLK",
 };
 
 static const char * const omap4_dss_clk_source_names[] = {
-	[DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC]	= "PLL1_CLK1",
-	[DSS_CLK_SRC_DSI_PLL_HSDIV_DSI]		= "PLL1_CLK2",
-	[DSS_CLK_SRC_FCK]			= "DSS_FCLK",
+	[OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC]	= "PLL1_CLK1",
+	[OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DSI]	= "PLL1_CLK2",
+	[OMAP_DSS_CLK_SRC_FCK]			= "DSS_FCLK",
+	[OMAP_DSS_CLK_SRC_DSI2_PLL_HSDIV_DISPC]	= "PLL2_CLK1",
+	[OMAP_DSS_CLK_SRC_DSI2_PLL_HSDIV_DSI]	= "PLL2_CLK2",
 };
 
 static const struct dss_param_range omap2_dss_param_range[] = {
 	[FEAT_PARAM_DSS_FCK]			= { 0, 173000000 },
+	[FEAT_PARAM_DSS_PCD]			= { 2, 255 },
 	[FEAT_PARAM_DSIPLL_REGN]		= { 0, 0 },
 	[FEAT_PARAM_DSIPLL_REGM]		= { 0, 0 },
 	[FEAT_PARAM_DSIPLL_REGM_DISPC]		= { 0, 0 },
 	[FEAT_PARAM_DSIPLL_REGM_DSI]		= { 0, 0 },
 	[FEAT_PARAM_DSIPLL_FINT]		= { 0, 0 },
 	[FEAT_PARAM_DSIPLL_LPDIV]		= { 0, 0 },
+	[FEAT_PARAM_DOWNSCALE]			= { 1, 2 },
+	/*
+	 * Assuming the line width buffer to be 768 pixels as OMAP2 DISPC
+	 * scaler cannot scale a image with width more than 768.
+	 */
+	[FEAT_PARAM_LINEWIDTH]			= { 1, 768 },
 };
 
 static const struct dss_param_range omap3_dss_param_range[] = {
 	[FEAT_PARAM_DSS_FCK]			= { 0, 173000000 },
+	[FEAT_PARAM_DSS_PCD]			= { 1, 255 },
 	[FEAT_PARAM_DSIPLL_REGN]		= { 0, (1 << 7) - 1 },
 	[FEAT_PARAM_DSIPLL_REGM]		= { 0, (1 << 11) - 1 },
 	[FEAT_PARAM_DSIPLL_REGM_DISPC]		= { 0, (1 << 4) - 1 },
 	[FEAT_PARAM_DSIPLL_REGM_DSI]		= { 0, (1 << 4) - 1 },
 	[FEAT_PARAM_DSIPLL_FINT]		= { 750000, 2100000 },
 	[FEAT_PARAM_DSIPLL_LPDIV]		= { 1, (1 << 13) - 1},
+	[FEAT_PARAM_DOWNSCALE]			= { 1, 4 },
+	[FEAT_PARAM_LINEWIDTH]			= { 1, 1024 },
 };
 
 static const struct dss_param_range omap4_dss_param_range[] = {
 	[FEAT_PARAM_DSS_FCK]			= { 0, 186000000 },
+	[FEAT_PARAM_DSS_PCD]			= { 1, 255 },
 	[FEAT_PARAM_DSIPLL_REGN]		= { 0, (1 << 8) - 1 },
 	[FEAT_PARAM_DSIPLL_REGM]		= { 0, (1 << 12) - 1 },
 	[FEAT_PARAM_DSIPLL_REGM_DISPC]		= { 0, (1 << 5) - 1 },
 	[FEAT_PARAM_DSIPLL_REGM_DSI]		= { 0, (1 << 5) - 1 },
 	[FEAT_PARAM_DSIPLL_FINT]		= { 500000, 2500000 },
 	[FEAT_PARAM_DSIPLL_LPDIV]		= { 0, (1 << 13) - 1 },
+	[FEAT_PARAM_DOWNSCALE]			= { 1, 4 },
+	[FEAT_PARAM_LINEWIDTH]			= { 1, 2048 },
 };
 
 /* OMAP2 DSS Features */
-static struct omap_dss_features omap2_dss_features = {
+static const struct omap_dss_features omap2_dss_features = {
 	.reg_fields = omap2_dss_reg_fields,
 	.num_reg_fields = ARRAY_SIZE(omap2_dss_reg_fields),
 
@@ -239,65 +351,140 @@ static struct omap_dss_features omap2_dss_features = {
 	.num_ovls = 3,
 	.supported_displays = omap2_dss_supported_displays,
 	.supported_color_modes = omap2_dss_supported_color_modes,
+	.overlay_caps = omap2_dss_overlay_caps,
 	.clksrc_names = omap2_dss_clk_source_names,
 	.dss_params = omap2_dss_param_range,
+	.buffer_size_unit = 1,
+	.burst_size_unit = 8,
 };
 
 /* OMAP3 DSS Features */
-static struct omap_dss_features omap3430_dss_features = {
+static const struct omap_dss_features omap3430_dss_features = {
 	.reg_fields = omap3_dss_reg_fields,
 	.num_reg_fields = ARRAY_SIZE(omap3_dss_reg_fields),
 
 	.has_feature	=
-		FEAT_GLOBAL_ALPHA | FEAT_LCDENABLEPOL |
+		FEAT_LCDENABLEPOL |
 		FEAT_LCDENABLESIGNAL | FEAT_PCKFREEENABLE |
 		FEAT_FUNCGATED | FEAT_ROWREPEATENABLE |
-		FEAT_LINEBUFFERSPLIT | FEAT_RESIZECONF,
+		FEAT_LINEBUFFERSPLIT | FEAT_RESIZECONF |
+		FEAT_DSI_PLL_FREQSEL | FEAT_DSI_REVERSE_TXCLKESC |
+		FEAT_VENC_REQUIRES_TV_DAC_CLK | FEAT_CPR | FEAT_PRELOAD |
+		FEAT_FIR_COEF_V | FEAT_ALPHA_FIXED_ZORDER,
 
 	.num_mgrs = 2,
 	.num_ovls = 3,
 	.supported_displays = omap3430_dss_supported_displays,
 	.supported_color_modes = omap3_dss_supported_color_modes,
+	.overlay_caps = omap3430_dss_overlay_caps,
 	.clksrc_names = omap3_dss_clk_source_names,
 	.dss_params = omap3_dss_param_range,
+	.buffer_size_unit = 1,
+	.burst_size_unit = 8,
 };
 
-static struct omap_dss_features omap3630_dss_features = {
+static const struct omap_dss_features omap3630_dss_features = {
 	.reg_fields = omap3_dss_reg_fields,
 	.num_reg_fields = ARRAY_SIZE(omap3_dss_reg_fields),
 
 	.has_feature    =
-		FEAT_GLOBAL_ALPHA | FEAT_LCDENABLEPOL |
+		FEAT_LCDENABLEPOL |
 		FEAT_LCDENABLESIGNAL | FEAT_PCKFREEENABLE |
-		FEAT_PRE_MULT_ALPHA | FEAT_FUNCGATED |
+		FEAT_FUNCGATED |
 		FEAT_ROWREPEATENABLE | FEAT_LINEBUFFERSPLIT |
-		FEAT_RESIZECONF,
+		FEAT_RESIZECONF | FEAT_DSI_PLL_PWR_BUG |
+		FEAT_DSI_PLL_FREQSEL | FEAT_CPR | FEAT_PRELOAD |
+		FEAT_FIR_COEF_V | FEAT_ALPHA_FIXED_ZORDER,
 
 	.num_mgrs = 2,
 	.num_ovls = 3,
 	.supported_displays = omap3630_dss_supported_displays,
 	.supported_color_modes = omap3_dss_supported_color_modes,
+	.overlay_caps = omap3630_dss_overlay_caps,
 	.clksrc_names = omap3_dss_clk_source_names,
 	.dss_params = omap3_dss_param_range,
+	.buffer_size_unit = 1,
+	.burst_size_unit = 8,
 };
 
 /* OMAP4 DSS Features */
-static struct omap_dss_features omap4_dss_features = {
+/* For OMAP4430 ES 1.0 revision */
+static const struct omap_dss_features omap4430_es1_0_dss_features  = {
 	.reg_fields = omap4_dss_reg_fields,
 	.num_reg_fields = ARRAY_SIZE(omap4_dss_reg_fields),
 
 	.has_feature	=
-		FEAT_GLOBAL_ALPHA | FEAT_PRE_MULT_ALPHA |
-		FEAT_MGR_LCD2 | FEAT_GLOBAL_ALPHA_VID1 |
-		FEAT_CORE_CLK_DIV | FEAT_LCD_CLK_SRC,
+		FEAT_MGR_LCD2 |
+		FEAT_CORE_CLK_DIV | FEAT_LCD_CLK_SRC |
+		FEAT_DSI_DCS_CMD_CONFIG_VC | FEAT_DSI_VC_OCP_WIDTH |
+		FEAT_DSI_GNQ | FEAT_HANDLE_UV_SEPARATE | FEAT_ATTR2 |
+		FEAT_CPR | FEAT_PRELOAD | FEAT_FIR_COEF_V |
+		FEAT_ALPHA_FREE_ZORDER,
 
 	.num_mgrs = 3,
-	.num_ovls = 3,
+	.num_ovls = 4,
 	.supported_displays = omap4_dss_supported_displays,
-	.supported_color_modes = omap3_dss_supported_color_modes,
+	.supported_color_modes = omap4_dss_supported_color_modes,
+	.overlay_caps = omap4_dss_overlay_caps,
 	.clksrc_names = omap4_dss_clk_source_names,
 	.dss_params = omap4_dss_param_range,
+	.buffer_size_unit = 16,
+	.burst_size_unit = 16,
 };
+
+/* For all the other OMAP4 versions */
+static const struct omap_dss_features omap4_dss_features = {
+	.reg_fields = omap4_dss_reg_fields,
+	.num_reg_fields = ARRAY_SIZE(omap4_dss_reg_fields),
+
+	.has_feature	=
+		FEAT_MGR_LCD2 |
+		FEAT_CORE_CLK_DIV | FEAT_LCD_CLK_SRC |
+		FEAT_DSI_DCS_CMD_CONFIG_VC | FEAT_DSI_VC_OCP_WIDTH |
+		FEAT_DSI_GNQ | FEAT_HDMI_CTS_SWMODE |
+		FEAT_HANDLE_UV_SEPARATE | FEAT_ATTR2 | FEAT_CPR |
+		FEAT_PRELOAD | FEAT_FIR_COEF_V | FEAT_ALPHA_FREE_ZORDER,
+
+	.num_mgrs = 3,
+	.num_ovls = 4,
+	.supported_displays = omap4_dss_supported_displays,
+	.supported_color_modes = omap4_dss_supported_color_modes,
+	.overlay_caps = omap4_dss_overlay_caps,
+	.clksrc_names = omap4_dss_clk_source_names,
+	.dss_params = omap4_dss_param_range,
+	.buffer_size_unit = 16,
+	.burst_size_unit = 16,
+};
+
+#if defined(CONFIG_OMAP4_DSS_HDMI)
+/* HDMI OMAP4 Functions*/
+static const struct ti_hdmi_ip_ops omap4_hdmi_functions = {
+
+	.video_configure	=	ti_hdmi_4xxx_basic_configure,
+	.phy_enable		=	ti_hdmi_4xxx_phy_enable,
+	.phy_disable		=	ti_hdmi_4xxx_phy_disable,
+	.read_edid		=	ti_hdmi_4xxx_read_edid,
+	.detect			=	ti_hdmi_4xxx_detect,
+	.pll_enable		=	ti_hdmi_4xxx_pll_enable,
+	.pll_disable		=	ti_hdmi_4xxx_pll_disable,
+	.video_enable		=	ti_hdmi_4xxx_wp_video_start,
+	.dump_wrapper		=	ti_hdmi_4xxx_wp_dump,
+	.dump_core		=	ti_hdmi_4xxx_core_dump,
+	.dump_pll		=	ti_hdmi_4xxx_pll_dump,
+	.dump_phy		=	ti_hdmi_4xxx_phy_dump,
+#if defined(CONFIG_SND_OMAP_SOC_OMAP4_HDMI) || \
+	defined(CONFIG_SND_OMAP_SOC_OMAP4_HDMI_MODULE)
+	.audio_enable		=       ti_hdmi_4xxx_wp_audio_enable,
+#endif
+
+};
+
+void dss_init_hdmi_ip_ops(struct hdmi_ip_data *ip_data)
+{
+	if (cpu_is_omap44xx())
+		ip_data->ops = &omap4_hdmi_functions;
+}
+#endif
 
 /* Functions returning values related to a DSS feature */
 int dss_feat_get_num_mgrs(void)
@@ -330,6 +517,11 @@ enum omap_color_mode dss_feat_get_supported_color_modes(enum omap_plane plane)
 	return omap_current_dss_features->supported_color_modes[plane];
 }
 
+enum omap_overlay_caps dss_feat_get_overlay_caps(enum omap_plane plane)
+{
+	return omap_current_dss_features->overlay_caps[plane];
+}
+
 bool dss_feat_color_mode_supported(enum omap_plane plane,
 		enum omap_color_mode color_mode)
 {
@@ -337,9 +529,19 @@ bool dss_feat_color_mode_supported(enum omap_plane plane,
 			color_mode;
 }
 
-const char *dss_feat_get_clk_source_name(enum dss_clk_source id)
+const char *dss_feat_get_clk_source_name(enum omap_dss_clk_source id)
 {
 	return omap_current_dss_features->clksrc_names[id];
+}
+
+u32 dss_feat_get_buffer_size_unit(void)
+{
+	return omap_current_dss_features->buffer_size_unit;
+}
+
+u32 dss_feat_get_burst_size_unit(void)
+{
+	return omap_current_dss_features->burst_size_unit;
 }
 
 /* DSS has_feature check */
@@ -365,6 +567,10 @@ void dss_features_init(void)
 		omap_current_dss_features = &omap3630_dss_features;
 	else if (cpu_is_omap34xx())
 		omap_current_dss_features = &omap3430_dss_features;
-	else
+	else if (omap_rev() == OMAP4430_REV_ES1_0)
+		omap_current_dss_features = &omap4430_es1_0_dss_features;
+	else if (cpu_is_omap44xx())
 		omap_current_dss_features = &omap4_dss_features;
+	else
+		DSSWARN("Unsupported OMAP version");
 }

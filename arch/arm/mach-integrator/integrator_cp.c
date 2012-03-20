@@ -14,7 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/string.h>
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/amba/bus.h>
 #include <linux/amba/kmi.h>
 #include <linux/amba/clcd.h>
@@ -22,6 +22,7 @@
 #include <linux/io.h>
 #include <linux/gfp.h>
 #include <linux/clkdev.h>
+#include <linux/mtd/physmap.h>
 
 #include <mach/hardware.h>
 #include <mach/platform.h>
@@ -35,7 +36,6 @@
 #include <mach/lm.h>
 
 #include <asm/mach/arch.h>
-#include <asm/mach/flash.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/map.h>
 #include <asm/mach/time.h>
@@ -229,17 +229,24 @@ static struct clk cp_auxclk = {
 	.vcoreg	= CM_AUXOSC,
 };
 
+static struct clk sp804_clk = {
+	.rate	= 1000000,
+};
+
 static struct clk_lookup cp_lookups[] = {
 	{	/* CLCD */
 		.dev_id		= "mb:c0",
 		.clk		= &cp_auxclk,
+	}, {	/* SP804 timers */
+		.dev_id		= "sp804",
+		.clk		= &sp804_clk,
 	},
 };
 
 /*
  * Flash handling.
  */
-static int intcp_flash_init(void)
+static int intcp_flash_init(struct platform_device *dev)
 {
 	u32 val;
 
@@ -250,7 +257,7 @@ static int intcp_flash_init(void)
 	return 0;
 }
 
-static void intcp_flash_exit(void)
+static void intcp_flash_exit(struct platform_device *dev)
 {
 	u32 val;
 
@@ -259,7 +266,7 @@ static void intcp_flash_exit(void)
 	writel(val, INTCP_VA_CTRL_BASE + INTCP_FLASHPROG);
 }
 
-static void intcp_flash_set_vpp(int on)
+static void intcp_flash_set_vpp(struct platform_device *pdev, int on)
 {
 	u32 val;
 
@@ -271,8 +278,7 @@ static void intcp_flash_set_vpp(int on)
 	writel(val, INTCP_VA_CTRL_BASE + INTCP_FLASHPROG);
 }
 
-static struct flash_platform_data intcp_flash_data = {
-	.map_name	= "cfi_probe",
+static struct physmap_flash_data intcp_flash_data = {
 	.width		= 4,
 	.init		= intcp_flash_init,
 	.exit		= intcp_flash_exit,
@@ -286,7 +292,7 @@ static struct resource intcp_flash_resource = {
 };
 
 static struct platform_device intcp_flash_device = {
-	.name		= "armflash",
+	.name		= "physmap-flash",
 	.id		= 0,
 	.dev		= {
 		.platform_data	= &intcp_flash_data,
@@ -476,8 +482,8 @@ static void __init intcp_timer_init(void)
 	writel(0, TIMER1_VA_BASE + TIMER_CTRL);
 	writel(0, TIMER2_VA_BASE + TIMER_CTRL);
 
-	sp804_clocksource_init(TIMER2_VA_BASE);
-	sp804_clockevents_init(TIMER1_VA_BASE, IRQ_TIMERINT1);
+	sp804_clocksource_init(TIMER2_VA_BASE, "timer2");
+	sp804_clockevents_init(TIMER1_VA_BASE, IRQ_TIMERINT1, "timer1");
 }
 
 static struct sys_timer cp_timer = {
@@ -486,11 +492,12 @@ static struct sys_timer cp_timer = {
 
 MACHINE_START(CINTEGRATOR, "ARM-IntegratorCP")
 	/* Maintainer: ARM Ltd/Deep Blue Solutions Ltd */
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
 	.reserve	= integrator_reserve,
 	.map_io		= intcp_map_io,
 	.init_early	= intcp_init_early,
 	.init_irq	= intcp_init_irq,
 	.timer		= &cp_timer,
 	.init_machine	= intcp_init,
+	.restart	= integrator_restart,
 MACHINE_END

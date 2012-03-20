@@ -19,13 +19,12 @@
 #include <linux/reboot.h>
 #include <linux/uaccess.h>
 #include <linux/ptrace.h>
-#include <asm/opcode-tile.h>
-#include <asm/opcode_constants.h>
 #include <asm/stack.h>
 #include <asm/traps.h>
 
 #include <arch/interrupts.h>
 #include <arch/spr_def.h>
+#include <arch/opcode.h>
 
 void __init trap_init(void)
 {
@@ -135,7 +134,7 @@ static int special_ill(bundle_bits bundle, int *sigp, int *codep)
 	if (get_UnaryOpcodeExtension_X1(bundle) != ILL_UNARY_OPCODE_X1)
 		return 0;
 #else
-	if (bundle & TILE_BUNDLE_Y_ENCODING_MASK)
+	if (bundle & TILEPRO_BUNDLE_Y_ENCODING_MASK)
 		return 0;
 	if (get_Opcode_X1(bundle) != SHUN_0_OPCODE_X1)
 		return 0;
@@ -308,6 +307,7 @@ void __kprobes do_trap(struct pt_regs *regs, int fault_num,
 	info.si_addr = (void __user *)address;
 	if (signo == SIGILL)
 		info.si_trapno = fault_num;
+	trace_unhandled_signal("trap", regs, address, signo);
 	force_sig_info(signo, &info, current);
 }
 

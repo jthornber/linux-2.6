@@ -17,6 +17,7 @@
  * the CPU clock speed on the fly.
  */
 
+#include <linux/module.h>
 #include <linux/cpufreq.h>
 #include <linux/clk.h>
 #include <linux/err.h>
@@ -97,7 +98,7 @@ static int mxc_set_target(struct cpufreq_policy *policy,
 	return ret;
 }
 
-static int __init mxc_cpufreq_init(struct cpufreq_policy *policy)
+static int mxc_cpufreq_init(struct cpufreq_policy *policy)
 {
 	int ret;
 	int i;
@@ -153,8 +154,8 @@ static int __init mxc_cpufreq_init(struct cpufreq_policy *policy)
 	ret = cpufreq_frequency_table_cpuinfo(policy, imx_freq_table);
 
 	if (ret < 0) {
-		printk(KERN_ERR "%s: failed to register i.MXC CPUfreq \
-				with error code %d\n", __func__, ret);
+		printk(KERN_ERR "%s: failed to register i.MXC CPUfreq with error code %d\n",
+		       __func__, ret);
 		goto err;
 	}
 

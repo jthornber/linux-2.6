@@ -39,10 +39,12 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/physmap.h>
+#include <linux/pm_clock.h>
 #include <linux/smsc911x.h>
 #include <linux/sh_intc.h>
 #include <linux/tca6416_keypad.h>
-#include <linux/usb/r8a66597.h>
+#include <linux/usb/renesas_usbhs.h>
+#include <linux/dma-mapping.h>
 
 #include <video/sh_mobile_hdmi.h>
 #include <video/sh_mobile_lcdc.h>
@@ -124,7 +126,7 @@
  * ------+--------------------+--------------------+-------
  * IRQ0  | ICR1A.IRQ0SA=0010  | SDHI2 card detect  | Low
  * IRQ6  | ICR1A.IRQ6SA=0011  | Ether(LAN9220)     | High
- * IRQ7  | ICR1A.IRQ7SA=0010  | LCD Tuch Panel     | Low
+ * IRQ7  | ICR1A.IRQ7SA=0010  | LCD Touch Panel    | Low
  * IRQ8  | ICR2A.IRQ8SA=0010  | MMC/SD card detect | Low
  * IRQ9  | ICR2A.IRQ9SA=0010  | KEY(TCA6408)       | Low
  * IRQ21 | ICR4A.IRQ21SA=0011 | Sensor(ADXL345)    | High
@@ -142,8 +144,17 @@
  * 1-2 short | VBUS 5V       | Host
  * open      | external VBUS | Function
  *
- * *1
- * CN31 is used as Host in Linux.
+ * CAUTION
+ *
+ * renesas_usbhs driver can use external interrupt mode
+ * (which come from USB-PHY) or autonomy mode (it use own interrupt)
+ * for detecting connection/disconnection when Function.
+ * USB will be power OFF while it has been disconnecting
+ * if external interrupt mode, and it is always power ON if autonomy mode,
+ *
+ * mackerel can not use external interrupt (IRQ7-PORT167) mode on "USB0",
+ * because Touchscreen is using IRQ7-PORT40.
+ * It is impossible to use IRQ7 demux on this board.
  */
 
 /*
@@ -182,9 +193,20 @@
  */
 
 /*
+ * FSI - AK4642
+ *
+ * it needs amixer settings for playing
+ *
+ * amixer set "Headphone" on
+ * amixer set "HPOUTL Mixer DACH" on
+ * amixer set "HPOUTR Mixer DACH" on
+ */
+
+/*
  * FIXME !!
  *
  * gpio_no_direction
+ * gpio_pull_down
  * are quick_hack.
  *
  * current gpio frame work doesn't have
@@ -194,6 +216,16 @@
 static void __init gpio_no_direction(u32 addr)
 {
 	__raw_writeb(0x00, addr);
+}
+
+static void __init gpio_pull_down(u32 addr)
+{
+	u8 data = __raw_readb(addr);
+
+	data &= 0x0F;
+	data |= 0xA0;
+
+	__raw_writeb(data, addr);
 }
 
 /* MTD */
@@ -236,8 +268,8 @@ static struct physmap_flash_data nor_flash_data = {
 
 static struct resource nor_flash_resources[] = {
 	[0]	= {
-		.start	= 0x00000000,
-		.end	= 0x08000000 - 1,
+		.start	= 0x20000000, /* CS0 shadow instead of regular CS0 */
+		.end	= 0x28000000 - 1, /* needed by USB MASK ROM boot */
 		.flags	= IORESOURCE_MEM,
 	}
 };
@@ -279,6 +311,30 @@ static struct platform_device smc911x_device = {
 	},
 };
 
+/* MERAM */
+static struct sh_mobile_meram_info mackerel_meram_info = {
+	.addr_mode	= SH_MOBILE_MERAM_MODE1,
+};
+
+static struct resource meram_resources[] = {
+	[0] = {
+		.name	= "MERAM",
+		.start	= 0xe8000000,
+		.end	= 0xe81fffff,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device meram_device = {
+	.name		= "sh_mobile_meram",
+	.id		= 0,
+	.num_resources	= ARRAY_SIZE(meram_resources),
+	.resource	= meram_resources,
+	.dev		= {
+		.platform_data = &mackerel_meram_info,
+	},
+};
+
 /* LCDC */
 static struct fb_videomode mackerel_lcdc_modes[] = {
 	{
@@ -307,11 +363,27 @@ static int mackerel_get_brightness(void *board_data)
 	return gpio_get_value(GPIO_PORT31);
 }
 
+static struct sh_mobile_meram_cfg lcd_meram_cfg = {
+	.icb[0] = {
+		.marker_icb     = 28,
+		.cache_icb      = 24,
+		.meram_offset   = 0x0,
+		.meram_size     = 0x40,
+	},
+	.icb[1] = {
+		.marker_icb     = 29,
+		.cache_icb      = 25,
+		.meram_offset   = 0x40,
+		.meram_size     = 0x40,
+	},
+};
+
 static struct sh_mobile_lcdc_info lcdc_info = {
+	.meram_dev = &mackerel_meram_info,
 	.clock_source = LCDC_CLK_BUS,
 	.ch[0] = {
 		.chan = LCDC_CHAN_MAINLCD,
-		.bpp = 16,
+		.fourcc = V4L2_PIX_FMT_RGB565,
 		.lcd_cfg = mackerel_lcdc_modes,
 		.num_cfg = ARRAY_SIZE(mackerel_lcdc_modes),
 		.interface_type		= RGB24,
@@ -327,6 +399,7 @@ static struct sh_mobile_lcdc_info lcdc_info = {
 			.name = "sh_mobile_lcdc_bl",
 			.max_brightness = 1,
 		},
+		.meram_cfg = &lcd_meram_cfg,
 	}
 };
 
@@ -353,15 +426,31 @@ static struct platform_device lcdc_device = {
 	},
 };
 
+static struct sh_mobile_meram_cfg hdmi_meram_cfg = {
+	.icb[0] = {
+		.marker_icb     = 30,
+		.cache_icb      = 26,
+		.meram_offset   = 0x80,
+		.meram_size     = 0x100,
+	},
+	.icb[1] = {
+		.marker_icb     = 31,
+		.cache_icb      = 27,
+		.meram_offset   = 0x180,
+		.meram_size     = 0x100,
+	},
+};
 /* HDMI */
 static struct sh_mobile_lcdc_info hdmi_lcdc_info = {
+	.meram_dev = &mackerel_meram_info,
 	.clock_source = LCDC_CLK_EXTERNAL,
 	.ch[0] = {
 		.chan = LCDC_CHAN_MAINLCD,
-		.bpp = 16,
+		.fourcc = V4L2_PIX_FMT_RGB565,
 		.interface_type = RGB24,
 		.clock_divider = 1,
 		.flags = LCDC_FLAGS_DWPOL,
+		.meram_cfg = &hdmi_meram_cfg,
 	}
 };
 
@@ -458,12 +547,6 @@ static void __init hdmi_init_pm_clock(void)
 		goto out;
 	}
 
-	ret = clk_enable(&sh7372_pllc2_clk);
-	if (ret < 0) {
-		pr_err("Cannot enable pllc2 clock\n");
-		goto out;
-	}
-
 	pr_debug("PLLC2 set frequency %lu\n", rate);
 
 	ret = clk_set_parent(hdmi_ick, &sh7372_pllc2_clk);
@@ -475,26 +558,232 @@ out:
 		clk_put(hdmi_ick);
 }
 
-/* USB1 (Host) */
-static void usb1_host_port_power(int port, int power)
-{
-	if (!power) /* only power-on is supported for now */
-		return;
+/* USBHS0 is connected to CN22 which takes a USB Mini-B plug
+ *
+ * The sh7372 SoC has IRQ7 set aside for USBHS0 hotplug,
+ * but on this particular board IRQ7 is already used by
+ * the touch screen. This leaves us with software polling.
+ */
+#define USBHS0_POLL_INTERVAL (HZ * 5)
 
-	/* set VBOUT/PWEN and EXTLP1 in DVSTCTR */
-	__raw_writew(__raw_readw(0xE68B0008) | 0x600, 0xE68B0008);
-}
-
-static struct r8a66597_platdata usb1_host_data = {
-	.on_chip	= 1,
-	.port_power	= usb1_host_port_power,
+struct usbhs_private {
+	unsigned int usbphyaddr;
+	unsigned int usbcrcaddr;
+	struct renesas_usbhs_platform_info info;
+	struct delayed_work work;
+	struct platform_device *pdev;
 };
 
-static struct resource usb1_host_resources[] = {
+#define usbhs_get_priv(pdev)				\
+	container_of(renesas_usbhs_get_info(pdev),	\
+		     struct usbhs_private, info)
+
+#define usbhs_is_connected(priv)			\
+	(!((1 << 7) & __raw_readw(priv->usbcrcaddr)))
+
+static int usbhs_get_vbus(struct platform_device *pdev)
+{
+	return usbhs_is_connected(usbhs_get_priv(pdev));
+}
+
+static void usbhs_phy_reset(struct platform_device *pdev)
+{
+	struct usbhs_private *priv = usbhs_get_priv(pdev);
+
+	/* init phy */
+	__raw_writew(0x8a0a, priv->usbcrcaddr);
+}
+
+static int usbhs0_get_id(struct platform_device *pdev)
+{
+	return USBHS_GADGET;
+}
+
+static void usbhs0_work_function(struct work_struct *work)
+{
+	struct usbhs_private *priv = container_of(work, struct usbhs_private,
+						  work.work);
+
+	renesas_usbhs_call_notify_hotplug(priv->pdev);
+	schedule_delayed_work(&priv->work, USBHS0_POLL_INTERVAL);
+}
+
+static int usbhs0_hardware_init(struct platform_device *pdev)
+{
+	struct usbhs_private *priv = usbhs_get_priv(pdev);
+
+	priv->pdev = pdev;
+	INIT_DELAYED_WORK(&priv->work, usbhs0_work_function);
+	schedule_delayed_work(&priv->work, USBHS0_POLL_INTERVAL);
+	return 0;
+}
+
+static void usbhs0_hardware_exit(struct platform_device *pdev)
+{
+	struct usbhs_private *priv = usbhs_get_priv(pdev);
+
+	cancel_delayed_work_sync(&priv->work);
+}
+
+static struct usbhs_private usbhs0_private = {
+	.usbcrcaddr	= 0xe605810c,		/* USBCR2 */
+	.info = {
+		.platform_callback = {
+			.hardware_init	= usbhs0_hardware_init,
+			.hardware_exit	= usbhs0_hardware_exit,
+			.phy_reset	= usbhs_phy_reset,
+			.get_id		= usbhs0_get_id,
+			.get_vbus	= usbhs_get_vbus,
+		},
+		.driver_param = {
+			.buswait_bwait	= 4,
+			.d0_tx_id	= SHDMA_SLAVE_USB0_TX,
+			.d1_rx_id	= SHDMA_SLAVE_USB0_RX,
+		},
+	},
+};
+
+static struct resource usbhs0_resources[] = {
 	[0] = {
-		.name	= "USBHS",
-		.start	= 0xE68B0000,
-		.end	= 0xE68B00E6 - 1,
+		.name	= "USBHS0",
+		.start	= 0xe6890000,
+		.end	= 0xe68900e6 - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= evt2irq(0x1ca0) /* USB0_USB0I0 */,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device usbhs0_device = {
+	.name	= "renesas_usbhs",
+	.id	= 0,
+	.dev = {
+		.platform_data		= &usbhs0_private.info,
+	},
+	.num_resources	= ARRAY_SIZE(usbhs0_resources),
+	.resource	= usbhs0_resources,
+};
+
+/* USBHS1 is connected to CN31 which takes a USB Mini-AB plug
+ *
+ * Use J30 to select between Host and Function. This setting
+ * can however not be detected by software. Hotplug of USBHS1
+ * is provided via IRQ8.
+ *
+ * Current USB1 works as "USB Host".
+ *  - set J30 "short"
+ *
+ * If you want to use it as "USB gadget",
+ *  - J30 "open"
+ *  - modify usbhs1_get_id() USBHS_HOST -> USBHS_GADGET
+ *  - add .get_vbus = usbhs_get_vbus in usbhs1_private
+ */
+#define IRQ8 evt2irq(0x0300)
+#define USB_PHY_MODE		(1 << 4)
+#define USB_PHY_INT_EN		((1 << 3) | (1 << 2))
+#define USB_PHY_ON		(1 << 1)
+#define USB_PHY_OFF		(1 << 0)
+#define USB_PHY_INT_CLR		(USB_PHY_ON | USB_PHY_OFF)
+
+static irqreturn_t usbhs1_interrupt(int irq, void *data)
+{
+	struct platform_device *pdev = data;
+	struct usbhs_private *priv = usbhs_get_priv(pdev);
+
+	dev_dbg(&pdev->dev, "%s\n", __func__);
+
+	renesas_usbhs_call_notify_hotplug(pdev);
+
+	/* clear status */
+	__raw_writew(__raw_readw(priv->usbphyaddr) | USB_PHY_INT_CLR,
+		     priv->usbphyaddr);
+
+	return IRQ_HANDLED;
+}
+
+static int usbhs1_hardware_init(struct platform_device *pdev)
+{
+	struct usbhs_private *priv = usbhs_get_priv(pdev);
+	int ret;
+
+	/* clear interrupt status */
+	__raw_writew(USB_PHY_MODE | USB_PHY_INT_CLR, priv->usbphyaddr);
+
+	ret = request_irq(IRQ8, usbhs1_interrupt, IRQF_TRIGGER_HIGH,
+			  dev_name(&pdev->dev), pdev);
+	if (ret) {
+		dev_err(&pdev->dev, "request_irq err\n");
+		return ret;
+	}
+
+	/* enable USB phy interrupt */
+	__raw_writew(USB_PHY_MODE | USB_PHY_INT_EN, priv->usbphyaddr);
+
+	return 0;
+}
+
+static void usbhs1_hardware_exit(struct platform_device *pdev)
+{
+	struct usbhs_private *priv = usbhs_get_priv(pdev);
+
+	/* clear interrupt status */
+	__raw_writew(USB_PHY_MODE | USB_PHY_INT_CLR, priv->usbphyaddr);
+
+	free_irq(IRQ8, pdev);
+}
+
+static int usbhs1_get_id(struct platform_device *pdev)
+{
+	return USBHS_HOST;
+}
+
+static u32 usbhs1_pipe_cfg[] = {
+	USB_ENDPOINT_XFER_CONTROL,
+	USB_ENDPOINT_XFER_ISOC,
+	USB_ENDPOINT_XFER_ISOC,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_INT,
+	USB_ENDPOINT_XFER_INT,
+	USB_ENDPOINT_XFER_INT,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+	USB_ENDPOINT_XFER_BULK,
+};
+
+static struct usbhs_private usbhs1_private = {
+	.usbphyaddr	= 0xe60581e2,		/* USBPHY1INTAP */
+	.usbcrcaddr	= 0xe6058130,		/* USBCR4 */
+	.info = {
+		.platform_callback = {
+			.hardware_init	= usbhs1_hardware_init,
+			.hardware_exit	= usbhs1_hardware_exit,
+			.get_id		= usbhs1_get_id,
+			.phy_reset	= usbhs_phy_reset,
+		},
+		.driver_param = {
+			.buswait_bwait	= 4,
+			.has_otg	= 1,
+			.pipe_type	= usbhs1_pipe_cfg,
+			.pipe_size	= ARRAY_SIZE(usbhs1_pipe_cfg),
+			.d0_tx_id	= SHDMA_SLAVE_USB1_TX,
+			.d1_rx_id	= SHDMA_SLAVE_USB1_RX,
+		},
+	},
+};
+
+static struct resource usbhs1_resources[] = {
+	[0] = {
+		.name	= "USBHS1",
+		.start	= 0xe68b0000,
+		.end	= 0xe68b00e6 - 1,
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
@@ -503,16 +792,14 @@ static struct resource usb1_host_resources[] = {
 	},
 };
 
-static struct platform_device usb1_host_device = {
-	.name	= "r8a66597_hcd",
+static struct platform_device usbhs1_device = {
+	.name	= "renesas_usbhs",
 	.id	= 1,
 	.dev = {
-		.dma_mask		= NULL,         /*  not use dma */
-		.coherent_dma_mask	= 0xffffffff,
-		.platform_data		= &usb1_host_data,
+		.platform_data		= &usbhs1_private.info,
 	},
-	.num_resources	= ARRAY_SIZE(usb1_host_resources),
-	.resource	= usb1_host_resources,
+	.num_resources	= ARRAY_SIZE(usbhs1_resources),
+	.resource	= usbhs1_resources,
 };
 
 /* LED */
@@ -662,8 +949,20 @@ static struct platform_device fsi_device = {
 	},
 };
 
+static struct fsi_ak4642_info fsi2_ak4643_info = {
+	.name		= "AK4643",
+	.card		= "FSI2A-AK4643",
+	.cpu_dai	= "fsia-dai",
+	.codec		= "ak4642-codec.0-0013",
+	.platform	= "sh_fsi2",
+	.id		= FSI_PORT_A,
+};
+
 static struct platform_device fsi_ak4643_device = {
-	.name		= "sh_fsi2_a_ak4643",
+	.name	= "fsi-ak4642-audio",
+	.dev	= {
+		.platform_data	= &fsi2_ak4643_info,
+	},
 };
 
 /*
@@ -676,6 +975,17 @@ static int slot_cn7_get_cd(struct platform_device *pdev)
 }
 
 /* SDHI0 */
+static irqreturn_t mackerel_sdhi0_gpio_cd(int irq, void *arg)
+{
+	struct device *dev = arg;
+	struct sh_mobile_sdhi_info *info = dev->platform_data;
+	struct tmio_mmc_data *pdata = info->pdata;
+
+	tmio_mmc_cd_wakeup(pdata);
+
+	return IRQ_HANDLED;
+}
+
 static struct sh_mobile_sdhi_info sdhi0_info = {
 	.dma_slave_tx	= SHDMA_SLAVE_SDHI0_TX,
 	.dma_slave_rx	= SHDMA_SLAVE_SDHI0_RX,
@@ -690,7 +1000,15 @@ static struct resource sdhi0_resources[] = {
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
-		.start	= evt2irq(0x0e00) /* SDHI0 */,
+		.start	= evt2irq(0x0e00) /* SDHI0_SDHI0I0 */,
+		.flags	= IORESOURCE_IRQ,
+	},
+	[2] = {
+		.start	= evt2irq(0x0e20) /* SDHI0_SDHI0I1 */,
+		.flags	= IORESOURCE_IRQ,
+	},
+	[3] = {
+		.start	= evt2irq(0x0e40) /* SDHI0_SDHI0I2 */,
 		.flags	= IORESOURCE_IRQ,
 	},
 };
@@ -705,7 +1023,7 @@ static struct platform_device sdhi0_device = {
 	},
 };
 
-#if !defined(CONFIG_MMC_SH_MMCIF)
+#if !defined(CONFIG_MMC_SH_MMCIF) && !defined(CONFIG_MMC_SH_MMCIF_MODULE)
 /* SDHI1 */
 static struct sh_mobile_sdhi_info sdhi1_info = {
 	.dma_slave_tx	= SHDMA_SLAVE_SDHI1_TX,
@@ -725,7 +1043,18 @@ static struct resource sdhi1_resources[] = {
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
-		.start	= evt2irq(0x0e80),
+		.name	= SH_MOBILE_SDHI_IRQ_CARD_DETECT,
+		.start	= evt2irq(0x0e80), /* SDHI1_SDHI1I0 */
+		.flags	= IORESOURCE_IRQ,
+	},
+	[2] = {
+		.name	= SH_MOBILE_SDHI_IRQ_SDCARD,
+		.start	= evt2irq(0x0ea0), /* SDHI1_SDHI1I1 */
+		.flags	= IORESOURCE_IRQ,
+	},
+	[3] = {
+		.name	= SH_MOBILE_SDHI_IRQ_SDIO,
+		.start	= evt2irq(0x0ec0), /* SDHI1_SDHI1I2 */
 		.flags	= IORESOURCE_IRQ,
 	},
 };
@@ -768,7 +1097,18 @@ static struct resource sdhi2_resources[] = {
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
-		.start	= evt2irq(0x1200),
+		.name	= SH_MOBILE_SDHI_IRQ_CARD_DETECT,
+		.start	= evt2irq(0x1200), /* SDHI2_SDHI2I0 */
+		.flags	= IORESOURCE_IRQ,
+	},
+	[2] = {
+		.name	= SH_MOBILE_SDHI_IRQ_SDCARD,
+		.start	= evt2irq(0x1220), /* SDHI2_SDHI2I1 */
+		.flags	= IORESOURCE_IRQ,
+	},
+	[3] = {
+		.name	= SH_MOBILE_SDHI_IRQ_SDIO,
+		.start	= evt2irq(0x1240), /* SDHI2_SDHI2I2 */
 		.flags	= IORESOURCE_IRQ,
 	},
 };
@@ -810,6 +1150,8 @@ static struct sh_mmcif_plat_data sh_mmcif_plat = {
 			  MMC_CAP_8_BIT_DATA |
 			  MMC_CAP_NEEDS_POLL,
 	.get_cd		= slot_cn7_get_cd,
+	.slave_id_tx	= SHDMA_SLAVE_MMCIF_TX,
+	.slave_id_rx	= SHDMA_SLAVE_MMCIF_RX,
 };
 
 static struct platform_device sh_mmcif_device = {
@@ -825,8 +1167,8 @@ static struct platform_device sh_mmcif_device = {
 };
 
 
-static int mackerel_camera_add(struct soc_camera_link *icl, struct device *dev);
-static void mackerel_camera_del(struct soc_camera_link *icl);
+static int mackerel_camera_add(struct soc_camera_device *icd);
+static void mackerel_camera_del(struct soc_camera_device *icd);
 
 static int camera_set_capture(struct soc_camera_platform_info *info,
 			      int enable)
@@ -844,9 +1186,10 @@ static struct soc_camera_platform_info camera_info = {
 		.width = 640,
 		.height = 480,
 	},
-	.bus_param = SOCAM_PCLK_SAMPLE_RISING | SOCAM_HSYNC_ACTIVE_HIGH |
-	SOCAM_VSYNC_ACTIVE_HIGH | SOCAM_MASTER | SOCAM_DATAWIDTH_8 |
-	SOCAM_DATA_ACTIVE_HIGH,
+	.mbus_param = V4L2_MBUS_PCLK_SAMPLE_RISING | V4L2_MBUS_MASTER |
+	V4L2_MBUS_VSYNC_ACTIVE_HIGH | V4L2_MBUS_HSYNC_ACTIVE_HIGH |
+	V4L2_MBUS_DATA_ACTIVE_HIGH,
+	.mbus_type = V4L2_MBUS_PARALLEL,
 	.set_capture = camera_set_capture,
 };
 
@@ -858,37 +1201,22 @@ static struct soc_camera_link camera_link = {
 	.priv		= &camera_info,
 };
 
-static void dummy_release(struct device *dev)
+static struct platform_device *camera_device;
+
+static void mackerel_camera_release(struct device *dev)
 {
+	soc_camera_platform_release(&camera_device);
 }
 
-static struct platform_device camera_device = {
-	.name		= "soc_camera_platform",
-	.dev		= {
-		.platform_data	= &camera_info,
-		.release	= dummy_release,
-	},
-};
-
-static int mackerel_camera_add(struct soc_camera_link *icl,
-			       struct device *dev)
+static int mackerel_camera_add(struct soc_camera_device *icd)
 {
-	if (icl != &camera_link)
-		return -ENODEV;
-
-	camera_info.dev = dev;
-
-	return platform_device_register(&camera_device);
+	return soc_camera_platform_add(icd, &camera_device, &camera_link,
+				       mackerel_camera_release, 0);
 }
 
-static void mackerel_camera_del(struct soc_camera_link *icl)
+static void mackerel_camera_del(struct soc_camera_device *icd)
 {
-	if (icl != &camera_link)
-		return;
-
-	platform_device_unregister(&camera_device);
-	memset(&camera_device.dev.kobj, 0,
-	       sizeof(camera_device.dev.kobj));
+	soc_camera_platform_del(icd, camera_device, &camera_link);
 }
 
 static struct sh_mobile_ceu_info sh_mobile_ceu_info = {
@@ -934,13 +1262,14 @@ static struct platform_device *mackerel_devices[] __initdata = {
 	&nor_flash_device,
 	&smc911x_device,
 	&lcdc_device,
-	&usb1_host_device,
+	&usbhs1_device,
+	&usbhs0_device,
 	&leds_device,
 	&fsi_device,
 	&fsi_ak4643_device,
 	&fsi_hdmi_device,
 	&sdhi0_device,
-#if !defined(CONFIG_MMC_SH_MMCIF)
+#if !defined(CONFIG_MMC_SH_MMCIF) && !defined(CONFIG_MMC_SH_MMCIF_MODULE)
 	&sdhi1_device,
 #endif
 	&sdhi2_device,
@@ -949,6 +1278,7 @@ static struct platform_device *mackerel_devices[] __initdata = {
 	&mackerel_camera,
 	&hdmi_lcdc_device,
 	&hdmi_device,
+	&meram_device,
 };
 
 /* Keypad Initialization */
@@ -1022,6 +1352,10 @@ static struct map_desc mackerel_io_desc[] __initdata = {
 static void __init mackerel_map_io(void)
 {
 	iotable_init(mackerel_io_desc, ARRAY_SIZE(mackerel_io_desc));
+	/* DMA memory at 0xff200000 - 0xffdfffff. The default 2MB size isn't
+	 * enough to allocate the frame buffer memory.
+	 */
+	init_consistent_dma_size(12 << 20);
 
 	/* setup early devices and console here as well */
 	sh7372_add_early_devices();
@@ -1030,12 +1364,15 @@ static void __init mackerel_map_io(void)
 
 #define GPIO_PORT9CR	0xE6051009
 #define GPIO_PORT10CR	0xE605100A
+#define GPIO_PORT167CR	0xE60520A7
+#define GPIO_PORT168CR	0xE60520A8
 #define SRCR4		0xe61580bc
 #define USCCR1		0xE6058144
 static void __init mackerel_init(void)
 {
 	u32 srcr4;
 	struct clk *clk;
+	int ret;
 
 	sh7372_pinmux_init();
 
@@ -1081,16 +1418,14 @@ static void __init mackerel_init(void)
 	gpio_request(GPIO_PORT151, NULL); /* LCDDON */
 	gpio_direction_output(GPIO_PORT151, 1);
 
-	/* USB enable */
-	gpio_request(GPIO_FN_VBUS0_1,    NULL);
-	gpio_request(GPIO_FN_IDIN_1_18,  NULL);
-	gpio_request(GPIO_FN_PWEN_1_115, NULL);
-	gpio_request(GPIO_FN_OVCN_1_114, NULL);
-	gpio_request(GPIO_FN_EXTLP_1,    NULL);
-	gpio_request(GPIO_FN_OVCN2_1,    NULL);
+	/* USBHS0 */
+	gpio_request(GPIO_FN_VBUS0_0, NULL);
+	gpio_pull_down(GPIO_PORT168CR); /* VBUS0_0 pull down */
 
-	/* setup USB phy */
-	__raw_writew(0x8a0a, 0xE6058130);	/* USBCR4 */
+	/* USBHS1 */
+	gpio_request(GPIO_FN_VBUS0_1, NULL);
+	gpio_pull_down(GPIO_PORT167CR); /* VBUS0_1 pull down */
+	gpio_request(GPIO_FN_IDIN_1_113, NULL);
 
 	/* enable FSI2 port A (ak4643) */
 	gpio_request(GPIO_FN_FSIAIBT,	NULL);
@@ -1140,7 +1475,14 @@ static void __init mackerel_init(void)
 	gpio_request(GPIO_FN_SDHID0_1, NULL);
 	gpio_request(GPIO_FN_SDHID0_0, NULL);
 
-#if !defined(CONFIG_MMC_SH_MMCIF)
+	ret = request_irq(evt2irq(0x3340), mackerel_sdhi0_gpio_cd,
+			  IRQF_TRIGGER_FALLING, "sdhi0 cd", &sdhi0_device.dev);
+	if (!ret)
+		sdhi0_info.tmio_flags |= TMIO_MMC_HAS_COLD_CD;
+	else
+		pr_err("Cannot get IRQ #%d: %d\n", evt2irq(0x3340), ret);
+
+#if !defined(CONFIG_MMC_SH_MMCIF) && !defined(CONFIG_MMC_SH_MMCIF_MODULE)
 	/* enable SDHI1 */
 	gpio_request(GPIO_FN_SDHICMD1, NULL);
 	gpio_request(GPIO_FN_SDHICLK1, NULL);
@@ -1215,7 +1557,24 @@ static void __init mackerel_init(void)
 
 	platform_add_devices(mackerel_devices, ARRAY_SIZE(mackerel_devices));
 
+	sh7372_add_device_to_domain(&sh7372_a4lc, &lcdc_device);
+	sh7372_add_device_to_domain(&sh7372_a4lc, &hdmi_lcdc_device);
+	sh7372_add_device_to_domain(&sh7372_a4lc, &meram_device);
+	sh7372_add_device_to_domain(&sh7372_a4mp, &fsi_device);
+	sh7372_add_device_to_domain(&sh7372_a3sp, &usbhs0_device);
+	sh7372_add_device_to_domain(&sh7372_a3sp, &usbhs1_device);
+	sh7372_add_device_to_domain(&sh7372_a3sp, &sh_mmcif_device);
+	sh7372_add_device_to_domain(&sh7372_a3sp, &sdhi0_device);
+#if !defined(CONFIG_MMC_SH_MMCIF) && !defined(CONFIG_MMC_SH_MMCIF_MODULE)
+	sh7372_add_device_to_domain(&sh7372_a3sp, &sdhi1_device);
+#endif
+	sh7372_add_device_to_domain(&sh7372_a3sp, &sdhi2_device);
+	sh7372_add_device_to_domain(&sh7372_a4r, &ceu_device);
+
 	hdmi_init_pm_clock();
+	sh7372_pm_init();
+	pm_clk_add(&fsi_device.dev, "spu2");
+	pm_clk_add(&hdmi_lcdc_device.dev, "hdmi");
 }
 
 static void __init mackerel_timer_init(void)

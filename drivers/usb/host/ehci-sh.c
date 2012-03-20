@@ -23,7 +23,7 @@ static int ehci_sh_reset(struct usb_hcd *hcd)
 	int ret;
 
 	ehci->caps = hcd->regs;
-	ehci->regs = hcd->regs + HC_LENGTH(ehci_readl(ehci,
+	ehci->regs = hcd->regs + HC_LENGTH(ehci, ehci_readl(ehci,
 		&ehci->caps->hc_capbase));
 
 	dbg_hcs_params(ehci, "reset");
@@ -168,7 +168,7 @@ static int ehci_hcd_sh_probe(struct platform_device *pdev)
 	clk_enable(priv->fclk);
 	clk_enable(priv->iclk);
 
-	ret = usb_add_hcd(hcd, irq, IRQF_DISABLED | IRQF_SHARED);
+	ret = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (ret != 0) {
 		dev_err(&pdev->dev, "Failed to add hcd");
 		goto fail_add_hcd;

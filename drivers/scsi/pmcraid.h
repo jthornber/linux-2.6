@@ -24,7 +24,6 @@
 #ifndef _PMCRAID_H
 #define _PMCRAID_H
 
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/completion.h>
 #include <linux/list.h>
@@ -43,7 +42,6 @@
 #define PMCRAID_DRIVER_NAME		"PMC MaxRAID"
 #define PMCRAID_DEVFILE			"pmcsas"
 #define PMCRAID_DRIVER_VERSION		"1.0.3"
-#define PMCRAID_DRIVER_DATE		__DATE__
 
 #define PMCRAID_FW_VERSION_1		0x002
 

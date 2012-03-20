@@ -22,6 +22,13 @@
 extern struct files_struct init_files;
 extern struct fs_struct init_fs;
 
+#ifdef CONFIG_CGROUPS
+#define INIT_GROUP_RWSEM(sig)						\
+	.group_rwsem = __RWSEM_INITIALIZER(sig.group_rwsem),
+#else
+#define INIT_GROUP_RWSEM(sig)
+#endif
+
 #define INIT_SIGNALS(sig) {						\
 	.nr_threads	= 1,						\
 	.wait_chldexit	= __WAIT_QUEUE_HEAD_INITIALIZER(sig.wait_chldexit),\
@@ -34,10 +41,11 @@ extern struct fs_struct init_fs;
 	.cputimer	= { 						\
 		.cputime = INIT_CPUTIME,				\
 		.running = 0,						\
-		.lock = __SPIN_LOCK_UNLOCKED(sig.cputimer.lock),	\
+		.lock = __RAW_SPIN_LOCK_UNLOCKED(sig.cputimer.lock),	\
 	},								\
 	.cred_guard_mutex =						\
 		 __MUTEX_INITIALIZER(sig.cred_guard_mutex),		\
+	INIT_GROUP_RWSEM(sig)						\
 }
 
 extern struct nsproxy init_nsproxy;
@@ -83,13 +91,6 @@ extern struct group_info init_groups;
 #define INIT_IDS
 #endif
 
-/*
- * Because of the reduced scope of CAP_SETPCAP when filesystem
- * capabilities are in effect, it is safe to allow CAP_SETPCAP to
- * be available in the default configuration.
- */
-# define CAP_INIT_BSET  CAP_FULL_SET
-
 #ifdef CONFIG_RCU_BOOST
 #define INIT_TASK_RCU_BOOST()						\
 	.rcu_boost_mutex = NULL,
@@ -123,6 +124,8 @@ extern struct cred init_cred;
 #else
 # define INIT_PERF_EVENTS(tsk)
 #endif
+
+#define INIT_TASK_COMM "swapper"
 
 /*
  *  INIT_TASK is used to set up the first task table, touch at
@@ -160,7 +163,7 @@ extern struct cred init_cred;
 	.group_leader	= &tsk,						\
 	RCU_INIT_POINTER(.real_cred, &init_cred),			\
 	RCU_INIT_POINTER(.cred, &init_cred),				\
-	.comm		= "swapper",					\
+	.comm		= INIT_TASK_COMM,				\
 	.thread		= INIT_THREAD,					\
 	.fs		= &init_fs,					\
 	.files		= &init_files,					\
@@ -174,7 +177,6 @@ extern struct cred init_cred;
 	.alloc_lock	= __SPIN_LOCK_UNLOCKED(tsk.alloc_lock),		\
 	.journal_info	= NULL,						\
 	.cpu_timers	= INIT_CPU_TIMERS(tsk.cpu_timers),		\
-	.fs_excl	= ATOMIC_INIT(0),				\
 	.pi_lock	= __RAW_SPIN_LOCK_UNLOCKED(tsk.pi_lock),	\
 	.timer_slack_ns = 50000, /* 50 usec default slack */		\
 	.pids = {							\
@@ -183,7 +185,6 @@ extern struct cred init_cred;
 		[PIDTYPE_SID]  = INIT_PID_LINK(PIDTYPE_SID),		\
 	},								\
 	.thread_group	= LIST_HEAD_INIT(tsk.thread_group),		\
-	.dirties = INIT_PROP_LOCAL_SINGLE(dirties),			\
 	INIT_IDS							\
 	INIT_PERF_EVENTS(tsk)						\
 	INIT_TRACE_IRQFLAGS						\

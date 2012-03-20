@@ -145,7 +145,7 @@ static const u8 abituguru_pwm_max[5] = { 0, 255, 255, 75, 75 };
 
 
 /* Insmod parameters */
-static int force;
+static bool force;
 module_param(force, bool, 0);
 MODULE_PARM_DESC(force, "Set to one to force detection.");
 static int bank1_types[ABIT_UGURU_MAX_BANK1_SENSORS] = { -1, -1, -1, -1, -1,
@@ -1448,15 +1448,12 @@ static int __init abituguru_init(void)
 {
 	int address, err;
 	struct resource res = { .flags = IORESOURCE_IO };
-
-#ifdef CONFIG_DMI
 	const char *board_vendor = dmi_get_system_info(DMI_BOARD_VENDOR);
 
 	/* safety check, refuse to load on non Abit motherboards */
 	if (!force && (!board_vendor ||
 			strcmp(board_vendor, "http://www.abit.com.tw/")))
 		return -ENODEV;
-#endif
 
 	address = abituguru_detect();
 	if (address < 0)

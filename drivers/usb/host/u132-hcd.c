@@ -74,7 +74,7 @@ MODULE_LICENSE("GPL");
 #define INT_MODULE_PARM(n, v) static int n = v;module_param(n, int, 0444)
 INT_MODULE_PARM(testing, 0);
 /* Some boards misreport power switching/overcurrent*/
-static int distrust_firmware = 1;
+static bool distrust_firmware = 1;
 module_param(distrust_firmware, bool, 0);
 MODULE_PARM_DESC(distrust_firmware, "true to distrust firmware power/overcurren"
 	"t setup");
@@ -3230,8 +3230,7 @@ static int __init u132_hcd_init(void)
 	mutex_init(&u132_module_lock);
 	if (usb_disabled())
 		return -ENODEV;
-	printk(KERN_INFO "driver %s built at %s on %s\n", hcd_name, __TIME__,
-		__DATE__);
+	printk(KERN_INFO "driver %s\n", hcd_name);
 	workqueue = create_singlethread_workqueue("u132");
 	retval = platform_driver_register(&u132_platform_driver);
 	return retval;

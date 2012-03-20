@@ -113,6 +113,7 @@ struct snd_kcontrol *snd_ctl_new1(const struct snd_kcontrol_new * kcontrolnew, v
 void snd_ctl_free_one(struct snd_kcontrol * kcontrol);
 int snd_ctl_add(struct snd_card * card, struct snd_kcontrol * kcontrol);
 int snd_ctl_remove(struct snd_card * card, struct snd_kcontrol * kcontrol);
+int snd_ctl_replace(struct snd_card *card, struct snd_kcontrol *kcontrol, bool add_on_replace);
 int snd_ctl_remove_id(struct snd_card * card, struct snd_ctl_elem_id *id);
 int snd_ctl_rename_id(struct snd_card * card, struct snd_ctl_elem_id *src_id, struct snd_ctl_elem_id *dst_id);
 int snd_ctl_activate_id(struct snd_card *card, struct snd_ctl_elem_id *id,
@@ -225,5 +226,13 @@ snd_ctl_add_slave_uncached(struct snd_kcontrol *master,
 {
 	return _snd_ctl_add_slave(master, slave, SND_CTL_SLAVE_NEED_UPDATE);
 }
+
+/*
+ * Helper functions for jack-detection controls
+ */
+struct snd_kcontrol *
+snd_kctl_jack_new(const char *name, int idx, void *private_data);
+void snd_kctl_jack_report(struct snd_card *card,
+			  struct snd_kcontrol *kctl, bool status);
 
 #endif	/* __SOUND_CONTROL_H */

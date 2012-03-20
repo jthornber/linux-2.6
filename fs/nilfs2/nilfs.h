@@ -80,12 +80,6 @@ static inline struct inode *NILFS_BTNC_I(struct address_space *btnc)
 	return &ii->vfs_inode;
 }
 
-static inline struct inode *NILFS_AS_I(struct address_space *mapping)
-{
-	return (mapping->host) ? :
-		container_of(mapping, struct inode, i_data);
-}
-
 /*
  * Dynamic state flags of NILFS on-memory inode (i_state)
  */
@@ -241,7 +235,7 @@ extern void nilfs_set_link(struct inode *, struct nilfs_dir_entry *,
 			   struct page *, struct inode *);
 
 /* file.c */
-extern int nilfs_sync_file(struct file *, int);
+extern int nilfs_sync_file(struct file *, loff_t, loff_t, int);
 
 /* ioctl.c */
 long nilfs_ioctl(struct file *, unsigned int, unsigned long);
@@ -252,7 +246,7 @@ int nilfs_ioctl_prepare_clean_segments(struct the_nilfs *, struct nilfs_argv *,
 /* inode.c */
 void nilfs_inode_add_blocks(struct inode *inode, int n);
 void nilfs_inode_sub_blocks(struct inode *inode, int n);
-extern struct inode *nilfs_new_inode(struct inode *, int);
+extern struct inode *nilfs_new_inode(struct inode *, umode_t);
 extern void nilfs_free_inode(struct inode *);
 extern int nilfs_get_block(struct inode *, sector_t, struct buffer_head *, int);
 extern void nilfs_set_inode_flags(struct inode *);
@@ -270,22 +264,22 @@ extern void nilfs_update_inode(struct inode *, struct buffer_head *);
 extern void nilfs_truncate(struct inode *);
 extern void nilfs_evict_inode(struct inode *);
 extern int nilfs_setattr(struct dentry *, struct iattr *);
-int nilfs_permission(struct inode *inode, int mask, unsigned int flags);
+int nilfs_permission(struct inode *inode, int mask);
 int nilfs_load_inode_block(struct inode *inode, struct buffer_head **pbh);
 extern int nilfs_inode_dirty(struct inode *);
 int nilfs_set_file_dirty(struct inode *inode, unsigned nr_dirty);
 extern int nilfs_mark_inode_dirty(struct inode *);
-extern void nilfs_dirty_inode(struct inode *);
+extern void nilfs_dirty_inode(struct inode *, int flags);
 int nilfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		 __u64 start, __u64 len);
 
 /* super.c */
 extern struct inode *nilfs_alloc_inode(struct super_block *);
 extern void nilfs_destroy_inode(struct inode *);
-extern void nilfs_error(struct super_block *, const char *, const char *, ...)
-	__attribute__ ((format (printf, 3, 4)));
-extern void nilfs_warning(struct super_block *, const char *, const char *, ...)
-	__attribute__ ((format (printf, 3, 4)));
+extern __printf(3, 4)
+void nilfs_error(struct super_block *, const char *, const char *, ...);
+extern __printf(3, 4)
+void nilfs_warning(struct super_block *, const char *, const char *, ...);
 extern struct nilfs_super_block *
 nilfs_read_super_block(struct super_block *, u64, int, struct buffer_head **);
 extern int nilfs_store_magic_and_option(struct super_block *,
@@ -298,6 +292,7 @@ struct nilfs_super_block **nilfs_prepare_super(struct super_block *sb,
 					       int flip);
 int nilfs_commit_super(struct super_block *sb, int flag);
 int nilfs_cleanup_super(struct super_block *sb);
+int nilfs_resize_fs(struct super_block *sb, __u64 newsize);
 int nilfs_attach_checkpoint(struct super_block *sb, __u64 cno, int curr_mnt,
 			    struct nilfs_root **root);
 int nilfs_checkpoint_is_mounted(struct super_block *sb, __u64 cno);

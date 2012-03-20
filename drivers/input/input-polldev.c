@@ -13,50 +13,14 @@
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
+#include <linux/workqueue.h>
+#include <linux/module.h>
 #include <linux/input-polldev.h>
 
 MODULE_AUTHOR("Dmitry Torokhov <dtor@mail.ru>");
 MODULE_DESCRIPTION("Generic implementation of a polled input device");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("0.1");
-
-static DEFINE_MUTEX(polldev_mutex);
-static int polldev_users;
-static struct workqueue_struct *polldev_wq;
-
-static int input_polldev_start_workqueue(void)
-{
-	int retval;
-
-	retval = mutex_lock_interruptible(&polldev_mutex);
-	if (retval)
-		return retval;
-
-	if (!polldev_users) {
-		polldev_wq = create_singlethread_workqueue("ipolldevd");
-		if (!polldev_wq) {
-			pr_err("failed to create ipolldevd workqueue\n");
-			retval = -ENOMEM;
-			goto out;
-		}
-	}
-
-	polldev_users++;
-
- out:
-	mutex_unlock(&polldev_mutex);
-	return retval;
-}
-
-static void input_polldev_stop_workqueue(void)
-{
-	mutex_lock(&polldev_mutex);
-
-	if (!--polldev_users)
-		destroy_workqueue(polldev_wq);
-
-	mutex_unlock(&polldev_mutex);
-}
 
 static void input_polldev_queue_work(struct input_polled_dev *dev)
 {
@@ -66,7 +30,7 @@ static void input_polldev_queue_work(struct input_polled_dev *dev)
 	if (delay >= HZ)
 		delay = round_jiffies_relative(delay);
 
-	queue_delayed_work(polldev_wq, &dev->work, delay);
+	queue_delayed_work(system_freezable_wq, &dev->work, delay);
 }
 
 static void input_polled_device_work(struct work_struct *work)
@@ -81,18 +45,15 @@ static void input_polled_device_work(struct work_struct *work)
 static int input_open_polled_device(struct input_dev *input)
 {
 	struct input_polled_dev *dev = input_get_drvdata(input);
-	int error;
-
-	error = input_polldev_start_workqueue();
-	if (error)
-		return error;
 
 	if (dev->open)
 		dev->open(dev);
 
 	/* Only start polling if polling is enabled */
-	if (dev->poll_interval > 0)
-		queue_delayed_work(polldev_wq, &dev->work, 0);
+	if (dev->poll_interval > 0) {
+		dev->poll(dev);
+		input_polldev_queue_work(dev);
+	}
 
 	return 0;
 }
@@ -102,13 +63,6 @@ static void input_close_polled_device(struct input_dev *input)
 	struct input_polled_dev *dev = input_get_drvdata(input);
 
 	cancel_delayed_work_sync(&dev->work);
-	/*
-	 * Clean up work struct to remove references to the workqueue.
-	 * It may be destroyed by the next call. This causes problems
-	 * at next device open-close in case of poll_interval == 0.
-	 */
-	INIT_DELAYED_WORK(&dev->work, dev->work.work.func);
-	input_polldev_stop_workqueue();
 
 	if (dev->close)
 		dev->close(dev);
@@ -130,10 +84,12 @@ static ssize_t input_polldev_set_poll(struct device *dev,
 {
 	struct input_polled_dev *polldev = dev_get_drvdata(dev);
 	struct input_dev *input = polldev->input;
-	unsigned long interval;
+	unsigned int interval;
+	int err;
 
-	if (strict_strtoul(buf, 0, &interval))
-		return -EINVAL;
+	err = kstrtouint(buf, 0, &interval);
+	if (err)
+		return err;
 
 	if (interval < polldev->poll_interval_min)
 		return -EINVAL;
@@ -295,4 +251,3 @@ void input_unregister_polled_device(struct input_polled_dev *dev)
 	input_unregister_device(dev->input);
 }
 EXPORT_SYMBOL(input_unregister_polled_device);
-

@@ -41,6 +41,7 @@ static const struct key_entry topstar_keymap[] = {
 	{ KE_KEY, 0x8c, { KEY_MEDIA } },
 
 	/* Known non hotkey events don't handled or that we don't care yet */
+	{ KE_IGNORE, 0x82, }, /* backlight event */
 	{ KE_IGNORE, 0x8e, },
 	{ KE_IGNORE, 0x8f, },
 	{ KE_IGNORE, 0x90, },
@@ -194,7 +195,7 @@ static int __init topstar_laptop_init(void)
 	if (ret < 0)
 		return ret;
 
-	printk(KERN_INFO "Topstar Laptop ACPI extras driver loaded\n");
+	pr_info("ACPI extras driver loaded\n");
 
 	return 0;
 }

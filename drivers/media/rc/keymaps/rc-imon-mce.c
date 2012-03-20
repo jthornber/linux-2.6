@@ -10,6 +10,7 @@
  */
 
 #include <media/rc-map.h>
+#include <linux/module.h>
 
 /* mce-mode imon mce remote key table */
 static struct rc_map_table imon_mce[] = {
@@ -111,7 +112,7 @@ static struct rc_map_table imon_mce[] = {
 	{ 0x800ff44d, KEY_TITLE },
 
 	{ 0x800ff40c, KEY_POWER },
-	{ 0x800ff40d, KEY_LEFTMETA }, /* Windows MCE button */
+	{ 0x800ff40d, KEY_MEDIA }, /* Windows MCE button */
 
 };
 

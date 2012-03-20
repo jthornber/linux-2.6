@@ -3,8 +3,6 @@
 #undef	Z_EXT_CHARS_IN_BUFFER
 
 /*
- *  linux/drivers/char/cyclades.c
- *
  * This file contains the driver for the Cyclades async multiport
  * serial boards.
  *
@@ -47,7 +45,6 @@
 #undef	CY_DEBUG_IO
 #undef	CY_DEBUG_COUNT
 #undef	CY_DEBUG_DTR
-#undef	CY_DEBUG_WAIT_UNTIL_SENT
 #undef	CY_DEBUG_INTERRUPTS
 #undef	CY_16Y_HACK
 #undef	CY_ENABLE_MONITORING
@@ -1445,13 +1442,11 @@ static void cy_shutdown(struct cyclades_port *info, struct tty_struct *tty)
 {
 	struct cyclades_card *card;
 	unsigned long flags;
-	int channel;
 
 	if (!(info->port.flags & ASYNC_INITIALIZED))
 		return;
 
 	card = info->card;
-	channel = info->line - card->first_line;
 	if (!cy_is_Z(card)) {
 		spin_lock_irqsave(&card->card_lock, flags);
 
@@ -1476,6 +1471,7 @@ static void cy_shutdown(struct cyclades_port *info, struct tty_struct *tty)
 		spin_unlock_irqrestore(&card->card_lock, flags);
 	} else {
 #ifdef CY_DEBUG_OPEN
+		int channel = info->line - card->first_line;
 		printk(KERN_DEBUG "cyc shutdown Z card %d, channel %d, "
 			"base_addr %p\n", card, channel, card->base_addr);
 #endif
@@ -1681,16 +1677,10 @@ static void cy_wait_until_sent(struct tty_struct *tty, int timeout)
 	 */
 	if (!timeout || timeout > 2 * info->timeout)
 		timeout = 2 * info->timeout;
-#ifdef CY_DEBUG_WAIT_UNTIL_SENT
-	printk(KERN_DEBUG "In cy_wait_until_sent(%d) check=%d, jiff=%lu...",
-		timeout, char_time, jiffies);
-#endif
+
 	card = info->card;
 	if (!cy_is_Z(card)) {
 		while (cyy_readb(info, CySRER) & CyTxRdy) {
-#ifdef CY_DEBUG_WAIT_UNTIL_SENT
-			printk(KERN_DEBUG "Not clean (jiff=%lu)...", jiffies);
-#endif
 			if (msleep_interruptible(jiffies_to_msecs(char_time)))
 				break;
 			if (timeout && time_after(jiffies, orig_jiffies +
@@ -1700,9 +1690,6 @@ static void cy_wait_until_sent(struct tty_struct *tty, int timeout)
 	}
 	/* Run one more char cycle */
 	msleep_interruptible(jiffies_to_msecs(char_time * 5));
-#ifdef CY_DEBUG_WAIT_UNTIL_SENT
-	printk(KERN_DEBUG "Clean (jiff=%lu)...done\n", jiffies);
-#endif
 }
 
 static void cy_flush_buffer(struct tty_struct *tty)
@@ -3380,7 +3367,7 @@ static int __init cy_detect_isa(void)
 
 		/* allocate IRQ */
 		if (request_irq(cy_isa_irq, cyy_interrupt,
-				IRQF_DISABLED, "Cyclom-Y", &cy_card[j])) {
+				0, "Cyclom-Y", &cy_card[j])) {
 			printk(KERN_ERR "Cyclom-Y/ISA found at 0x%lx, but "
 				"could not allocate IRQ#%d.\n",
 				(unsigned long)cy_isa_address, cy_isa_irq);
@@ -4099,8 +4086,7 @@ static int __init cy_init(void)
 	if (!cy_serial_driver)
 		goto err;
 
-	printk(KERN_INFO "Cyclades driver " CY_VERSION " (built %s %s)\n",
-			__DATE__, __TIME__);
+	printk(KERN_INFO "Cyclades driver " CY_VERSION "\n");
 
 	/* Initialize the tty_driver structure */
 

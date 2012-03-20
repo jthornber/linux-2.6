@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2011, Intel Corp.
+ * Copyright (C) 2000 - 2012, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -562,7 +562,7 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 				    ((op->common.value.arg)->common.value.
 				     integer);
 			} else {
-				region_space = REGION_DATA_TABLE;
+				region_space = ACPI_ADR_SPACE_DATA_TABLE;
 			}
 
 			/*

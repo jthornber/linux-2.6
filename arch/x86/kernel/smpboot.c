@@ -207,21 +207,27 @@ static void __cpuinit smp_callin(void)
 	 * Need to setup vector mappings before we enable interrupts.
 	 */
 	setup_vector_irq(smp_processor_id());
+
+	/*
+	 * Save our processor parameters. Note: this information
+	 * is needed for clock calibration.
+	 */
+	smp_store_cpu_info(cpuid);
+
 	/*
 	 * Get our bogomips.
+	 * Update loops_per_jiffy in cpu_data. Previous call to
+	 * smp_store_cpu_info() stored a value that is close but not as
+	 * accurate as the value just calculated.
 	 *
 	 * Need to enable IRQs because it can take longer and then
 	 * the NMI watchdog might kill us.
 	 */
 	local_irq_enable();
 	calibrate_delay();
+	cpu_data(cpuid).loops_per_jiffy = loops_per_jiffy;
 	local_irq_disable();
 	pr_debug("Stack at about %p\n", &cpuid);
-
-	/*
-	 * Save our processor parameters
-	 */
-	smp_store_cpu_info(cpuid);
 
 	/*
 	 * This must be done before setting cpu_online_mask
@@ -284,6 +290,19 @@ notrace static void __cpuinit start_secondary(void *unused)
 	ipi_call_unlock();
 	per_cpu(cpu_state, smp_processor_id()) = CPU_ONLINE;
 	x86_platform.nmi_init();
+
+	/*
+	 * Wait until the cpu which brought this one up marked it
+	 * online before enabling interrupts. If we don't do that then
+	 * we can end up waking up the softirq thread before this cpu
+	 * reached the active state, which makes the scheduler unhappy
+	 * and schedule the softirq thread on the wrong cpu. This is
+	 * only observable with forced threaded interrupts, but in
+	 * theory it could also happen w/o them. It's just way harder
+	 * to achieve.
+	 */
+	while (!cpumask_test_cpu(smp_processor_id(), cpu_active_mask))
+		cpu_relax();
 
 	/* enable local interrupts */
 	local_irq_enable();
@@ -425,7 +444,7 @@ static void impress_friends(void)
 void __inquire_remote_apic(int apicid)
 {
 	unsigned i, regs[] = { APIC_ID >> 4, APIC_LVR >> 4, APIC_SPIV >> 4 };
-	char *names[] = { "ID", "VERSION", "SPIV" };
+	const char * const names[] = { "ID", "VERSION", "SPIV" };
 	int timeout;
 	u32 status;
 
@@ -827,7 +846,8 @@ int __cpuinit native_cpu_up(unsigned int cpu)
 	pr_debug("++++++++++++++++++++=_---CPU UP  %u\n", cpu);
 
 	if (apicid == BAD_APICID || apicid == boot_cpu_physical_apicid ||
-	    !physid_isset(apicid, phys_cpu_present_map)) {
+	    !physid_isset(apicid, phys_cpu_present_map) ||
+	    (!x2apic_mode && apicid >= 255)) {
 		printk(KERN_ERR "%s: bad cpu %d\n", __func__, cpu);
 		return -EINVAL;
 	}
@@ -1129,6 +1149,7 @@ void __init native_smp_cpus_done(unsigned int max_cpus)
 {
 	pr_debug("Boot done.\n");
 
+	nmi_selftest();
 	impress_friends();
 #ifdef CONFIG_X86_IO_APIC
 	setup_ioapic_dest();
@@ -1307,7 +1328,7 @@ void play_dead_common(void)
 {
 	idle_task_exit();
 	reset_lazy_tlbstate();
-	c1e_remove_cpu(raw_smp_processor_id());
+	amd_e400_remove_cpu(raw_smp_processor_id());
 
 	mb();
 	/* Ack it */
@@ -1332,7 +1353,7 @@ static inline void mwait_play_dead(void)
 	void *mwait_ptr;
 	struct cpuinfo_x86 *c = __this_cpu_ptr(&cpu_info);
 
-	if (!this_cpu_has(X86_FEATURE_MWAIT) && mwait_usable(c))
+	if (!(this_cpu_has(X86_FEATURE_MWAIT) && mwait_usable(c)))
 		return;
 	if (!this_cpu_has(X86_FEATURE_CLFLSH))
 		return;

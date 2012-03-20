@@ -71,7 +71,7 @@ int tick_check_broadcast_device(struct clock_event_device *dev)
 	     (dev->features & CLOCK_EVT_FEAT_C3STOP))
 		return 0;
 
-	clockevents_exchange_device(NULL, dev);
+	clockevents_exchange_device(tick_broadcast_device.evtdev, dev);
 	tick_broadcast_device.evtdev = dev;
 	if (!cpumask_empty(tick_get_broadcast_mask()))
 		tick_broadcast_start_periodic(dev);
@@ -194,7 +194,7 @@ static void tick_handle_periodic_broadcast(struct clock_event_device *dev)
 	for (next = dev->next_event; ;) {
 		next = ktime_add(next, tick_period);
 
-		if (!clockevents_program_event(dev, next, ktime_get()))
+		if (!clockevents_program_event(dev, next, false))
 			return;
 		tick_do_periodic_broadcast();
 	}
@@ -373,7 +373,7 @@ static int tick_broadcast_set_event(ktime_t expires, int force)
 {
 	struct clock_event_device *bc = tick_broadcast_device.evtdev;
 
-	return tick_dev_program_event(bc, expires, force);
+	return clockevents_program_event(bc, expires, force);
 }
 
 int tick_resume_broadcast_oneshot(struct clock_event_device *bc)
@@ -456,23 +456,27 @@ void tick_broadcast_oneshot_control(unsigned long reason)
 	unsigned long flags;
 	int cpu;
 
-	raw_spin_lock_irqsave(&tick_broadcast_lock, flags);
-
 	/*
 	 * Periodic mode does not care about the enter/exit of power
 	 * states
 	 */
 	if (tick_broadcast_device.mode == TICKDEV_MODE_PERIODIC)
-		goto out;
+		return;
 
-	bc = tick_broadcast_device.evtdev;
+	/*
+	 * We are called with preemtion disabled from the depth of the
+	 * idle code, so we can't be moved away.
+	 */
 	cpu = smp_processor_id();
 	td = &per_cpu(tick_cpu_device, cpu);
 	dev = td->evtdev;
 
 	if (!(dev->features & CLOCK_EVT_FEAT_C3STOP))
-		goto out;
+		return;
 
+	bc = tick_broadcast_device.evtdev;
+
+	raw_spin_lock_irqsave(&tick_broadcast_lock, flags);
 	if (reason == CLOCK_EVT_NOTIFY_BROADCAST_ENTER) {
 		if (!cpumask_test_cpu(cpu, tick_get_broadcast_oneshot_mask())) {
 			cpumask_set_cpu(cpu, tick_get_broadcast_oneshot_mask());
@@ -489,8 +493,6 @@ void tick_broadcast_oneshot_control(unsigned long reason)
 				tick_program_event(dev->next_event, 1);
 		}
 	}
-
-out:
 	raw_spin_unlock_irqrestore(&tick_broadcast_lock, flags);
 }
 

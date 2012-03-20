@@ -408,9 +408,10 @@ ccw_device_done(struct ccw_device *cdev, int state)
 		CIO_MSG_EVENT(0, "Disconnected device %04x on subchannel "
 			      "%04x\n", cdev->private->dev_id.devno,
 			      sch->schid.sch_no);
-		if (ccw_device_notify(cdev, CIO_NO_PATH) != NOTIFY_OK)
+		if (ccw_device_notify(cdev, CIO_NO_PATH) != NOTIFY_OK) {
+			cdev->private->state = DEV_STATE_NOT_OPER;
 			ccw_device_sched_todo(cdev, CDEV_TODO_UNREG);
-		else
+		} else
 			ccw_device_set_disconnected(cdev);
 		cdev->private->flags.donotify = 0;
 		break;
@@ -495,8 +496,26 @@ static void ccw_device_reset_path_events(struct ccw_device *cdev)
 	cdev->private->pgid_reset_mask = 0;
 }
 
-void
-ccw_device_verify_done(struct ccw_device *cdev, int err)
+static void create_fake_irb(struct irb *irb, int type)
+{
+	memset(irb, 0, sizeof(*irb));
+	if (type == FAKE_CMD_IRB) {
+		struct cmd_scsw *scsw = &irb->scsw.cmd;
+		scsw->cc = 1;
+		scsw->fctl = SCSW_FCTL_START_FUNC;
+		scsw->actl = SCSW_ACTL_START_PEND;
+		scsw->stctl = SCSW_STCTL_STATUS_PEND;
+	} else if (type == FAKE_TM_IRB) {
+		struct tm_scsw *scsw = &irb->scsw.tm;
+		scsw->x = 1;
+		scsw->cc = 1;
+		scsw->fctl = SCSW_FCTL_START_FUNC;
+		scsw->actl = SCSW_ACTL_START_PEND;
+		scsw->stctl = SCSW_STCTL_STATUS_PEND;
+	}
+}
+
+void ccw_device_verify_done(struct ccw_device *cdev, int err)
 {
 	struct subchannel *sch;
 
@@ -519,12 +538,8 @@ callback:
 		ccw_device_done(cdev, DEV_STATE_ONLINE);
 		/* Deliver fake irb to device driver, if needed. */
 		if (cdev->private->flags.fake_irb) {
-			memset(&cdev->private->irb, 0, sizeof(struct irb));
-			cdev->private->irb.scsw.cmd.cc = 1;
-			cdev->private->irb.scsw.cmd.fctl = SCSW_FCTL_START_FUNC;
-			cdev->private->irb.scsw.cmd.actl = SCSW_ACTL_START_PEND;
-			cdev->private->irb.scsw.cmd.stctl =
-				SCSW_STCTL_STATUS_PEND;
+			create_fake_irb(&cdev->private->irb,
+					cdev->private->flags.fake_irb);
 			cdev->private->flags.fake_irb = 0;
 			if (cdev->handler)
 				cdev->handler(cdev, cdev->private->intparm,
@@ -840,9 +855,6 @@ call_handler:
 static void
 ccw_device_killing_irq(struct ccw_device *cdev, enum dev_event dev_event)
 {
-	struct subchannel *sch;
-
-	sch = to_subchannel(cdev->dev.parent);
 	ccw_device_set_timeout(cdev, 0);
 	/* Start delayed path verification. */
 	ccw_device_online_verify(cdev, 0);

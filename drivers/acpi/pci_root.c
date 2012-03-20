@@ -485,7 +485,8 @@ static int __devinit acpi_pci_root_add(struct acpi_device *device)
 		root->secondary.end = 0xFF;
 		printk(KERN_WARNING FW_BUG PREFIX
 		       "no secondary bus range in _CRS\n");
-		status = acpi_evaluate_integer(device->handle, METHOD_NAME__BBN,					       NULL, &bus);
+		status = acpi_evaluate_integer(device->handle, METHOD_NAME__BBN,
+					       NULL, &bus);
 		if (ACPI_SUCCESS(status))
 			root->secondary.start = bus;
 		else if (status == AE_NOT_FOUND)
@@ -595,13 +596,26 @@ static int __devinit acpi_pci_root_add(struct acpi_device *device)
 		if (ACPI_SUCCESS(status)) {
 			dev_info(root->bus->bridge,
 				"ACPI _OSC control (0x%02x) granted\n", flags);
+			if (acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_ASPM) {
+				/*
+				 * We have ASPM control, but the FADT indicates
+				 * that it's unsupported. Clear it.
+				 */
+				pcie_clear_aspm(root->bus);
+			}
 		} else {
-			dev_dbg(root->bus->bridge,
-				"ACPI _OSC request failed (code %d)\n", status);
-			printk(KERN_INFO "Unable to assume _OSC PCIe control. "
-				"Disabling ASPM\n");
+			dev_info(root->bus->bridge,
+				"ACPI _OSC request failed (%s), "
+				"returned control mask: 0x%02x\n",
+				acpi_format_exception(status), flags);
+			pr_info("ACPI _OSC control for PCIe not granted, "
+				"disabling ASPM\n");
 			pcie_no_aspm();
 		}
+	} else {
+		dev_info(root->bus->bridge,
+			 "Unable to request _OSC control "
+			 "(_OSC support mask: 0x%02x)\n", flags);
 	}
 
 	pci_acpi_add_bus_pm_notifier(device, root->bus);

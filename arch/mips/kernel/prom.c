@@ -9,7 +9,7 @@
  */
 
 #include <linux/init.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/bootmem.h>
@@ -83,7 +83,8 @@ void __init early_init_devtree(void *params)
 	 * device-tree, including the platform type, initrd location and
 	 * size, and more ...
 	 */
-	of_scan_flat_dt(early_init_dt_scan_chosen, NULL);
+	of_scan_flat_dt(early_init_dt_scan_chosen, arcs_cmdline);
+
 
 	/* Scan memory nodes */
 	of_scan_flat_dt(early_init_dt_scan_root, NULL);

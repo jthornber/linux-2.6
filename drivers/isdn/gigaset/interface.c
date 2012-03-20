@@ -14,6 +14,7 @@
 #include "gigaset.h"
 #include <linux/gigaset_dev.h>
 #include <linux/tty_flip.h>
+#include <linux/module.h>
 
 /*** our ioctls ***/
 
@@ -156,8 +157,10 @@ static int if_open(struct tty_struct *tty, struct file *filp)
 	if (!cs || !try_module_get(cs->driver->owner))
 		return -ENODEV;
 
-	if (mutex_lock_interruptible(&cs->mutex))
+	if (mutex_lock_interruptible(&cs->mutex)) {
+		module_put(cs->driver->owner);
 		return -ERESTARTSYS;
+	}
 	tty->driver_data = cs;
 
 	++cs->open_count;

@@ -34,7 +34,7 @@ extern const struct mxs_flexcan_data mx28_flexcan_data[] __initconst;
 #define mx28_add_flexcan0(pdata)	mx28_add_flexcan(0, pdata)
 #define mx28_add_flexcan1(pdata)	mx28_add_flexcan(1, pdata)
 
-extern const struct mxs_i2c_data mx28_mxs_i2c_data[] __initconst;
+extern const struct mxs_mxs_i2c_data mx28_mxs_i2c_data[] __initconst;
 #define mx28_add_mxs_i2c(id)		mxs_add_mxs_i2c(&mx28_mxs_i2c_data[id])
 
 extern const struct mxs_mxs_mmc_data mx28_mxs_mmc_data[] __initconst;
@@ -45,3 +45,9 @@ extern const struct mxs_mxs_mmc_data mx28_mxs_mmc_data[] __initconst;
 
 struct platform_device *__init mx28_add_mxsfb(
 		const struct mxsfb_platform_data *pdata);
+
+extern const struct mxs_saif_data mx28_saif_data[] __initconst;
+#define mx28_add_saif(id, pdata) \
+	mxs_add_saif(&mx28_saif_data[id], pdata)
+
+struct platform_device *__init mx28_add_rtc_stmp3xxx(void);

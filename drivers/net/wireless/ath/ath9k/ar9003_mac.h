@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Atheros Communications Inc.
+ * Copyright (c) 2010-2011 Atheros Communications Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -118,5 +118,5 @@ int ath9k_hw_process_rxdesc_edma(struct ath_hw *ah,
 void ath9k_hw_reset_txstatus_ring(struct ath_hw *ah);
 void ath9k_hw_setup_statusring(struct ath_hw *ah, void *ts_start,
 			       u32 ts_paddr_start,
-			       u8 size);
+			       u16 size);
 #endif

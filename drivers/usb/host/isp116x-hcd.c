@@ -612,6 +612,7 @@ static irqreturn_t isp116x_irq(struct usb_hcd *hcd)
 			/* IRQ's are off, we do no DMA,
 			   perfectly ready to die ... */
 			hcd->state = HC_STATE_HALT;
+			usb_hc_died(hcd);
 			ret = IRQ_HANDLED;
 			goto done;
 		}
@@ -1638,7 +1639,7 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 		goto err6;
 	}
 
-	ret = usb_add_hcd(hcd, irq, irqflags | IRQF_DISABLED);
+	ret = usb_add_hcd(hcd, irq, irqflags);
 	if (ret)
 		goto err6;
 

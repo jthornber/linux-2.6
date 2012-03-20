@@ -233,7 +233,7 @@ module_param(park, uint, S_IRUGO);
 MODULE_PARM_DESC(park, "park setting; 1-3 back-to-back async packets");
 
 /* For flakey hardware, ignore overcurrent indicators */
-static int ignore_oc;
+static bool ignore_oc;
 module_param(ignore_oc, bool, S_IRUGO);
 MODULE_PARM_DESC(ignore_oc, "ignore bogus hardware overcurrent indications");
 
@@ -1884,6 +1884,7 @@ static int enable_periodic(struct oxu_hcd *oxu)
 	status = handshake(oxu, &oxu->regs->status, STS_PSS, 0, 9 * 125);
 	if (status != 0) {
 		oxu_to_hcd(oxu)->state = HC_STATE_HALT;
+		usb_hc_died(oxu_to_hcd(oxu));
 		return status;
 	}
 
@@ -1909,6 +1910,7 @@ static int disable_periodic(struct oxu_hcd *oxu)
 	status = handshake(oxu, &oxu->regs->status, STS_PSS, STS_PSS, 9 * 125);
 	if (status != 0) {
 		oxu_to_hcd(oxu)->state = HC_STATE_HALT;
+		usb_hc_died(oxu_to_hcd(oxu));
 		return status;
 	}
 
@@ -2449,8 +2451,9 @@ static irqreturn_t oxu210_hcd_irq(struct usb_hcd *hcd)
 		goto dead;
 	}
 
+	/* Shared IRQ? */
 	status &= INTR_MASK;
-	if (!status) {			/* irq sharing? */
+	if (!status || unlikely(hcd->state == HC_STATE_HALT)) {
 		spin_unlock(&oxu->lock);
 		return IRQ_NONE;
 	}
@@ -2516,6 +2519,7 @@ static irqreturn_t oxu210_hcd_irq(struct usb_hcd *hcd)
 dead:
 			ehci_reset(oxu);
 			writel(0, &oxu->regs->configured_flag);
+			usb_hc_died(hcd);
 			/* generic layer kills/unlinks all urbs, then
 			 * uses oxu_stop to clean up the rest
 			 */
@@ -3824,7 +3828,7 @@ static int oxu_drv_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 	memstart = res->start;
-	memlen = res->end - res->start + 1;
+	memlen = resource_size(res);
 	dev_dbg(&pdev->dev, "MEM resource %lx-%lx\n", memstart, memlen);
 	if (!request_mem_region(memstart, memlen,
 				oxu_hc_driver.description)) {
@@ -3947,24 +3951,7 @@ static struct platform_driver oxu_driver = {
 	}
 };
 
-static int __init oxu_module_init(void)
-{
-	int retval = 0;
-
-	retval = platform_driver_register(&oxu_driver);
-	if (retval < 0)
-		return retval;
-
-	return retval;
-}
-
-static void __exit oxu_module_cleanup(void)
-{
-	platform_driver_unregister(&oxu_driver);
-}
-
-module_init(oxu_module_init);
-module_exit(oxu_module_cleanup);
+module_platform_driver(oxu_driver);
 
 MODULE_DESCRIPTION("Oxford OXU210HP HCD driver - ver. " DRIVER_VERSION);
 MODULE_AUTHOR("Rodolfo Giometti <giometti@linux.it>");

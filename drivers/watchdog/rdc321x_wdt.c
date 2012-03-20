@@ -37,7 +37,6 @@
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/mfd/rdc321x.h>
-#include <linux/mfd/core.h>
 
 #define RDC_WDT_MASK	0x80000000 /* Mask */
 #define RDC_WDT_EN	0x00800000 /* Enable bit */
@@ -232,7 +231,7 @@ static int __devinit rdc321x_wdt_probe(struct platform_device *pdev)
 	struct resource *r;
 	struct rdc321x_wdt_pdata *pdata;
 
-	pdata = mfd_get_data(pdev);
+	pdata = pdev->dev.platform_data;
 	if (!pdata) {
 		dev_err(&pdev->dev, "no platform data supplied\n");
 		return -ENODEV;
@@ -294,18 +293,7 @@ static struct platform_driver rdc321x_wdt_driver = {
 	},
 };
 
-static int __init rdc321x_wdt_init(void)
-{
-	return platform_driver_register(&rdc321x_wdt_driver);
-}
-
-static void __exit rdc321x_wdt_exit(void)
-{
-	platform_driver_unregister(&rdc321x_wdt_driver);
-}
-
-module_init(rdc321x_wdt_init);
-module_exit(rdc321x_wdt_exit);
+module_platform_driver(rdc321x_wdt_driver);
 
 MODULE_AUTHOR("Florian Fainelli <florian@openwrt.org>");
 MODULE_DESCRIPTION("RDC321x watchdog driver");

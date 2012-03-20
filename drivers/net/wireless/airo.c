@@ -242,9 +242,8 @@ static int airo_perm = 0555;
 static int proc_perm = 0644;
 
 MODULE_AUTHOR("Benjamin Reed");
-MODULE_DESCRIPTION("Support for Cisco/Aironet 802.11 wireless ethernet \
-cards.  Direct support for ISA/PCI/MPI cards and support \
-for PCMCIA when used with airo_cs.");
+MODULE_DESCRIPTION("Support for Cisco/Aironet 802.11 wireless ethernet cards.  "
+		   "Direct support for ISA/PCI/MPI cards and support for PCMCIA when used with airo_cs.");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_SUPPORTED_DEVICE("Aironet 4500, 4800 and Cisco 340/350");
 module_param_array(io, int, NULL, 0);
@@ -252,18 +251,20 @@ module_param_array(irq, int, NULL, 0);
 module_param_array(rates, int, NULL, 0);
 module_param_array(ssids, charp, NULL, 0);
 module_param(auto_wep, int, 0);
-MODULE_PARM_DESC(auto_wep, "If non-zero, the driver will keep looping through \
-the authentication options until an association is made.  The value of \
-auto_wep is number of the wep keys to check.  A value of 2 will try using \
-the key at index 0 and index 1.");
+MODULE_PARM_DESC(auto_wep,
+		 "If non-zero, the driver will keep looping through the authentication options until an association is made.  "
+		 "The value of auto_wep is number of the wep keys to check.  "
+		 "A value of 2 will try using the key at index 0 and index 1.");
 module_param(aux_bap, int, 0);
-MODULE_PARM_DESC(aux_bap, "If non-zero, the driver will switch into a mode \
-than seems to work better for older cards with some older buses.  Before \
-switching it checks that the switch is needed.");
+MODULE_PARM_DESC(aux_bap,
+		 "If non-zero, the driver will switch into a mode that seems to work better for older cards with some older buses.  "
+		 "Before switching it checks that the switch is needed.");
 module_param(maxencrypt, int, 0);
-MODULE_PARM_DESC(maxencrypt, "The maximum speed that the card can do \
-encryption.  Units are in 512kbs.  Zero (default) means there is no limit. \
-Older cards used to be limited to 2mbs (4).");
+MODULE_PARM_DESC(maxencrypt,
+		 "The maximum speed that the card can do encryption.  "
+		 "Units are in 512kbs.  "
+		 "Zero (default) means there is no limit.  "
+		 "Older cards used to be limited to 2mbs (4).");
 module_param(adhoc, int, 0);
 MODULE_PARM_DESC(adhoc, "If non-zero, the card will start in adhoc mode.");
 module_param(probe, int, 0);
@@ -1417,7 +1418,7 @@ static int encapsulate(struct airo_info *ai ,etherHead *frame, MICBuffer *mic, i
 	emmh32_update(&context->seed,frame->da,ETH_ALEN * 2); // DA,SA
 	emmh32_update(&context->seed,(u8*)&mic->typelen,10); // Type/Length and Snap
 	emmh32_update(&context->seed,(u8*)&mic->seq,sizeof(mic->seq)); //SEQ
-	emmh32_update(&context->seed,frame->da + ETH_ALEN * 2,payLen); //payload
+	emmh32_update(&context->seed,(u8*)(frame + 1),payLen); //payload
 	emmh32_final(&context->seed, (u8*)&mic->mic);
 
 	/*    New Type/length ?????????? */
@@ -1505,7 +1506,7 @@ static int decapsulate(struct airo_info *ai, MICBuffer *mic, etherHead *eth, u16
 		emmh32_update(&context->seed, eth->da, ETH_ALEN*2); 
 		emmh32_update(&context->seed, (u8 *)&mic->typelen, sizeof(mic->typelen)+sizeof(mic->u.snap)); 
 		emmh32_update(&context->seed, (u8 *)&mic->seq,sizeof(mic->seq));	
-		emmh32_update(&context->seed, eth->da + ETH_ALEN*2,payLen);	
+		emmh32_update(&context->seed, (u8 *)(eth + 1),payLen);	
 		//Calculate MIC
 		emmh32_final(&context->seed, digest);
 	
@@ -2753,7 +2754,7 @@ static const struct net_device_ops airo_netdev_ops = {
 	.ndo_stop		= airo_close,
 	.ndo_start_xmit		= airo_start_xmit,
 	.ndo_get_stats		= airo_get_stats,
-	.ndo_set_multicast_list	= airo_set_multicast_list,
+	.ndo_set_rx_mode	= airo_set_multicast_list,
 	.ndo_set_mac_address	= airo_set_mac_address,
 	.ndo_do_ioctl		= airo_ioctl,
 	.ndo_change_mtu		= airo_change_mtu,
@@ -2765,7 +2766,7 @@ static const struct net_device_ops mpi_netdev_ops = {
 	.ndo_stop		= airo_close,
 	.ndo_start_xmit		= mpi_start_xmit,
 	.ndo_get_stats		= airo_get_stats,
-	.ndo_set_multicast_list	= airo_set_multicast_list,
+	.ndo_set_rx_mode	= airo_set_multicast_list,
 	.ndo_set_mac_address	= airo_set_mac_address,
 	.ndo_do_ioctl		= airo_ioctl,
 	.ndo_change_mtu		= airo_change_mtu,
@@ -2822,6 +2823,7 @@ static struct net_device *_init_airo_card( unsigned short irq, int port,
 	dev->wireless_data = &ai->wireless_data;
 	dev->irq = irq;
 	dev->base_addr = port;
+	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 
 	SET_NETDEV_DEV(dev, dmdev);
 
@@ -4500,17 +4502,15 @@ static int setup_proc_entry( struct net_device *dev,
 	struct proc_dir_entry *entry;
 	/* First setup the device directory */
 	strcpy(apriv->proc_name,dev->name);
-	apriv->proc_entry = create_proc_entry(apriv->proc_name,
-					      S_IFDIR|airo_perm,
-					      airo_entry);
+	apriv->proc_entry = proc_mkdir_mode(apriv->proc_name, airo_perm,
+					    airo_entry);
 	if (!apriv->proc_entry)
 		goto fail;
 	apriv->proc_entry->uid = proc_uid;
 	apriv->proc_entry->gid = proc_gid;
 
 	/* Setup the StatsDelta */
-	entry = proc_create_data("StatsDelta",
-				 S_IFREG | (S_IRUGO&proc_perm),
+	entry = proc_create_data("StatsDelta", S_IRUGO & proc_perm,
 				 apriv->proc_entry, &proc_statsdelta_ops, dev);
 	if (!entry)
 		goto fail_stats_delta;
@@ -4518,8 +4518,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the Stats */
-	entry = proc_create_data("Stats",
-				 S_IFREG | (S_IRUGO&proc_perm),
+	entry = proc_create_data("Stats", S_IRUGO & proc_perm,
 				 apriv->proc_entry, &proc_stats_ops, dev);
 	if (!entry)
 		goto fail_stats;
@@ -4527,8 +4526,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the Status */
-	entry = proc_create_data("Status",
-				 S_IFREG | (S_IRUGO&proc_perm),
+	entry = proc_create_data("Status", S_IRUGO & proc_perm,
 				 apriv->proc_entry, &proc_status_ops, dev);
 	if (!entry)
 		goto fail_status;
@@ -4536,8 +4534,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the Config */
-	entry = proc_create_data("Config",
-				 S_IFREG | proc_perm,
+	entry = proc_create_data("Config", proc_perm,
 				 apriv->proc_entry, &proc_config_ops, dev);
 	if (!entry)
 		goto fail_config;
@@ -4545,8 +4542,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the SSID */
-	entry = proc_create_data("SSID",
-				 S_IFREG | proc_perm,
+	entry = proc_create_data("SSID", proc_perm,
 				 apriv->proc_entry, &proc_SSID_ops, dev);
 	if (!entry)
 		goto fail_ssid;
@@ -4554,8 +4550,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the APList */
-	entry = proc_create_data("APList",
-				 S_IFREG | proc_perm,
+	entry = proc_create_data("APList", proc_perm,
 				 apriv->proc_entry, &proc_APList_ops, dev);
 	if (!entry)
 		goto fail_aplist;
@@ -4563,8 +4558,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the BSSList */
-	entry = proc_create_data("BSSList",
-				 S_IFREG | proc_perm,
+	entry = proc_create_data("BSSList", proc_perm,
 				 apriv->proc_entry, &proc_BSSList_ops, dev);
 	if (!entry)
 		goto fail_bsslist;
@@ -4572,8 +4566,7 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->gid = proc_gid;
 
 	/* Setup the WepKey */
-	entry = proc_create_data("WepKey",
-				 S_IFREG | proc_perm,
+	entry = proc_create_data("WepKey", proc_perm,
 				 apriv->proc_entry, &proc_wepkey_ops, dev);
 	if (!entry)
 		goto fail_wepkey;
@@ -5705,9 +5698,7 @@ static int __init airo_init_module( void )
 {
 	int i;
 
-	airo_entry = create_proc_entry("driver/aironet",
-				       S_IFDIR | airo_perm,
-				       NULL);
+	airo_entry = proc_mkdir_mode("driver/aironet", airo_perm, NULL);
 
 	if (airo_entry) {
 		airo_entry->uid = proc_uid;

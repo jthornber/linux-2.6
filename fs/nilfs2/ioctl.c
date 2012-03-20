@@ -27,7 +27,7 @@
 #include <linux/uaccess.h>	/* copy_from_user(), copy_to_user() */
 #include <linux/vmalloc.h>
 #include <linux/compat.h>	/* compat_ptr() */
-#include <linux/mount.h>	/* mnt_want_write(), mnt_drop_write() */
+#include <linux/mount.h>	/* mnt_want_write_file(), mnt_drop_write_file() */
 #include <linux/buffer_head.h>
 #include <linux/nilfs2_fs.h>
 #include "nilfs.h"
@@ -119,7 +119,7 @@ static int nilfs_ioctl_setflags(struct inode *inode, struct file *filp,
 	if (get_user(flags, (int __user *)argp))
 		return -EFAULT;
 
-	ret = mnt_want_write(filp->f_path.mnt);
+	ret = mnt_want_write_file(filp);
 	if (ret)
 		return ret;
 
@@ -154,7 +154,7 @@ static int nilfs_ioctl_setflags(struct inode *inode, struct file *filp,
 	ret = nilfs_transaction_commit(inode->i_sb);
 out:
 	mutex_unlock(&inode->i_mutex);
-	mnt_drop_write(filp->f_path.mnt);
+	mnt_drop_write_file(filp);
 	return ret;
 }
 
@@ -174,7 +174,7 @@ static int nilfs_ioctl_change_cpmode(struct inode *inode, struct file *filp,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	ret = mnt_want_write(filp->f_path.mnt);
+	ret = mnt_want_write_file(filp);
 	if (ret)
 		return ret;
 
@@ -194,7 +194,7 @@ static int nilfs_ioctl_change_cpmode(struct inode *inode, struct file *filp,
 
 	up_read(&inode->i_sb->s_umount);
 out:
-	mnt_drop_write(filp->f_path.mnt);
+	mnt_drop_write_file(filp);
 	return ret;
 }
 
@@ -210,7 +210,7 @@ nilfs_ioctl_delete_checkpoint(struct inode *inode, struct file *filp,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	ret = mnt_want_write(filp->f_path.mnt);
+	ret = mnt_want_write_file(filp);
 	if (ret)
 		return ret;
 
@@ -225,7 +225,7 @@ nilfs_ioctl_delete_checkpoint(struct inode *inode, struct file *filp,
 	else
 		nilfs_transaction_commit(inode->i_sb); /* never fails */
 out:
-	mnt_drop_write(filp->f_path.mnt);
+	mnt_drop_write_file(filp);
 	return ret;
 }
 
@@ -591,7 +591,7 @@ static int nilfs_ioctl_clean_segments(struct inode *inode, struct file *filp,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	ret = mnt_want_write(filp->f_path.mnt);
+	ret = mnt_want_write_file(filp);
 	if (ret)
 		return ret;
 
@@ -602,6 +602,8 @@ static int nilfs_ioctl_clean_segments(struct inode *inode, struct file *filp,
 	ret = -EINVAL;
 	nsegs = argv[4].v_nmembs;
 	if (argv[4].v_size != argsz[4])
+		goto out;
+	if (nsegs > UINT_MAX / sizeof(__u64))
 		goto out;
 
 	/*
@@ -623,6 +625,9 @@ static int nilfs_ioctl_clean_segments(struct inode *inode, struct file *filp,
 			goto out_free;
 
 		if (argv[n].v_nmembs > nsegs * nilfs->ns_blocks_per_segment)
+			goto out_free;
+
+		if (argv[n].v_nmembs >= UINT_MAX / argv[n].v_size)
 			goto out_free;
 
 		len = argv[n].v_size * argv[n].v_nmembs;
@@ -672,7 +677,7 @@ out_free:
 		vfree(kbufs[n]);
 	kfree(kbufs[4]);
 out:
-	mnt_drop_write(filp->f_path.mnt);
+	mnt_drop_write_file(filp);
 	return ret;
 }
 
@@ -696,6 +701,63 @@ static int nilfs_ioctl_sync(struct inode *inode, struct file *filp,
 			return -EFAULT;
 	}
 	return 0;
+}
+
+static int nilfs_ioctl_resize(struct inode *inode, struct file *filp,
+			      void __user *argp)
+{
+	__u64 newsize;
+	int ret = -EPERM;
+
+	if (!capable(CAP_SYS_ADMIN))
+		goto out;
+
+	ret = mnt_want_write_file(filp);
+	if (ret)
+		goto out;
+
+	ret = -EFAULT;
+	if (copy_from_user(&newsize, argp, sizeof(newsize)))
+		goto out_drop_write;
+
+	ret = nilfs_resize_fs(inode->i_sb, newsize);
+
+out_drop_write:
+	mnt_drop_write_file(filp);
+out:
+	return ret;
+}
+
+static int nilfs_ioctl_set_alloc_range(struct inode *inode, void __user *argp)
+{
+	struct the_nilfs *nilfs = inode->i_sb->s_fs_info;
+	__u64 range[2];
+	__u64 minseg, maxseg;
+	unsigned long segbytes;
+	int ret = -EPERM;
+
+	if (!capable(CAP_SYS_ADMIN))
+		goto out;
+
+	ret = -EFAULT;
+	if (copy_from_user(range, argp, sizeof(__u64[2])))
+		goto out;
+
+	ret = -ERANGE;
+	if (range[1] > i_size_read(inode->i_sb->s_bdev->bd_inode))
+		goto out;
+
+	segbytes = nilfs->ns_blocks_per_segment * nilfs->ns_blocksize;
+
+	minseg = range[0] + segbytes - 1;
+	do_div(minseg, segbytes);
+	maxseg = NILFS_SB2_OFFSET_BYTES(range[1]);
+	do_div(maxseg, segbytes);
+	maxseg--;
+
+	ret = nilfs_sufile_set_alloc_range(nilfs->ns_sufile, minseg, maxseg);
+out:
+	return ret;
 }
 
 static int nilfs_ioctl_get_info(struct inode *inode, struct file *filp,
@@ -763,6 +825,10 @@ long nilfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return nilfs_ioctl_clean_segments(inode, filp, cmd, argp);
 	case NILFS_IOCTL_SYNC:
 		return nilfs_ioctl_sync(inode, filp, cmd, argp);
+	case NILFS_IOCTL_RESIZE:
+		return nilfs_ioctl_resize(inode, filp, argp);
+	case NILFS_IOCTL_SET_ALLOC_RANGE:
+		return nilfs_ioctl_set_alloc_range(inode, argp);
 	default:
 		return -ENOTTY;
 	}
@@ -780,6 +846,19 @@ long nilfs_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 	case FS_IOC32_GETVERSION:
 		cmd = FS_IOC_GETVERSION;
+		break;
+	case NILFS_IOCTL_CHANGE_CPMODE:
+	case NILFS_IOCTL_DELETE_CHECKPOINT:
+	case NILFS_IOCTL_GET_CPINFO:
+	case NILFS_IOCTL_GET_CPSTAT:
+	case NILFS_IOCTL_GET_SUINFO:
+	case NILFS_IOCTL_GET_SUSTAT:
+	case NILFS_IOCTL_GET_VINFO:
+	case NILFS_IOCTL_GET_BDESCS:
+	case NILFS_IOCTL_CLEAN_SEGMENTS:
+	case NILFS_IOCTL_SYNC:
+	case NILFS_IOCTL_RESIZE:
+	case NILFS_IOCTL_SET_ALLOC_RANGE:
 		break;
 	default:
 		return -ENOIOCTLCMD;

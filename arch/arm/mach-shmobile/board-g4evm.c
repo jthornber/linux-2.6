@@ -33,6 +33,7 @@
 #include <linux/mmc/host.h>
 #include <linux/mmc/sh_mobile_sdhi.h>
 #include <linux/gpio.h>
+#include <linux/dma-mapping.h>
 #include <mach/sh7377.h>
 #include <mach/common.h>
 #include <asm/mach-types.h>
@@ -205,7 +206,7 @@ static struct resource sdhi0_resources[] = {
 	[0] = {
 		.name	= "SDHI0",
 		.start  = 0xe6d50000,
-		.end    = 0xe6d50nff,
+		.end    = 0xe6d500ff,
 		.flags  = IORESOURCE_MEM,
 	},
 	[1] = {

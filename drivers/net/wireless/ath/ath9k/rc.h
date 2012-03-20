@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2004 Sam Leffler, Errno Consulting
  * Copyright (c) 2004 Video54 Technologies, Inc.
- * Copyright (c) 2008-2009 Atheros Communications Inc.
+ * Copyright (c) 2008-2011 Atheros Communications Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -219,12 +219,6 @@ struct ath_rate_priv {
 
 	struct dentry *debugfs_rcstats;
 	struct ath_rc_stats rcstats[RATE_TABLE_SIZE];
-};
-
-enum ath9k_internal_frame_type {
-	ATH9K_IFT_NOT_INTERNAL,
-	ATH9K_IFT_PAUSE,
-	ATH9K_IFT_UNPAUSE
 };
 
 #ifdef CONFIG_ATH9K_RATE_CONTROL

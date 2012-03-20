@@ -815,14 +815,8 @@ else  CARDbRadioPowerOn(pDevice);
             pMgmt->eScanType = WMAC_SCAN_PASSIVE;
     // get Permanent network address
     SROMvReadEtherAddress(pDevice->PortOffset, pDevice->abyCurrentNetAddr);
-    DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"Network address = %02x-%02x-%02x=%02x-%02x-%02x\n",
-        pDevice->abyCurrentNetAddr[0],
-        pDevice->abyCurrentNetAddr[1],
-        pDevice->abyCurrentNetAddr[2],
-        pDevice->abyCurrentNetAddr[3],
-        pDevice->abyCurrentNetAddr[4],
-        pDevice->abyCurrentNetAddr[5]);
-
+	DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"Network address = %pM\n",
+		pDevice->abyCurrentNetAddr);
 
     // reset Tx pointer
     CARDvSafeResetRx(pDevice);
@@ -900,7 +894,7 @@ static bool device_release_WPADEV(PSDevice pDevice)
 	        if(ii>20)
 		  break;
               }
-           };
+           }
     return true;
 }
 
@@ -911,7 +905,7 @@ static const struct net_device_ops device_netdev_ops = {
     .ndo_do_ioctl           = device_ioctl,
     .ndo_get_stats          = device_get_stats,
     .ndo_start_xmit         = device_xmit,
-    .ndo_set_multicast_list = device_set_multi,
+    .ndo_set_rx_mode	    = device_set_multi,
 };
 
 
@@ -1446,7 +1440,7 @@ static void device_init_defrag_cb(PSDevice pDevice) {
         if (!device_alloc_frag_buf(pDevice, pDeF)) {
             DBG_PRT(MSG_LEVEL_ERR,KERN_ERR "%s: can not alloc frag bufs\n",
                 pDevice->dev->name);
-        };
+        }
     }
     pDevice->cbDFCB = CB_MAX_RX_FRAG;
     pDevice->cbFreeDFCB = pDevice->cbDFCB;
@@ -2104,7 +2098,7 @@ static int device_dma0_tx_80211(struct sk_buff *skb, struct net_device *dev) {
         dev_kfree_skb_irq(skb);
         spin_unlock_irq(&pDevice->lock);
         return 0;
-    };
+    }
 
     cbMPDULen = skb->len;
     pbMPDU = skb->data;
@@ -2136,7 +2130,7 @@ bool device_dma0_xmit(PSDevice pDevice, struct sk_buff *skb, unsigned int uNodeI
     if (pDevice->bStopTx0Pkt == true) {
         dev_kfree_skb_irq(skb);
         return false;
-    };
+    }
 
     if (AVAIL_TD(pDevice, TYPE_TXDMA0) <= 0) {
         dev_kfree_skb_irq(skb);
@@ -2865,7 +2859,7 @@ static  irqreturn_t  device_intr(int irq,  void *dev_instance) {
             pDevice->bBeaconSent = false;
             if (pDevice->bEnablePSMode) {
                 PSbIsNextTBTTWakeUp((void *)pDevice);
-            };
+            }
 
             if ((pDevice->eOPMode == OP_MODE_AP) ||
                 (pDevice->eOPMode == OP_MODE_ADHOC)) {
@@ -2876,7 +2870,7 @@ static  irqreturn_t  device_intr(int irq,  void *dev_instance) {
 
             if (pDevice->eOPMode == OP_MODE_ADHOC && pDevice->pMgmt->wCurrATIMWindow > 0) {
                 // todo adhoc PS mode
-            };
+            }
 
         }
 
@@ -2885,7 +2879,7 @@ static  irqreturn_t  device_intr(int irq,  void *dev_instance) {
             if (pDevice->eOPMode == OP_MODE_ADHOC) {
                 pDevice->bIsBeaconBufReadySet = false;
                 pDevice->cbBeaconBufReadySetCnt = 0;
-            };
+            }
 
             if (pDevice->eOPMode == OP_MODE_AP) {
                 if(pMgmt->byDTIMCount > 0) {
@@ -3159,11 +3153,7 @@ static int  device_ioctl(struct net_device *dev, struct ifreq *rq, int cmd) {
 		break;
 
 	case SIOCGIWNWID:     //0x8b03  support
-	#ifdef  WPA_SUPPLICANT_DRIVER_WEXT_SUPPORT
-          rc = iwctl_giwnwid(dev, NULL, &(wrq->u.nwid), NULL);
-	#else
-        rc = -EOPNOTSUPP;
-	#endif
+		rc = -EOPNOTSUPP;
 		break;
 
 		// Set frequency/channel

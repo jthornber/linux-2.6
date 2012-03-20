@@ -312,8 +312,10 @@ int usb_hcd_pxa27x_probe (const struct hc_driver *driver, struct platform_device
 		return PTR_ERR(usb_clk);
 
 	hcd = usb_create_hcd (driver, &pdev->dev, "pxa27x");
-	if (!hcd)
-		return -ENOMEM;
+	if (!hcd) {
+		retval = -ENOMEM;
+		goto err0;
+	}
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!r) {
@@ -357,7 +359,7 @@ int usb_hcd_pxa27x_probe (const struct hc_driver *driver, struct platform_device
 
 	ohci_hcd_init(hcd_to_ohci(hcd));
 
-	retval = usb_add_hcd(hcd, irq, IRQF_DISABLED);
+	retval = usb_add_hcd(hcd, irq, 0);
 	if (retval == 0)
 		return retval;
 
@@ -368,6 +370,7 @@ int usb_hcd_pxa27x_probe (const struct hc_driver *driver, struct platform_device
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
  err1:
 	usb_put_hcd(hcd);
+ err0:
 	clk_put(usb_clk);
 	return retval;
 }
@@ -499,8 +502,6 @@ static int ohci_hcd_pxa27x_drv_suspend(struct device *dev)
 	ohci->ohci.next_statechange = jiffies;
 
 	pxa27x_stop_hc(ohci, dev);
-	hcd->state = HC_STATE_SUSPENDED;
-
 	return 0;
 }
 

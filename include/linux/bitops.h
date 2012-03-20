@@ -22,8 +22,14 @@ extern unsigned long __sw_hweight64(__u64 w);
 #include <asm/bitops.h>
 
 #define for_each_set_bit(bit, addr, size) \
-	for ((bit) = find_first_bit((addr), (size)); \
-	     (bit) < (size); \
+	for ((bit) = find_first_bit((addr), (size));		\
+	     (bit) < (size);					\
+	     (bit) = find_next_bit((addr), (size), (bit) + 1))
+
+/* same as for_each_set_bit() but use bit as value to start with */
+#define for_each_set_bit_cont(bit, addr, size) \
+	for ((bit) = find_next_bit((addr), (size), (bit));	\
+	     (bit) < (size);					\
 	     (bit) = find_next_bit((addr), (size), (bit) + 1))
 
 static __inline__ int get_bitmask_order(unsigned int count)
@@ -47,6 +53,26 @@ static __inline__ int get_count_order(unsigned int count)
 static inline unsigned long hweight_long(unsigned long w)
 {
 	return sizeof(w) == 4 ? hweight32(w) : hweight64(w);
+}
+
+/**
+ * rol64 - rotate a 64-bit value left
+ * @word: value to rotate
+ * @shift: bits to roll
+ */
+static inline __u64 rol64(__u64 word, unsigned int shift)
+{
+	return (word << shift) | (word >> (64 - shift));
+}
+
+/**
+ * ror64 - rotate a 64-bit value right
+ * @word: value to rotate
+ * @shift: bits to roll
+ */
+static inline __u64 ror64(__u64 word, unsigned int shift)
+{
+	return (word >> shift) | (word << (64 - shift));
 }
 
 /**
@@ -148,7 +174,7 @@ static inline unsigned long __ffs64(u64 word)
 
 #ifdef __KERNEL__
 
-#ifdef CONFIG_GENERIC_FIND_LAST_BIT
+#ifndef find_last_bit
 /**
  * find_last_bit - find the last set bit in a memory region
  * @addr: The address to start the search at
@@ -158,7 +184,7 @@ static inline unsigned long __ffs64(u64 word)
  */
 extern unsigned long find_last_bit(const unsigned long *addr,
 				   unsigned long size);
-#endif /* CONFIG_GENERIC_FIND_LAST_BIT */
+#endif
 
 #endif /* __KERNEL__ */
 #endif

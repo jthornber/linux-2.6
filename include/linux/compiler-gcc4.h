@@ -29,6 +29,7 @@
    the kernel context */
 #define __cold			__attribute__((__cold__))
 
+#define __linktime_error(message) __attribute__((__error__(message)))
 
 #if __GNUC_MINOR__ >= 5
 /*
@@ -51,7 +52,7 @@
 #if __GNUC_MINOR__ > 0
 #define __compiletime_object_size(obj) __builtin_object_size(obj, 0)
 #endif
-#if __GNUC_MINOR__ >= 4
+#if __GNUC_MINOR__ >= 4 && !defined(__CHECKER__)
 #define __compiletime_warning(message) __attribute__((warning(message)))
 #define __compiletime_error(message) __attribute__((error(message)))
 #endif

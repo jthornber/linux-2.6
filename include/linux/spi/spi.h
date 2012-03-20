@@ -200,6 +200,17 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
 		driver_unregister(&sdrv->driver);
 }
 
+/**
+ * module_spi_driver() - Helper macro for registering a SPI driver
+ * @__spi_driver: spi_driver struct
+ *
+ * Helper macro for SPI drivers which do not do anything special in module
+ * init/exit. This eliminates a lot of boilerplate. Each module may only
+ * use this macro once, and calling it replaces module_init() and module_exit()
+ */
+#define module_spi_driver(__spi_driver) \
+	module_driver(__spi_driver, spi_register_driver, \
+			spi_unregister_driver)
 
 /**
  * struct spi_master - interface to SPI master controller
@@ -581,7 +592,7 @@ extern int spi_bus_unlock(struct spi_master *master);
  * Callable only from contexts that can sleep.
  */
 static inline int
-spi_write(struct spi_device *spi, const u8 *buf, size_t len)
+spi_write(struct spi_device *spi, const void *buf, size_t len)
 {
 	struct spi_transfer	t = {
 			.tx_buf		= buf,
@@ -605,7 +616,7 @@ spi_write(struct spi_device *spi, const u8 *buf, size_t len)
  * Callable only from contexts that can sleep.
  */
 static inline int
-spi_read(struct spi_device *spi, u8 *buf, size_t len)
+spi_read(struct spi_device *spi, void *buf, size_t len)
 {
 	struct spi_transfer	t = {
 			.rx_buf		= buf,
@@ -620,8 +631,8 @@ spi_read(struct spi_device *spi, u8 *buf, size_t len)
 
 /* this copies txbuf and rxbuf data; for small transfers only! */
 extern int spi_write_then_read(struct spi_device *spi,
-		const u8 *txbuf, unsigned n_tx,
-		u8 *rxbuf, unsigned n_rx);
+		const void *txbuf, unsigned n_tx,
+		void *rxbuf, unsigned n_rx);
 
 /**
  * spi_w8r8 - SPI synchronous 8 bit write followed by 8 bit read

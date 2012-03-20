@@ -20,7 +20,7 @@
 
 #include <sound/core.h>
 #include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <pcmcia/ciscode.h>
 #include <pcmcia/cisreg.h>
 #include "pdaudiocf.h"
@@ -39,7 +39,7 @@ MODULE_SUPPORTED_DEVICE("{{Sound Core," CARD_NAME "}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable switches */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable switches */
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for " CARD_NAME " soundcard.");
@@ -223,7 +223,7 @@ static int pdacf_config(struct pcmcia_device *link)
 	if (ret)
 		goto failed;
 
-	ret = pcmcia_request_exclusive_irq(link, pdacf_interrupt);
+	ret = pcmcia_request_irq(link, pdacf_interrupt);
 	if (ret)
 		goto failed;
 
@@ -278,7 +278,7 @@ static int pdacf_resume(struct pcmcia_device *link)
 /*
  * Module entry points
  */
-static struct pcmcia_device_id snd_pdacf_ids[] = {
+static const struct pcmcia_device_id snd_pdacf_ids[] = {
 	/* this is too general PCMCIA_DEVICE_MANF_CARD(0x015d, 0x4c45), */
 	PCMCIA_DEVICE_PROD_ID12("Core Sound","PDAudio-CF",0x396d19d2,0x71717b49),
 	PCMCIA_DEVICE_NULL

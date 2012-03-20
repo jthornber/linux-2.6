@@ -163,7 +163,7 @@ static int __init obsolete_checksetup(char *line)
 	p = __setup_start;
 	do {
 		int n = strlen(p->str);
-		if (!strncmp(line, p->str, n)) {
+		if (parameqn(line, p->str, n)) {
 			if (p->early) {
 				/* Already done in parse_early_param?
 				 * (Needs exact match on param part).
@@ -209,8 +209,19 @@ early_param("quiet", quiet_kernel);
 
 static int __init loglevel(char *str)
 {
-	get_option(&str, &console_loglevel);
-	return 0;
+	int newlevel;
+
+	/*
+	 * Only update loglevel value when a correct setting was passed,
+	 * to prevent blind crashes (when loglevel being set to 0) that
+	 * are quite hard to debug
+	 */
+	if (get_option(&str, &newlevel)) {
+		console_loglevel = newlevel;
+		return 0;
+	}
+
+	return -EINVAL;
 }
 
 early_param("loglevel", loglevel);
@@ -270,10 +281,6 @@ static int __init unknown_bootoption(char *param, char *val)
 	}
 	return 0;
 }
-
-#ifdef CONFIG_DEBUG_PAGEALLOC
-int __read_mostly debug_pagealloc_enabled = 0;
-#endif
 
 static int __init init_setup(char *str)
 {
@@ -369,9 +376,9 @@ static noinline void __init_refok rest_init(void)
 	init_idle_bootup_task(current);
 	preempt_enable_no_resched();
 	schedule();
-	preempt_disable();
 
 	/* Call into cpu_idle with preempt disabled */
+	preempt_disable();
 	cpu_idle();
 }
 
@@ -381,7 +388,7 @@ static int __init do_early_param(char *param, char *val)
 	const struct obs_kernel_param *p;
 
 	for (p = __setup_start; p < __setup_end; p++) {
-		if ((p->early && strcmp(param, p->str) == 0) ||
+		if ((p->early && parameq(param, p->str)) ||
 		    (strcmp(param, "console") == 0 &&
 		     strcmp(p->str, "earlycon") == 0)
 		) {
@@ -458,13 +465,12 @@ asmlinkage void __init start_kernel(void)
 	char * command_line;
 	extern const struct kernel_param __start___param[], __stop___param[];
 
-	smp_setup_processor_id();
-
 	/*
 	 * Need to run as early as possible, to initialize the
 	 * lockdep hash:
 	 */
 	lockdep_init();
+	smp_setup_processor_id();
 	debug_objects_early_init();
 
 	/*
@@ -487,6 +493,7 @@ asmlinkage void __init start_kernel(void)
 	printk(KERN_NOTICE "%s", linux_banner);
 	setup_arch(&command_line);
 	mm_init_owner(&init_mm, &init_task);
+	mm_init_cpumask(&init_mm);
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
 	setup_per_cpu_areas();
@@ -500,15 +507,20 @@ asmlinkage void __init start_kernel(void)
 	parse_args("Booting kernel", static_command_line, __start___param,
 		   __stop___param - __start___param,
 		   &unknown_bootoption);
+
+	jump_label_init();
+
 	/*
 	 * These use large bootmem allocations and must precede
 	 * kmem_cache_init()
 	 */
+	setup_log_buf(0);
 	pidhash_init();
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
 	mm_init();
+
 	/*
 	 * Set up the scheduler prior starting any interrupts (such as the
 	 * timer interrupt). Full topology setup happens at smp_init()
@@ -539,6 +551,7 @@ asmlinkage void __init start_kernel(void)
 	timekeeping_init();
 	time_init();
 	profile_init();
+	call_function_init();
 	if (!irqs_disabled())
 		printk(KERN_CRIT "start_kernel(): bug: interrupts were "
 				 "enabled early\n");
@@ -579,7 +592,6 @@ asmlinkage void __init start_kernel(void)
 	}
 #endif
 	page_cgroup_init();
-	enable_debug_pagealloc();
 	debug_objects_mem_init();
 	kmemleak_init();
 	setup_per_cpu_pageset();
@@ -636,7 +648,7 @@ static void __init do_ctors(void)
 #endif
 }
 
-int initcall_debug;
+bool initcall_debug;
 core_param(initcall_debug, initcall_debug, bool, 0644);
 
 static char msgbuf[64];
@@ -711,10 +723,11 @@ static void __init do_basic_setup(void)
 {
 	cpuset_init_smp();
 	usermodehelper_init();
-	init_tmpfs();
+	shmem_init();
 	driver_init();
 	init_irq_proc();
 	do_ctors();
+	usermodehelper_enable();
 	do_initcalls();
 }
 

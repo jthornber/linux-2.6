@@ -3,7 +3,10 @@ if ARCH_AT91
 config HAVE_AT91_DATAFLASH_CARD
 	bool
 
-config HAVE_NAND_ATMEL_BUSWIDTH_16
+config HAVE_AT91_DBGU0
+	bool
+
+config HAVE_AT91_DBGU1
 	bool
 
 config HAVE_AT91_USART3
@@ -15,6 +18,12 @@ config HAVE_AT91_USART4
 config HAVE_AT91_USART5
 	bool
 
+config AT91_SAM9_ALT_RESET
+	bool
+
+config AT91_SAM9G45_RESET
+	bool
+
 menu "Atmel AT91 System-on-Chip"
 
 choice
@@ -24,28 +33,35 @@ config ARCH_AT91RM9200
 	bool "AT91RM9200"
 	select CPU_ARM920T
 	select GENERIC_CLOCKEVENTS
+	select HAVE_AT91_DBGU0
 	select HAVE_AT91_USART3
 
 config ARCH_AT91SAM9260
 	bool "AT91SAM9260 or AT91SAM9XE"
 	select CPU_ARM926T
 	select GENERIC_CLOCKEVENTS
+	select HAVE_AT91_DBGU0
 	select HAVE_AT91_USART3
 	select HAVE_AT91_USART4
 	select HAVE_AT91_USART5
 	select HAVE_NET_MACB
+	select AT91_SAM9_ALT_RESET
 
 config ARCH_AT91SAM9261
 	bool "AT91SAM9261"
 	select CPU_ARM926T
 	select GENERIC_CLOCKEVENTS
 	select HAVE_FB_ATMEL
+	select HAVE_AT91_DBGU0
+	select AT91_SAM9_ALT_RESET
 
 config ARCH_AT91SAM9G10
 	bool "AT91SAM9G10"
 	select CPU_ARM926T
 	select GENERIC_CLOCKEVENTS
+	select HAVE_AT91_DBGU0
 	select HAVE_FB_ATMEL
+	select AT91_SAM9_ALT_RESET
 
 config ARCH_AT91SAM9263
 	bool "AT91SAM9263"
@@ -53,6 +69,8 @@ config ARCH_AT91SAM9263
 	select GENERIC_CLOCKEVENTS
 	select HAVE_FB_ATMEL
 	select HAVE_NET_MACB
+	select HAVE_AT91_DBGU1
+	select AT91_SAM9_ALT_RESET
 
 config ARCH_AT91SAM9RL
 	bool "AT91SAM9RL"
@@ -60,15 +78,19 @@ config ARCH_AT91SAM9RL
 	select GENERIC_CLOCKEVENTS
 	select HAVE_AT91_USART3
 	select HAVE_FB_ATMEL
+	select HAVE_AT91_DBGU0
+	select AT91_SAM9_ALT_RESET
 
 config ARCH_AT91SAM9G20
 	bool "AT91SAM9G20"
 	select CPU_ARM926T
 	select GENERIC_CLOCKEVENTS
+	select HAVE_AT91_DBGU0
 	select HAVE_AT91_USART3
 	select HAVE_AT91_USART4
 	select HAVE_AT91_USART5
 	select HAVE_NET_MACB
+	select AT91_SAM9_ALT_RESET
 
 config ARCH_AT91SAM9G45
 	bool "AT91SAM9G45"
@@ -77,6 +99,8 @@ config ARCH_AT91SAM9G45
 	select HAVE_AT91_USART3
 	select HAVE_FB_ATMEL
 	select HAVE_NET_MACB
+	select HAVE_AT91_DBGU1
+	select AT91_SAM9G45_RESET
 
 config ARCH_AT91CAP9
 	bool "AT91CAP9"
@@ -84,11 +108,8 @@ config ARCH_AT91CAP9
 	select GENERIC_CLOCKEVENTS
 	select HAVE_FB_ATMEL
 	select HAVE_NET_MACB
-
-config ARCH_AT572D940HF
-	bool "AT572D940HF"
-	select CPU_ARM926T
-	select GENERIC_CLOCKEVENTS
+	select HAVE_AT91_DBGU1
+	select AT91_SAM9G45_RESET
 
 config ARCH_AT91X40
 	bool "AT91x40"
@@ -190,6 +211,11 @@ config MACH_ECO920
 	help
 	  Select this if you are using the eco920 board
 
+config MACH_RSI_EWS
+	bool "RSI Embedded Webserver"
+	depends on ARCH_AT91RM9200
+	help
+	  Select this if you are using RSIs EWS board.
 endif
 
 # ----------------------------------------------------------
@@ -198,18 +224,11 @@ if ARCH_AT91SAM9260
 
 comment "AT91SAM9260 Variants"
 
-config ARCH_AT91SAM9260_SAM9XE
-	bool "AT91SAM9XE"
-	help
-	  Select this if you are using Atmel's AT91SAM9XE System-on-Chip.
-	  They are basically AT91SAM9260s with various sizes of embedded Flash.
-
 comment "AT91SAM9260 / AT91SAM9XE Board Type"
 
 config MACH_AT91SAM9260EK
 	bool "Atmel AT91SAM9260-EK / AT91SAM9XE Evaluation Kit"
 	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91SAM9260-EK or AT91SAM9XE Evaluation Kit
 	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=3933>
@@ -270,7 +289,6 @@ comment "AT91SAM9261 Board Type"
 config MACH_AT91SAM9261EK
 	bool "Atmel AT91SAM9261-EK Evaluation Kit"
 	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91SAM9261-EK Evaluation Kit.
 	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=3820>
@@ -286,7 +304,6 @@ comment "AT91SAM9G10 Board Type"
 config MACH_AT91SAM9G10EK
 	bool "Atmel AT91SAM9G10-EK Evaluation Kit"
 	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91SAM9G10-EK Evaluation Kit.
 	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=4588>
@@ -302,7 +319,6 @@ comment "AT91SAM9263 Board Type"
 config MACH_AT91SAM9263EK
 	bool "Atmel AT91SAM9263-EK Evaluation Kit"
 	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91SAM9263-EK Evaluation Kit.
 	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=4057>
@@ -343,7 +359,6 @@ comment "AT91SAM9G20 Board Type"
 config MACH_AT91SAM9G20EK
 	bool "Atmel AT91SAM9G20-EK Evaluation Kit"
 	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91SAM9G20-EK Evaluation Kit
 	  that embeds only one SD/MMC slot.
@@ -351,7 +366,6 @@ config MACH_AT91SAM9G20EK
 config MACH_AT91SAM9G20EK_2MMC
 	depends on MACH_AT91SAM9G20EK
 	bool "Atmel AT91SAM9G20-EK Evaluation Kit with 2 SD/MMC Slots"
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using an Atmel AT91SAM9G20-EK Evaluation Kit
 	  with 2 SD/MMC Slots. This is the case for AT91SAM9G20-EK rev. C and
@@ -395,6 +409,14 @@ config MACH_GSIA18S
 	  This enables support for the GS_IA18_S board
 	  produced by GeoSIG Ltd company. This is an internet accelerograph.
 	  <http://www.geosig.com>
+
+config MACH_USB_A9G20
+	bool "CALAO USB-A9G20"
+	depends on ARCH_AT91SAM9G20
+	help
+	  Select this if you are using a Calao Systems USB-A9G20.
+	  <http://www.calao-systems.com>
+
 endif
 
 if (ARCH_AT91SAM9260 || ARCH_AT91SAM9G20)
@@ -416,7 +438,6 @@ comment "AT91SAM9G45 Board Type"
 
 config MACH_AT91SAM9M10G45EK
 	bool "Atmel AT91SAM9M10G45-EK Evaluation Kits"
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91SAM9G45-EKES Evaluation Kit.
 	  "ES" at the end of the name means that this board is an
@@ -433,27 +454,9 @@ comment "AT91CAP9 Board Type"
 config MACH_AT91CAP9ADK
 	bool "Atmel AT91CAP9A-DK Evaluation Kit"
 	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
 	help
 	  Select this if you are using Atmel's AT91CAP9A-DK Evaluation Kit.
 	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=4138>
-
-endif
-
-# ----------------------------------------------------------
-
-if ARCH_AT572D940HF
-
-comment "AT572D940HF Board Type"
-
-config MACH_AT572D940HFEB
-	bool "AT572D940HF-EK"
-	depends on ARCH_AT572D940HF
-	select HAVE_AT91_DATAFLASH_CARD
-	select HAVE_NAND_ATMEL_BUSWIDTH_16
-	help
-	  Select this if you are using Atmel's AT572D940HF-EK evaluation kit.
-	  <http://www.atmel.com/products/diopsis/default.asp>
 
 endif
 
@@ -475,6 +478,17 @@ endif
 
 # ----------------------------------------------------------
 
+comment "Generic Board Type"
+
+config MACH_AT91SAM_DT
+	bool "Atmel AT91SAM Evaluation Kits with device-tree support"
+	select USE_OF
+	help
+	  Select this if you want to experiment device-tree with
+	  an Atmel Evaluation Kit.
+
+# ----------------------------------------------------------
+
 comment "AT91 Board Options"
 
 config MTD_AT91_DATAFLASH_CARD
@@ -482,13 +496,6 @@ config MTD_AT91_DATAFLASH_CARD
 	depends on HAVE_AT91_DATAFLASH_CARD
 	help
 	  Enable support for the DataFlash card.
-
-config MTD_NAND_ATMEL_BUSWIDTH_16
-	bool "Enable 16-bit data bus interface to NAND flash"
-	depends on HAVE_NAND_ATMEL_BUSWIDTH_16
-	help
-	  On AT91SAM926x boards both types of NAND flash can be present
-	  (8 and 16 bit data bus width).
 
 # ----------------------------------------------------------
 
@@ -532,8 +539,13 @@ config AT91_TIMER_HZ
 choice
 	prompt "Select a UART for early kernel messages"
 
-config AT91_EARLY_DBGU
-	bool "DBGU"
+config AT91_EARLY_DBGU0
+	bool "DBGU on rm9200, 9260/9g20, 9261/9g10 and 9rl"
+	depends on HAVE_AT91_DBGU0
+
+config AT91_EARLY_DBGU1
+	bool "DBGU on 9263, 9g45 and cap9"
+	depends on HAVE_AT91_DBGU1
 
 config AT91_EARLY_USART0
 	bool "USART0"

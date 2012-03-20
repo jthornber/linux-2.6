@@ -68,6 +68,7 @@ config USB_KAWETH
 
 config USB_PEGASUS
 	tristate "USB Pegasus/Pegasus-II based ethernet device support"
+	select NET_CORE
 	select MII
 	---help---
 	  Say Y here if you know you have Pegasus or Pegasus-II based adapter.
@@ -84,6 +85,7 @@ config USB_PEGASUS
 config USB_RTL8150
 	tristate "USB RTL8150 based ethernet device support (EXPERIMENTAL)"
 	depends on EXPERIMENTAL
+	select NET_CORE
 	select MII
 	help
 	  Say Y here if you have RTL8150 based usb-ethernet adapter.
@@ -95,6 +97,7 @@ config USB_RTL8150
 
 config USB_USBNET
 	tristate "Multi-purpose USB Networking Framework"
+	select NET_CORE
 	select MII
 	---help---
 	  This driver supports several kinds of network links over USB,
@@ -384,6 +387,16 @@ config USB_NET_CX82310_ETH
 	  Choose this option if you're using a Conexant CX82310-based ADSL
 	  router with USB ethernet port. This driver is for routers only,
 	  it will not work with ADSL modems (use cxacru driver instead).
+
+config USB_NET_KALMIA
+	tristate "Samsung Kalmia based LTE USB modem"
+	depends on USB_USBNET
+	help
+	  Choose this option if you have a Samsung Kalmia based USB modem
+	  as Samsung GT-B3730.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called kalmia.
 
 config USB_HSO
 	tristate "Option USB High Speed Mobile Devices"

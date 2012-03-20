@@ -11,7 +11,7 @@
 #include <linux/fs.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/blkdev.h>
 #include <linux/backing-dev.h>
 #include <linux/task_io_accounting_ops.h>
@@ -180,7 +180,7 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 		if (page)
 			continue;
 
-		page = page_cache_alloc_cold(mapping);
+		page = page_cache_alloc_readahead(mapping);
 		if (!page)
 			break;
 		page->index = page_offset;

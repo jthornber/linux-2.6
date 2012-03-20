@@ -35,7 +35,7 @@
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/idr.h>
-#include <linux/workqueue.h>
+#include <linux/completion.h>
 #include <linux/netdevice.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
@@ -131,28 +131,21 @@ static inline int c4iw_num_stags(struct c4iw_rdev *rdev)
 
 #define C4IW_WR_TO (10*HZ)
 
-enum {
-	REPLY_READY = 0,
-};
-
 struct c4iw_wr_wait {
-	wait_queue_head_t wait;
-	unsigned long status;
+	struct completion completion;
 	int ret;
 };
 
 static inline void c4iw_init_wr_wait(struct c4iw_wr_wait *wr_waitp)
 {
 	wr_waitp->ret = 0;
-	wr_waitp->status = 0;
-	init_waitqueue_head(&wr_waitp->wait);
+	init_completion(&wr_waitp->completion);
 }
 
 static inline void c4iw_wake_up(struct c4iw_wr_wait *wr_waitp, int ret)
 {
 	wr_waitp->ret = ret;
-	set_bit(REPLY_READY, &wr_waitp->status);
-	wake_up(&wr_waitp->wait);
+	complete(&wr_waitp->completion);
 }
 
 static inline int c4iw_wait_for_reply(struct c4iw_rdev *rdev,
@@ -164,8 +157,7 @@ static inline int c4iw_wait_for_reply(struct c4iw_rdev *rdev,
 	int ret;
 
 	do {
-		ret = wait_event_timeout(wr_waitp->wait,
-			test_and_clear_bit(REPLY_READY, &wr_waitp->status), to);
+		ret = wait_for_completion_timeout(&wr_waitp->completion, to);
 		if (!ret) {
 			printk(KERN_ERR MOD "%s - Device %s not responding - "
 			       "tid %u qpid %u\n", func,
@@ -317,6 +309,7 @@ struct c4iw_cq {
 	struct c4iw_dev *rhp;
 	struct t4_cq cq;
 	spinlock_t lock;
+	spinlock_t comp_handler_lock;
 	atomic_t refcnt;
 	wait_queue_head_t wait;
 };
@@ -331,6 +324,7 @@ struct c4iw_mpa_attributes {
 	u8 recv_marker_enabled;
 	u8 xmit_marker_enabled;
 	u8 crc_enabled;
+	u8 enhanced_rdma_conn;
 	u8 version;
 	u8 p2p_type;
 };
@@ -357,6 +351,8 @@ struct c4iw_qp_attributes {
 	u8 is_terminate_local;
 	struct c4iw_mpa_attributes mpa_attr;
 	struct c4iw_ep *llp_stream_handle;
+	u8 layer_etype;
+	u8 ecode;
 };
 
 struct c4iw_qp {
@@ -509,10 +505,17 @@ enum c4iw_mmid_state {
 #define MPA_KEY_REP "MPA ID Rep Frame"
 
 #define MPA_MAX_PRIVATE_DATA	256
+#define MPA_ENHANCED_RDMA_CONN	0x10
 #define MPA_REJECT		0x20
 #define MPA_CRC			0x40
 #define MPA_MARKERS		0x80
 #define MPA_FLAGS_MASK		0xE0
+
+#define MPA_V2_PEER2PEER_MODEL          0x8000
+#define MPA_V2_ZERO_LEN_FPDU_RTR        0x4000
+#define MPA_V2_RDMA_WRITE_RTR           0x8000
+#define MPA_V2_RDMA_READ_RTR            0x4000
+#define MPA_V2_IRD_ORD_MASK             0x3FFF
 
 #define c4iw_put_ep(ep) { \
 	PDBG("put_ep (via %s:%u) ep %p refcnt %d\n", __func__, __LINE__,  \
@@ -534,6 +537,11 @@ struct mpa_message {
 	u8 revision;
 	__be16 private_data_size;
 	u8 private_data[0];
+};
+
+struct mpa_v2_conn_params {
+	__be16 ird;
+	__be16 ord;
 };
 
 struct terminate_message {
@@ -588,7 +596,10 @@ enum c4iw_ddp_ecodes {
 
 enum c4iw_mpa_ecodes {
 	MPA_CRC_ERR		= 0x02,
-	MPA_MARKER_ERR		= 0x03
+	MPA_MARKER_ERR          = 0x03,
+	MPA_LOCAL_CATA          = 0x05,
+	MPA_INSUFF_IRD          = 0x06,
+	MPA_NOMATCH_RTR         = 0x07,
 };
 
 enum c4iw_ep_state {
@@ -659,6 +670,8 @@ struct c4iw_ep {
 	u16 txq_idx;
 	u16 ctrlq_idx;
 	u8 tos;
+	u8 retry_with_mpa_v1;
+	u8 tried_with_mpa_v1;
 };
 
 static inline struct c4iw_ep *to_ep(struct iw_cm_id *cm_id)

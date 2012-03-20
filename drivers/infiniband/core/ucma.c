@@ -41,6 +41,7 @@
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/sysctl.h>
+#include <linux/module.h>
 
 #include <rdma/rdma_user_cm.h>
 #include <rdma/ib_marshall.h>
@@ -276,7 +277,7 @@ static int ucma_event_handler(struct rdma_cm_id *cm_id,
 	ucma_set_event_context(ctx, event, uevent);
 	uevent->resp.event = event->event;
 	uevent->resp.status = event->status;
-	if (cm_id->ps == RDMA_PS_UDP || cm_id->ps == RDMA_PS_IPOIB)
+	if (cm_id->qp_type == IB_QPT_UD)
 		ucma_copy_ud_event(&uevent->resp.param.ud, &event->param.ud);
 	else
 		ucma_copy_conn_event(&uevent->resp.param.conn,
@@ -367,13 +368,31 @@ done:
 	return ret;
 }
 
-static ssize_t ucma_create_id(struct ucma_file *file,
-				const char __user *inbuf,
-				int in_len, int out_len)
+static int ucma_get_qp_type(struct rdma_ucm_create_id *cmd, enum ib_qp_type *qp_type)
+{
+	switch (cmd->ps) {
+	case RDMA_PS_TCP:
+		*qp_type = IB_QPT_RC;
+		return 0;
+	case RDMA_PS_UDP:
+	case RDMA_PS_IPOIB:
+		*qp_type = IB_QPT_UD;
+		return 0;
+	case RDMA_PS_IB:
+		*qp_type = cmd->qp_type;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static ssize_t ucma_create_id(struct ucma_file *file, const char __user *inbuf,
+			      int in_len, int out_len)
 {
 	struct rdma_ucm_create_id cmd;
 	struct rdma_ucm_create_id_resp resp;
 	struct ucma_context *ctx;
+	enum ib_qp_type qp_type;
 	int ret;
 
 	if (out_len < sizeof(resp))
@@ -382,6 +401,10 @@ static ssize_t ucma_create_id(struct ucma_file *file,
 	if (copy_from_user(&cmd, inbuf, sizeof(cmd)))
 		return -EFAULT;
 
+	ret = ucma_get_qp_type(&cmd, &qp_type);
+	if (ret)
+		return ret;
+
 	mutex_lock(&file->mut);
 	ctx = ucma_alloc_ctx(file);
 	mutex_unlock(&file->mut);
@@ -389,7 +412,7 @@ static ssize_t ucma_create_id(struct ucma_file *file,
 		return -ENOMEM;
 
 	ctx->uid = cmd.uid;
-	ctx->cm_id = rdma_create_id(ucma_event_handler, ctx, cmd.ps);
+	ctx->cm_id = rdma_create_id(ucma_event_handler, ctx, cmd.ps, qp_type);
 	if (IS_ERR(ctx->cm_id)) {
 		ret = PTR_ERR(ctx->cm_id);
 		goto err1;
@@ -785,9 +808,12 @@ static ssize_t ucma_accept(struct ucma_file *file, const char __user *inbuf,
 		return PTR_ERR(ctx);
 
 	if (cmd.conn_param.valid) {
-		ctx->uid = cmd.uid;
 		ucma_copy_conn_param(&conn_param, &cmd.conn_param);
+		mutex_lock(&file->mut);
 		ret = rdma_accept(ctx->cm_id, &conn_param);
+		if (!ret)
+			ctx->uid = cmd.uid;
+		mutex_unlock(&file->mut);
 	} else
 		ret = rdma_accept(ctx->cm_id, NULL);
 
@@ -1251,7 +1277,7 @@ static ssize_t ucma_write(struct file *filp, const char __user *buf,
 	if (copy_from_user(&hdr, buf, sizeof(hdr)))
 		return -EFAULT;
 
-	if (hdr.cmd < 0 || hdr.cmd >= ARRAY_SIZE(ucma_cmd_table))
+	if (hdr.cmd >= ARRAY_SIZE(ucma_cmd_table))
 		return -EINVAL;
 
 	if (hdr.in + sizeof(hdr) > len)
@@ -1338,9 +1364,11 @@ static const struct file_operations ucma_fops = {
 };
 
 static struct miscdevice ucma_misc = {
-	.minor	= MISC_DYNAMIC_MINOR,
-	.name	= "rdma_cm",
-	.fops	= &ucma_fops,
+	.minor		= MISC_DYNAMIC_MINOR,
+	.name		= "rdma_cm",
+	.nodename	= "infiniband/rdma_cm",
+	.mode		= 0666,
+	.fops		= &ucma_fops,
 };
 
 static ssize_t show_abi_version(struct device *dev,

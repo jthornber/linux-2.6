@@ -248,7 +248,7 @@ static int __devinit bcm63xx_wdt_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	bcm63xx_wdt_device.regs = ioremap_nocache(r->start, r->end - r->start);
+	bcm63xx_wdt_device.regs = ioremap_nocache(r->start, resource_size(r));
 	if (!bcm63xx_wdt_device.regs) {
 		dev_err(&pdev->dev, "failed to remap I/O resources\n");
 		return -ENXIO;
@@ -311,18 +311,7 @@ static struct platform_driver bcm63xx_wdt = {
 	}
 };
 
-static int __init bcm63xx_wdt_init(void)
-{
-	return platform_driver_register(&bcm63xx_wdt);
-}
-
-static void __exit bcm63xx_wdt_exit(void)
-{
-	platform_driver_unregister(&bcm63xx_wdt);
-}
-
-module_init(bcm63xx_wdt_init);
-module_exit(bcm63xx_wdt_exit);
+module_platform_driver(bcm63xx_wdt);
 
 MODULE_AUTHOR("Miguel Gaio <miguel.gaio@efixo.com>");
 MODULE_AUTHOR("Florian Fainelli <florian@openwrt.org>");

@@ -35,15 +35,12 @@ struct cflayer *cfctrl_create(void)
 {
 	struct dev_info dev_info;
 	struct cfctrl *this =
-		kmalloc(sizeof(struct cfctrl), GFP_ATOMIC);
-	if (!this) {
-		pr_warn("Out of memory\n");
+		kzalloc(sizeof(struct cfctrl), GFP_ATOMIC);
+	if (!this)
 		return NULL;
-	}
 	caif_assert(offsetof(struct cfctrl, serv.layer) == 0);
 	memset(&dev_info, 0, sizeof(dev_info));
 	dev_info.id = 0xff;
-	memset(this, 0, sizeof(*this));
 	cfsrvl_init(&this->serv, 0, &dev_info, false);
 	atomic_set(&this->req_seq_no, 1);
 	atomic_set(&this->rsp_seq_no, 1);
@@ -178,10 +175,12 @@ static void init_info(struct caif_payload_info *info, struct cfctrl *cfctrl)
 void cfctrl_enum_req(struct cflayer *layer, u8 physlinkid)
 {
 	struct cfctrl *cfctrl = container_obj(layer);
-	int ret;
 	struct cfpkt *pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
-	if (!pkt) {
-		pr_warn("Out of memory\n");
+	struct cflayer *dn = cfctrl->serv.layer.dn;
+	if (!pkt)
+		return;
+	if (!dn) {
+		pr_debug("not able to send enum request\n");
 		return;
 	}
 	caif_assert(offsetof(struct cfctrl, serv.layer) == 0);
@@ -190,8 +189,7 @@ void cfctrl_enum_req(struct cflayer *layer, u8 physlinkid)
 	cfctrl->serv.dev_info.id = physlinkid;
 	cfpkt_addbdy(pkt, CFCTRL_CMD_ENUM);
 	cfpkt_addbdy(pkt, physlinkid);
-	ret =
-	    cfctrl->serv.layer.dn->transmit(cfctrl->serv.layer.dn, pkt);
+	dn->transmit(dn, pkt);
 }
 
 int cfctrl_linkup_request(struct cflayer *layer,
@@ -206,6 +204,12 @@ int cfctrl_linkup_request(struct cflayer *layer,
 	int ret;
 	char utility_name[16];
 	struct cfpkt *pkt;
+	struct cflayer *dn = cfctrl->serv.layer.dn;
+
+	if (!dn) {
+		pr_debug("not able to send linkup request\n");
+		return -ENODEV;
+	}
 
 	if (cfctrl_cancel_req(layer, user_layer) > 0) {
 		/* Slight Paranoia, check if already connecting */
@@ -215,10 +219,8 @@ int cfctrl_linkup_request(struct cflayer *layer,
 	}
 
 	pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
-	if (!pkt) {
-		pr_warn("Out of memory\n");
+	if (!pkt)
 		return -ENOMEM;
-	}
 	cfpkt_addbdy(pkt, CFCTRL_CMD_LINK_SETUP);
 	cfpkt_addbdy(pkt, (param->chtype << 4) | param->linktype);
 	cfpkt_addbdy(pkt, (param->priority << 3) | param->phyid);
@@ -266,10 +268,8 @@ int cfctrl_linkup_request(struct cflayer *layer,
 		return -EINVAL;
 	}
 	req = kzalloc(sizeof(*req), GFP_KERNEL);
-	if (!req) {
-		pr_warn("Out of memory\n");
+	if (!req)
 		return -ENOMEM;
-	}
 	req->client_layer = user_layer;
 	req->cmd = CFCTRL_CMD_LINK_SETUP;
 	req->param = *param;
@@ -282,7 +282,7 @@ int cfctrl_linkup_request(struct cflayer *layer,
 	 */
 	cfpkt_info(pkt)->dev_info->id = param->phyid;
 	ret =
-	    cfctrl->serv.layer.dn->transmit(cfctrl->serv.layer.dn, pkt);
+	    dn->transmit(dn, pkt);
 	if (ret < 0) {
 		int count;
 
@@ -301,15 +301,21 @@ int cfctrl_linkdown_req(struct cflayer *layer, u8 channelid,
 	int ret;
 	struct cfctrl *cfctrl = container_obj(layer);
 	struct cfpkt *pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
-	if (!pkt) {
-		pr_warn("Out of memory\n");
+	struct cflayer *dn = cfctrl->serv.layer.dn;
+
+	if (!pkt)
 		return -ENOMEM;
+
+	if (!dn) {
+		pr_debug("not able to send link-down request\n");
+		return -ENODEV;
 	}
+
 	cfpkt_addbdy(pkt, CFCTRL_CMD_LINK_DESTROY);
 	cfpkt_addbdy(pkt, channelid);
 	init_info(cfpkt_info(pkt), cfctrl);
 	ret =
-	    cfctrl->serv.layer.dn->transmit(cfctrl->serv.layer.dn, pkt);
+	    dn->transmit(dn, pkt);
 #ifndef CAIF_NO_LOOP
 	cfctrl->loop_linkused[channelid] = 0;
 #endif
@@ -351,7 +357,8 @@ static int cfctrl_recv(struct cflayer *layer, struct cfpkt *pkt)
 	cfpkt_extr_head(pkt, &cmdrsp, 1);
 	cmd = cmdrsp & CFCTRL_CMD_MASK;
 	if (cmd != CFCTRL_CMD_LINK_ERR
-	    && CFCTRL_RSP_BIT != (CFCTRL_RSP_BIT & cmdrsp)) {
+	    && CFCTRL_RSP_BIT != (CFCTRL_RSP_BIT & cmdrsp)
+		&& CFCTRL_ERR_BIT != (CFCTRL_ERR_BIT & cmdrsp)) {
 		if (handle_loop(cfctrl, cmd, pkt) != 0)
 			cmdrsp |= CFCTRL_ERR_BIT;
 	}
@@ -477,7 +484,7 @@ static int cfctrl_recv(struct cflayer *layer, struct cfpkt *pkt)
 				cfpkt_extr_head(pkt, &param, len);
 				break;
 			default:
-				pr_warn("Request setup - invalid link type (%d)\n",
+				pr_warn("Request setup, invalid type (%d)\n",
 					serv);
 				goto error;
 			}
@@ -489,7 +496,8 @@ static int cfctrl_recv(struct cflayer *layer, struct cfpkt *pkt)
 
 			if (CFCTRL_ERR_BIT == (CFCTRL_ERR_BIT & cmdrsp) ||
 				cfpkt_erroneous(pkt)) {
-				pr_err("Invalid O/E bit or parse error on CAIF control channel\n");
+				pr_err("Invalid O/E bit or parse error "
+						"on CAIF control channel\n");
 				cfctrl->res.reject_rsp(cfctrl->serv.layer.up,
 						       0,
 						       req ? req->client_layer
@@ -550,9 +558,8 @@ static void cfctrl_ctrlcmd(struct cflayer *layr, enum caif_ctrlcmd ctrl,
 	case _CAIF_CTRLCMD_PHYIF_FLOW_OFF_IND:
 	case CAIF_CTRLCMD_FLOW_OFF_IND:
 		spin_lock_bh(&this->info_list_lock);
-		if (!list_empty(&this->list)) {
+		if (!list_empty(&this->list))
 			pr_debug("Received flow off in control layer\n");
-		}
 		spin_unlock_bh(&this->info_list_lock);
 		break;
 	case _CAIF_CTRLCMD_PHYIF_DOWN_IND: {
@@ -587,16 +594,16 @@ static int handle_loop(struct cfctrl *ctrl, int cmd, struct cfpkt *pkt)
 	case CFCTRL_CMD_LINK_SETUP:
 		spin_lock_bh(&ctrl->loop_linkid_lock);
 		if (!dec) {
-			for (linkid = last_linkid + 1; linkid < 255; linkid++)
+			for (linkid = last_linkid + 1; linkid < 254; linkid++)
 				if (!ctrl->loop_linkused[linkid])
 					goto found;
 		}
 		dec = 1;
-		for (linkid = last_linkid - 1; linkid > 0; linkid--)
+		for (linkid = last_linkid - 1; linkid > 1; linkid--)
 			if (!ctrl->loop_linkused[linkid])
 				goto found;
 		spin_unlock_bh(&ctrl->loop_linkid_lock);
-
+		return -1;
 found:
 		if (linkid < 10)
 			dec = 0;

@@ -68,7 +68,7 @@ struct pcie_link_state {
 	struct aspm_latency acceptable[8];
 };
 
-static int aspm_disabled, aspm_force, aspm_clear_state;
+static int aspm_disabled, aspm_force;
 static bool aspm_support_enabled = true;
 static DEFINE_MUTEX(aspm_lock);
 static LIST_HEAD(link_list);
@@ -500,8 +500,8 @@ static int pcie_aspm_sanity_check(struct pci_dev *pdev)
 	int pos;
 	u32 reg32;
 
-	if (aspm_clear_state)
-		return -EINVAL;
+	if (aspm_disabled)
+		return 0;
 
 	/*
 	 * Some functions in a slot might not all be PCIe functions,
@@ -572,9 +572,6 @@ void pcie_aspm_init_link_state(struct pci_dev *pdev)
 		return;
 	if (pdev->pcie_type != PCI_EXP_TYPE_ROOT_PORT &&
 	    pdev->pcie_type != PCI_EXP_TYPE_DOWNSTREAM)
-		return;
-
-	if (aspm_disabled && !aspm_clear_state)
 		return;
 
 	/* VIA has a strange chipset, root port is under a bridge */
@@ -649,8 +646,7 @@ void pcie_aspm_exit_link_state(struct pci_dev *pdev)
 	struct pci_dev *parent = pdev->bus->self;
 	struct pcie_link_state *link, *root, *parent_link;
 
-	if ((aspm_disabled && !aspm_clear_state) || !pci_is_pcie(pdev) ||
-	    !parent || !parent->link_state)
+	if (!pci_is_pcie(pdev) || !parent || !parent->link_state)
 		return;
 	if ((parent->pcie_type != PCI_EXP_TYPE_ROOT_PORT) &&
 	    (parent->pcie_type != PCI_EXP_TYPE_DOWNSTREAM))
@@ -734,20 +730,26 @@ void pcie_aspm_powersave_config_link(struct pci_dev *pdev)
  * pci_disable_link_state - disable pci device's link state, so the link will
  * never enter specific states
  */
-void pci_disable_link_state(struct pci_dev *pdev, int state)
+static void __pci_disable_link_state(struct pci_dev *pdev, int state, bool sem,
+				     bool force)
 {
 	struct pci_dev *parent = pdev->bus->self;
 	struct pcie_link_state *link;
 
-	if (aspm_disabled || !pci_is_pcie(pdev))
+	if (aspm_disabled && !force)
 		return;
+
+	if (!pci_is_pcie(pdev))
+		return;
+
 	if (pdev->pcie_type == PCI_EXP_TYPE_ROOT_PORT ||
 	    pdev->pcie_type == PCI_EXP_TYPE_DOWNSTREAM)
 		parent = pdev;
 	if (!parent || !parent->link_state)
 		return;
 
-	down_read(&pci_bus_sem);
+	if (sem)
+		down_read(&pci_bus_sem);
 	mutex_lock(&aspm_lock);
 	link = parent->link_state;
 	if (state & PCIE_LINK_STATE_L0S)
@@ -761,9 +763,36 @@ void pci_disable_link_state(struct pci_dev *pdev, int state)
 		pcie_set_clkpm(link, 0);
 	}
 	mutex_unlock(&aspm_lock);
-	up_read(&pci_bus_sem);
+	if (sem)
+		up_read(&pci_bus_sem);
+}
+
+void pci_disable_link_state_locked(struct pci_dev *pdev, int state)
+{
+	__pci_disable_link_state(pdev, state, false, false);
+}
+EXPORT_SYMBOL(pci_disable_link_state_locked);
+
+void pci_disable_link_state(struct pci_dev *pdev, int state)
+{
+	__pci_disable_link_state(pdev, state, true, false);
 }
 EXPORT_SYMBOL(pci_disable_link_state);
+
+void pcie_clear_aspm(struct pci_bus *bus)
+{
+	struct pci_dev *child;
+
+	/*
+	 * Clear any ASPM setup that the firmware has carried out on this bus
+	 */
+	list_for_each_entry(child, &bus->devices, bus_list) {
+		__pci_disable_link_state(child, PCIE_LINK_STATE_L0S |
+					 PCIE_LINK_STATE_L1 |
+					 PCIE_LINK_STATE_CLKPM,
+					 false, true);
+	}
+}
 
 static int pcie_aspm_set_policy(const char *val, struct kernel_param *kp)
 {
@@ -922,28 +951,31 @@ void pcie_aspm_remove_sysfs_dev_files(struct pci_dev *pdev)
 static int __init pcie_aspm_disable(char *str)
 {
 	if (!strcmp(str, "off")) {
+		aspm_policy = POLICY_DEFAULT;
 		aspm_disabled = 1;
 		aspm_support_enabled = false;
 		printk(KERN_INFO "PCIe ASPM is disabled\n");
 	} else if (!strcmp(str, "force")) {
 		aspm_force = 1;
-		printk(KERN_INFO "PCIe ASPM is forcedly enabled\n");
+		printk(KERN_INFO "PCIe ASPM is forcibly enabled\n");
 	}
 	return 1;
 }
 
 __setup("pcie_aspm=", pcie_aspm_disable);
 
-void pcie_clear_aspm(void)
-{
-	if (!aspm_force)
-		aspm_clear_state = 1;
-}
-
 void pcie_no_aspm(void)
 {
-	if (!aspm_force)
+	/*
+	 * Disabling ASPM is intended to prevent the kernel from modifying
+	 * existing hardware state, not to clear existing state. To that end:
+	 * (a) set policy to POLICY_DEFAULT in order to avoid changing state
+	 * (b) prevent userspace from changing policy
+	 */
+	if (!aspm_force) {
+		aspm_policy = POLICY_DEFAULT;
 		aspm_disabled = 1;
+	}
 }
 
 /**

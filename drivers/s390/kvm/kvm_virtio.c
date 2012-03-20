@@ -20,12 +20,12 @@
 #include <linux/virtio_console.h>
 #include <linux/interrupt.h>
 #include <linux/virtio_ring.h>
+#include <linux/export.h>
 #include <linux/pfn.h>
 #include <asm/io.h>
 #include <asm/kvm_para.h>
 #include <asm/kvm_virtio.h>
 #include <asm/setup.h>
-#include <asm/s390_ext.h>
 #include <asm/irq.h>
 
 #define VIRTIO_SUBCODE_64 0x0D00
@@ -34,7 +34,7 @@
  * The pointer to our (page) of device descriptions.
  */
 static void *kvm_devices;
-struct work_struct hotplug_work;
+static struct work_struct hotplug_work;
 
 struct kvm_device {
 	struct virtio_device vdev;
@@ -198,7 +198,7 @@ static struct virtqueue *kvm_find_vq(struct virtio_device *vdev,
 		goto out;
 
 	vq = vring_new_virtqueue(config->num, KVM_S390_VIRTIO_RING_ALIGN,
-				 vdev, (void *) config->address,
+				 vdev, true, (void *) config->address,
 				 kvm_notify, callback, name);
 	if (!vq) {
 		err = -ENOMEM;
@@ -263,6 +263,11 @@ error:
 	return PTR_ERR(vqs[i]);
 }
 
+static const char *kvm_bus_name(struct virtio_device *vdev)
+{
+	return "";
+}
+
 /*
  * The config ops structure as defined by virtio config
  */
@@ -276,6 +281,7 @@ static struct virtio_config_ops kvm_vq_configspace_ops = {
 	.reset = kvm_reset,
 	.find_vqs = kvm_find_vqs,
 	.del_vqs = kvm_del_vqs,
+	.bus_name = kvm_bus_name,
 };
 
 /*
@@ -335,10 +341,10 @@ static void scan_devices(void)
  */
 static int match_desc(struct device *dev, void *data)
 {
-	if ((ulong)to_kvmdev(dev_to_virtio(dev))->desc == (ulong)data)
-		return 1;
+	struct virtio_device *vdev = dev_to_virtio(dev);
+	struct kvm_device *kdev = to_kvmdev(vdev);
 
-	return 0;
+	return kdev->desc == data;
 }
 
 /*
@@ -441,7 +447,7 @@ static int __init kvm_devices_init(void)
 
 	INIT_WORK(&hotplug_work, hotplug_devices);
 
-	ctl_set_bit(0, 9);
+	service_subclass_irq_register();
 	register_external_interrupt(0x2603, kvm_extint_handler);
 
 	scan_devices();

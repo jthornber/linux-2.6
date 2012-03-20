@@ -268,7 +268,7 @@ static int evtchn_bind_to_user(struct per_user_data *u, int port)
 	rc = bind_evtchn_to_irqhandler(port, evtchn_interrupt, IRQF_DISABLED,
 				       u->name, (void *)(unsigned long)port);
 	if (rc >= 0)
-		rc = 0;
+		rc = evtchn_make_refcounted(port);
 
 	return rc;
 }
@@ -470,7 +470,7 @@ static int evtchn_open(struct inode *inode, struct file *filp)
 
 	filp->private_data = u;
 
-	return nonseekable_open(inode, filp);;
+	return nonseekable_open(inode, filp);
 }
 
 static int evtchn_release(struct inode *inode, struct file *filp)

@@ -17,7 +17,7 @@
  *
  * Copyright (C) IBM Corporation, 2004
  *
- * Author: Max Asböck <amax@us.ibm.com>
+ * Author: Max AsbÃ¶ck <amax@us.ibm.com>
  *
  */
 
@@ -29,7 +29,7 @@
 
 /*
  * The IBMASM file virtual filesystem. It creates the following hierarchy
- * dymamically when mounted from user space:
+ * dynamically when mounted from user space:
  *
  *    /ibmasm
  *    |-- 0

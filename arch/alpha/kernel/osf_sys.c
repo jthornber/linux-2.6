@@ -42,6 +42,7 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/sysinfo.h>
+#include <asm/thread_info.h>
 #include <asm/hwrpb.h>
 #include <asm/processor.h>
 
@@ -409,7 +410,7 @@ SYSCALL_DEFINE2(osf_getdomainname, char __user *, name, int, namelen)
 		return -EFAULT;
 
 	len = namelen;
-	if (namelen > 32)
+	if (len > 32)
 		len = 32;
 
 	down_read(&uts_sem);
@@ -594,7 +595,7 @@ SYSCALL_DEFINE3(osf_sysinfo, int, command, char __user *, buf, long, count)
 	down_read(&uts_sem);
 	res = sysinfo_table[offset];
 	len = strlen(res)+1;
-	if (len > count)
+	if ((unsigned long)len > (unsigned long)count)
 		len = count;
 	if (copy_to_user(buf, res, len))
 		err = -EFAULT;
@@ -633,9 +634,10 @@ SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
  	case GSI_UACPROC:
 		if (nbytes < sizeof(unsigned int))
 			return -EINVAL;
- 		w = (current_thread_info()->flags >> UAC_SHIFT) & UAC_BITMASK;
- 		if (put_user(w, (unsigned int __user *)buffer))
- 			return -EFAULT;
+		w = (current_thread_info()->flags >> ALPHA_UAC_SHIFT) &
+			UAC_BITMASK;
+		if (put_user(w, (unsigned int __user *)buffer))
+			return -EFAULT;
  		return 1;
 
 	case GSI_PROC_TYPE:
@@ -649,7 +651,7 @@ SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
 		return 1;
 
 	case GSI_GET_HWRPB:
-		if (nbytes < sizeof(*hwrpb))
+		if (nbytes > sizeof(*hwrpb))
 			return -EINVAL;
 		if (copy_to_user(buffer, hwrpb, nbytes) != 0)
 			return -EFAULT;
@@ -756,8 +758,8 @@ SYSCALL_DEFINE5(osf_setsysinfo, unsigned long, op, void __user *, buffer,
  			case SSIN_UACPROC:
 			again:
 				old = current_thread_info()->flags;
-				new = old & ~(UAC_BITMASK << UAC_SHIFT);
-				new = new | (w & UAC_BITMASK) << UAC_SHIFT;
+				new = old & ~(UAC_BITMASK << ALPHA_UAC_SHIFT);
+				new = new | (w & UAC_BITMASK) << ALPHA_UAC_SHIFT;
 				if (cmpxchg(&current_thread_info()->flags,
 					    old, new) != old)
 					goto again;
@@ -1008,6 +1010,7 @@ SYSCALL_DEFINE4(osf_wait4, pid_t, pid, int __user *, ustatus, int, options,
 {
 	struct rusage r;
 	long ret, err;
+	unsigned int status = 0;
 	mm_segment_t old_fs;
 
 	if (!ur)
@@ -1016,13 +1019,15 @@ SYSCALL_DEFINE4(osf_wait4, pid_t, pid, int __user *, ustatus, int, options,
 	old_fs = get_fs();
 		
 	set_fs (KERNEL_DS);
-	ret = sys_wait4(pid, ustatus, options, (struct rusage __user *) &r);
+	ret = sys_wait4(pid, (unsigned int __user *) &status, options,
+			(struct rusage __user *) &r);
 	set_fs (old_fs);
 
 	if (!access_ok(VERIFY_WRITE, ur, sizeof(*ur)))
 		return -EFAULT;
 
 	err = 0;
+	err |= put_user(status, ustatus);
 	err |= __put_user(r.ru_utime.tv_sec, &ur->ru_utime.tv_sec);
 	err |= __put_user(r.ru_utime.tv_usec, &ur->ru_utime.tv_usec);
 	err |= __put_user(r.ru_stime.tv_sec, &ur->ru_stime.tv_sec);

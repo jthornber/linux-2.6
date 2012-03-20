@@ -22,6 +22,7 @@
  */
 
 #include <linux/types.h>
+#include <linux/gpio.h>
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -41,18 +42,18 @@
 #include <asm/mach/map.h>
 
 #include <mach/board.h>
-#include <mach/gpio.h>
 #include <mach/at91cap9_matrix.h>
 #include <mach/at91sam9_smc.h>
+#include <mach/system_rev.h>
 
 #include "sam9_smc.h"
 #include "generic.h"
 
 
-static void __init cap9adk_map_io(void)
+static void __init cap9adk_init_early(void)
 {
 	/* Initialize processor: 12 MHz crystal */
-	at91cap9_initialize(12000000);
+	at91_initialize(12000000);
 
 	/* Setup the LEDs: USER1 and USER2 LED for cpu/timer... */
 	at91_init_leds(AT91_PIN_PA10, AT91_PIN_PA11);
@@ -64,17 +65,13 @@ static void __init cap9adk_map_io(void)
 	at91_set_serial_console(0);
 }
 
-static void __init cap9adk_init_irq(void)
-{
-	at91cap9_init_interrupts(NULL);
-}
-
-
 /*
  * USB Host port
  */
 static struct at91_usbh_data __initdata cap9adk_usbh_data = {
 	.ports		= 2,
+	.vbus_pin	= {-EINVAL, -EINVAL},
+	.overcurrent_pin= {-EINVAL, -EINVAL},
 };
 
 /*
@@ -149,16 +146,17 @@ static struct spi_board_info cap9adk_spi_devices[] = {
  */
 static struct at91_mmc_data __initdata cap9adk_mmc_data = {
 	.wire4		= 1,
-//	.det_pin	= ... not connected
-//	.wp_pin		= ... not connected
-//	.vcc_pin	= ... not connected
+	.det_pin	= -EINVAL,
+	.wp_pin		= -EINVAL,
+	.vcc_pin	= -EINVAL,
 };
 
 
 /*
  * MACB Ethernet device
  */
-static struct at91_eth_data __initdata cap9adk_macb_data = {
+static struct macb_platform_data __initdata cap9adk_macb_data = {
+	.phy_irq_pin	= -EINVAL,
 	.is_rmii	= 1,
 };
 
@@ -174,24 +172,14 @@ static struct mtd_partition __initdata cap9adk_nand_partitions[] = {
 	},
 };
 
-static struct mtd_partition * __init nand_partitions(int size, int *num_partitions)
-{
-	*num_partitions = ARRAY_SIZE(cap9adk_nand_partitions);
-	return cap9adk_nand_partitions;
-}
-
 static struct atmel_nand_data __initdata cap9adk_nand_data = {
 	.ale		= 21,
 	.cle		= 22,
-//	.det_pin	= ... not connected
-//	.rdy_pin	= ... not connected
+	.det_pin	= -EINVAL,
+	.rdy_pin	= -EINVAL,
 	.enable_pin	= AT91_PIN_PD15,
-	.partition_info	= nand_partitions,
-#if defined(CONFIG_MTD_NAND_ATMEL_BUSWIDTH_16)
-	.bus_width_16	= 1,
-#else
-	.bus_width_16	= 0,
-#endif
+	.parts		= cap9adk_nand_partitions,
+	.num_parts	= ARRAY_SIZE(cap9adk_nand_partitions),
 };
 
 static struct sam9_smc_config __initdata cap9adk_nand_smc_config = {
@@ -219,6 +207,7 @@ static void __init cap9adk_add_device_nand(void)
 	csa = at91_sys_read(AT91_MATRIX_EBICSA);
 	at91_sys_write(AT91_MATRIX_EBICSA, csa | AT91_MATRIX_EBI_VDDIOMSEL_3_3V);
 
+	cap9adk_nand_data.bus_width_16 = board_have_nand_16bit();
 	/* setup bus-width (8 or 16) */
 	if (cap9adk_nand_data.bus_width_16)
 		cap9adk_nand_smc_config.mode |= AT91_SMC_DBW_16;
@@ -226,7 +215,7 @@ static void __init cap9adk_add_device_nand(void)
 		cap9adk_nand_smc_config.mode |= AT91_SMC_DBW_8;
 
 	/* configure chip-select 3 (NAND) */
-	sam9_smc_configure(3, &cap9adk_nand_smc_config);
+	sam9_smc_configure(0, 3, &cap9adk_nand_smc_config);
 
 	at91_add_device_nand(&cap9adk_nand_data);
 }
@@ -296,7 +285,7 @@ static __init void cap9adk_add_device_nor(void)
 	at91_sys_write(AT91_MATRIX_EBICSA, csa | AT91_MATRIX_EBI_VDDIOMSEL_3_3V);
 
 	/* configure chip-select 0 (NOR) */
-	sam9_smc_configure(0, &cap9adk_nor_smc_config);
+	sam9_smc_configure(0, 0, &cap9adk_nor_smc_config);
 
 	platform_device_register(&cap9adk_nor_flash);
 }
@@ -365,7 +354,7 @@ static struct atmel_lcdfb_info __initdata cap9adk_lcdc_data;
  * AC97
  */
 static struct ac97c_platform_data cap9adk_ac97_data = {
-//	.reset_pin	= ... not connected
+	.reset_pin	= -EINVAL,
 };
 
 
@@ -399,9 +388,9 @@ static void __init cap9adk_board_init(void)
 
 MACHINE_START(AT91CAP9ADK, "Atmel AT91CAP9A-DK")
 	/* Maintainer: Stelian Pop <stelian.pop@leadtechdesign.com> */
-	.boot_params	= AT91_SDRAM_BASE + 0x100,
 	.timer		= &at91sam926x_timer,
-	.map_io		= cap9adk_map_io,
-	.init_irq	= cap9adk_init_irq,
+	.map_io		= at91_map_io,
+	.init_early	= cap9adk_init_early,
+	.init_irq	= at91_init_irq_default,
 	.init_machine	= cap9adk_board_init,
 MACHINE_END

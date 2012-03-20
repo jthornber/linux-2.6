@@ -13,6 +13,7 @@
 #include <linux/pm.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/module.h>
 
 #include <asm/io.h>
 #include <asm/oplib.h>
@@ -123,7 +124,7 @@ static long apc_ioctl(struct file *f, unsigned int cmd, unsigned long __arg)
 
 	default:
 		return -EINVAL;
-	};
+	}
 
 	return 0;
 }

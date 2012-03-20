@@ -22,6 +22,7 @@
 
 #include <linux/mfd/wl1273-core.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 
 #define DRIVER_DESC "WL1273 FM Radio Core"
 
@@ -153,7 +154,6 @@ out:
  */
 static int wl1273_fm_set_volume(struct wl1273_core *core, unsigned int volume)
 {
-	u16 val;
 	int r;
 
 	if (volume > WL1273_MAX_VOLUME)
@@ -217,7 +217,8 @@ static int __devinit wl1273_core_probe(struct i2c_client *client,
 
 	cell = &core->cells[children];
 	cell->name = "wl1273_fm_radio";
-	cell->mfd_data = &core;
+	cell->platform_data = &core;
+	cell->pdata_size = sizeof(core);
 	children++;
 
 	core->read = wl1273_fm_read_reg;
@@ -231,7 +232,8 @@ static int __devinit wl1273_core_probe(struct i2c_client *client,
 
 		dev_dbg(&client->dev, "%s: Have codec.\n", __func__);
 		cell->name = "wl1273-codec";
-		cell->mfd_data = &core;
+		cell->platform_data = &core;
+		cell->pdata_size = sizeof(core);
 		children++;
 	}
 

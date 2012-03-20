@@ -79,21 +79,19 @@ static int das08_cs_attach(struct comedi_device *dev,
 	if (ret < 0)
 		return ret;
 
-	printk("comedi%d: das08_cs: ", dev->minor);
+	dev_info(dev->hw_dev, "comedi%d: das08_cs:\n", dev->minor);
 	/*  deal with a pci board */
 
 	if (thisboard->bustype == pcmcia) {
 		if (link == NULL) {
-			printk(" no pcmcia cards found\n");
+			dev_err(dev->hw_dev, "no pcmcia cards found\n");
 			return -EIO;
 		}
 		iobase = link->resource[0]->start;
 	} else {
-		printk(" bug! board does not have PCMCIA bustype\n");
+		dev_err(dev->hw_dev, "bug! board does not have PCMCIA bustype\n");
 		return -EINVAL;
 	}
-
-	printk("\n");
 
 	return das08_common_attach(dev, iobase);
 }
@@ -219,7 +217,7 @@ static int das08_pcmcia_resume(struct pcmcia_device *link)
 
 /*====================================================================*/
 
-static struct pcmcia_device_id das08_cs_id_table[] = {
+static const struct pcmcia_device_id das08_cs_id_table[] = {
 	PCMCIA_DEVICE_MANF_CARD(0x01c5, 0x4001),
 	PCMCIA_DEVICE_NULL
 };

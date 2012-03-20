@@ -28,6 +28,9 @@
 
 #define _RTL871X_RECV_C_
 
+#include <linux/slab.h>
+#include <linux/kmemleak.h>
+
 #include "osdep_service.h"
 #include "drv_types.h"
 #include "recv_osdep.h"
@@ -73,6 +76,7 @@ sint _r8712_init_recv_priv(struct recv_priv *precvpriv,
 					   RXFRAME_ALIGN_SZ);
 	if (precvpriv->pallocated_frame_buf == NULL)
 		return _FAIL;
+	kmemleak_not_leak(precvpriv->pallocated_frame_buf);
 	memset(precvpriv->pallocated_frame_buf, 0, NR_RECVFRAME *
 		sizeof(union recv_frame) + RXFRAME_ALIGN_SZ);
 	precvpriv->precv_frame_buf = precvpriv->pallocated_frame_buf +
@@ -307,9 +311,9 @@ static sint recv_decache(union recv_frame *precv_frame, u8 bretry,
 	return _SUCCESS;
 }
 
-static sint sta2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_frame,
-			struct sta_info **psta
-)
+static sint sta2sta_data_frame(struct _adapter *adapter,
+			       union recv_frame *precv_frame,
+			       struct sta_info **psta)
 {
 	u8 *ptr = precv_frame->u.hdr.rx_data;
 	sint ret = _SUCCESS;
@@ -373,8 +377,9 @@ static sint sta2sta_data_frame(struct _adapter *adapter, union recv_frame *precv
 	return ret;
 }
 
-static sint ap2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_frame,
-		       struct sta_info **psta)
+static sint ap2sta_data_frame(struct _adapter *adapter,
+			      union recv_frame *precv_frame,
+			      struct sta_info **psta)
 {
 	u8 *ptr = precv_frame->u.hdr.rx_data;
 	struct rx_pkt_attrib *pattrib = &precv_frame->u.hdr.attrib;
@@ -431,8 +436,9 @@ static sint ap2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_
 	return _SUCCESS;
 }
 
-static sint sta2ap_data_frame(struct _adapter *adapter, union recv_frame *precv_frame,
-		       struct sta_info **psta)
+static sint sta2ap_data_frame(struct _adapter *adapter,
+			      union recv_frame *precv_frame,
+			      struct sta_info **psta)
 {
 	struct rx_pkt_attrib *pattrib = &precv_frame->u.hdr.attrib;
 	struct	sta_priv *pstapriv = &adapter->stapriv;

@@ -6,6 +6,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/io.h>
 #include <linux/hwmon.h>
@@ -258,7 +259,7 @@ static int __devinit env_probe(struct platform_device *op)
 		goto out_sysfs_remove_group;
 	}
 
-	dev_set_drvdata(&op->dev, p);
+	platform_set_drvdata(op, p);
 	err = 0;
 
 out:
@@ -277,7 +278,7 @@ out_free:
 
 static int __devexit env_remove(struct platform_device *op)
 {
-	struct env *p = dev_get_drvdata(&op->dev);
+	struct env *p = platform_get_drvdata(op);
 
 	if (p) {
 		sysfs_remove_group(&op->dev.kobj, &env_group);
@@ -308,15 +309,4 @@ static struct platform_driver env_driver = {
 	.remove		= __devexit_p(env_remove),
 };
 
-static int __init env_init(void)
-{
-	return platform_driver_register(&env_driver);
-}
-
-static void __exit env_exit(void)
-{
-	platform_driver_unregister(&env_driver);
-}
-
-module_init(env_init);
-module_exit(env_exit);
+module_platform_driver(env_driver);

@@ -79,8 +79,6 @@ xfs_inode_item_size(
 		break;
 
 	case XFS_DINODE_FMT_BTREE:
-		ASSERT(ip->i_df.if_ext_max ==
-		       XFS_IFORK_DSIZE(ip) / (uint)sizeof(xfs_bmbt_rec_t));
 		iip->ili_format.ilf_fields &=
 			~(XFS_ILOG_DDATA | XFS_ILOG_DEXT |
 			  XFS_ILOG_DEV | XFS_ILOG_UUID);
@@ -437,7 +435,6 @@ xfs_inode_item_format(
 	 * Assert that no attribute-related log flags are set.
 	 */
 	if (!XFS_IFORK_Q(ip)) {
-		ASSERT(nvecs == lip->li_desc->lid_size);
 		iip->ili_format.ilf_size = nvecs;
 		ASSERT(!(iip->ili_format.ilf_fields &
 			 (XFS_ILOG_ADATA | XFS_ILOG_ABROOT | XFS_ILOG_AEXT)));
@@ -521,7 +518,6 @@ xfs_inode_item_format(
 		break;
 	}
 
-	ASSERT(nvecs == lip->li_desc->lid_size);
 	iip->ili_format.ilf_size = nvecs;
 }
 
@@ -559,7 +555,7 @@ xfs_inode_item_unpin(
 	trace_xfs_inode_unpin(ip, _RET_IP_);
 	ASSERT(atomic_read(&ip->i_pincount) > 0);
 	if (atomic_dec_and_test(&ip->i_pincount))
-		wake_up(&ip->i_ipin_wait);
+		wake_up_bit(&ip->i_flags, __XFS_IPINNED_BIT);
 }
 
 /*
@@ -632,13 +628,8 @@ xfs_inode_item_unlock(
 	struct xfs_inode	*ip = iip->ili_inode;
 	unsigned short		lock_flags;
 
-	ASSERT(iip->ili_inode->i_itemp != NULL);
-	ASSERT(xfs_isilocked(iip->ili_inode, XFS_ILOCK_EXCL));
-
-	/*
-	 * Clear the transaction pointer in the inode.
-	 */
-	ip->i_transp = NULL;
+	ASSERT(ip->i_itemp != NULL);
+	ASSERT(xfs_isilocked(ip, XFS_ILOCK_EXCL));
 
 	/*
 	 * If the inode needed a separate buffer with which to log
@@ -663,10 +654,8 @@ xfs_inode_item_unlock(
 
 	lock_flags = iip->ili_lock_flags;
 	iip->ili_lock_flags = 0;
-	if (lock_flags) {
-		xfs_iunlock(iip->ili_inode, lock_flags);
-		IRELE(iip->ili_inode);
-	}
+	if (lock_flags)
+		xfs_iunlock(ip, lock_flags);
 }
 
 /*
@@ -681,15 +670,15 @@ xfs_inode_item_unlock(
  * where the cluster buffer may be unpinned before the inode is inserted into
  * the AIL during transaction committed processing. If the buffer is unpinned
  * before the inode item has been committed and inserted, then it is possible
- * for the buffer to be written and IO completions before the inode is inserted
+ * for the buffer to be written and IO completes before the inode is inserted
  * into the AIL. In that case, we'd be inserting a clean, stale inode into the
  * AIL which will never get removed. It will, however, get reclaimed which
  * triggers an assert in xfs_inode_free() complaining about freein an inode
  * still in the AIL.
  *
- * To avoid this, return a lower LSN than the one passed in so that the
- * transaction committed code will not move the inode forward in the AIL but
- * will still unpin it properly.
+ * To avoid this, just unpin the inode directly and return a LSN of -1 so the
+ * transaction committed code knows that it does not need to do any further
+ * processing on the item.
  */
 STATIC xfs_lsn_t
 xfs_inode_item_committed(
@@ -699,8 +688,10 @@ xfs_inode_item_committed(
 	struct xfs_inode_log_item *iip = INODE_ITEM(lip);
 	struct xfs_inode	*ip = iip->ili_inode;
 
-	if (xfs_iflags_test(ip, XFS_ISTALE))
-		return lsn - 1;
+	if (xfs_iflags_test(ip, XFS_ISTALE)) {
+		xfs_inode_item_unpin(lip, 0);
+		return -1;
+	}
 	return lsn;
 }
 
@@ -711,13 +702,14 @@ xfs_inode_item_committed(
  * marked delayed write. If that's the case, we'll promote it and that will
  * allow the caller to write the buffer by triggering the xfsbufd to run.
  */
-STATIC void
+STATIC bool
 xfs_inode_item_pushbuf(
 	struct xfs_log_item	*lip)
 {
 	struct xfs_inode_log_item *iip = INODE_ITEM(lip);
 	struct xfs_inode	*ip = iip->ili_inode;
 	struct xfs_buf		*bp;
+	bool			ret = true;
 
 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_SHARED));
 
@@ -725,10 +717,10 @@ xfs_inode_item_pushbuf(
 	 * If a flush is not in progress anymore, chances are that the
 	 * inode was taken off the AIL. So, just get out.
 	 */
-	if (completion_done(&ip->i_flush) ||
+	if (!xfs_isiflocked(ip) ||
 	    !(lip->li_flags & XFS_LI_IN_AIL)) {
 		xfs_iunlock(ip, XFS_ILOCK_SHARED);
-		return;
+		return true;
 	}
 
 	bp = xfs_incore(ip->i_mount->m_ddev_targp, iip->ili_format.ilf_blkno,
@@ -736,10 +728,13 @@ xfs_inode_item_pushbuf(
 
 	xfs_iunlock(ip, XFS_ILOCK_SHARED);
 	if (!bp)
-		return;
+		return true;
 	if (XFS_BUF_ISDELAYWRITE(bp))
 		xfs_buf_delwri_promote(bp);
+	if (xfs_buf_ispinned(bp))
+		ret = false;
 	xfs_buf_relse(bp);
+	return ret;
 }
 
 /*
@@ -755,7 +750,7 @@ xfs_inode_item_push(
 	struct xfs_inode	*ip = iip->ili_inode;
 
 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_SHARED));
-	ASSERT(!completion_done(&ip->i_flush));
+	ASSERT(xfs_isiflocked(ip));
 
 	/*
 	 * Since we were able to lock the inode's flush lock and
@@ -796,7 +791,7 @@ xfs_inode_item_committing(
 /*
  * This is the ops vector shared by all buf log items.
  */
-static struct xfs_item_ops xfs_inode_item_ops = {
+static const struct xfs_item_ops xfs_inode_item_ops = {
 	.iop_size	= xfs_inode_item_size,
 	.iop_format	= xfs_inode_item_format,
 	.iop_pin	= xfs_inode_item_pin,
@@ -877,7 +872,7 @@ xfs_iflush_done(
 	 * Scan the buffer IO completions for other inodes being completed and
 	 * attach them to the current inode log item.
 	 */
-	blip = XFS_BUF_FSPRIVATE(bp, xfs_log_item_t *);
+	blip = bp->b_fspriv;
 	prev = NULL;
 	while (blip != NULL) {
 		if (lip->li_cb != xfs_iflush_done) {
@@ -889,7 +884,7 @@ xfs_iflush_done(
 		/* remove from list */
 		next = blip->li_bio_list;
 		if (!prev) {
-			XFS_BUF_SET_FSPRIVATE(bp, next);
+			bp->b_fspriv = next;
 		} else {
 			prev->li_bio_list = next;
 		}
@@ -970,7 +965,6 @@ xfs_iflush_abort(
 {
 	xfs_inode_log_item_t	*iip = ip->i_itemp;
 
-	iip = ip->i_itemp;
 	if (iip) {
 		struct xfs_ail	*ailp = iip->ili_item.li_ailp;
 		if (iip->ili_item.li_flags & XFS_LI_IN_AIL) {

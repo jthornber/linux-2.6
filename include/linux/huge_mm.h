@@ -18,10 +18,15 @@ extern struct page *follow_trans_huge_pmd(struct mm_struct *mm,
 					  unsigned int flags);
 extern int zap_huge_pmd(struct mmu_gather *tlb,
 			struct vm_area_struct *vma,
-			pmd_t *pmd);
+			pmd_t *pmd, unsigned long addr);
 extern int mincore_huge_pmd(struct vm_area_struct *vma, pmd_t *pmd,
 			unsigned long addr, unsigned long end,
 			unsigned char *vec);
+extern int move_huge_pmd(struct vm_area_struct *vma,
+			 struct vm_area_struct *new_vma,
+			 unsigned long old_addr,
+			 unsigned long new_addr, unsigned long old_end,
+			 pmd_t *old_pmd, pmd_t *new_pmd);
 extern int change_huge_pmd(struct vm_area_struct *vma, pmd_t *pmd,
 			unsigned long addr, pgprot_t newprot);
 
@@ -92,12 +97,8 @@ extern void __split_huge_page_pmd(struct mm_struct *mm, pmd_t *pmd);
 #define wait_split_huge_page(__anon_vma, __pmd)				\
 	do {								\
 		pmd_t *____pmd = (__pmd);				\
-		spin_unlock_wait(&(__anon_vma)->root->lock);		\
-		/*							\
-		 * spin_unlock_wait() is just a loop in C and so the	\
-		 * CPU can reorder anything around it.			\
-		 */							\
-		smp_mb();						\
+		anon_vma_lock(__anon_vma);				\
+		anon_vma_unlock(__anon_vma);				\
 		BUG_ON(pmd_trans_splitting(*____pmd) ||			\
 		       pmd_trans_huge(*____pmd));			\
 	} while (0)

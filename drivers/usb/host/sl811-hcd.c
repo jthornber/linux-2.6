@@ -72,12 +72,6 @@ MODULE_ALIAS("platform:sl811-hcd");
 /* for now, use only one transfer register bank */
 #undef	USE_B
 
-/* this doesn't understand urb->iso_frame_desc[], but if you had a driver
- * that just queued one ISO frame per URB then iso transfers "should" work
- * using the normal urb status fields.
- */
-#define	DISABLE_ISO
-
 // #define	QUIRK2
 #define	QUIRK3
 
@@ -808,7 +802,7 @@ static int sl811h_urb_enqueue(
 	int			retval;
 	struct usb_host_endpoint	*hep = urb->ep;
 
-#ifdef	DISABLE_ISO
+#ifndef CONFIG_USB_SL811_HCD_ISO
 	if (type == PIPE_ISOCHRONOUS)
 		return -ENOSPC;
 #endif
@@ -1735,7 +1729,7 @@ sl811h_probe(struct platform_device *dev)
 	 * Use resource IRQ flags if set by platform device setup.
 	 */
 	irqflags |= IRQF_SHARED;
-	retval = usb_add_hcd(hcd, irq, IRQF_DISABLED | irqflags);
+	retval = usb_add_hcd(hcd, irq, irqflags);
 	if (retval != 0)
 		goto err6;
 

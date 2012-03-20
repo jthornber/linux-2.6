@@ -767,8 +767,8 @@ done:
 	return i;
 }
 
-static unsigned long num_arg(const char __user * user_buffer,
-			     unsigned long maxlen, unsigned long *num)
+static long num_arg(const char __user *user_buffer, unsigned long maxlen,
+				unsigned long *num)
 {
 	int i;
 	*num = 0;
@@ -1070,7 +1070,9 @@ static ssize_t pktgen_if_write(struct file *file,
 		len = num_arg(&user_buffer[i], 10, &value);
 		if (len < 0)
 			return len;
-
+		if ((value > 0) &&
+		    (!(pkt_dev->odev->priv_flags & IFF_TX_SKB_SHARING)))
+			return -ENOTSUPP;
 		i += len;
 		pkt_dev->clone_skb = value;
 
@@ -1302,7 +1304,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		scan_ip6(buf, pkt_dev->in6_daddr.s6_addr);
 		snprintf(buf, sizeof(buf), "%pI6c", &pkt_dev->in6_daddr);
 
-		ipv6_addr_copy(&pkt_dev->cur_in6_daddr, &pkt_dev->in6_daddr);
+		pkt_dev->cur_in6_daddr = pkt_dev->in6_daddr;
 
 		if (debug)
 			printk(KERN_DEBUG "pktgen: dst6 set to: %s\n", buf);
@@ -1325,8 +1327,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		scan_ip6(buf, pkt_dev->min_in6_daddr.s6_addr);
 		snprintf(buf, sizeof(buf), "%pI6c", &pkt_dev->min_in6_daddr);
 
-		ipv6_addr_copy(&pkt_dev->cur_in6_daddr,
-			       &pkt_dev->min_in6_daddr);
+		pkt_dev->cur_in6_daddr = pkt_dev->min_in6_daddr;
 		if (debug)
 			printk(KERN_DEBUG "pktgen: dst6_min set to: %s\n", buf);
 
@@ -1369,7 +1370,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		scan_ip6(buf, pkt_dev->in6_saddr.s6_addr);
 		snprintf(buf, sizeof(buf), "%pI6c", &pkt_dev->in6_saddr);
 
-		ipv6_addr_copy(&pkt_dev->cur_in6_saddr, &pkt_dev->in6_saddr);
+		pkt_dev->cur_in6_saddr = pkt_dev->in6_saddr;
 
 		if (debug)
 			printk(KERN_DEBUG "pktgen: src6 set to: %s\n", buf);
@@ -2023,13 +2024,13 @@ static void pktgen_setup_inject(struct pktgen_dev *pkt_dev)
 		pr_warning("WARNING: Requested queue_map_min (zero-based) (%d) exceeds valid range [0 - %d] for (%d) queues on %s, resetting\n",
 			   pkt_dev->queue_map_min, (ntxq ?: 1) - 1, ntxq,
 			   pkt_dev->odevname);
-		pkt_dev->queue_map_min = ntxq - 1;
+		pkt_dev->queue_map_min = (ntxq ?: 1) - 1;
 	}
 	if (pkt_dev->queue_map_max >= ntxq) {
 		pr_warning("WARNING: Requested queue_map_max (zero-based) (%d) exceeds valid range [0 - %d] for (%d) queues on %s, resetting\n",
 			   pkt_dev->queue_map_max, (ntxq ?: 1) - 1, ntxq,
 			   pkt_dev->odevname);
-		pkt_dev->queue_map_max = ntxq - 1;
+		pkt_dev->queue_map_max = (ntxq ?: 1) - 1;
 	}
 
 	/* Default to the interface's mac if not explicitly set. */
@@ -2077,9 +2078,7 @@ static void pktgen_setup_inject(struct pktgen_dev *pkt_dev)
 				     ifp = ifp->if_next) {
 					if (ifp->scope == IFA_LINK &&
 					    !(ifp->flags & IFA_F_TENTATIVE)) {
-						ipv6_addr_copy(&pkt_dev->
-							       cur_in6_saddr,
-							       &ifp->addr);
+						pkt_dev->cur_in6_saddr = ifp->addr;
 						err = 0;
 						break;
 					}
@@ -2143,9 +2142,12 @@ static void spin(struct pktgen_dev *pkt_dev, ktime_t spin_until)
 	}
 
 	start_time = ktime_now();
-	if (remaining < 100000)
-		ndelay(remaining);	/* really small just spin */
-	else {
+	if (remaining < 100000) {
+		/* for small delays (<100us), just loop until limit is reached */
+		do {
+			end_time = ktime_now();
+		} while (ktime_lt(end_time, spin_until));
+	} else {
 		/* see do_nanosleep */
 		hrtimer_init_sleeper(&t, current);
 		do {
@@ -2160,8 +2162,8 @@ static void spin(struct pktgen_dev *pkt_dev, ktime_t spin_until)
 			hrtimer_cancel(&t.timer);
 		} while (t.task && pkt_dev->running && !signal_pending(current));
 		__set_current_state(TASK_RUNNING);
+		end_time = ktime_now();
 	}
-	end_time = ktime_now();
 
 	pkt_dev->idle_acc += ktime_to_ns(ktime_sub(end_time, start_time));
 	pkt_dev->next_tx = ktime_add_ns(spin_until, pkt_dev->delay);
@@ -2600,18 +2602,18 @@ static void pktgen_finalize_skb(struct pktgen_dev *pkt_dev, struct sk_buff *skb,
 				if (!pkt_dev->page)
 					break;
 			}
-			skb_shinfo(skb)->frags[i].page = pkt_dev->page;
 			get_page(pkt_dev->page);
+			skb_frag_set_page(skb, i, pkt_dev->page);
 			skb_shinfo(skb)->frags[i].page_offset = 0;
 			/*last fragment, fill rest of data*/
 			if (i == (frags - 1))
-				skb_shinfo(skb)->frags[i].size =
-				    (datalen < PAGE_SIZE ? datalen : PAGE_SIZE);
+				skb_frag_size_set(&skb_shinfo(skb)->frags[i],
+				    (datalen < PAGE_SIZE ? datalen : PAGE_SIZE));
 			else
-				skb_shinfo(skb)->frags[i].size = frag_len;
-			datalen -= skb_shinfo(skb)->frags[i].size;
-			skb->len += skb_shinfo(skb)->frags[i].size;
-			skb->data_len += skb_shinfo(skb)->frags[i].size;
+				skb_frag_size_set(&skb_shinfo(skb)->frags[i], frag_len);
+			datalen -= skb_frag_size(&skb_shinfo(skb)->frags[i]);
+			skb->len += skb_frag_size(&skb_shinfo(skb)->frags[i]);
+			skb->data_len += skb_frag_size(&skb_shinfo(skb)->frags[i]);
 			i++;
 			skb_shinfo(skb)->nr_frags = i;
 		}
@@ -2953,8 +2955,8 @@ static struct sk_buff *fill_packet_ipv6(struct net_device *odev,
 	iph->payload_len = htons(sizeof(struct udphdr) + datalen);
 	iph->nexthdr = IPPROTO_UDP;
 
-	ipv6_addr_copy(&iph->daddr, &pkt_dev->cur_in6_daddr);
-	ipv6_addr_copy(&iph->saddr, &pkt_dev->cur_in6_saddr);
+	iph->daddr = pkt_dev->cur_in6_daddr;
+	iph->saddr = pkt_dev->cur_in6_saddr;
 
 	skb->mac_header = (skb->network_header - ETH_HLEN -
 			   pkt_dev->pkt_overhead);
@@ -3340,7 +3342,7 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 
 	__netif_tx_lock_bh(txq);
 
-	if (unlikely(netif_tx_queue_frozen_or_stopped(txq))) {
+	if (unlikely(netif_xmit_frozen_or_stopped(txq))) {
 		ret = NETDEV_TX_BUSY;
 		pkt_dev->last_ok = 0;
 		goto unlock;
@@ -3544,19 +3546,17 @@ static int pktgen_add_device(struct pktgen_thread *t, const char *ifname)
 		return -ENOMEM;
 
 	strcpy(pkt_dev->odevname, ifname);
-	pkt_dev->flows = vmalloc_node(MAX_CFLOWS * sizeof(struct flow_state),
+	pkt_dev->flows = vzalloc_node(MAX_CFLOWS * sizeof(struct flow_state),
 				      node);
 	if (pkt_dev->flows == NULL) {
 		kfree(pkt_dev);
 		return -ENOMEM;
 	}
-	memset(pkt_dev->flows, 0, MAX_CFLOWS * sizeof(struct flow_state));
 
 	pkt_dev->removal_mark = 0;
 	pkt_dev->min_pkt_size = ETH_ZLEN;
 	pkt_dev->max_pkt_size = ETH_ZLEN;
 	pkt_dev->nfrags = 0;
-	pkt_dev->clone_skb = pg_clone_skb_d;
 	pkt_dev->delay = pg_delay_d;
 	pkt_dev->count = pg_count_d;
 	pkt_dev->sofar = 0;
@@ -3564,7 +3564,6 @@ static int pktgen_add_device(struct pktgen_thread *t, const char *ifname)
 	pkt_dev->udp_src_max = 9;
 	pkt_dev->udp_dst_min = 9;
 	pkt_dev->udp_dst_max = 9;
-
 	pkt_dev->vlan_p = 0;
 	pkt_dev->vlan_cfi = 0;
 	pkt_dev->vlan_id = 0xffff;
@@ -3576,6 +3575,8 @@ static int pktgen_add_device(struct pktgen_thread *t, const char *ifname)
 	err = pktgen_setup_dev(pkt_dev, ifname);
 	if (err)
 		goto out1;
+	if (pkt_dev->odev->priv_flags & IFF_TX_SKB_SHARING)
+		pkt_dev->clone_skb = pg_clone_skb_d;
 
 	pkt_dev->entry = proc_create_data(ifname, 0600, pg_proc_dir,
 					  &pktgen_if_fops, pkt_dev);
@@ -3708,6 +3709,7 @@ static int __init pg_init(void)
 {
 	int cpu;
 	struct proc_dir_entry *pe;
+	int ret = 0;
 
 	pr_info("%s", version);
 
@@ -3718,11 +3720,10 @@ static int __init pg_init(void)
 	pe = proc_create(PGCTRL, 0600, pg_proc_dir, &pktgen_fops);
 	if (pe == NULL) {
 		pr_err("ERROR: cannot create %s procfs entry\n", PGCTRL);
-		proc_net_remove(&init_net, PG_PROC_DIR);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto remove_dir;
 	}
 
-	/* Register us to receive netdevice events */
 	register_netdevice_notifier(&pktgen_notifier_block);
 
 	for_each_online_cpu(cpu) {
@@ -3736,13 +3737,18 @@ static int __init pg_init(void)
 
 	if (list_empty(&pktgen_threads)) {
 		pr_err("ERROR: Initialization failed for all threads\n");
-		unregister_netdevice_notifier(&pktgen_notifier_block);
-		remove_proc_entry(PGCTRL, pg_proc_dir);
-		proc_net_remove(&init_net, PG_PROC_DIR);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto unregister;
 	}
 
 	return 0;
+
+ unregister:
+	unregister_netdevice_notifier(&pktgen_notifier_block);
+	remove_proc_entry(PGCTRL, pg_proc_dir);
+ remove_dir:
+	proc_net_remove(&init_net, PG_PROC_DIR);
+	return ret;
 }
 
 static void __exit pg_cleanup(void)

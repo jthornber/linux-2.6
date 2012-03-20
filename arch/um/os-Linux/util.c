@@ -13,9 +13,7 @@
 #include <wait.h>
 #include <sys/mman.h>
 #include <sys/utsname.h>
-#include "kern_constants.h"
 #include "os.h"
-#include "user.h"
 
 void stack_protections(unsigned long address)
 {
@@ -138,4 +136,9 @@ void os_dump_core(void)
 		os_kill_ptraced_process(pid, 0);
 
 	uml_abort();
+}
+
+void um_early_printk(const char *s, unsigned int n)
+{
+	printf("%.*s", n, s);
 }

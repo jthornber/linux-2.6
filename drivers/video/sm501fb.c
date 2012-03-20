@@ -582,7 +582,7 @@ static int sm501fb_pan_crt(struct fb_var_screeninfo *var,
 {
 	struct sm501fb_par  *par = info->par;
 	struct sm501fb_info *fbi = par->info;
-	unsigned int bytes_pixel = var->bits_per_pixel / 8;
+	unsigned int bytes_pixel = info->var.bits_per_pixel / 8;
 	unsigned long reg;
 	unsigned long xoffs;
 
@@ -614,10 +614,10 @@ static int sm501fb_pan_pnl(struct fb_var_screeninfo *var,
 	struct sm501fb_info *fbi = par->info;
 	unsigned long reg;
 
-	reg = var->xoffset | (var->xres_virtual << 16);
+	reg = var->xoffset | (info->var.xres_virtual << 16);
 	smc501_writel(reg, fbi->regs + SM501_DC_PANEL_FB_WIDTH);
 
-	reg = var->yoffset | (var->yres_virtual << 16);
+	reg = var->yoffset | (info->var.yres_virtual << 16);
 	smc501_writel(reg, fbi->regs + SM501_DC_PANEL_FB_HEIGHT);
 
 	sm501fb_sync_regs(fbi);
@@ -1625,22 +1625,22 @@ static int sm501fb_start(struct sm501fb_info *info,
 	return 0; /* everything is setup */
 
  err_mem_res:
-	release_resource(info->fbmem_res);
-	kfree(info->fbmem_res);
+	release_mem_region(info->fbmem_res->start,
+			   resource_size(info->fbmem_res));
 
  err_regs2d_map:
 	iounmap(info->regs2d);
 
  err_regs2d_res:
-	release_resource(info->regs2d_res);
-	kfree(info->regs2d_res);
+	release_mem_region(info->regs2d_res->start,
+			   resource_size(info->regs2d_res));
 
  err_regs_map:
 	iounmap(info->regs);
 
  err_regs_res:
-	release_resource(info->regs_res);
-	kfree(info->regs_res);
+	release_mem_region(info->regs_res->start,
+			   resource_size(info->regs_res));
 
  err_release:
 	return ret;
@@ -1652,19 +1652,19 @@ static void sm501fb_stop(struct sm501fb_info *info)
 	sm501_unit_power(info->dev->parent, SM501_GATE_DISPLAY, 0);
 
 	iounmap(info->fbmem);
-	release_resource(info->fbmem_res);
-	kfree(info->fbmem_res);
+	release_mem_region(info->fbmem_res->start,
+			   resource_size(info->fbmem_res));
 
 	iounmap(info->regs2d);
-	release_resource(info->regs2d_res);
-	kfree(info->regs2d_res);
+	release_mem_region(info->regs2d_res->start,
+			   resource_size(info->regs2d_res));
 
 	iounmap(info->regs);
-	release_resource(info->regs_res);
-	kfree(info->regs_res);
+	release_mem_region(info->regs_res->start,
+			   resource_size(info->regs_res));
 }
 
-static int sm501fb_init_fb(struct fb_info *fb,
+static int __devinit sm501fb_init_fb(struct fb_info *fb,
 			   enum sm501_controller head,
 			   const char *fbname)
 {
@@ -2230,18 +2230,7 @@ static struct platform_driver sm501fb_driver = {
 	},
 };
 
-static int __devinit sm501fb_init(void)
-{
-	return platform_driver_register(&sm501fb_driver);
-}
-
-static void __exit sm501fb_cleanup(void)
-{
-	platform_driver_unregister(&sm501fb_driver);
-}
-
-module_init(sm501fb_init);
-module_exit(sm501fb_cleanup);
+module_platform_driver(sm501fb_driver);
 
 module_param_named(mode, fb_mode, charp, 0);
 MODULE_PARM_DESC(mode,

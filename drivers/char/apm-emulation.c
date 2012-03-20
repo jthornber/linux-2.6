@@ -40,10 +40,7 @@
 #define APM_MINOR_DEV	134
 
 /*
- * See Documentation/Config.help for the configuration options.
- *
- * Various options can be changed at boot time as follows:
- * (We allow underscores for compatibility with the modules code)
+ * One option can be changed at boot time as follows:
  *	apm=on/off			enable/disable APM
  */
 
@@ -126,7 +123,6 @@ struct apm_user {
 /*
  * Local variables
  */
-static DEFINE_MUTEX(apm_mutex);
 static atomic_t suspend_acks_pending = ATOMIC_INIT(0);
 static atomic_t userspace_notification_inhibit = ATOMIC_INIT(0);
 static int apm_disabled;
@@ -275,7 +271,6 @@ apm_ioctl(struct file *filp, u_int cmd, u_long arg)
 	if (!as->suser || !as->writer)
 		return -EPERM;
 
-	mutex_lock(&apm_mutex);
 	switch (cmd) {
 	case APM_IOC_SUSPEND:
 		mutex_lock(&state_lock);
@@ -302,17 +297,13 @@ apm_ioctl(struct file *filp, u_int cmd, u_long arg)
 			/*
 			 * Wait for the suspend/resume to complete.  If there
 			 * are pending acknowledges, we wait here for them.
+			 * wait_event_freezable() is interruptible and pending
+			 * signal can cause busy looping.  We aren't doing
+			 * anything critical, chill a bit on each iteration.
 			 */
-			freezer_do_not_count();
-
-			wait_event(apm_suspend_waitqueue,
-				   as->suspend_state == SUSPEND_DONE);
-
-			/*
-			 * Since we are waiting until the suspend is done, the
-			 * try_to_freeze() in freezer_count() will not trigger
-			 */
-			freezer_count();
+			while (wait_event_freezable(apm_suspend_waitqueue,
+					as->suspend_state == SUSPEND_DONE))
+				msleep(10);
 			break;
 		case SUSPEND_ACKTO:
 			as->suspend_result = -ETIMEDOUT;
@@ -336,7 +327,6 @@ apm_ioctl(struct file *filp, u_int cmd, u_long arg)
 		mutex_unlock(&state_lock);
 		break;
 	}
-	mutex_unlock(&apm_mutex);
 
 	return err;
 }
@@ -371,7 +361,6 @@ static int apm_open(struct inode * inode, struct file * filp)
 {
 	struct apm_user *as;
 
-	mutex_lock(&apm_mutex);
 	as = kzalloc(sizeof(*as), GFP_KERNEL);
 	if (as) {
 		/*
@@ -391,7 +380,6 @@ static int apm_open(struct inode * inode, struct file * filp)
 
 		filp->private_data = as;
 	}
-	mutex_unlock(&apm_mutex);
 
 	return as ? 0 : -ENOMEM;
 }
@@ -611,7 +599,7 @@ static int apm_suspend_notifier(struct notifier_block *nb,
 			return NOTIFY_OK;
 
 		/* interrupted by signal */
-		return NOTIFY_BAD;
+		return notifier_from_errno(err);
 
 	case PM_POST_SUSPEND:
 		/*

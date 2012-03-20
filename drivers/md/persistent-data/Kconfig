@@ -1,8 +1,8 @@
 config DM_PERSISTENT_DATA
-       tristate "Persistent data library"
-       depends on BLK_DEV_DM
+       tristate
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       select LIBCRC32C
+       select DM_BUFIO
        ---help---
-         Library of code for metadata support for dm targets.  The
-         term persistent isn't referring to the fact that the data is
-         written to disk (which of course it is).  But that these data
-         structures are immutable.
+	 Library providing immutable on-disk data structure support for
+	 device-mapper targets such as the thin provisioning target.

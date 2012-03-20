@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2011, Intel Corp.
+ * Copyright (C) 2000 - 2012, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -83,9 +83,15 @@ acpi_status acpi_ut_mutex_initialize(void)
 
 	/* Create the spinlocks for use at interrupt level */
 
-	spin_lock_init(acpi_gbl_gpe_lock);
-	spin_lock_init(acpi_gbl_hardware_lock);
-	spin_lock_init(acpi_ev_global_lock_pending_lock);
+	status = acpi_os_create_lock (&acpi_gbl_gpe_lock);
+	if (ACPI_FAILURE (status)) {
+		return_ACPI_STATUS (status);
+	}
+
+	status = acpi_os_create_lock (&acpi_gbl_hardware_lock);
+	if (ACPI_FAILURE (status)) {
+		return_ACPI_STATUS (status);
+	}
 
 	/* Mutex for _OSI support */
 	status = acpi_os_create_mutex(&acpi_gbl_osi_mutex);
@@ -287,14 +293,10 @@ acpi_status acpi_ut_acquire_mutex(acpi_mutex_handle mutex_id)
 
 acpi_status acpi_ut_release_mutex(acpi_mutex_handle mutex_id)
 {
-	acpi_thread_id this_thread_id;
-
 	ACPI_FUNCTION_NAME(ut_release_mutex);
 
-	this_thread_id = acpi_os_get_thread_id();
-
 	ACPI_DEBUG_PRINT((ACPI_DB_MUTEX, "Thread %u releasing Mutex [%s]\n",
-			  (u32)this_thread_id,
+			  (u32)acpi_os_get_thread_id(),
 			  acpi_ut_get_mutex_name(mutex_id)));
 
 	if (mutex_id > ACPI_MAX_MUTEX) {
@@ -323,7 +325,8 @@ acpi_status acpi_ut_release_mutex(acpi_mutex_handle mutex_id)
 		 * the ACPI subsystem code.
 		 */
 		for (i = mutex_id; i < ACPI_NUM_MUTEX; i++) {
-			if (acpi_gbl_mutex_info[i].thread_id == this_thread_id) {
+			if (acpi_gbl_mutex_info[i].thread_id ==
+			    acpi_os_get_thread_id()) {
 				if (i == mutex_id) {
 					continue;
 				}

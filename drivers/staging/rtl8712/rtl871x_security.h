@@ -1,3 +1,28 @@
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
+ *
+ * Modifications for inclusion into the Linux staging tree are
+ * Copyright(c) 2010 Larry Finger. All rights reserved.
+ *
+ * Contact information:
+ * WLAN FAE <wlanfae@realtek.com>
+ * Larry Finger <Larry.Finger@lwfinger.net>
+ *
+ ******************************************************************************/
 #ifndef __RTL871X_SECURITY_H_
 #define __RTL871X_SECURITY_H_
 
@@ -21,30 +46,31 @@
 #ifndef Ndis802_11AuthModeWPA2PSK
 #define Ndis802_11AuthModeWPA2PSK (Ndis802_11AuthModeWPANone + 2)
 #endif
+
 union pn48 {
 	u64 val;
 #if defined(__BIG_ENDIAN)
-struct {
-  u8 TSC7;
-  u8 TSC6;
-  u8 TSC5;
-  u8 TSC4;
-  u8 TSC3;
-  u8 TSC2;
-  u8 TSC1;
-  u8 TSC0;
-} _byte_;
+	struct {
+		u8 TSC7;
+		u8 TSC6;
+		u8 TSC5;
+		u8 TSC4;
+		u8 TSC3;
+		u8 TSC2;
+		u8 TSC1;
+		u8 TSC0;
+	} _byte_;
 #else
-struct {
-  u8 TSC0;
-  u8 TSC1;
-  u8 TSC2;
-  u8 TSC3;
-  u8 TSC4;
-  u8 TSC5;
-  u8 TSC6;
-  u8 TSC7;
-} _byte_;
+	struct {
+		u8 TSC0;
+		u8 TSC1;
+		u8 TSC2;
+		u8 TSC3;
+		u8 TSC4;
+		u8 TSC5;
+		u8 TSC6;
+		u8 TSC7;
+	} _byte_;
 #endif
 };
 
@@ -174,11 +200,11 @@ struct mic_data {
 };
 
 void seccalctkipmic(
-	u8 *key,
-	u8 *header,
-	u8 *data,
-	u32 data_len,
-	u8 *Miccode,
+	u8  *key,
+	u8  *header,
+	u8  *data,
+	u32  data_len,
+	u8  *Miccode,
 	u8   priority);
 
 void r8712_secmicsetkey(struct mic_data *pmicdata, u8 * key);

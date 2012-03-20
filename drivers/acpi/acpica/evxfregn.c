@@ -6,7 +6,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2011, Intel Corp.
+ * Copyright (C) 2000 - 2012, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,6 +42,7 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
+#include <linux/export.h>
 #include <acpi/acpi.h>
 #include "accommon.h"
 #include "acnamesp.h"
@@ -130,19 +131,20 @@ acpi_install_address_space_handler(acpi_handle device,
 	case ACPI_ADR_SPACE_PCI_CONFIG:
 	case ACPI_ADR_SPACE_DATA_TABLE:
 
-		if (acpi_gbl_reg_methods_executed) {
+		if (!acpi_gbl_reg_methods_executed) {
 
-			/* Run all _REG methods for this address space */
-
-			status = acpi_ev_execute_reg_methods(node, space_id);
+			/* We will defer execution of the _REG methods for this space */
+			goto unlock_and_exit;
 		}
 		break;
 
 	default:
-
-		status = acpi_ev_execute_reg_methods(node, space_id);
 		break;
 	}
+
+	/* Run all _REG methods for this address space */
+
+	status = acpi_ev_execute_reg_methods(node, space_id);
 
       unlock_and_exit:
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);

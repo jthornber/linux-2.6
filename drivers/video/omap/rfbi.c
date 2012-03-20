@@ -2,7 +2,7 @@
  * OMAP2 Remote Frame Buffer Interface support
  *
  * Copyright (C) 2005 Nokia Corporation
- * Author: Juha Yrjölä <juha.yrjola@nokia.com>
+ * Author: Juha YrjÃ¶lÃ¤ <juha.yrjola@nokia.com>
  *	   Imre Deak <imre.deak@nokia.com>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -90,7 +90,7 @@ static int rfbi_get_clocks(void)
 		return PTR_ERR(rfbi.dss_ick);
 	}
 
-	rfbi.dss1_fck = clk_get(&rfbi.fbdev->dssdev->dev, "dss1_fck");
+	rfbi.dss1_fck = clk_get(&rfbi.fbdev->dssdev->dev, "fck");
 	if (IS_ERR(rfbi.dss1_fck)) {
 		dev_err(rfbi.fbdev->dev, "can't get dss1_fck\n");
 		clk_put(rfbi.dss_ick);

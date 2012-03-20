@@ -155,9 +155,7 @@ static void gf_copy_to(struct map_info *map, unsigned long to, const void *from,
 	memcpy_toio(map->virt + (to % state->win_size), from, len);
 }
 
-#ifdef CONFIG_MTD_PARTITIONS
 static const char *part_probe_types[] = { "cmdlinepart", "RedBoot", NULL };
-#endif
 
 /**
  * gpio_flash_probe() - setup a mapping for a GPIO assisted flash
@@ -189,7 +187,6 @@ static const char *part_probe_types[] = { "cmdlinepart", "RedBoot", NULL };
  */
 static int __devinit gpio_flash_probe(struct platform_device *pdev)
 {
-	int ret;
 	size_t i, arr_size;
 	struct physmap_flash_data *pdata;
 	struct resource *memory;
@@ -254,23 +251,9 @@ static int __devinit gpio_flash_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-#ifdef CONFIG_MTD_PARTITIONS
-	ret = parse_mtd_partitions(state->mtd, part_probe_types, &pdata->parts, 0);
-	if (ret > 0) {
-		pr_devinit(KERN_NOTICE PFX "Using commandline partition definition\n");
-		add_mtd_partitions(state->mtd, pdata->parts, ret);
-		kfree(pdata->parts);
 
-	} else if (pdata->nr_parts) {
-		pr_devinit(KERN_NOTICE PFX "Using board partition definition\n");
-		add_mtd_partitions(state->mtd, pdata->parts, pdata->nr_parts);
-
-	} else
-#endif
-	{
-		pr_devinit(KERN_NOTICE PFX "no partition info available, registering whole flash at once\n");
-		add_mtd_device(state->mtd);
-	}
+	mtd_device_parse_register(state->mtd, part_probe_types, 0,
+			pdata->parts, pdata->nr_parts);
 
 	return 0;
 }
@@ -282,9 +265,7 @@ static int __devexit gpio_flash_remove(struct platform_device *pdev)
 	do {
 		gpio_free(state->gpio_addrs[i]);
 	} while (++i < state->gpio_count);
-#ifdef CONFIG_MTD_PARTITIONS
-	del_mtd_partitions(state->mtd);
-#endif
+	mtd_device_unregister(state->mtd);
 	map_destroy(state->mtd);
 	kfree(state);
 	return 0;
@@ -298,17 +279,7 @@ static struct platform_driver gpio_flash_driver = {
 	},
 };
 
-static int __init gpio_flash_init(void)
-{
-	return platform_driver_register(&gpio_flash_driver);
-}
-module_init(gpio_flash_init);
-
-static void __exit gpio_flash_exit(void)
-{
-	platform_driver_unregister(&gpio_flash_driver);
-}
-module_exit(gpio_flash_exit);
+module_platform_driver(gpio_flash_driver);
 
 MODULE_AUTHOR("Mike Frysinger <vapier@gentoo.org>");
 MODULE_DESCRIPTION("MTD map driver for flashes addressed physically and with gpios");

@@ -10,7 +10,7 @@
  *	Remote softirq infrastructure is by Jens Axboe.
  */
 
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -58,7 +58,7 @@ DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
 
 char *softirq_to_name[NR_SOFTIRQS] = {
 	"HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "BLOCK_IOPOLL",
-	"TASKLET", "SCHED", "HRTIMER"
+	"TASKLET", "SCHED", "HRTIMER", "RCU"
 };
 
 /*
@@ -315,16 +315,24 @@ static inline void invoke_softirq(void)
 {
 	if (!force_irqthreads)
 		__do_softirq();
-	else
+	else {
+		__local_bh_disable((unsigned long)__builtin_return_address(0),
+				SOFTIRQ_OFFSET);
 		wakeup_softirqd();
+		__local_bh_enable(SOFTIRQ_OFFSET);
+	}
 }
 #else
 static inline void invoke_softirq(void)
 {
 	if (!force_irqthreads)
 		do_softirq();
-	else
+	else {
+		__local_bh_disable((unsigned long)__builtin_return_address(0),
+				SOFTIRQ_OFFSET);
 		wakeup_softirqd();
+		__local_bh_enable(SOFTIRQ_OFFSET);
+	}
 }
 #endif
 
@@ -339,12 +347,12 @@ void irq_exit(void)
 	if (!in_interrupt() && local_softirq_pending())
 		invoke_softirq();
 
-	rcu_irq_exit();
 #ifdef CONFIG_NO_HZ
 	/* Make sure that timer wheel updates are propagated */
 	if (idle_cpu(smp_processor_id()) && !in_interrupt() && !need_resched())
-		tick_nohz_stop_sched_tick(0);
+		tick_nohz_irq_exit();
 #endif
+	rcu_irq_exit();
 	preempt_enable_no_resched();
 }
 

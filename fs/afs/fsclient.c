@@ -89,8 +89,8 @@ static void xdr_decode_AFSFetchStatus(const __be32 **_bp,
 			i_size_write(&vnode->vfs_inode, size);
 			vnode->vfs_inode.i_uid = status->owner;
 			vnode->vfs_inode.i_gid = status->group;
-			vnode->vfs_inode.i_version = vnode->fid.unique;
-			vnode->vfs_inode.i_nlink = status->nlink;
+			vnode->vfs_inode.i_generation = vnode->fid.unique;
+			set_nlink(&vnode->vfs_inode, status->nlink);
 
 			mode = vnode->vfs_inode.i_mode;
 			mode &= ~S_IALLUGO;
@@ -102,6 +102,7 @@ static void xdr_decode_AFSFetchStatus(const __be32 **_bp,
 		vnode->vfs_inode.i_ctime.tv_sec	= status->mtime_server;
 		vnode->vfs_inode.i_mtime	= vnode->vfs_inode.i_ctime;
 		vnode->vfs_inode.i_atime	= vnode->vfs_inode.i_ctime;
+		vnode->vfs_inode.i_version	= data_version;
 	}
 
 	expected_version = status->data_version;

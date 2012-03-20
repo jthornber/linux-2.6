@@ -25,6 +25,7 @@
 #include <linux/kmod.h>
 #include <linux/slab.h>
 #include <linux/completion.h>
+#include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/workqueue.h>
@@ -35,6 +36,7 @@
 #include <linux/resource.h>
 #include <linux/notifier.h>
 #include <linux/suspend.h>
+#include <linux/rwsem.h>
 #include <asm/uaccess.h>
 
 #include <trace/events/module.h>
@@ -42,6 +44,14 @@
 extern int max_threads;
 
 static struct workqueue_struct *khelper_wq;
+
+#define CAP_BSET	(void *)1
+#define CAP_PI		(void *)2
+
+static kernel_cap_t usermodehelper_bset = CAP_FULL_SET;
+static kernel_cap_t usermodehelper_inheritable = CAP_FULL_SET;
+static DEFINE_SPINLOCK(umh_sysctl_lock);
+static DECLARE_RWSEM(umhelper_sem);
 
 #ifdef CONFIG_MODULES
 
@@ -106,10 +116,12 @@ int __request_module(bool wait, const char *fmt, ...)
 	atomic_inc(&kmod_concurrent);
 	if (atomic_read(&kmod_concurrent) > max_modprobes) {
 		/* We may be blaming an innocent here, but unlikely */
-		if (kmod_loop_msg++ < 5)
+		if (kmod_loop_msg < 5) {
 			printk(KERN_ERR
 			       "request_module: runaway loop modprobe %s\n",
 			       module_name);
+			kmod_loop_msg++;
+		}
 		atomic_dec(&kmod_concurrent);
 		return -ENOMEM;
 	}
@@ -132,6 +144,7 @@ EXPORT_SYMBOL(__request_module);
 static int ____call_usermodehelper(void *data)
 {
 	struct subprocess_info *sub_info = data;
+	struct cred *new;
 	int retval;
 
 	spin_lock_irq(&current->sighand->siglock);
@@ -147,11 +160,26 @@ static int ____call_usermodehelper(void *data)
 	 */
 	set_user_nice(current, 0);
 
+	retval = -ENOMEM;
+	new = prepare_kernel_cred(current);
+	if (!new)
+		goto fail;
+
+	spin_lock(&umh_sysctl_lock);
+	new->cap_bset = cap_intersect(usermodehelper_bset, new->cap_bset);
+	new->cap_inheritable = cap_intersect(usermodehelper_inheritable,
+					     new->cap_inheritable);
+	spin_unlock(&umh_sysctl_lock);
+
 	if (sub_info->init) {
-		retval = sub_info->init(sub_info);
-		if (retval)
+		retval = sub_info->init(sub_info, new);
+		if (retval) {
+			abort_creds(new);
 			goto fail;
+		}
 	}
+
+	commit_creds(new);
 
 	retval = kernel_execve(sub_info->path,
 			       (const char *const *)sub_info->argv,
@@ -249,23 +277,36 @@ static void __call_usermodehelper(struct work_struct *work)
  * If set, call_usermodehelper_exec() will exit immediately returning -EBUSY
  * (used for preventing user land processes from being created after the user
  * land has been frozen during a system-wide hibernation or suspend operation).
+ * Should always be manipulated under umhelper_sem acquired for write.
  */
-static int usermodehelper_disabled;
+static int usermodehelper_disabled = 1;
 
 /* Number of helpers running */
 static atomic_t running_helpers = ATOMIC_INIT(0);
 
 /*
- * Wait queue head used by usermodehelper_pm_callback() to wait for all running
+ * Wait queue head used by usermodehelper_disable() to wait for all running
  * helpers to finish.
  */
 static DECLARE_WAIT_QUEUE_HEAD(running_helpers_waitq);
 
 /*
  * Time to wait for running_helpers to become zero before the setting of
- * usermodehelper_disabled in usermodehelper_pm_callback() fails
+ * usermodehelper_disabled in usermodehelper_disable() fails
  */
 #define RUNNING_HELPERS_TIMEOUT	(5 * HZ)
+
+void read_lock_usermodehelper(void)
+{
+	down_read(&umhelper_sem);
+}
+EXPORT_SYMBOL_GPL(read_lock_usermodehelper);
+
+void read_unlock_usermodehelper(void)
+{
+	up_read(&umhelper_sem);
+}
+EXPORT_SYMBOL_GPL(read_unlock_usermodehelper);
 
 /**
  * usermodehelper_disable - prevent new helpers from being started
@@ -274,8 +315,10 @@ int usermodehelper_disable(void)
 {
 	long retval;
 
+	down_write(&umhelper_sem);
 	usermodehelper_disabled = 1;
-	smp_mb();
+	up_write(&umhelper_sem);
+
 	/*
 	 * From now on call_usermodehelper_exec() won't start any new
 	 * helpers, so it is sufficient if running_helpers turns out to
@@ -288,7 +331,9 @@ int usermodehelper_disable(void)
 	if (retval)
 		return 0;
 
+	down_write(&umhelper_sem);
 	usermodehelper_disabled = 0;
+	up_write(&umhelper_sem);
 	return -EAGAIN;
 }
 
@@ -297,7 +342,9 @@ int usermodehelper_disable(void)
  */
 void usermodehelper_enable(void)
 {
+	down_write(&umhelper_sem);
 	usermodehelper_disabled = 0;
+	up_write(&umhelper_sem);
 }
 
 /**
@@ -366,7 +413,7 @@ EXPORT_SYMBOL(call_usermodehelper_setup);
  * context in which call_usermodehelper_exec is called.
  */
 void call_usermodehelper_setfns(struct subprocess_info *info,
-		    int (*init)(struct subprocess_info *info),
+		    int (*init)(struct subprocess_info *info, struct cred *new),
 		    void (*cleanup)(struct subprocess_info *info),
 		    void *data)
 {
@@ -419,6 +466,84 @@ unlock:
 	return retval;
 }
 EXPORT_SYMBOL(call_usermodehelper_exec);
+
+static int proc_cap_handler(struct ctl_table *table, int write,
+			 void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table t;
+	unsigned long cap_array[_KERNEL_CAPABILITY_U32S];
+	kernel_cap_t new_cap;
+	int err, i;
+
+	if (write && (!capable(CAP_SETPCAP) ||
+		      !capable(CAP_SYS_MODULE)))
+		return -EPERM;
+
+	/*
+	 * convert from the global kernel_cap_t to the ulong array to print to
+	 * userspace if this is a read.
+	 */
+	spin_lock(&umh_sysctl_lock);
+	for (i = 0; i < _KERNEL_CAPABILITY_U32S; i++)  {
+		if (table->data == CAP_BSET)
+			cap_array[i] = usermodehelper_bset.cap[i];
+		else if (table->data == CAP_PI)
+			cap_array[i] = usermodehelper_inheritable.cap[i];
+		else
+			BUG();
+	}
+	spin_unlock(&umh_sysctl_lock);
+
+	t = *table;
+	t.data = &cap_array;
+
+	/*
+	 * actually read or write and array of ulongs from userspace.  Remember
+	 * these are least significant 32 bits first
+	 */
+	err = proc_doulongvec_minmax(&t, write, buffer, lenp, ppos);
+	if (err < 0)
+		return err;
+
+	/*
+	 * convert from the sysctl array of ulongs to the kernel_cap_t
+	 * internal representation
+	 */
+	for (i = 0; i < _KERNEL_CAPABILITY_U32S; i++)
+		new_cap.cap[i] = cap_array[i];
+
+	/*
+	 * Drop everything not in the new_cap (but don't add things)
+	 */
+	spin_lock(&umh_sysctl_lock);
+	if (write) {
+		if (table->data == CAP_BSET)
+			usermodehelper_bset = cap_intersect(usermodehelper_bset, new_cap);
+		if (table->data == CAP_PI)
+			usermodehelper_inheritable = cap_intersect(usermodehelper_inheritable, new_cap);
+	}
+	spin_unlock(&umh_sysctl_lock);
+
+	return 0;
+}
+
+struct ctl_table usermodehelper_table[] = {
+	{
+		.procname	= "bset",
+		.data		= CAP_BSET,
+		.maxlen		= _KERNEL_CAPABILITY_U32S * sizeof(unsigned long),
+		.mode		= 0600,
+		.proc_handler	= proc_cap_handler,
+	},
+	{
+		.procname	= "inheritable",
+		.data		= CAP_PI,
+		.maxlen		= _KERNEL_CAPABILITY_U32S * sizeof(unsigned long),
+		.mode		= 0600,
+		.proc_handler	= proc_cap_handler,
+	},
+	{ }
+};
 
 void __init usermodehelper_init(void)
 {

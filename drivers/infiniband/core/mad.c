@@ -35,6 +35,7 @@
  */
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <rdma/ib_cache.h>
 
 #include "mad_priv.h"
@@ -273,6 +274,13 @@ struct ib_mad_agent *ib_register_mad_agent(struct ib_device *device,
 	port_priv = ib_get_mad_port(device, port_num);
 	if (!port_priv) {
 		ret = ERR_PTR(-ENODEV);
+		goto error1;
+	}
+
+	/* Verify the QP requested is supported.  For example, Ethernet devices
+	 * will not have QP0 */
+	if (!port_priv->qp_info[qpn].qp) {
+		ret = ERR_PTR(-EPROTONOSUPPORT);
 		goto error1;
 	}
 
@@ -1588,6 +1596,9 @@ find_mad_agent(struct ib_mad_port_private *port_priv,
 			class = port_priv->version[
 					mad->mad_hdr.class_version].class;
 			if (!class)
+				goto out;
+			if (convert_mgmt_class(mad->mad_hdr.mgmt_class) >=
+			    IB_MGMT_MAX_METHODS)
 				goto out;
 			method = class->method_table[convert_mgmt_class(
 							mad->mad_hdr.mgmt_class)];

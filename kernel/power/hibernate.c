@@ -9,11 +9,13 @@
  * This file is released under the GPLv2.
  */
 
+#include <linux/export.h>
 #include <linux/suspend.h>
 #include <linux/syscalls.h>
 #include <linux/reboot.h>
 #include <linux/string.h>
 #include <linux/device.h>
+#include <linux/async.h>
 #include <linux/kmod.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
@@ -25,23 +27,22 @@
 #include <linux/gfp.h>
 #include <linux/syscore_ops.h>
 #include <scsi/scsi_scan.h>
-#include <asm/suspend.h>
 
 #include "power.h"
 
 
-static int nocompress = 0;
-static int noresume = 0;
+static int nocompress;
+static int noresume;
+static int resume_wait;
+static int resume_delay;
 static char resume_file[256] = CONFIG_PM_STD_PARTITION;
 dev_t swsusp_resume_device;
 sector_t swsusp_resume_block;
-int in_suspend __nosavedata = 0;
+int in_suspend __nosavedata;
 
 enum {
 	HIBERNATION_INVALID,
 	HIBERNATION_PLATFORM,
-	HIBERNATION_TEST,
-	HIBERNATION_TESTPROC,
 	HIBERNATION_SHUTDOWN,
 	HIBERNATION_REBOOT,
 	/* keep last */
@@ -52,13 +53,14 @@ enum {
 
 static int hibernation_mode = HIBERNATION_SHUTDOWN;
 
+bool freezer_test_done;
+
 static const struct platform_hibernation_ops *hibernation_ops;
 
 /**
- * hibernation_set_ops - set the global hibernate operations
- * @ops: the hibernation operations to use in subsequent hibernation transitions
+ * hibernation_set_ops - Set the global hibernate operations.
+ * @ops: Hibernation operations to use in subsequent hibernation transitions.
  */
-
 void hibernation_set_ops(const struct platform_hibernation_ops *ops)
 {
 	if (ops && !(ops->begin && ops->end &&  ops->pre_snapshot
@@ -67,14 +69,14 @@ void hibernation_set_ops(const struct platform_hibernation_ops *ops)
 		WARN_ON(1);
 		return;
 	}
-	mutex_lock(&pm_mutex);
+	lock_system_sleep();
 	hibernation_ops = ops;
 	if (ops)
 		hibernation_mode = HIBERNATION_PLATFORM;
 	else if (hibernation_mode == HIBERNATION_PLATFORM)
 		hibernation_mode = HIBERNATION_SHUTDOWN;
 
-	mutex_unlock(&pm_mutex);
+	unlock_system_sleep();
 }
 
 static bool entering_platform_hibernation;
@@ -92,15 +94,6 @@ static void hibernation_debug_sleep(void)
 	mdelay(5000);
 }
 
-static int hibernation_testmode(int mode)
-{
-	if (hibernation_mode == mode) {
-		hibernation_debug_sleep();
-		return 1;
-	}
-	return 0;
-}
-
 static int hibernation_test(int level)
 {
 	if (pm_test_level == level) {
@@ -110,15 +103,13 @@ static int hibernation_test(int level)
 	return 0;
 }
 #else /* !CONFIG_PM_DEBUG */
-static int hibernation_testmode(int mode) { return 0; }
 static int hibernation_test(int level) { return 0; }
 #endif /* !CONFIG_PM_DEBUG */
 
 /**
- *	platform_begin - tell the platform driver that we're starting
- *	hibernation
+ * platform_begin - Call platform to start hibernation.
+ * @platform_mode: Whether or not to use the platform driver.
  */
-
 static int platform_begin(int platform_mode)
 {
 	return (platform_mode && hibernation_ops) ?
@@ -126,10 +117,9 @@ static int platform_begin(int platform_mode)
 }
 
 /**
- *	platform_end - tell the platform driver that we've entered the
- *	working state
+ * platform_end - Call platform to finish transition to the working state.
+ * @platform_mode: Whether or not to use the platform driver.
  */
-
 static void platform_end(int platform_mode)
 {
 	if (platform_mode && hibernation_ops)
@@ -137,8 +127,11 @@ static void platform_end(int platform_mode)
 }
 
 /**
- *	platform_pre_snapshot - prepare the machine for hibernation using the
- *	platform driver if so configured and return an error code if it fails
+ * platform_pre_snapshot - Call platform to prepare the machine for hibernation.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Use the platform driver to prepare the system for creating a hibernate image,
+ * if so configured, and return an error code if that fails.
  */
 
 static int platform_pre_snapshot(int platform_mode)
@@ -148,10 +141,14 @@ static int platform_pre_snapshot(int platform_mode)
 }
 
 /**
- *	platform_leave - prepare the machine for switching to the normal mode
- *	of operation using the platform driver (called with interrupts disabled)
+ * platform_leave - Call platform to prepare a transition to the working state.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Use the platform driver prepare to prepare the machine for switching to the
+ * normal mode of operation.
+ *
+ * This routine is called on one CPU with interrupts disabled.
  */
-
 static void platform_leave(int platform_mode)
 {
 	if (platform_mode && hibernation_ops)
@@ -159,10 +156,14 @@ static void platform_leave(int platform_mode)
 }
 
 /**
- *	platform_finish - switch the machine to the normal mode of operation
- *	using the platform driver (must be called after platform_prepare())
+ * platform_finish - Call platform to switch the system to the working state.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Use the platform driver to switch the machine to the normal mode of
+ * operation.
+ *
+ * This routine must be called after platform_prepare().
  */
-
 static void platform_finish(int platform_mode)
 {
 	if (platform_mode && hibernation_ops)
@@ -170,11 +171,15 @@ static void platform_finish(int platform_mode)
 }
 
 /**
- *	platform_pre_restore - prepare the platform for the restoration from a
- *	hibernation image.  If the restore fails after this function has been
- *	called, platform_restore_cleanup() must be called.
+ * platform_pre_restore - Prepare for hibernate image restoration.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Use the platform driver to prepare the system for resume from a hibernation
+ * image.
+ *
+ * If the restore fails after this function has been called,
+ * platform_restore_cleanup() must be called.
  */
-
 static int platform_pre_restore(int platform_mode)
 {
 	return (platform_mode && hibernation_ops) ?
@@ -182,12 +187,16 @@ static int platform_pre_restore(int platform_mode)
 }
 
 /**
- *	platform_restore_cleanup - switch the platform to the normal mode of
- *	operation after a failing restore.  If platform_pre_restore() has been
- *	called before the failing restore, this function must be called too,
- *	regardless of the result of platform_pre_restore().
+ * platform_restore_cleanup - Switch to the working state after failing restore.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Use the platform driver to switch the system to the normal mode of operation
+ * after a failing restore.
+ *
+ * If platform_pre_restore() has been called before the failing restore, this
+ * function must be called too, regardless of the result of
+ * platform_pre_restore().
  */
-
 static void platform_restore_cleanup(int platform_mode)
 {
 	if (platform_mode && hibernation_ops)
@@ -195,10 +204,9 @@ static void platform_restore_cleanup(int platform_mode)
 }
 
 /**
- *	platform_recover - recover the platform from a failure to suspend
- *	devices.
+ * platform_recover - Recover from a failure to suspend devices.
+ * @platform_mode: Whether or not to use the platform driver.
  */
-
 static void platform_recover(int platform_mode)
 {
 	if (platform_mode && hibernation_ops && hibernation_ops->recover)
@@ -206,13 +214,12 @@ static void platform_recover(int platform_mode)
 }
 
 /**
- *	swsusp_show_speed - print the time elapsed between two events.
- *	@start: Starting event.
- *	@stop: Final event.
- *	@nr_pages -	number of pages processed between @start and @stop
- *	@msg -		introductory message to print
+ * swsusp_show_speed - Print time elapsed between two events during hibernation.
+ * @start: Starting event.
+ * @stop: Final event.
+ * @nr_pages: Number of memory pages processed between @start and @stop.
+ * @msg: Additional diagnostic message to print.
  */
-
 void swsusp_show_speed(struct timeval *start, struct timeval *stop,
 			unsigned nr_pages, char *msg)
 {
@@ -235,25 +242,18 @@ void swsusp_show_speed(struct timeval *start, struct timeval *stop,
 }
 
 /**
- *	create_image - freeze devices that need to be frozen with interrupts
- *	off, create the hibernation image and thaw those devices.  Control
- *	reappears in this routine after a restore.
+ * create_image - Create a hibernation image.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Execute device drivers' .freeze_noirq() callbacks, create a hibernation image
+ * and execute the drivers' .thaw_noirq() callbacks.
+ *
+ * Control reappears in this routine after the subsequent restore.
  */
-
 static int create_image(int platform_mode)
 {
 	int error;
 
-	error = arch_prepare_suspend();
-	if (error)
-		return error;
-
-	/* At this point, dpm_suspend_start() has been called, but *not*
-	 * dpm_suspend_noirq(). We *must* call dpm_suspend_noirq() now.
-	 * Otherwise, drivers for some devices (e.g. interrupt controllers)
-	 * become desynchronized with the actual state of the hardware
-	 * at resume time, and evil weirdness ensues.
-	 */
 	error = dpm_suspend_noirq(PMSG_FREEZE);
 	if (error) {
 		printk(KERN_ERR "PM: Some devices failed to power down, "
@@ -266,8 +266,7 @@ static int create_image(int platform_mode)
 		goto Platform_finish;
 
 	error = disable_nonboot_cpus();
-	if (error || hibernation_test(TEST_CPUS)
-	    || hibernation_testmode(HIBERNATION_TEST))
+	if (error || hibernation_test(TEST_CPUS))
 		goto Enable_cpus;
 
 	local_irq_disable();
@@ -297,9 +296,6 @@ static int create_image(int platform_mode)
 
  Power_up:
 	syscore_resume();
-	/* NOTE:  dpm_resume_noirq() is just a resume() for devices
-	 * that suspended with irqs off ... no overall powerup.
-	 */
 
  Enable_irqs:
 	local_irq_enable();
@@ -317,48 +313,61 @@ static int create_image(int platform_mode)
 }
 
 /**
- *	hibernation_snapshot - quiesce devices and create the hibernation
- *	snapshot image.
- *	@platform_mode - if set, use the platform driver, if available, to
- *			 prepare the platform firmware for the power transition.
+ * hibernation_snapshot - Quiesce devices and create a hibernation image.
+ * @platform_mode: If set, use platform driver to prepare for the transition.
  *
- *	Must be called with pm_mutex held
+ * This routine must be called with pm_mutex held.
  */
-
 int hibernation_snapshot(int platform_mode)
 {
-	pm_message_t msg = PMSG_RECOVER;
+	pm_message_t msg;
 	int error;
 
 	error = platform_begin(platform_mode);
 	if (error)
 		goto Close;
 
-	error = dpm_prepare(PMSG_FREEZE);
-	if (error)
-		goto Complete_devices;
-
 	/* Preallocate image memory before shutting down devices. */
 	error = hibernate_preallocate_memory();
 	if (error)
-		goto Complete_devices;
+		goto Close;
+
+	error = freeze_kernel_threads();
+	if (error)
+		goto Cleanup;
+
+	if (hibernation_test(TEST_FREEZER)) {
+
+		/*
+		 * Indicate to the caller that we are returning due to a
+		 * successful freezer test.
+		 */
+		freezer_test_done = true;
+		goto Cleanup;
+	}
+
+	error = dpm_prepare(PMSG_FREEZE);
+	if (error) {
+		dpm_complete(PMSG_RECOVER);
+		goto Cleanup;
+	}
 
 	suspend_console();
 	pm_restrict_gfp_mask();
+
 	error = dpm_suspend(PMSG_FREEZE);
-	if (error)
-		goto Recover_platform;
 
-	if (hibernation_test(TEST_DEVICES))
-		goto Recover_platform;
+	if (error || hibernation_test(TEST_DEVICES))
+		platform_recover(platform_mode);
+	else
+		error = create_image(platform_mode);
 
-	error = create_image(platform_mode);
 	/*
-	 * Control returns here (1) after the image has been created or the
+	 * In the case that we call create_image() above, the control
+	 * returns here (1) after the image has been created or the
 	 * image creation has failed and (2) after a successful restore.
 	 */
 
- Resume_devices:
 	/* We may need to release the preallocated image pages here. */
 	if (error || !in_suspend)
 		swsusp_free();
@@ -370,27 +379,26 @@ int hibernation_snapshot(int platform_mode)
 		pm_restore_gfp_mask();
 
 	resume_console();
-
- Complete_devices:
 	dpm_complete(msg);
 
  Close:
 	platform_end(platform_mode);
 	return error;
 
- Recover_platform:
-	platform_recover(platform_mode);
-	goto Resume_devices;
+ Cleanup:
+	swsusp_free();
+	goto Close;
 }
 
 /**
- *	resume_target_kernel - prepare devices that need to be suspended with
- *	interrupts off, restore the contents of highmem that have not been
- *	restored yet from the image and run the low level code that will restore
- *	the remaining contents of memory and switch to the just restored target
- *	kernel.
+ * resume_target_kernel - Restore system state from a hibernation image.
+ * @platform_mode: Whether or not to use the platform driver.
+ *
+ * Execute device drivers' .freeze_noirq() callbacks, restore the contents of
+ * highmem that have not been restored yet from the image and run the low-level
+ * code that will restore the remaining contents of memory and switch to the
+ * just restored target kernel.
  */
-
 static int resume_target_kernel(bool platform_mode)
 {
 	int error;
@@ -416,24 +424,26 @@ static int resume_target_kernel(bool platform_mode)
 	if (error)
 		goto Enable_irqs;
 
-	/* We'll ignore saved state, but this gets preempt count (etc) right */
 	save_processor_state();
 	error = restore_highmem();
 	if (!error) {
 		error = swsusp_arch_resume();
 		/*
 		 * The code below is only ever reached in case of a failure.
-		 * Otherwise execution continues at place where
-		 * swsusp_arch_suspend() was called
+		 * Otherwise, execution continues at the place where
+		 * swsusp_arch_suspend() was called.
 		 */
 		BUG_ON(!error);
-		/* This call to restore_highmem() undos the previous one */
+		/*
+		 * This call to restore_highmem() reverts the changes made by
+		 * the previous one.
+		 */
 		restore_highmem();
 	}
 	/*
 	 * The only reason why swsusp_arch_resume() can fail is memory being
 	 * very tight, so we have to free it as soon as we can to avoid
-	 * subsequent failures
+	 * subsequent failures.
 	 */
 	swsusp_free();
 	restore_processor_state();
@@ -456,14 +466,12 @@ static int resume_target_kernel(bool platform_mode)
 }
 
 /**
- *	hibernation_restore - quiesce devices and restore the hibernation
- *	snapshot image.  If successful, control returns in hibernation_snaphot()
- *	@platform_mode - if set, use the platform driver, if available, to
- *			 prepare the platform firmware for the transition.
+ * hibernation_restore - Quiesce devices and restore from a hibernation image.
+ * @platform_mode: If set, use platform driver to prepare for the transition.
  *
- *	Must be called with pm_mutex held
+ * This routine must be called with pm_mutex held.  If it is successful, control
+ * reappears in the restored target kernel in hibernation_snapshot().
  */
-
 int hibernation_restore(int platform_mode)
 {
 	int error;
@@ -483,10 +491,8 @@ int hibernation_restore(int platform_mode)
 }
 
 /**
- *	hibernation_platform_enter - enter the hibernation state using the
- *	platform driver (if available)
+ * hibernation_platform_enter - Power off the system using the platform driver.
  */
-
 int hibernation_platform_enter(void)
 {
 	int error;
@@ -557,18 +563,15 @@ int hibernation_platform_enter(void)
 }
 
 /**
- *	power_down - Shut the machine down for hibernation.
+ * power_down - Shut the machine down for hibernation.
  *
- *	Use the platform driver, if configured so; otherwise try
- *	to power off or reboot.
+ * Use the platform driver, if configured, to put the system into the sleep
+ * state corresponding to hibernation, or try to power it off or reboot,
+ * depending on the value of hibernation_mode.
  */
-
 static void power_down(void)
 {
 	switch (hibernation_mode) {
-	case HIBERNATION_TEST:
-	case HIBERNATION_TESTPROC:
-		break;
 	case HIBERNATION_REBOOT:
 		kernel_restart(NULL);
 		break;
@@ -587,26 +590,14 @@ static void power_down(void)
 	while(1);
 }
 
-static int prepare_processes(void)
-{
-	int error = 0;
-
-	if (freeze_processes()) {
-		error = -EBUSY;
-		thaw_processes();
-	}
-	return error;
-}
-
 /**
- *	hibernate - The granpappy of the built-in hibernation management
+ * hibernate - Carry out system hibernation, including saving the image.
  */
-
 int hibernate(void)
 {
 	int error;
 
-	mutex_lock(&pm_mutex);
+	lock_system_sleep();
 	/* The snapshot device should not be opened while we're running */
 	if (!atomic_add_unless(&snapshot_device_available, -1, 0)) {
 		error = -EBUSY;
@@ -631,19 +622,17 @@ int hibernate(void)
 	sys_sync();
 	printk("done.\n");
 
-	error = prepare_processes();
+	error = freeze_processes();
 	if (error)
 		goto Finish;
-
-	if (hibernation_test(TEST_FREEZER))
-		goto Thaw;
-
-	if (hibernation_testmode(HIBERNATION_TESTPROC))
-		goto Thaw;
 
 	error = hibernation_snapshot(hibernation_mode == HIBERNATION_PLATFORM);
 	if (error)
 		goto Thaw;
+	if (freezer_test_done) {
+		freezer_test_done = false;
+		goto Thaw;
+	}
 
 	if (in_suspend) {
 		unsigned int flags = 0;
@@ -652,6 +641,9 @@ int hibernate(void)
 			flags |= SF_PLATFORM_MODE;
 		if (nocompress)
 			flags |= SF_NOCOMPRESS_MODE;
+		else
+		        flags |= SF_CRC32_MODE;
+
 		pr_debug("PM: writing image.\n");
 		error = swsusp_write(flags);
 		swsusp_free();
@@ -673,23 +665,26 @@ int hibernate(void)
 	pm_restore_console();
 	atomic_inc(&snapshot_device_available);
  Unlock:
-	mutex_unlock(&pm_mutex);
+	unlock_system_sleep();
 	return error;
 }
 
 
 /**
- *	software_resume - Resume from a saved image.
+ * software_resume - Resume from a saved hibernation image.
  *
- *	Called as a late_initcall (so all devices are discovered and
- *	initialized), we call swsusp to see if we have a saved image or not.
- *	If so, we quiesce devices, the restore the saved image. We will
- *	return above (in hibernate() ) if everything goes well.
- *	Otherwise, we fail gracefully and return to the normally
- *	scheduled program.
+ * This routine is called as a late initcall, when all devices have been
+ * discovered and initialized already.
  *
+ * The image reading code is called to see if there is a hibernation image
+ * available for reading.  If that is the case, devices are quiesced and the
+ * contents of memory is restored from the saved image.
+ *
+ * If this is successful, control reappears in the restored target kernel in
+ * hibernation_snaphot() which returns to hibernate().  Otherwise, the routine
+ * attempts to recover gracefully and make the kernel return to the normal mode
+ * of operation.
  */
-
 static int software_resume(void)
 {
 	int error;
@@ -723,6 +718,12 @@ static int software_resume(void)
 
 	pr_debug("PM: Checking hibernation image partition %s\n", resume_file);
 
+	if (resume_delay) {
+		printk(KERN_INFO "Waiting %dsec before reading resume device...\n",
+			resume_delay);
+		ssleep(resume_delay);
+	}
+
 	/* Check if the device is there */
 	swsusp_resume_device = name_to_dev_t(resume_file);
 	if (!swsusp_resume_device) {
@@ -731,6 +732,13 @@ static int software_resume(void)
 		 * to wait for this to finish.
 		 */
 		wait_for_device_probe();
+
+		if (resume_wait) {
+			while ((swsusp_resume_device = name_to_dev_t(resume_file)) == 0)
+				msleep(10);
+			async_synchronize_full();
+		}
+
 		/*
 		 * We can't depend on SCSI devices being available after loading
 		 * one of their modules until scsi_complete_async_scans() is
@@ -771,11 +779,13 @@ static int software_resume(void)
 		goto close_finish;
 
 	error = create_basic_memory_bitmaps();
-	if (error)
+	if (error) {
+		usermodehelper_enable();
 		goto close_finish;
+	}
 
 	pr_debug("PM: Preparing processes for restore.\n");
-	error = prepare_processes();
+	error = freeze_processes();
 	if (error) {
 		swsusp_close(FMODE_READ);
 		goto Done;
@@ -815,34 +825,32 @@ static const char * const hibernation_modes[] = {
 	[HIBERNATION_PLATFORM]	= "platform",
 	[HIBERNATION_SHUTDOWN]	= "shutdown",
 	[HIBERNATION_REBOOT]	= "reboot",
-	[HIBERNATION_TEST]	= "test",
-	[HIBERNATION_TESTPROC]	= "testproc",
 };
 
-/**
- *	disk - Control hibernation mode
+/*
+ * /sys/power/disk - Control hibernation mode.
  *
- *	Suspend-to-disk can be handled in several ways. We have a few options
- *	for putting the system to sleep - using the platform driver (e.g. ACPI
- *	or other hibernation_ops), powering off the system or rebooting the
- *	system (for testing) as well as the two test modes.
+ * Hibernation can be handled in several ways.  There are a few different ways
+ * to put the system into the sleep state: using the platform driver (e.g. ACPI
+ * or other hibernation_ops), powering it off or rebooting it (for testing
+ * mostly).
  *
- *	The system can support 'platform', and that is known a priori (and
- *	encoded by the presence of hibernation_ops). However, the user may
- *	choose 'shutdown' or 'reboot' as alternatives, as well as one fo the
- *	test modes, 'test' or 'testproc'.
- *
- *	show() will display what the mode is currently set to.
- *	store() will accept one of
+ * The sysfs file /sys/power/disk provides an interface for selecting the
+ * hibernation mode to use.  Reading from this file causes the available modes
+ * to be printed.  There are 3 modes that can be supported:
  *
  *	'platform'
  *	'shutdown'
  *	'reboot'
- *	'test'
- *	'testproc'
  *
- *	It will only change to 'platform' if the system
- *	supports it (as determined by having hibernation_ops).
+ * If a platform hibernation driver is in use, 'platform' will be supported
+ * and will be used by default.  Otherwise, 'shutdown' will be used by default.
+ * The selected option (i.e. the one corresponding to the current value of
+ * hibernation_mode) is enclosed by a square bracket.
+ *
+ * To select a given hibernation mode it is necessary to write the mode's
+ * string representation (as returned by reading from /sys/power/disk) back
+ * into /sys/power/disk.
  */
 
 static ssize_t disk_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -857,8 +865,6 @@ static ssize_t disk_show(struct kobject *kobj, struct kobj_attribute *attr,
 		switch (i) {
 		case HIBERNATION_SHUTDOWN:
 		case HIBERNATION_REBOOT:
-		case HIBERNATION_TEST:
-		case HIBERNATION_TESTPROC:
 			break;
 		case HIBERNATION_PLATFORM:
 			if (hibernation_ops)
@@ -875,7 +881,6 @@ static ssize_t disk_show(struct kobject *kobj, struct kobj_attribute *attr,
 	return buf-start;
 }
 
-
 static ssize_t disk_store(struct kobject *kobj, struct kobj_attribute *attr,
 			  const char *buf, size_t n)
 {
@@ -888,7 +893,7 @@ static ssize_t disk_store(struct kobject *kobj, struct kobj_attribute *attr,
 	p = memchr(buf, '\n', n);
 	len = p ? p - buf : n;
 
-	mutex_lock(&pm_mutex);
+	lock_system_sleep();
 	for (i = HIBERNATION_FIRST; i <= HIBERNATION_MAX; i++) {
 		if (len == strlen(hibernation_modes[i])
 		    && !strncmp(buf, hibernation_modes[i], len)) {
@@ -900,8 +905,6 @@ static ssize_t disk_store(struct kobject *kobj, struct kobj_attribute *attr,
 		switch (mode) {
 		case HIBERNATION_SHUTDOWN:
 		case HIBERNATION_REBOOT:
-		case HIBERNATION_TEST:
-		case HIBERNATION_TESTPROC:
 			hibernation_mode = mode;
 			break;
 		case HIBERNATION_PLATFORM:
@@ -916,7 +919,7 @@ static ssize_t disk_store(struct kobject *kobj, struct kobj_attribute *attr,
 	if (!error)
 		pr_debug("PM: Hibernation mode set to '%s'\n",
 			 hibernation_modes[mode]);
-	mutex_unlock(&pm_mutex);
+	unlock_system_sleep();
 	return error ? error : n;
 }
 
@@ -943,9 +946,9 @@ static ssize_t resume_store(struct kobject *kobj, struct kobj_attribute *attr,
 	if (maj != MAJOR(res) || min != MINOR(res))
 		goto out;
 
-	mutex_lock(&pm_mutex);
+	lock_system_sleep();
 	swsusp_resume_device = res;
-	mutex_unlock(&pm_mutex);
+	unlock_system_sleep();
 	printk(KERN_INFO "PM: Starting manual resume from disk\n");
 	noresume = 0;
 	software_resume();
@@ -1058,7 +1061,21 @@ static int __init noresume_setup(char *str)
 	return 1;
 }
 
+static int __init resumewait_setup(char *str)
+{
+	resume_wait = 1;
+	return 1;
+}
+
+static int __init resumedelay_setup(char *str)
+{
+	resume_delay = simple_strtoul(str, NULL, 0);
+	return 1;
+}
+
 __setup("noresume", noresume_setup);
 __setup("resume_offset=", resume_offset_setup);
 __setup("resume=", resume_setup);
 __setup("hibernate=", hibernate_setup);
+__setup("resumewait", resumewait_setup);
+__setup("resumedelay=", resumedelay_setup);

@@ -197,7 +197,7 @@ int tps6586x_set_bits(struct device *dev, int reg, uint8_t bit_mask)
 	if (ret)
 		goto out;
 
-	if ((reg_val & bit_mask) == 0) {
+	if ((reg_val & bit_mask) != bit_mask) {
 		reg_val |= bit_mask;
 		ret = __tps6586x_write(to_i2c_client(dev), reg, reg_val);
 	}
@@ -270,8 +270,8 @@ static void tps6586x_gpio_set(struct gpio_chip *chip, unsigned offset,
 {
 	struct tps6586x *tps6586x = container_of(chip, struct tps6586x, gpio);
 
-	__tps6586x_write(tps6586x->client, TPS6586X_GPIOSET2,
-			 value << offset);
+	tps6586x_update(tps6586x->dev, TPS6586X_GPIOSET2,
+			value << offset, 1 << offset);
 }
 
 static int tps6586x_gpio_output(struct gpio_chip *gc, unsigned offset,

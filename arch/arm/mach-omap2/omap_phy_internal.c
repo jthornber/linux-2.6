@@ -50,13 +50,18 @@ int omap4430_phy_init(struct device *dev)
 {
 	ctrl_base = ioremap(OMAP443X_SCM_BASE, SZ_1K);
 	if (!ctrl_base) {
-		dev_err(dev, "control module ioremap failed\n");
+		pr_err("control module ioremap failed\n");
 		return -ENOMEM;
 	}
 	/* Power down the phy */
 	__raw_writel(PHY_PD, ctrl_base + CONTROL_DEV_CONF);
-	phyclk = clk_get(dev, "ocp2scp_usb_phy_ick");
 
+	if (!dev) {
+		iounmap(ctrl_base);
+		return 0;
+	}
+
+	phyclk = clk_get(dev, "ocp2scp_usb_phy_ick");
 	if (IS_ERR(phyclk)) {
 		dev_err(dev, "cannot clk_get ocp2scp_usb_phy_ick\n");
 		iounmap(ctrl_base);
@@ -228,7 +233,7 @@ void am35x_musb_clear_irq(void)
 	regval = omap_ctrl_readl(AM35XX_CONTROL_LVL_INTR_CLEAR);
 }
 
-void am35x_musb_set_mode(u8 musb_mode)
+void am35x_set_mode(u8 musb_mode)
 {
 	u32 devconf2 = omap_ctrl_readl(AM35XX_CONTROL_DEVCONF2);
 
@@ -254,4 +259,39 @@ void am35x_musb_set_mode(u8 musb_mode)
 	}
 
 	omap_ctrl_writel(devconf2, AM35XX_CONTROL_DEVCONF2);
+}
+
+void ti81xx_musb_phy_power(u8 on)
+{
+	void __iomem *scm_base = NULL;
+	u32 usbphycfg;
+
+	scm_base = ioremap(TI81XX_SCM_BASE, SZ_2K);
+	if (!scm_base) {
+		pr_err("system control module ioremap failed\n");
+		return;
+	}
+
+	usbphycfg = __raw_readl(scm_base + USBCTRL0);
+
+	if (on) {
+		if (cpu_is_ti816x()) {
+			usbphycfg |= TI816X_USBPHY0_NORMAL_MODE;
+			usbphycfg &= ~TI816X_USBPHY_REFCLK_OSC;
+		} else if (cpu_is_ti814x()) {
+			usbphycfg &= ~(USBPHY_CM_PWRDN | USBPHY_OTG_PWRDN
+				| USBPHY_DPINPUT | USBPHY_DMINPUT);
+			usbphycfg |= (USBPHY_OTGVDET_EN | USBPHY_OTGSESSEND_EN
+				| USBPHY_DPOPBUFCTL | USBPHY_DMOPBUFCTL);
+		}
+	} else {
+		if (cpu_is_ti816x())
+			usbphycfg &= ~TI816X_USBPHY0_NORMAL_MODE;
+		else if (cpu_is_ti814x())
+			usbphycfg |= USBPHY_CM_PWRDN | USBPHY_OTG_PWRDN;
+
+	}
+	__raw_writel(usbphycfg, scm_base + USBCTRL0);
+
+	iounmap(scm_base);
 }

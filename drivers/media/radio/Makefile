@@ -16,7 +16,6 @@ obj-$(CONFIG_RADIO_GEMTEK) += radio-gemtek.o
 obj-$(CONFIG_RADIO_TRUST) += radio-trust.o
 obj-$(CONFIG_I2C_SI4713) += si4713-i2c.o
 obj-$(CONFIG_RADIO_SI4713) += radio-si4713.o
-obj-$(CONFIG_RADIO_MAESTRO) += radio-maestro.o
 obj-$(CONFIG_RADIO_MIROPCM20) += radio-miropcm20.o
 obj-$(CONFIG_USB_DSBR) += dsbr100.o
 obj-$(CONFIG_RADIO_SI470X) += si470x/
@@ -28,4 +27,4 @@ obj-$(CONFIG_RADIO_TIMBERDALE) += radio-timb.o
 obj-$(CONFIG_RADIO_WL1273) += radio-wl1273.o
 obj-$(CONFIG_RADIO_WL128X) += wl128x/
 
-EXTRA_CFLAGS += -Isound
+ccflags-y += -Isound

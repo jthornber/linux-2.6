@@ -11,9 +11,11 @@
  *  MMC card bus driver model
  */
 
+#include <linux/export.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/stat.h>
 #include <linux/pm_runtime.h>
 
 #include <linux/mmc/card.h>
@@ -274,8 +276,12 @@ int mmc_add_card(struct mmc_card *card)
 		break;
 	case MMC_TYPE_SD:
 		type = "SD";
-		if (mmc_card_blockaddr(card))
-			type = "SDHC";
+		if (mmc_card_blockaddr(card)) {
+			if (mmc_card_ext_capacity(card))
+				type = "SDXC";
+			else
+				type = "SDHC";
+		}
 		break;
 	case MMC_TYPE_SDIO:
 		type = "SDIO";
@@ -291,15 +297,17 @@ int mmc_add_card(struct mmc_card *card)
 	}
 
 	if (mmc_host_is_spi(card->host)) {
-		printk(KERN_INFO "%s: new %s%s%s card on SPI\n",
+		pr_info("%s: new %s%s%s card on SPI\n",
 			mmc_hostname(card->host),
 			mmc_card_highspeed(card) ? "high speed " : "",
 			mmc_card_ddr_mode(card) ? "DDR " : "",
 			type);
 	} else {
-		printk(KERN_INFO "%s: new %s%s%s card at address %04x\n",
+		pr_info("%s: new %s%s%s%s card at address %04x\n",
 			mmc_hostname(card->host),
-			mmc_card_highspeed(card) ? "high speed " : "",
+			mmc_card_uhs(card) ? "ultra high speed " :
+			(mmc_card_highspeed(card) ? "high speed " : ""),
+			(mmc_card_hs200(card) ? "HS200 " : ""),
 			mmc_card_ddr_mode(card) ? "DDR " : "",
 			type, card->rca);
 	}
@@ -329,10 +337,10 @@ void mmc_remove_card(struct mmc_card *card)
 
 	if (mmc_card_present(card)) {
 		if (mmc_host_is_spi(card->host)) {
-			printk(KERN_INFO "%s: SPI card removed\n",
+			pr_info("%s: SPI card removed\n",
 				mmc_hostname(card->host));
 		} else {
-			printk(KERN_INFO "%s: card %04x removed\n",
+			pr_info("%s: card %04x removed\n",
 				mmc_hostname(card->host), card->rca);
 		}
 		device_del(&card->dev);

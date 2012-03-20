@@ -332,7 +332,7 @@ SND_SOC_DAPM_INPUT("MIC1"),
 SND_SOC_DAPM_INPUT("MIC2"),
 };
 
-static const struct snd_soc_dapm_route audio_map[] = {
+static const struct snd_soc_dapm_route wm9712_audio_map[] = {
 	/* virtual mixer - mixes left & right channels for spk and mono */
 	{"AC97 Mixer", NULL, "Left DAC"},
 	{"AC97 Mixer", NULL, "Right DAC"},
@@ -429,17 +429,6 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{"ROUT2", NULL, "Speaker PGA"},
 };
 
-static int wm9712_add_widgets(struct snd_soc_codec *codec)
-{
-	struct snd_soc_dapm_context *dapm = &codec->dapm;
-
-	snd_soc_dapm_new_controls(dapm, wm9712_dapm_widgets,
-				  ARRAY_SIZE(wm9712_dapm_widgets));
-	snd_soc_dapm_add_routes(dapm, audio_map, ARRAY_SIZE(audio_map));
-
-	return 0;
-}
-
 static unsigned int ac97_read(struct snd_soc_codec *codec,
 	unsigned int reg)
 {
@@ -516,11 +505,11 @@ static int ac97_aux_prepare(struct snd_pcm_substream *substream,
 		SNDRV_PCM_RATE_22050 | SNDRV_PCM_RATE_44100 |\
 		SNDRV_PCM_RATE_48000)
 
-static struct snd_soc_dai_ops wm9712_dai_ops_hifi = {
+static const struct snd_soc_dai_ops wm9712_dai_ops_hifi = {
 	.prepare	= ac97_prepare,
 };
 
-static struct snd_soc_dai_ops wm9712_dai_ops_aux = {
+static const struct snd_soc_dai_ops wm9712_dai_ops_aux = {
 	.prepare	= ac97_aux_prepare,
 };
 
@@ -594,8 +583,7 @@ err:
 	return -EIO;
 }
 
-static int wm9712_soc_suspend(struct snd_soc_codec *codec,
-	pm_message_t state)
+static int wm9712_soc_suspend(struct snd_soc_codec *codec)
 {
 	wm9712_set_bias_level(codec, SND_SOC_BIAS_OFF);
 	return 0;
@@ -651,7 +639,6 @@ static int wm9712_soc_probe(struct snd_soc_codec *codec)
 	wm9712_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
 	snd_soc_add_controls(codec, wm9712_snd_ac97_controls,
 				ARRAY_SIZE(wm9712_snd_ac97_controls));
-	wm9712_add_widgets(codec);
 
 	return 0;
 
@@ -678,6 +665,10 @@ static struct snd_soc_codec_driver soc_codec_dev_wm9712 = {
 	.reg_word_size = sizeof(u16),
 	.reg_cache_step = 2,
 	.reg_cache_default = wm9712_reg,
+	.dapm_widgets = wm9712_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(wm9712_dapm_widgets),
+	.dapm_routes = wm9712_audio_map,
+	.num_dapm_routes = ARRAY_SIZE(wm9712_audio_map),
 };
 
 static __devinit int wm9712_probe(struct platform_device *pdev)
@@ -702,17 +693,7 @@ static struct platform_driver wm9712_codec_driver = {
 	.remove = __devexit_p(wm9712_remove),
 };
 
-static int __init wm9712_init(void)
-{
-	return platform_driver_register(&wm9712_codec_driver);
-}
-module_init(wm9712_init);
-
-static void __exit wm9712_exit(void)
-{
-	platform_driver_unregister(&wm9712_codec_driver);
-}
-module_exit(wm9712_exit);
+module_platform_driver(wm9712_codec_driver);
 
 MODULE_DESCRIPTION("ASoC WM9711/WM9712 driver");
 MODULE_AUTHOR("Liam Girdwood");

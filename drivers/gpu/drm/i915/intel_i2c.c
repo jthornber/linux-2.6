@@ -28,6 +28,7 @@
  */
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
+#include <linux/export.h>
 #include "drmP.h"
 #include "drm.h"
 #include "intel_drv.h"
@@ -401,8 +402,7 @@ int intel_setup_gmbus(struct drm_device *dev)
 		bus->reg0 = i | GMBUS_RATE_100KHZ;
 
 		/* XXX force bit banging until GMBUS is fully debugged */
-		if (IS_GEN2(dev))
-			bus->force_bit = intel_gpio_create(dev_priv, i);
+		bus->force_bit = intel_gpio_create(dev_priv, i);
 	}
 
 	intel_i2c_reset(dev_priv->dev);
@@ -423,13 +423,7 @@ void intel_gmbus_set_speed(struct i2c_adapter *adapter, int speed)
 {
 	struct intel_gmbus *bus = to_intel_gmbus(adapter);
 
-	/* speed:
-	 * 0x0 = 100 KHz
-	 * 0x1 = 50 KHz
-	 * 0x2 = 400 KHz
-	 * 0x3 = 1000 Khz
-	 */
-	bus->reg0 = (bus->reg0 & ~(0x3 << 8)) | (speed << 8);
+	bus->reg0 = (bus->reg0 & ~(0x3 << 8)) | speed;
 }
 
 void intel_gmbus_force_bit(struct i2c_adapter *adapter, bool force_bit)

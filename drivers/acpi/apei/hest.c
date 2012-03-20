@@ -41,7 +41,7 @@
 
 #define HEST_PFX "HEST: "
 
-int hest_disable;
+bool hest_disable;
 EXPORT_SYMBOL_GPL(hest_disable);
 
 /* HEST table parsing */
@@ -139,13 +139,23 @@ static int __init hest_parse_ghes(struct acpi_hest_header *hest_hdr, void *data)
 {
 	struct platform_device *ghes_dev;
 	struct ghes_arr *ghes_arr = data;
-	int rc;
+	int rc, i;
 
 	if (hest_hdr->type != ACPI_HEST_TYPE_GENERIC_ERROR)
 		return 0;
 
 	if (!((struct acpi_hest_generic *)hest_hdr)->enabled)
 		return 0;
+	for (i = 0; i < ghes_arr->count; i++) {
+		struct acpi_hest_header *hdr;
+		ghes_dev = ghes_arr->ghes_devs[i];
+		hdr = *(struct acpi_hest_header **)ghes_dev->dev.platform_data;
+		if (hdr->source_id == hest_hdr->source_id) {
+			pr_warning(FW_WARN HEST_PFX "Duplicated hardware error source ID: %d.\n",
+				   hdr->source_id);
+			return -EIO;
+		}
+	}
 	ghes_dev = platform_device_alloc("GHES", hest_hdr->source_id);
 	if (!ghes_dev)
 		return -ENOMEM;
@@ -211,26 +221,26 @@ void __init acpi_hest_init(void)
 
 	status = acpi_get_table(ACPI_SIG_HEST, 0,
 				(struct acpi_table_header **)&hest_tab);
-	if (status == AE_NOT_FOUND) {
-		pr_info(HEST_PFX "Table not found.\n");
+	if (status == AE_NOT_FOUND)
 		goto err;
-	} else if (ACPI_FAILURE(status)) {
+	else if (ACPI_FAILURE(status)) {
 		const char *msg = acpi_format_exception(status);
 		pr_err(HEST_PFX "Failed to get table, %s\n", msg);
 		rc = -EINVAL;
 		goto err;
 	}
 
-	rc = apei_hest_parse(hest_parse_ghes_count, &ghes_count);
-	if (rc)
-		goto err;
-
-	rc = hest_ghes_dev_register(ghes_count);
-	if (!rc) {
-		pr_info(HEST_PFX "Table parsing has been initialized.\n");
-		return;
+	if (!ghes_disable) {
+		rc = apei_hest_parse(hest_parse_ghes_count, &ghes_count);
+		if (rc)
+			goto err;
+		rc = hest_ghes_dev_register(ghes_count);
+		if (rc)
+			goto err;
 	}
 
+	pr_info(HEST_PFX "Table parsing has been initialized.\n");
+	return;
 err:
 	hest_disable = 1;
 }

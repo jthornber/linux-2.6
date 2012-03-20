@@ -121,9 +121,6 @@ struct tmio_nand {
 
 #define mtd_to_tmio(m)			container_of(m, struct tmio_nand, mtd)
 
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-static const char *part_probes[] = { "cmdlinepart", NULL };
-#endif
 
 /*--------------------------------------------------------------------------*/
 
@@ -372,7 +369,7 @@ static void tmio_hw_stop(struct platform_device *dev, struct tmio_nand *tmio)
 
 static int tmio_probe(struct platform_device *dev)
 {
-	struct tmio_nand_data *data = mfd_get_data(dev);
+	struct tmio_nand_data *data = dev->dev.platform_data;
 	struct resource *fcr = platform_get_resource(dev,
 			IORESOURCE_MEM, 0);
 	struct resource *ccr = platform_get_resource(dev,
@@ -381,10 +378,6 @@ static int tmio_probe(struct platform_device *dev)
 	struct tmio_nand *tmio;
 	struct mtd_info *mtd;
 	struct nand_chip *nand_chip;
-#ifdef CONFIG_MTD_PARTITIONS
-	struct mtd_partition *parts;
-	int nbparts = 0;
-#endif
 	int retval;
 
 	if (data == NULL)
@@ -463,21 +456,9 @@ static int tmio_probe(struct platform_device *dev)
 		goto err_scan;
 	}
 	/* Register the partitions */
-#ifdef CONFIG_MTD_PARTITIONS
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-	nbparts = parse_mtd_partitions(mtd, part_probes, &parts, 0);
-#endif
-	if (nbparts <= 0 && data) {
-		parts = data->partition;
-		nbparts = data->num_partitions;
-	}
-
-	if (nbparts)
-		retval = add_mtd_partitions(mtd, parts, nbparts);
-	else
-#endif
-	retval = add_mtd_device(mtd);
-
+	retval = mtd_device_parse_register(mtd, NULL, 0,
+			data ? data->partition : NULL,
+			data ? data->num_partitions : 0);
 	if (!retval)
 		return retval;
 
@@ -552,18 +533,7 @@ static struct platform_driver tmio_driver = {
 	.resume		= tmio_resume,
 };
 
-static int __init tmio_init(void)
-{
-	return platform_driver_register(&tmio_driver);
-}
-
-static void __exit tmio_exit(void)
-{
-	platform_driver_unregister(&tmio_driver);
-}
-
-module_init(tmio_init);
-module_exit(tmio_exit);
+module_platform_driver(tmio_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Ian Molton, Dirk Opfer, Chris Humbert, Dmitry Baryshkov");

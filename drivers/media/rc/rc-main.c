@@ -18,6 +18,7 @@
 #include <linux/input.h>
 #include <linux/slab.h>
 #include <linux/device.h>
+#include <linux/module.h>
 #include "rc-core-priv.h"
 
 /* Sizes are in bytes, 256 bytes allows for 32 entries on x64 */
@@ -522,18 +523,20 @@ EXPORT_SYMBOL_GPL(rc_g_keycode_from_table);
 /**
  * ir_do_keyup() - internal function to signal the release of a keypress
  * @dev:	the struct rc_dev descriptor of the device
+ * @sync:	whether or not to call input_sync
  *
  * This function is used internally to release a keypress, it must be
  * called with keylock held.
  */
-static void ir_do_keyup(struct rc_dev *dev)
+static void ir_do_keyup(struct rc_dev *dev, bool sync)
 {
 	if (!dev->keypressed)
 		return;
 
 	IR_dprintk(1, "keyup key 0x%04x\n", dev->last_keycode);
 	input_report_key(dev->input_dev, dev->last_keycode, 0);
-	input_sync(dev->input_dev);
+	if (sync)
+		input_sync(dev->input_dev);
 	dev->keypressed = false;
 }
 
@@ -549,7 +552,7 @@ void rc_keyup(struct rc_dev *dev)
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->keylock, flags);
-	ir_do_keyup(dev);
+	ir_do_keyup(dev, true);
 	spin_unlock_irqrestore(&dev->keylock, flags);
 }
 EXPORT_SYMBOL_GPL(rc_keyup);
@@ -578,7 +581,7 @@ static void ir_timer_keyup(unsigned long cookie)
 	 */
 	spin_lock_irqsave(&dev->keylock, flags);
 	if (time_is_before_eq_jiffies(dev->keyup_jiffies))
-		ir_do_keyup(dev);
+		ir_do_keyup(dev, true);
 	spin_unlock_irqrestore(&dev->keylock, flags);
 }
 
@@ -597,6 +600,7 @@ void rc_repeat(struct rc_dev *dev)
 	spin_lock_irqsave(&dev->keylock, flags);
 
 	input_event(dev->input_dev, EV_MSC, MSC_SCAN, dev->last_scancode);
+	input_sync(dev->input_dev);
 
 	if (!dev->keypressed)
 		goto out;
@@ -622,29 +626,28 @@ EXPORT_SYMBOL_GPL(rc_repeat);
 static void ir_do_keydown(struct rc_dev *dev, int scancode,
 			  u32 keycode, u8 toggle)
 {
+	bool new_event = !dev->keypressed ||
+			 dev->last_scancode != scancode ||
+			 dev->last_toggle != toggle;
+
+	if (new_event && dev->keypressed)
+		ir_do_keyup(dev, false);
+
 	input_event(dev->input_dev, EV_MSC, MSC_SCAN, scancode);
 
-	/* Repeat event? */
-	if (dev->keypressed &&
-	    dev->last_scancode == scancode &&
-	    dev->last_toggle == toggle)
-		return;
+	if (new_event && keycode != KEY_RESERVED) {
+		/* Register a keypress */
+		dev->keypressed = true;
+		dev->last_scancode = scancode;
+		dev->last_toggle = toggle;
+		dev->last_keycode = keycode;
 
-	/* Release old keypress */
-	ir_do_keyup(dev);
+		IR_dprintk(1, "%s: key down event, "
+			   "key 0x%04x, scancode 0x%04x\n",
+			   dev->input_name, keycode, scancode);
+		input_report_key(dev->input_dev, keycode, 1);
+	}
 
-	dev->last_scancode = scancode;
-	dev->last_toggle = toggle;
-	dev->last_keycode = keycode;
-
-	if (keycode == KEY_RESERVED)
-		return;
-
-	/* Register a keypress */
-	dev->keypressed = true;
-	IR_dprintk(1, "%s: key down event, key 0x%04x, scancode 0x%04x\n",
-		   dev->input_name, keycode, scancode);
-	input_report_key(dev->input_dev, dev->last_keycode, 1);
 	input_sync(dev->input_dev);
 }
 
@@ -712,7 +715,7 @@ static void ir_close(struct input_dev *idev)
 }
 
 /* class for /sys/class/rc */
-static char *ir_devnode(struct device *dev, mode_t *mode)
+static char *ir_devnode(struct device *dev, umode_t *mode)
 {
 	return kasprintf(GFP_KERNEL, "rc/%s", dev_name(dev));
 }
@@ -733,6 +736,8 @@ static struct {
 	{ RC_TYPE_JVC,		"jvc"		},
 	{ RC_TYPE_SONY,		"sony"		},
 	{ RC_TYPE_RC5_SZ,	"rc-5-sz"	},
+	{ RC_TYPE_SANYO,	"sanyo"		},
+	{ RC_TYPE_MCE_KBD,	"mce_kbd"	},
 	{ RC_TYPE_LIRC,		"lirc"		},
 	{ RC_TYPE_OTHER,	"other"		},
 };
@@ -749,6 +754,9 @@ static struct {
  * it is trigged by reading /sys/class/rc/rc?/protocols.
  * It returns the protocol names of supported protocols.
  * Enabled protocols are printed in brackets.
+ *
+ * dev->lock is taken to guard against races between device
+ * registration, store_protocols and show_protocols.
  */
 static ssize_t show_protocols(struct device *device,
 			      struct device_attribute *mattr, char *buf)
@@ -761,6 +769,8 @@ static ssize_t show_protocols(struct device *device,
 	/* Device is being removed */
 	if (!dev)
 		return -EINVAL;
+
+	mutex_lock(&dev->lock);
 
 	if (dev->driver_type == RC_DRIVER_SCANCODE) {
 		enabled = dev->rc_map.rc_type;
@@ -784,6 +794,9 @@ static ssize_t show_protocols(struct device *device,
 	if (tmp != buf)
 		tmp--;
 	*tmp = '\n';
+
+	mutex_unlock(&dev->lock);
+
 	return tmp + 1 - buf;
 }
 
@@ -802,6 +815,9 @@ static ssize_t show_protocols(struct device *device,
  * Writing "none" will disable all protocols.
  * Returns -EINVAL if an invalid protocol combination or unknown protocol name
  * is used, otherwise @len.
+ *
+ * dev->lock is taken to guard against races between device
+ * registration, store_protocols and show_protocols.
  */
 static ssize_t store_protocols(struct device *device,
 			       struct device_attribute *mattr,
@@ -815,10 +831,13 @@ static ssize_t store_protocols(struct device *device,
 	u64 mask;
 	int rc, i, count = 0;
 	unsigned long flags;
+	ssize_t ret;
 
 	/* Device is being removed */
 	if (!dev)
 		return -EINVAL;
+
+	mutex_lock(&dev->lock);
 
 	if (dev->driver_type == RC_DRIVER_SCANCODE)
 		type = dev->rc_map.rc_type;
@@ -826,7 +845,8 @@ static ssize_t store_protocols(struct device *device,
 		type = dev->raw->enabled_protocols;
 	else {
 		IR_dprintk(1, "Protocol switching not supported\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	while ((tmp = strsep((char **) &data, " \n")) != NULL) {
@@ -860,7 +880,8 @@ static ssize_t store_protocols(struct device *device,
 			}
 			if (i == ARRAY_SIZE(proto_names)) {
 				IR_dprintk(1, "Unknown protocol: '%s'\n", tmp);
-				return -EINVAL;
+				ret = -EINVAL;
+				goto out;
 			}
 			count++;
 		}
@@ -875,7 +896,8 @@ static ssize_t store_protocols(struct device *device,
 
 	if (!count) {
 		IR_dprintk(1, "Protocol not specified\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	if (dev->change_protocol) {
@@ -883,7 +905,8 @@ static ssize_t store_protocols(struct device *device,
 		if (rc < 0) {
 			IR_dprintk(1, "Error setting protocols to 0x%llx\n",
 				   (long long)type);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
 	}
 
@@ -898,15 +921,15 @@ static ssize_t store_protocols(struct device *device,
 	IR_dprintk(1, "Current protocol(s): 0x%llx\n",
 		   (long long)type);
 
-	return len;
+	ret = len;
+
+out:
+	mutex_unlock(&dev->lock);
+	return ret;
 }
 
 static void rc_dev_release(struct device *device)
 {
-	struct rc_dev *dev = to_rc_dev(device);
-
-	kfree(dev);
-	module_put(THIS_MODULE);
 }
 
 #define ADD_HOTPLUG_VAR(fmt, val...)					\
@@ -919,6 +942,9 @@ static void rc_dev_release(struct device *device)
 static int rc_dev_uevent(struct device *device, struct kobj_uevent_env *env)
 {
 	struct rc_dev *dev = to_rc_dev(device);
+
+	if (!dev || !dev->input_dev)
+		return -ENODEV;
 
 	if (dev->rc_map.name)
 		ADD_HOTPLUG_VAR("NAME=%s", dev->rc_map.name);
@@ -974,6 +1000,7 @@ struct rc_dev *rc_allocate_device(void)
 
 	spin_lock_init(&dev->rc_map.lock);
 	spin_lock_init(&dev->keylock);
+	mutex_init(&dev->lock);
 	setup_timer(&dev->timer_keyup, ir_timer_keyup, (unsigned long)dev);
 
 	dev->dev.type = &rc_dev_type;
@@ -987,10 +1014,16 @@ EXPORT_SYMBOL_GPL(rc_allocate_device);
 
 void rc_free_device(struct rc_dev *dev)
 {
-	if (dev) {
+	if (!dev)
+		return;
+
+	if (dev->input_dev)
 		input_free_device(dev->input_dev);
-		put_device(&dev->dev);
-	}
+
+	put_device(&dev->dev);
+
+	kfree(dev);
+	module_put(THIS_MODULE);
 }
 EXPORT_SYMBOL_GPL(rc_free_device);
 
@@ -1019,12 +1052,21 @@ int rc_register_device(struct rc_dev *dev)
 	if (dev->close)
 		dev->input_dev->close = ir_close;
 
+	/*
+	 * Take the lock here, as the device sysfs node will appear
+	 * when device_add() is called, which may trigger an ir-keytable udev
+	 * rule, which will in turn call show_protocols and access either
+	 * dev->rc_map.rc_type or dev->raw->enabled_protocols before it has
+	 * been initialized.
+	 */
+	mutex_lock(&dev->lock);
+
 	dev->devno = (unsigned long)(atomic_inc_return(&devno) - 1);
 	dev_set_name(&dev->dev, "rc%ld", dev->devno);
 	dev_set_drvdata(&dev->dev, dev);
 	rc = device_add(&dev->dev);
 	if (rc)
-		return rc;
+		goto out_unlock;
 
 	rc = ir_setkeytable(dev, rc_map);
 	if (rc)
@@ -1046,6 +1088,13 @@ int rc_register_device(struct rc_dev *dev)
 	 */
 	dev->input_dev->rep[REP_DELAY] = 500;
 
+	/*
+	 * As a repeat event on protocols like RC-5 and NEC take as long as
+	 * 110/114ms, using 33ms as a repeat period is not the right thing
+	 * to do.
+	 */
+	dev->input_dev->rep[REP_PERIOD] = 125;
+
 	path = kobject_get_path(&dev->dev.kobj, GFP_KERNEL);
 	printk(KERN_INFO "%s: %s as %s\n",
 		dev_name(&dev->dev),
@@ -1065,6 +1114,8 @@ int rc_register_device(struct rc_dev *dev)
 			goto out_raw;
 	}
 
+	mutex_unlock(&dev->lock);
+
 	IR_dprintk(1, "Registered rc%ld (driver: %s, remote: %s, mode %s)\n",
 		   dev->devno,
 		   dev->driver_name ? dev->driver_name : "unknown",
@@ -1083,6 +1134,8 @@ out_table:
 	ir_free_table(&dev->rc_map);
 out_dev:
 	device_del(&dev->dev);
+out_unlock:
+	mutex_unlock(&dev->lock);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(rc_register_device);
@@ -1097,14 +1150,18 @@ void rc_unregister_device(struct rc_dev *dev)
 	if (dev->driver_type == RC_DRIVER_IR_RAW)
 		ir_raw_event_unregister(dev);
 
-	input_unregister_device(dev->input_dev);
-	dev->input_dev = NULL;
-
+	/* Freeing the table should also call the stop callback */
 	ir_free_table(&dev->rc_map);
 	IR_dprintk(1, "Freed keycode table\n");
 
-	device_unregister(&dev->dev);
+	input_unregister_device(dev->input_dev);
+	dev->input_dev = NULL;
+
+	device_del(&dev->dev);
+
+	rc_free_device(dev);
 }
+
 EXPORT_SYMBOL_GPL(rc_unregister_device);
 
 /*

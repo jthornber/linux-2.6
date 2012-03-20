@@ -27,6 +27,7 @@
 #include <linux/mtd/pfow.h>
 #include <linux/mtd/qinfo.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 
 static int lpddr_read(struct mtd_info *mtd, loff_t adr, size_t len,
 					size_t *retlen, u_char *buf);
@@ -69,19 +70,12 @@ struct mtd_info *lpddr_cmdset(struct map_info *map)
 	mtd->erase = lpddr_erase;
 	mtd->write = lpddr_write_buffers;
 	mtd->writev = lpddr_writev;
-	mtd->read_oob = NULL;
-	mtd->write_oob = NULL;
-	mtd->sync = NULL;
 	mtd->lock = lpddr_lock;
 	mtd->unlock = lpddr_unlock;
-	mtd->suspend = NULL;
-	mtd->resume = NULL;
 	if (map_is_linear(map)) {
 		mtd->point = lpddr_point;
 		mtd->unpoint = lpddr_unpoint;
 	}
-	mtd->block_isbad = NULL;
-	mtd->block_markbad = NULL;
 	mtd->size = 1 << lpddr->qinfo->DevSizeShift;
 	mtd->erasesize = 1 << lpddr->qinfo->UniformBlockSizeShift;
 	mtd->writesize = 1 << lpddr->qinfo->BufSizeShift;
@@ -313,12 +307,7 @@ static int chip_ready(struct map_info *map, struct flchip *chip, int mode)
 		if (ret) {
 			/* Oops. something got wrong. */
 			/* Resume and pretend we weren't here.  */
-			map_write(map, CMD(LPDDR_RESUME),
-				map->pfow_base + PFOW_COMMAND_CODE);
-			map_write(map, CMD(LPDDR_START_EXECUTION),
-				map->pfow_base + PFOW_COMMAND_EXECUTE);
-			chip->state = FL_ERASING;
-			chip->oldstate = FL_READY;
+			put_chip(map, chip);
 			printk(KERN_ERR "%s: suspend operation failed."
 					"State may be wrong \n", map->name);
 			return -EIO;
@@ -383,7 +372,6 @@ static void put_chip(struct map_info *map, struct flchip *chip)
 
 	switch (chip->oldstate) {
 	case FL_ERASING:
-		chip->state = chip->oldstate;
 		map_write(map, CMD(LPDDR_RESUME),
 				map->pfow_base + PFOW_COMMAND_CODE);
 		map_write(map, CMD(LPDDR_START_EXECUTION),

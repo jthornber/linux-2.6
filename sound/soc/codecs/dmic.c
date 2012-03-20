@@ -21,6 +21,7 @@
 
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
@@ -39,7 +40,31 @@ static struct snd_soc_dai_driver dmic_dai = {
 	},
 };
 
-static struct snd_soc_codec_driver soc_dmic = {};
+static const struct snd_soc_dapm_widget dmic_dapm_widgets[] = {
+	SND_SOC_DAPM_AIF_OUT("DMIC AIF", "Capture", 0,
+			     SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_INPUT("DMic"),
+};
+
+static const struct snd_soc_dapm_route intercon[] = {
+	{"DMIC AIF", NULL, "DMic"},
+};
+
+static int dmic_probe(struct snd_soc_codec *codec)
+{
+	struct snd_soc_dapm_context *dapm = &codec->dapm;
+
+	snd_soc_dapm_new_controls(dapm, dmic_dapm_widgets,
+				  ARRAY_SIZE(dmic_dapm_widgets));
+        snd_soc_dapm_add_routes(dapm, intercon, ARRAY_SIZE(intercon));
+	snd_soc_dapm_new_widgets(dapm);
+
+	return 0;
+}
+
+static struct snd_soc_codec_driver soc_dmic = {
+	.probe	= dmic_probe,
+};
 
 static int __devinit dmic_dev_probe(struct platform_device *pdev)
 {
@@ -64,17 +89,7 @@ static struct platform_driver dmic_driver = {
 	.remove = __devexit_p(dmic_dev_remove),
 };
 
-static int __init dmic_init(void)
-{
-	return platform_driver_register(&dmic_driver);
-}
-module_init(dmic_init);
-
-static void __exit dmic_exit(void)
-{
-	platform_driver_unregister(&dmic_driver);
-}
-module_exit(dmic_exit);
+module_platform_driver(dmic_driver);
 
 MODULE_DESCRIPTION("Generic DMIC driver");
 MODULE_AUTHOR("Liam Girdwood <lrg@slimlogic.co.uk>");

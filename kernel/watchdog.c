@@ -28,7 +28,7 @@
 #include <linux/perf_event.h>
 
 int watchdog_enabled = 1;
-int __read_mostly softlockup_thresh = 60;
+int __read_mostly watchdog_thresh = 10;
 
 static DEFINE_PER_CPU(unsigned long, watchdog_touch_ts);
 static DEFINE_PER_CPU(struct task_struct *, softlockup_watchdog);
@@ -91,6 +91,17 @@ static int __init nosoftlockup_setup(char *str)
 __setup("nosoftlockup", nosoftlockup_setup);
 /*  */
 
+/*
+ * Hard-lockup warnings should be triggered after just a few seconds. Soft-
+ * lockups can have false positives under extreme conditions. So we generally
+ * want a higher threshold for soft lockups than for hard lockups. So we couple
+ * the thresholds with a factor: we make the soft threshold twice the amount of
+ * time the hard threshold is.
+ */
+static int get_softlockup_thresh(void)
+{
+	return watchdog_thresh * 2;
+}
 
 /*
  * Returns seconds, approximately.  We don't need nanosecond
@@ -105,12 +116,12 @@ static unsigned long get_timestamp(int this_cpu)
 static unsigned long get_sample_period(void)
 {
 	/*
-	 * convert softlockup_thresh from seconds to ns
+	 * convert watchdog_thresh from seconds to ns
 	 * the divide by 5 is to give hrtimer 5 chances to
 	 * increment before the hardlockup detector generates
 	 * a warning
 	 */
-	return softlockup_thresh / 5 * NSEC_PER_SEC;
+	return get_softlockup_thresh() * (NSEC_PER_SEC / 5);
 }
 
 /* Commands for resetting the watchdog */
@@ -182,13 +193,14 @@ static int is_softlockup(unsigned long touch_ts)
 	unsigned long now = get_timestamp(smp_processor_id());
 
 	/* Warn about unreasonable delays: */
-	if (time_after(now, touch_ts + softlockup_thresh))
+	if (time_after(now, touch_ts + get_softlockup_thresh()))
 		return now - touch_ts;
 
 	return 0;
 }
 
 #ifdef CONFIG_HARDLOCKUP_DETECTOR
+
 static struct perf_event_attr wd_hw_attr = {
 	.type		= PERF_TYPE_HARDWARE,
 	.config		= PERF_COUNT_HW_CPU_CYCLES,
@@ -198,7 +210,7 @@ static struct perf_event_attr wd_hw_attr = {
 };
 
 /* Callback function for perf event subsystem */
-static void watchdog_overflow_callback(struct perf_event *event, int nmi,
+static void watchdog_overflow_callback(struct perf_event *event,
 		 struct perf_sample_data *data,
 		 struct pt_regs *regs)
 {
@@ -284,7 +296,7 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 		if (__this_cpu_read(soft_watchdog_warn) == true)
 			return HRTIMER_RESTART;
 
-		printk(KERN_ERR "BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
+		printk(KERN_EMERG "BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
 			smp_processor_id(), duration,
 			current->comm, task_pid_nr(current));
 		print_modules();
@@ -309,7 +321,7 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
  */
 static int watchdog(void *unused)
 {
-	static struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
+	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 	struct hrtimer *hrtimer = &__raw_get_cpu_var(watchdog_hrtimer);
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
@@ -338,7 +350,8 @@ static int watchdog(void *unused)
 		set_current_state(TASK_INTERRUPTIBLE);
 	}
 	__set_current_state(TASK_RUNNING);
-
+	param.sched_priority = 0;
+	sched_setscheduler(current, SCHED_NORMAL, &param);
 	return 0;
 }
 
@@ -357,10 +370,11 @@ static int watchdog_nmi_enable(int cpu)
 	if (event != NULL)
 		goto out_enable;
 
-	/* Try to register using hardware perf events */
 	wd_attr = &wd_hw_attr;
-	wd_attr->sample_period = hw_nmi_get_sample_period();
-	event = perf_event_create_kernel_counter(wd_attr, cpu, NULL, watchdog_overflow_callback);
+	wd_attr->sample_period = hw_nmi_get_sample_period(watchdog_thresh);
+
+	/* Try to register using hardware perf events */
+	event = perf_event_create_kernel_counter(wd_attr, cpu, NULL, watchdog_overflow_callback, NULL);
 	if (!IS_ERR(event)) {
 		printk(KERN_INFO "NMI watchdog enabled, takes one hw-pmu counter.\n");
 		goto out_save;
@@ -404,15 +418,13 @@ static void watchdog_nmi_disable(int cpu) { return; }
 #endif /* CONFIG_HARDLOCKUP_DETECTOR */
 
 /* prepare/enable/disable routines */
-static int watchdog_prepare_cpu(int cpu)
+static void watchdog_prepare_cpu(int cpu)
 {
 	struct hrtimer *hrtimer = &per_cpu(watchdog_hrtimer, cpu);
 
 	WARN_ON(per_cpu(softlockup_watchdog, cpu));
 	hrtimer_init(hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	hrtimer->function = watchdog_timer_fn;
-
-	return 0;
 }
 
 static int watchdog_enable(int cpu)
@@ -427,7 +439,7 @@ static int watchdog_enable(int cpu)
 
 	/* create the watchdog thread */
 	if (!p) {
-		p = kthread_create(watchdog, (void *)(unsigned long)cpu, "watchdog/%d", cpu);
+		p = kthread_create_on_node(watchdog, NULL, cpu_to_node(cpu), "watchdog/%d", cpu);
 		if (IS_ERR(p)) {
 			printk(KERN_ERR "softlockup watchdog for %i failed\n", cpu);
 			if (!err) {
@@ -469,6 +481,8 @@ static void watchdog_disable(int cpu)
 	}
 }
 
+/* sysctl functions */
+#ifdef CONFIG_SYSCTL
 static void watchdog_enable_all_cpus(void)
 {
 	int cpu;
@@ -498,31 +512,26 @@ static void watchdog_disable_all_cpus(void)
 }
 
 
-/* sysctl functions */
-#ifdef CONFIG_SYSCTL
 /*
- * proc handler for /proc/sys/kernel/nmi_watchdog
+ * proc handler for /proc/sys/kernel/nmi_watchdog,watchdog_thresh
  */
 
-int proc_dowatchdog_enabled(struct ctl_table *table, int write,
-		     void __user *buffer, size_t *length, loff_t *ppos)
+int proc_dowatchdog(struct ctl_table *table, int write,
+		    void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	proc_dointvec(table, write, buffer, length, ppos);
+	int ret;
 
-	if (write) {
-		if (watchdog_enabled)
-			watchdog_enable_all_cpus();
-		else
-			watchdog_disable_all_cpus();
-	}
-	return 0;
-}
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		goto out;
 
-int proc_dowatchdog_thresh(struct ctl_table *table, int write,
-			     void __user *buffer,
-			     size_t *lenp, loff_t *ppos)
-{
-	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (watchdog_enabled && watchdog_thresh)
+		watchdog_enable_all_cpus();
+	else
+		watchdog_disable_all_cpus();
+
+out:
+	return ret;
 }
 #endif /* CONFIG_SYSCTL */
 
@@ -534,17 +543,16 @@ static int __cpuinit
 cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
 	int hotcpu = (unsigned long)hcpu;
-	int err = 0;
 
 	switch (action) {
 	case CPU_UP_PREPARE:
 	case CPU_UP_PREPARE_FROZEN:
-		err = watchdog_prepare_cpu(hotcpu);
+		watchdog_prepare_cpu(hotcpu);
 		break;
 	case CPU_ONLINE:
 	case CPU_ONLINE_FROZEN:
 		if (watchdog_enabled)
-			err = watchdog_enable(hotcpu);
+			watchdog_enable(hotcpu);
 		break;
 #ifdef CONFIG_HOTPLUG_CPU
 	case CPU_UP_CANCELED:

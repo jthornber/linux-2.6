@@ -27,7 +27,7 @@
 #include <linux/delay.h>
 #include <linux/initrd.h>
 #include <linux/bitops.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kexec.h>
 #include <linux/debugfs.h>
 #include <linux/irq.h>
@@ -54,6 +54,8 @@
 #include <asm/pci-bridge.h>
 #include <asm/phyp_dump.h>
 #include <asm/kexec.h>
+#include <asm/opal.h>
+
 #include <mm/mmu_decl.h>
 
 #ifdef DEBUG
@@ -69,6 +71,7 @@ unsigned long tce_alloc_start, tce_alloc_end;
 u64 ppc64_rma_size;
 #endif
 static phys_addr_t first_memblock_size;
+static int __initdata boot_cpu_count;
 
 static int __init early_parse_mem(char *p)
 {
@@ -82,11 +85,29 @@ static int __init early_parse_mem(char *p)
 }
 early_param("mem", early_parse_mem);
 
+/*
+ * overlaps_initrd - check for overlap with page aligned extension of
+ * initrd.
+ */
+static inline int overlaps_initrd(unsigned long start, unsigned long size)
+{
+#ifdef CONFIG_BLK_DEV_INITRD
+	if (!initrd_start)
+		return 0;
+
+	return	(start + size) > _ALIGN_DOWN(initrd_start, PAGE_SIZE) &&
+			start <= _ALIGN_UP(initrd_end, PAGE_SIZE);
+#else
+	return 0;
+#endif
+}
+
 /**
  * move_device_tree - move tree to an unused area, if needed.
  *
  * The device tree may be allocated beyond our memory limit, or inside the
- * crash kernel region for kdump. If so, move it out of the way.
+ * crash kernel region for kdump, or within the page aligned range of initrd.
+ * If so, move it out of the way.
  */
 static void __init move_device_tree(void)
 {
@@ -99,7 +120,8 @@ static void __init move_device_tree(void)
 	size = be32_to_cpu(initial_boot_params->totalsize);
 
 	if ((memory_limit && (start + size) > PHYSICAL_START + memory_limit) ||
-			overlaps_crashkernel(start, size)) {
+			overlaps_crashkernel(start, size) ||
+			overlaps_initrd(start, size)) {
 		p = __va(memblock_alloc(size, PAGE_SIZE));
 		memcpy(p, initial_boot_params, size);
 		initial_boot_params = (struct boot_param_header *)p;
@@ -555,7 +577,9 @@ static void __init early_reserve_mem(void)
 #ifdef CONFIG_BLK_DEV_INITRD
 	/* then reserve the initrd, if any */
 	if (initrd_start && (initrd_end > initrd_start))
-		memblock_reserve(__pa(initrd_start), initrd_end - initrd_start);
+		memblock_reserve(_ALIGN_DOWN(__pa(initrd_start), PAGE_SIZE),
+			_ALIGN_UP(initrd_end, PAGE_SIZE) -
+			_ALIGN_DOWN(initrd_start, PAGE_SIZE));
 #endif /* CONFIG_BLK_DEV_INITRD */
 
 #ifdef CONFIG_PPC32
@@ -685,28 +709,41 @@ void __init early_init_devtree(void *params)
 	of_scan_flat_dt(early_init_dt_scan_rtas, NULL);
 #endif
 
+#ifdef CONFIG_PPC_POWERNV
+	/* Some machines might need OPAL info for debugging, grab it now. */
+	of_scan_flat_dt(early_init_dt_scan_opal, NULL);
+#endif
+
 #ifdef CONFIG_PHYP_DUMP
 	/* scan tree to see if dump occurred during last boot */
 	of_scan_flat_dt(early_init_dt_scan_phyp_dump, NULL);
 #endif
 
+	/* Pre-initialize the cmd_line with the content of boot_commmand_line,
+	 * which will be empty except when the content of the variable has
+	 * been overriden by a bootloading mechanism. This happens typically
+	 * with HAL takeover
+	 */
+	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
+
 	/* Retrieve various informations from the /chosen node of the
 	 * device-tree, including the platform type, initrd location and
 	 * size, TCE reserve, and more ...
 	 */
-	of_scan_flat_dt(early_init_dt_scan_chosen_ppc, NULL);
+	of_scan_flat_dt(early_init_dt_scan_chosen_ppc, cmd_line);
 
 	/* Scan memory nodes and rebuild MEMBLOCKs */
-	memblock_init();
-
 	of_scan_flat_dt(early_init_dt_scan_root, NULL);
 	of_scan_flat_dt(early_init_dt_scan_memory_ppc, NULL);
-	setup_initial_memory_limit(memstart_addr, first_memblock_size);
 
 	/* Save command line for /proc/cmdline and then parse parameters */
 	strlcpy(boot_command_line, cmd_line, COMMAND_LINE_SIZE);
 	parse_early_param();
 
+	/* make sure we've parsed cmdline for mem= before this */
+	if (memory_limit)
+		first_memblock_size = min(first_memblock_size, memory_limit);
+	setup_initial_memory_limit(memstart_addr, first_memblock_size);
 	/* Reserve MEMBLOCK regions used by kernel, initrd, dt, etc... */
 	memblock_reserve(PHYSICAL_START, __pa(klimit) - PHYSICAL_START);
 	/* If relocatable, reserve first 32k for interrupt vectors etc. */
@@ -717,20 +754,14 @@ void __init early_init_devtree(void *params)
 	early_reserve_mem();
 	phyp_dump_reserve_mem();
 
-	limit = memory_limit;
-	if (! limit) {
-		phys_addr_t memsize;
-
-		/* Ensure that total memory size is page-aligned, because
-		 * otherwise mark_bootmem() gets upset. */
-		memblock_analyze();
-		memsize = memblock_phys_mem_size();
-		if ((memsize & PAGE_MASK) != memsize)
-			limit = memsize & PAGE_MASK;
-	}
+	/*
+	 * Ensure that total memory size is page-aligned, because otherwise
+	 * mark_bootmem() gets upset.
+	 */
+	limit = ALIGN(memory_limit ?: memblock_phys_mem_size(), PAGE_SIZE);
 	memblock_enforce_memory_limit(limit);
 
-	memblock_analyze();
+	memblock_allow_resize();
 	memblock_dump_all();
 
 	DBG("Phys. mem: %llx\n", memblock_phys_mem_size());
@@ -747,6 +778,13 @@ void __init early_init_devtree(void *params)
 	 * (altivec support, boot CPU ID, ...)
 	 */
 	of_scan_flat_dt(early_init_dt_scan_cpus, NULL);
+
+#if defined(CONFIG_SMP) && defined(CONFIG_PPC64)
+	/* We'll later wait for secondaries to check in; there are
+	 * NCPUS-1 non-boot CPUs  :-)
+	 */
+	spinning_secondaries = boot_cpu_count - 1;
+#endif
 
 	DBG(" <- early_init_devtree()\n");
 }
@@ -841,16 +879,14 @@ static int prom_reconfig_notifier(struct notifier_block *nb,
 	switch (action) {
 	case PSERIES_RECONFIG_ADD:
 		err = of_finish_dynamic_node(node);
-		if (err < 0) {
+		if (err < 0)
 			printk(KERN_ERR "finish_node returned %d\n", err);
-			err = NOTIFY_BAD;
-		}
 		break;
 	default:
-		err = NOTIFY_DONE;
+		err = 0;
 		break;
 	}
-	return err;
+	return notifier_from_errno(err);
 }
 
 static struct notifier_block prom_reconfig_nb = {

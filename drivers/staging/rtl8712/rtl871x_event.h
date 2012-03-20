@@ -1,3 +1,28 @@
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
+ *
+ * Modifications for inclusion into the Linux staging tree are
+ * Copyright(c) 2010 Larry Finger. All rights reserved.
+ *
+ * Contact information:
+ * WLAN FAE <wlanfae@realtek.com>
+ * Larry Finger <Larry.Finger@lwfinger.net>
+ *
+ ******************************************************************************/
 #ifndef _RTL871x_EVENT_H_
 #define _RTL871x_EVENT_H_
 
@@ -45,8 +70,8 @@ struct stassoc_event {
 };
 
 struct stadel_event {
- unsigned char macaddr[6];
- unsigned char rsvd[2];
+	unsigned char macaddr[6];
+	unsigned char rsvd[2];
 };
 
 struct addba_event {
@@ -61,7 +86,7 @@ struct fwevent {
 };
 
 #define C2HEVENT_SZ			32
-struct event_node{
+struct event_node {
 	unsigned char *node;
 	unsigned char evt_code;
 	unsigned short evt_sz;
@@ -85,9 +110,9 @@ struct network_queue {
 };
 
 struct ADDBA_Req_Report_parm {
- unsigned char MacAddress[ETH_ALEN];
- unsigned short StartSeqNum;
- unsigned char tid;
+	unsigned char MacAddress[ETH_ALEN];
+	unsigned short StartSeqNum;
+	unsigned char tid;
 };
 #include "rtl8712_event.h"
 

@@ -45,7 +45,7 @@ MODULE_LICENSE("GPL");
 
 static void pcmcia_check_driver(struct pcmcia_driver *p_drv)
 {
-	struct pcmcia_device_id *did = p_drv->id_table;
+	const struct pcmcia_device_id *did = p_drv->id_table;
 	unsigned int i;
 	u32 hash;
 
@@ -784,7 +784,7 @@ static inline int pcmcia_load_firmware(struct pcmcia_device *dev, char * filenam
 
 
 static inline int pcmcia_devmatch(struct pcmcia_device *dev,
-				  struct pcmcia_device_id *did)
+				  const struct pcmcia_device_id *did)
 {
 	if (did->match_flags & PCMCIA_DEV_ID_MATCH_MANF_ID) {
 		if ((!dev->has_manf_id) || (dev->manf_id != did->manf_id))
@@ -890,7 +890,7 @@ static int pcmcia_bus_match(struct device *dev, struct device_driver *drv)
 {
 	struct pcmcia_device *p_dev = to_pcmcia_dev(dev);
 	struct pcmcia_driver *p_drv = to_pcmcia_drv(drv);
-	struct pcmcia_device_id *did = p_drv->id_table;
+	const struct pcmcia_device_id *did = p_drv->id_table;
 	struct pcmcia_dynid *dynid;
 
 	/* match dynamic devices first */
@@ -1269,10 +1269,8 @@ static int pcmcia_bus_add(struct pcmcia_socket *skt)
 
 static int pcmcia_bus_early_resume(struct pcmcia_socket *skt)
 {
-	if (!verify_cis_cache(skt)) {
-		pcmcia_put_socket(skt);
+	if (!verify_cis_cache(skt))
 		return 0;
-	}
 
 	dev_dbg(&skt->dev, "cis mismatch - different card\n");
 

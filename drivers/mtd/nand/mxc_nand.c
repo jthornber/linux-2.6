@@ -41,7 +41,7 @@
 
 #define nfc_is_v21()		(cpu_is_mx25() || cpu_is_mx35())
 #define nfc_is_v1()		(cpu_is_mx31() || cpu_is_mx27() || cpu_is_mx21())
-#define nfc_is_v3_2()		cpu_is_mx51()
+#define nfc_is_v3_2()		(cpu_is_mx51() || cpu_is_mx53())
 #define nfc_is_v3()		nfc_is_v3_2()
 
 /* Addresses for NFC registers */
@@ -56,8 +56,14 @@
 #define NFC_V1_V2_WRPROT		(host->regs + 0x12)
 #define NFC_V1_UNLOCKSTART_BLKADDR	(host->regs + 0x14)
 #define NFC_V1_UNLOCKEND_BLKADDR	(host->regs + 0x16)
-#define NFC_V21_UNLOCKSTART_BLKADDR	(host->regs + 0x20)
-#define NFC_V21_UNLOCKEND_BLKADDR	(host->regs + 0x22)
+#define NFC_V21_UNLOCKSTART_BLKADDR0	(host->regs + 0x20)
+#define NFC_V21_UNLOCKSTART_BLKADDR1	(host->regs + 0x24)
+#define NFC_V21_UNLOCKSTART_BLKADDR2	(host->regs + 0x28)
+#define NFC_V21_UNLOCKSTART_BLKADDR3	(host->regs + 0x2c)
+#define NFC_V21_UNLOCKEND_BLKADDR0	(host->regs + 0x22)
+#define NFC_V21_UNLOCKEND_BLKADDR1	(host->regs + 0x26)
+#define NFC_V21_UNLOCKEND_BLKADDR2	(host->regs + 0x2a)
+#define NFC_V21_UNLOCKEND_BLKADDR3	(host->regs + 0x2e)
 #define NFC_V1_V2_NF_WRPRST		(host->regs + 0x18)
 #define NFC_V1_V2_CONFIG1		(host->regs + 0x1a)
 #define NFC_V1_V2_CONFIG2		(host->regs + 0x1c)
@@ -137,7 +143,6 @@
 struct mxc_nand_host {
 	struct mtd_info		mtd;
 	struct nand_chip	nand;
-	struct mtd_partition	*parts;
 	struct device		*dev;
 
 	void			*spare0;
@@ -152,6 +157,7 @@ struct mxc_nand_host {
 	int			clk_act;
 	int			irq;
 	int			eccsize;
+	int			active_cs;
 
 	struct completion	op_completion;
 
@@ -236,9 +242,7 @@ static struct nand_ecclayout nandv2_hw_eccoob_4k = {
 	}
 };
 
-#ifdef CONFIG_MTD_PARTITIONS
 static const char *part_probes[] = { "RedBoot", "cmdlinepart", NULL };
-#endif
 
 static irqreturn_t mxc_nfc_irq(int irq, void *dev_id)
 {
@@ -345,8 +349,7 @@ static void wait_op_done(struct mxc_nand_host *host, int useirq)
 			udelay(1);
 		}
 		if (max_retries < 0)
-			DEBUG(MTD_DEBUG_LEVEL0, "%s: INT not set\n",
-			      __func__);
+			pr_debug("%s: INT not set\n", __func__);
 	}
 }
 
@@ -366,7 +369,7 @@ static void send_cmd_v3(struct mxc_nand_host *host, uint16_t cmd, int useirq)
  * waits for completion. */
 static void send_cmd_v1_v2(struct mxc_nand_host *host, uint16_t cmd, int useirq)
 {
-	DEBUG(MTD_DEBUG_LEVEL3, "send_cmd(host, 0x%x, %d)\n", cmd, useirq);
+	pr_debug("send_cmd(host, 0x%x, %d)\n", cmd, useirq);
 
 	writew(cmd, NFC_V1_V2_FLASH_CMD);
 	writew(NFC_CMD, NFC_V1_V2_CONFIG2);
@@ -382,8 +385,7 @@ static void send_cmd_v1_v2(struct mxc_nand_host *host, uint16_t cmd, int useirq)
 			udelay(1);
 		}
 		if (max_retries < 0)
-			DEBUG(MTD_DEBUG_LEVEL0, "%s: RESET failed\n",
-			      __func__);
+			pr_debug("%s: RESET failed\n", __func__);
 	} else {
 		/* Wait for operation to complete */
 		wait_op_done(host, useirq);
@@ -406,7 +408,7 @@ static void send_addr_v3(struct mxc_nand_host *host, uint16_t addr, int islast)
  * a NAND command. */
 static void send_addr_v1_v2(struct mxc_nand_host *host, uint16_t addr, int islast)
 {
-	DEBUG(MTD_DEBUG_LEVEL3, "send_addr(host, 0x%x %d)\n", addr, islast);
+	pr_debug("send_addr(host, 0x%x %d)\n", addr, islast);
 
 	writew(addr, NFC_V1_V2_FLASH_ADDR);
 	writew(NFC_ADDR, NFC_V1_V2_CONFIG2);
@@ -445,7 +447,7 @@ static void send_page_v1_v2(struct mtd_info *mtd, unsigned int ops)
 	for (i = 0; i < bufs; i++) {
 
 		/* NANDFC buffer 0 is used for page read/write */
-		writew(i, NFC_V1_V2_BUF_ADDR);
+		writew((host->active_cs << 4) | i, NFC_V1_V2_BUF_ADDR);
 
 		writew(ops, NFC_V1_V2_CONFIG2);
 
@@ -470,7 +472,7 @@ static void send_read_id_v1_v2(struct mxc_nand_host *host)
 	struct nand_chip *this = &host->nand;
 
 	/* NANDFC buffer 0 is used for device ID output */
-	writew(0x0, NFC_V1_V2_BUF_ADDR);
+	writew(host->active_cs << 4, NFC_V1_V2_BUF_ADDR);
 
 	writew(NFC_ID, NFC_V1_V2_CONFIG2);
 
@@ -505,7 +507,7 @@ static uint16_t get_dev_status_v1_v2(struct mxc_nand_host *host)
 	uint32_t store;
 	uint16_t ret;
 
-	writew(0x0, NFC_V1_V2_BUF_ADDR);
+	writew(host->active_cs << 4, NFC_V1_V2_BUF_ADDR);
 
 	/*
 	 * The device status is stored in main_area0. To
@@ -556,8 +558,7 @@ static int mxc_nand_correct_data_v1(struct mtd_info *mtd, u_char *dat,
 	uint16_t ecc_status = readw(NFC_V1_V2_ECC_STATUS_RESULT);
 
 	if (((ecc_status & 0x3) == 2) || ((ecc_status >> 2) == 2)) {
-		DEBUG(MTD_DEBUG_LEVEL0,
-		      "MXC_NAND: HWECC uncorrectable 2-bit ECC error\n");
+		pr_debug("MXC_NAND: HWECC uncorrectable 2-bit ECC error\n");
 		return -1;
 	}
 
@@ -686,24 +687,24 @@ static void mxc_nand_select_chip(struct mtd_info *mtd, int chip)
 	struct nand_chip *nand_chip = mtd->priv;
 	struct mxc_nand_host *host = nand_chip->priv;
 
-	switch (chip) {
-	case -1:
+	if (chip == -1) {
 		/* Disable the NFC clock */
 		if (host->clk_act) {
 			clk_disable(host->clk);
 			host->clk_act = 0;
 		}
-		break;
-	case 0:
-		/* Enable the NFC clock */
-		if (!host->clk_act) {
-			clk_enable(host->clk);
-			host->clk_act = 1;
-		}
-		break;
+		return;
+	}
 
-	default:
-		break;
+	if (!host->clk_act) {
+		/* Enable the NFC clock */
+		clk_enable(host->clk);
+		host->clk_act = 1;
+	}
+
+	if (nfc_is_v21()) {
+		host->active_cs = chip;
+		writew(host->active_cs << 4, NFC_V1_V2_BUF_ADDR);
 	}
 }
 
@@ -834,11 +835,17 @@ static void preset_v1_v2(struct mtd_info *mtd)
 
 	/* Blocks to be unlocked */
 	if (nfc_is_v21()) {
-		writew(0x0, NFC_V21_UNLOCKSTART_BLKADDR);
-		writew(0xffff, NFC_V21_UNLOCKEND_BLKADDR);
+		writew(0x0, NFC_V21_UNLOCKSTART_BLKADDR0);
+		writew(0x0, NFC_V21_UNLOCKSTART_BLKADDR1);
+		writew(0x0, NFC_V21_UNLOCKSTART_BLKADDR2);
+		writew(0x0, NFC_V21_UNLOCKSTART_BLKADDR3);
+		writew(0xffff, NFC_V21_UNLOCKEND_BLKADDR0);
+		writew(0xffff, NFC_V21_UNLOCKEND_BLKADDR1);
+		writew(0xffff, NFC_V21_UNLOCKEND_BLKADDR2);
+		writew(0xffff, NFC_V21_UNLOCKEND_BLKADDR3);
 	} else if (nfc_is_v1()) {
 		writew(0x0, NFC_V1_UNLOCKSTART_BLKADDR);
-		writew(0x4000, NFC_V1_UNLOCKEND_BLKADDR);
+		writew(0xffff, NFC_V1_UNLOCKEND_BLKADDR);
 	} else
 		BUG();
 
@@ -921,8 +928,7 @@ static void mxc_nand_command(struct mtd_info *mtd, unsigned command,
 	struct nand_chip *nand_chip = mtd->priv;
 	struct mxc_nand_host *host = nand_chip->priv;
 
-	DEBUG(MTD_DEBUG_LEVEL3,
-	      "mxc_nand_command (cmd = 0x%x, col = 0x%x, page = 0x%x)\n",
+	pr_debug("mxc_nand_command (cmd = 0x%x, col = 0x%x, page = 0x%x)\n",
 	      command, column, page_addr);
 
 	/* Reset command state information */
@@ -1033,7 +1039,7 @@ static int __init mxcnd_probe(struct platform_device *pdev)
 	struct mxc_nand_platform_data *pdata = pdev->dev.platform_data;
 	struct mxc_nand_host *host;
 	struct resource *res;
-	int err = 0, __maybe_unused nr_parts = 0;
+	int err = 0;
 	struct nand_ecclayout *oob_smallpage, *oob_largepage;
 
 	/* Allocate memory for MTD device structure and private data */
@@ -1168,7 +1174,7 @@ static int __init mxcnd_probe(struct platform_device *pdev)
 		this->bbt_td = &bbt_main_descr;
 		this->bbt_md = &bbt_mirror_descr;
 		/* update flash based bbt */
-		this->options |= NAND_USE_FLASH_BBT;
+		this->bbt_options |= NAND_BBT_USE_FLASH;
 	}
 
 	init_completion(&host->op_completion);
@@ -1200,7 +1206,7 @@ static int __init mxcnd_probe(struct platform_device *pdev)
 		irq_control_v1_v2(host, 1);
 
 	/* first scan to find the device and get the page size */
-	if (nand_scan_ident(mtd, 1, NULL)) {
+	if (nand_scan_ident(mtd, nfc_is_v21() ? 4 : 1, NULL)) {
 		err = -ENXIO;
 		goto escan;
 	}
@@ -1220,19 +1226,8 @@ static int __init mxcnd_probe(struct platform_device *pdev)
 	}
 
 	/* Register the partitions */
-#ifdef CONFIG_MTD_PARTITIONS
-	nr_parts =
-	    parse_mtd_partitions(mtd, part_probes, &host->parts, 0);
-	if (nr_parts > 0)
-		add_mtd_partitions(mtd, host->parts, nr_parts);
-	else if (pdata->parts)
-		add_mtd_partitions(mtd, pdata->parts, pdata->nr_parts);
-	else
-#endif
-	{
-		pr_info("Registering %s as whole device\n", mtd->name);
-		add_mtd_device(mtd);
-	}
+	mtd_device_parse_register(mtd, part_probes, 0,
+			pdata->parts, pdata->nr_parts);
 
 	platform_set_drvdata(pdev, host);
 

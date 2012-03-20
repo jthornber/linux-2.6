@@ -13,27 +13,14 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <dirent.h>
 
 #define IIO_MAX_NAME_LENGTH 30
 
-#define IIO_EV_CLASS_BUFFER		0
-#define IIO_BUFFER_EVENT_CODE(code)		\
-	(IIO_EV_CLASS_BUFFER | (code << 8))
-
-#define IIO_EVENT_CODE_RING_50_FULL	IIO_BUFFER_EVENT_CODE(0)
-#define IIO_EVENT_CODE_RING_75_FULL	IIO_BUFFER_EVENT_CODE(1)
-#define IIO_EVENT_CODE_RING_100_FULL	IIO_BUFFER_EVENT_CODE(2)
-
-
-#define FORMAT_SCAN_ELEMENTS_DIR "%s:buffer0/scan_elements"
+#define FORMAT_SCAN_ELEMENTS_DIR "%s/scan_elements"
 #define FORMAT_TYPE_FILE "%s_type"
 
 const char *iio_dir = "/sys/bus/iio/devices/";
-
-struct iio_event_data {
-	int id;
-	__s64 timestamp;
-};
 
 /**
  * iioutils_break_up_name() - extract generic name from full channel name
@@ -85,7 +72,9 @@ struct iio_channel_info {
 	unsigned index;
 	unsigned bytes;
 	unsigned bits_used;
+	unsigned shift;
 	uint64_t mask;
+	unsigned be;
 	unsigned is_signed;
 	unsigned enabled;
 	unsigned location;
@@ -96,6 +85,7 @@ struct iio_channel_info {
  * @is_signed: output whether channel is signed
  * @bytes: output how many bytes the channel storage occupies
  * @mask: output a bit mask for the raw data
+ * @be: big endian
  * @device_dir: the iio device directory
  * @name: the channel name
  * @generic_name: the channel type name
@@ -103,7 +93,9 @@ struct iio_channel_info {
 inline int iioutils_get_type(unsigned *is_signed,
 			     unsigned *bytes,
 			     unsigned *bits_used,
+			     unsigned *shift,
 			     uint64_t *mask,
+			     unsigned *be,
 			     const char *device_dir,
 			     const char *name,
 			     const char *generic_name)
@@ -112,7 +104,7 @@ inline int iioutils_get_type(unsigned *is_signed,
 	int ret;
 	DIR *dp;
 	char *scan_el_dir, *builtname, *builtname_generic, *filename = 0;
-	char signchar;
+	char signchar, endianchar;
 	unsigned padint;
 	const struct dirent *ent;
 
@@ -156,8 +148,18 @@ inline int iioutils_get_type(unsigned *is_signed,
 				ret = -errno;
 				goto error_free_filename;
 			}
-			fscanf(sysfsfp,
-			       "%c%u/%u", &signchar, bits_used, &padint);
+
+			ret = fscanf(sysfsfp,
+				     "%ce:%c%u/%u>>%u",
+				     &endianchar,
+				     &signchar,
+				     bits_used,
+				     &padint, shift);
+			if (ret < 0) {
+				printf("failed to pass scan type description\n");
+				return ret;
+			}
+			*be = (endianchar == 'b');
 			*bytes = padint / 8;
 			if (*bits_used == 64)
 				*mask = ~0;
@@ -167,6 +169,10 @@ inline int iioutils_get_type(unsigned *is_signed,
 				*is_signed = 1;
 			else
 				*is_signed = 0;
+			fclose(sysfsfp);
+			free(filename);
+
+			filename = 0;
 		}
 error_free_filename:
 	if (filename)
@@ -395,7 +401,9 @@ inline int build_channel_array(const char *device_dir,
 			ret = iioutils_get_type(&current->is_signed,
 						&current->bytes,
 						&current->bits_used,
+						&current->shift,
 						&current->mask,
+						&current->be,
 						device_dir,
 						current->name,
 						current->generic_name);

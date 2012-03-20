@@ -21,7 +21,7 @@
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/wait.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
@@ -32,7 +32,7 @@
  * UVC ioctls
  */
 static int uvc_ioctl_ctrl_map(struct uvc_video_chain *chain,
-	struct uvc_xu_control_mapping *xmap, int old)
+	struct uvc_xu_control_mapping *xmap)
 {
 	struct uvc_control_mapping *map;
 	unsigned int size;
@@ -58,9 +58,11 @@ static int uvc_ioctl_ctrl_map(struct uvc_video_chain *chain,
 		break;
 
 	case V4L2_CTRL_TYPE_MENU:
-		if (old) {
-			uvc_trace(UVC_TRACE_CONTROL, "V4L2_CTRL_TYPE_MENU not "
-				  "supported for UVCIOC_CTRL_MAP_OLD.\n");
+		/* Prevent excessive memory consumption, as well as integer
+		 * overflows.
+		 */
+		if (xmap->menu_count == 0 ||
+		    xmap->menu_count > UVC_MAX_CONTROL_MENU_ENTRIES) {
 			ret = -EINVAL;
 			goto done;
 		}
@@ -83,7 +85,7 @@ static int uvc_ioctl_ctrl_map(struct uvc_video_chain *chain,
 	default:
 		uvc_trace(UVC_TRACE_CONTROL, "Unsupported V4L2 control type "
 			  "%u.\n", xmap->v4l2_type);
-		ret = -EINVAL;
+		ret = -ENOTTY;
 		goto done;
 	}
 
@@ -520,10 +522,7 @@ static int uvc_v4l2_release(struct file *file)
 	/* Only free resources if this is a privileged handle. */
 	if (uvc_has_privileges(handle)) {
 		uvc_video_enable(stream, 0);
-
-		if (uvc_free_buffers(&stream->queue) < 0)
-			uvc_printk(KERN_ERR, "uvc_v4l2_release: Unable to "
-					"free buffers.\n");
+		uvc_free_buffers(&stream->queue);
 	}
 
 	/* Release the file handle. */
@@ -557,7 +556,7 @@ static long uvc_v4l2_do_ioctl(struct file *file, unsigned int cmd, void *arg)
 		strlcpy(cap->card, vdev->name, sizeof cap->card);
 		usb_make_path(stream->dev->udev,
 			      cap->bus_info, sizeof(cap->bus_info));
-		cap->version = DRIVER_VERSION_NUMBER;
+		cap->version = LINUX_VERSION_CODE;
 		if (stream->type == V4L2_BUF_TYPE_VIDEO_CAPTURE)
 			cap->capabilities = V4L2_CAP_VIDEO_CAPTURE
 					  | V4L2_CAP_STREAMING;
@@ -921,19 +920,11 @@ static long uvc_v4l2_do_ioctl(struct file *file, unsigned int cmd, void *arg)
 
 	/* Buffers & streaming */
 	case VIDIOC_REQBUFS:
-	{
-		struct v4l2_requestbuffers *rb = arg;
-
-		if (rb->type != stream->type ||
-		    rb->memory != V4L2_MEMORY_MMAP)
-			return -EINVAL;
-
 		if ((ret = uvc_acquire_privileges(handle)) < 0)
 			return ret;
 
 		mutex_lock(&stream->mutex);
-		ret = uvc_alloc_buffers(&stream->queue, rb->count,
-					stream->ctrl.dwMaxVideoFrameSize);
+		ret = uvc_alloc_buffers(&stream->queue, arg);
 		mutex_unlock(&stream->mutex);
 		if (ret < 0)
 			return ret;
@@ -941,17 +932,12 @@ static long uvc_v4l2_do_ioctl(struct file *file, unsigned int cmd, void *arg)
 		if (ret == 0)
 			uvc_dismiss_privileges(handle);
 
-		rb->count = ret;
 		ret = 0;
 		break;
-	}
 
 	case VIDIOC_QUERYBUF:
 	{
 		struct v4l2_buffer *buf = arg;
-
-		if (buf->type != stream->type)
-			return -EINVAL;
 
 		if (!uvc_has_privileges(handle))
 			return -EBUSY;
@@ -1018,21 +1004,11 @@ static long uvc_v4l2_do_ioctl(struct file *file, unsigned int cmd, void *arg)
 		uvc_trace(UVC_TRACE_IOCTL, "Unsupported ioctl 0x%08x\n", cmd);
 		return -EINVAL;
 
-	/* Dynamic controls. */
-	case UVCIOC_CTRL_ADD:
-		/* Legacy ioctl, kept for API compatibility reasons */
-		return -EEXIST;
-
-	case UVCIOC_CTRL_MAP_OLD:
 	case UVCIOC_CTRL_MAP:
-		return uvc_ioctl_ctrl_map(chain, arg,
-					  cmd == UVCIOC_CTRL_MAP_OLD);
+		return uvc_ioctl_ctrl_map(chain, arg);
 
-	case UVCIOC_CTRL_GET:
-		return uvc_xu_ctrl_query(chain, arg, 0);
-
-	case UVCIOC_CTRL_SET:
-		return uvc_xu_ctrl_query(chain, arg, 1);
+	case UVCIOC_CTRL_QUERY:
+		return uvc_xu_ctrl_query(chain, arg);
 
 	default:
 		uvc_trace(UVC_TRACE_IOCTL, "Unknown ioctl 0x%08x\n", cmd);
@@ -1081,6 +1057,20 @@ static unsigned int uvc_v4l2_poll(struct file *file, poll_table *wait)
 	return uvc_queue_poll(&stream->queue, file, wait);
 }
 
+#ifndef CONFIG_MMU
+static unsigned long uvc_v4l2_get_unmapped_area(struct file *file,
+		unsigned long addr, unsigned long len, unsigned long pgoff,
+		unsigned long flags)
+{
+	struct uvc_fh *handle = file->private_data;
+	struct uvc_streaming *stream = handle->stream;
+
+	uvc_trace(UVC_TRACE_CALLS, "uvc_v4l2_get_unmapped_area\n");
+
+	return uvc_queue_get_unmapped_area(&stream->queue, pgoff);
+}
+#endif
+
 const struct v4l2_file_operations uvc_fops = {
 	.owner		= THIS_MODULE,
 	.open		= uvc_v4l2_open,
@@ -1089,5 +1079,8 @@ const struct v4l2_file_operations uvc_fops = {
 	.read		= uvc_v4l2_read,
 	.mmap		= uvc_v4l2_mmap,
 	.poll		= uvc_v4l2_poll,
+#ifndef CONFIG_MMU
+	.get_unmapped_area = uvc_v4l2_get_unmapped_area,
+#endif
 };
 

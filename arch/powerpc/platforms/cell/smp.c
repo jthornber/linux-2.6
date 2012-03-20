@@ -15,7 +15,6 @@
 #undef DEBUG
 
 #include <linux/kernel.h>
-#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
@@ -24,11 +23,11 @@
 #include <linux/spinlock.h>
 #include <linux/cache.h>
 #include <linux/err.h>
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/cpu.h>
 
 #include <asm/ptrace.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/irq.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -152,7 +151,7 @@ static int smp_cell_cpu_bootable(unsigned int nr)
 	return 1;
 }
 static struct smp_ops_t bpa_iic_smp_ops = {
-	.message_pass	= iic_cause_IPI,
+	.message_pass	= iic_message_pass,
 	.probe		= smp_iic_probe,
 	.kick_cpu	= smp_cell_kick_cpu,
 	.setup_cpu	= smp_cell_setup_cpu,

@@ -297,10 +297,11 @@ enum {
 
 struct pm860x_chip {
 	struct device		*dev;
-	struct mutex		io_lock;
 	struct mutex		irq_lock;
 	struct i2c_client	*client;
 	struct i2c_client	*companion;	/* companion chip client */
+	struct regmap           *regmap;
+	struct regmap           *regmap_companion;
 
 	int			buck3_double;	/* DVC ramp slope double */
 	unsigned short		companion_addr;
@@ -330,6 +331,11 @@ struct pm860x_led_pdata {
 	unsigned long	flags;
 };
 
+struct pm860x_rtc_pdata {
+	int		(*sync)(unsigned int ticks);
+	int		vrtc;
+};
+
 struct pm860x_touch_pdata {
 	int		gpadc_prebias;
 	int		slot_cycle;
@@ -349,6 +355,7 @@ struct pm860x_power_pdata {
 struct pm860x_platform_data {
 	struct pm860x_backlight_pdata	*backlight;
 	struct pm860x_led_pdata		*led;
+	struct pm860x_rtc_pdata		*rtc;
 	struct pm860x_touch_pdata	*touch;
 	struct pm860x_power_pdata	*power;
 	struct regulator_init_data	*regulator;

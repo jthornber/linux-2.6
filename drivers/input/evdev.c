@@ -41,6 +41,7 @@ struct evdev {
 struct evdev_client {
 	unsigned int head;
 	unsigned int tail;
+	unsigned int packet_head; /* [future] position of the first element of next packet */
 	spinlock_t buffer_lock; /* protects access to buffer, head and tail */
 	struct fasync_struct *fasync;
 	struct evdev *evdev;
@@ -72,12 +73,16 @@ static void evdev_pass_event(struct evdev_client *client,
 		client->buffer[client->tail].type = EV_SYN;
 		client->buffer[client->tail].code = SYN_DROPPED;
 		client->buffer[client->tail].value = 0;
+
+		client->packet_head = client->tail;
+	}
+
+	if (event->type == EV_SYN && event->code == SYN_REPORT) {
+		client->packet_head = client->head;
+		kill_fasync(&client->fasync, SIGIO, POLL_IN);
 	}
 
 	spin_unlock(&client->buffer_lock);
-
-	if (event->type == EV_SYN)
-		kill_fasync(&client->fasync, SIGIO, POLL_IN);
 }
 
 /*
@@ -106,7 +111,8 @@ static void evdev_event(struct input_handle *handle,
 
 	rcu_read_unlock();
 
-	wake_up_interruptible(&evdev->wait);
+	if (type == EV_SYN && code == SYN_REPORT)
+		wake_up_interruptible(&evdev->wait);
 }
 
 static int evdev_fasync(int fd, struct file *file, int on)
@@ -159,7 +165,6 @@ static int evdev_grab(struct evdev *evdev, struct evdev_client *client)
 		return error;
 
 	rcu_assign_pointer(evdev->grab, client);
-	synchronize_rcu();
 
 	return 0;
 }
@@ -182,7 +187,6 @@ static void evdev_attach_client(struct evdev *evdev,
 	spin_lock(&evdev->client_lock);
 	list_add_tail_rcu(&client->node, &evdev->client_list);
 	spin_unlock(&evdev->client_lock);
-	synchronize_rcu();
 }
 
 static void evdev_detach_client(struct evdev *evdev,
@@ -328,7 +332,7 @@ static ssize_t evdev_write(struct file *file, const char __user *buffer,
 	struct evdev_client *client = file->private_data;
 	struct evdev *evdev = client->evdev;
 	struct input_event event;
-	int retval;
+	int retval = 0;
 
 	if (count < input_event_size())
 		return -EINVAL;
@@ -365,7 +369,7 @@ static int evdev_fetch_next_event(struct evdev_client *client,
 
 	spin_lock_irq(&client->buffer_lock);
 
-	have_event = client->head != client->tail;
+	have_event = client->packet_head != client->tail;
 	if (have_event) {
 		*event = client->buffer[client->tail++];
 		client->tail &= client->bufsize - 1;
@@ -382,19 +386,18 @@ static ssize_t evdev_read(struct file *file, char __user *buffer,
 	struct evdev_client *client = file->private_data;
 	struct evdev *evdev = client->evdev;
 	struct input_event event;
-	int retval;
+	int retval = 0;
 
 	if (count < input_event_size())
 		return -EINVAL;
 
-	if (client->head == client->tail && evdev->exist &&
-	    (file->f_flags & O_NONBLOCK))
-		return -EAGAIN;
-
-	retval = wait_event_interruptible(evdev->wait,
-		client->head != client->tail || !evdev->exist);
-	if (retval)
-		return retval;
+	if (!(file->f_flags & O_NONBLOCK)) {
+		retval = wait_event_interruptible(evdev->wait,
+				client->packet_head != client->tail ||
+				!evdev->exist);
+		if (retval)
+			return retval;
+	}
 
 	if (!evdev->exist)
 		return -ENODEV;
@@ -407,6 +410,9 @@ static ssize_t evdev_read(struct file *file, char __user *buffer,
 
 		retval += input_event_size();
 	}
+
+	if (retval == 0 && (file->f_flags & O_NONBLOCK))
+		return -EAGAIN;
 
 	return retval;
 }
@@ -421,7 +427,7 @@ static unsigned int evdev_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &evdev->wait, wait);
 
 	mask = evdev->exist ? POLLOUT | POLLWRNORM : POLLHUP | POLLERR;
-	if (client->head != client->tail)
+	if (client->packet_head != client->tail)
 		mask |= POLLIN | POLLRDNORM;
 
 	return mask;

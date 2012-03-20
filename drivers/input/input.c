@@ -451,7 +451,6 @@ int input_grab_device(struct input_handle *handle)
 	}
 
 	rcu_assign_pointer(dev->grab, handle);
-	synchronize_rcu();
 
  out:
 	mutex_unlock(&dev->mutex);
@@ -1625,7 +1624,7 @@ static struct device_type input_dev_type = {
 #endif
 };
 
-static char *input_devnode(struct device *dev, mode_t *mode)
+static char *input_devnode(struct device *dev, umode_t *mode)
 {
 	return kasprintf(GFP_KERNEL, "input/%s", dev_name(dev));
 }
@@ -1757,7 +1756,7 @@ static unsigned int input_estimate_events_per_packet(struct input_dev *dev)
 	} else if (test_bit(ABS_MT_TRACKING_ID, dev->absbit)) {
 		mt_slots = dev->absinfo[ABS_MT_TRACKING_ID].maximum -
 			   dev->absinfo[ABS_MT_TRACKING_ID].minimum + 1,
-		clamp(mt_slots, 2, 32);
+		mt_slots = clamp(mt_slots, 2, 32);
 	} else if (test_bit(ABS_MT_POSITION_X, dev->absbit)) {
 		mt_slots = 2;
 	} else {

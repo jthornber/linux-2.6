@@ -25,8 +25,7 @@
 
 #include <mach/serial.h>
 
-static u32 *uart;
-static u32 *uart_info = (u32 *)(DAVINCI_UART_INFO);
+u32 *uart;
 
 /* PORT_16C550A, in polled non-fifo mode */
 static void putc(char c)
@@ -44,6 +43,13 @@ static inline void flush(void)
 
 static inline void set_uart_info(u32 phys, void * __iomem virt)
 {
+	/*
+	 * Get address of some.bss variable and round it down
+	 * a la CONFIG_AUTO_ZRELADDR.
+	 */
+	u32 ram_start = (u32)&uart & 0xf8000000;
+	u32 *uart_info = (u32 *)(ram_start + DAVINCI_UART_INFO_OFS);
+
 	uart = (u32 *)phys;
 	uart_info[0] = phys;
 	uart_info[1] = (u32)virt;

@@ -1,4 +1,5 @@
-/* Virtio balloon implementation, inspired by Dor Loar and Marcelo
+/*
+ * Virtio balloon implementation, inspired by Dor Laor and Marcelo
  * Tosatti's implementations.
  *
  *  Copyright 2008 Rusty Russell IBM Corporation
@@ -17,7 +18,7 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-//#define DEBUG
+
 #include <linux/virtio.h>
 #include <linux/virtio_balloon.h>
 #include <linux/swap.h>
@@ -25,6 +26,7 @@
 #include <linux/freezer.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 
 struct virtio_balloon
 {
@@ -39,9 +41,6 @@ struct virtio_balloon
 
 	/* Waiting for host to ack the pages we released. */
 	struct completion acked;
-
-	/* Do we have to tell Host *before* we reuse pages? */
-	bool tell_host_first;
 
 	/* The pages we've told the Host we're not using. */
 	unsigned int num_pages;
@@ -89,7 +88,7 @@ static void tell_host(struct virtio_balloon *vb, struct virtqueue *vq)
 	init_completion(&vb->acked);
 
 	/* We should always be able to add one buffer to an empty queue. */
-	if (virtqueue_add_buf(vq, &sg, 1, 0, vb) < 0)
+	if (virtqueue_add_buf(vq, &sg, 1, 0, vb, GFP_KERNEL) < 0)
 		BUG();
 	virtqueue_kick(vq);
 
@@ -151,13 +150,13 @@ static void leak_balloon(struct virtio_balloon *vb, size_t num)
 		vb->num_pages--;
 	}
 
-	if (vb->tell_host_first) {
-		tell_host(vb, vb->deflate_vq);
-		release_pages_by_pfn(vb->pfns, vb->num_pfns);
-	} else {
-		release_pages_by_pfn(vb->pfns, vb->num_pfns);
-		tell_host(vb, vb->deflate_vq);
-	}
+	/*
+	 * Note that if
+	 * virtio_has_feature(vdev, VIRTIO_BALLOON_F_MUST_TELL_HOST);
+	 * is true, we *have* to do it in this order
+	 */
+	tell_host(vb, vb->deflate_vq);
+	release_pages_by_pfn(vb->pfns, vb->num_pfns);
 }
 
 static inline void update_stat(struct virtio_balloon *vb, int idx,
@@ -221,7 +220,7 @@ static void stats_handle_request(struct virtio_balloon *vb)
 
 	vq = vb->stats_vq;
 	sg_init_one(&sg, vb->stats, sizeof(vb->stats));
-	if (virtqueue_add_buf(vq, &sg, 1, 0, vb) < 0)
+	if (virtqueue_add_buf(vq, &sg, 1, 0, vb, GFP_KERNEL) < 0)
 		BUG();
 	virtqueue_kick(vq);
 }
@@ -276,13 +275,45 @@ static int balloon(void *_vballoon)
 	return 0;
 }
 
-static int virtballoon_probe(struct virtio_device *vdev)
+static int init_vqs(struct virtio_balloon *vb)
 {
-	struct virtio_balloon *vb;
 	struct virtqueue *vqs[3];
 	vq_callback_t *callbacks[] = { balloon_ack, balloon_ack, stats_request };
 	const char *names[] = { "inflate", "deflate", "stats" };
 	int err, nvqs;
+
+	/*
+	 * We expect two virtqueues: inflate and deflate, and
+	 * optionally stat.
+	 */
+	nvqs = virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_STATS_VQ) ? 3 : 2;
+	err = vb->vdev->config->find_vqs(vb->vdev, nvqs, vqs, callbacks, names);
+	if (err)
+		return err;
+
+	vb->inflate_vq = vqs[0];
+	vb->deflate_vq = vqs[1];
+	if (virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_STATS_VQ)) {
+		struct scatterlist sg;
+		vb->stats_vq = vqs[2];
+
+		/*
+		 * Prime this virtqueue with one buffer so the hypervisor can
+		 * use it to signal us later.
+		 */
+		sg_init_one(&sg, vb->stats, sizeof vb->stats);
+		if (virtqueue_add_buf(vb->stats_vq, &sg, 1, 0, vb, GFP_KERNEL)
+		    < 0)
+			BUG();
+		virtqueue_kick(vb->stats_vq);
+	}
+	return 0;
+}
+
+static int virtballoon_probe(struct virtio_device *vdev)
+{
+	struct virtio_balloon *vb;
+	int err;
 
 	vdev->priv = vb = kmalloc(sizeof(*vb), GFP_KERNEL);
 	if (!vb) {
@@ -296,37 +327,15 @@ static int virtballoon_probe(struct virtio_device *vdev)
 	vb->vdev = vdev;
 	vb->need_stats_update = 0;
 
-	/* We expect two virtqueues: inflate and deflate,
-	 * and optionally stat. */
-	nvqs = virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_STATS_VQ) ? 3 : 2;
-	err = vdev->config->find_vqs(vdev, nvqs, vqs, callbacks, names);
+	err = init_vqs(vb);
 	if (err)
 		goto out_free_vb;
-
-	vb->inflate_vq = vqs[0];
-	vb->deflate_vq = vqs[1];
-	if (virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_STATS_VQ)) {
-		struct scatterlist sg;
-		vb->stats_vq = vqs[2];
-
-		/*
-		 * Prime this virtqueue with one buffer so the hypervisor can
-		 * use it to signal us later.
-		 */
-		sg_init_one(&sg, vb->stats, sizeof vb->stats);
-		if (virtqueue_add_buf(vb->stats_vq, &sg, 1, 0, vb) < 0)
-			BUG();
-		virtqueue_kick(vb->stats_vq);
-	}
 
 	vb->thread = kthread_run(balloon, vb, "vballoon");
 	if (IS_ERR(vb->thread)) {
 		err = PTR_ERR(vb->thread);
 		goto out_del_vqs;
 	}
-
-	vb->tell_host_first
-		= virtio_has_feature(vdev, VIRTIO_BALLOON_F_MUST_TELL_HOST);
 
 	return 0;
 
@@ -355,6 +364,59 @@ static void __devexit virtballoon_remove(struct virtio_device *vdev)
 	kfree(vb);
 }
 
+#ifdef CONFIG_PM
+static int virtballoon_freeze(struct virtio_device *vdev)
+{
+	struct virtio_balloon *vb = vdev->priv;
+
+	/*
+	 * The kthread is already frozen by the PM core before this
+	 * function is called.
+	 */
+
+	while (vb->num_pages)
+		leak_balloon(vb, vb->num_pages);
+	update_balloon_size(vb);
+
+	/* Ensure we don't get any more requests from the host */
+	vdev->config->reset(vdev);
+	vdev->config->del_vqs(vdev);
+	return 0;
+}
+
+static int restore_common(struct virtio_device *vdev)
+{
+	struct virtio_balloon *vb = vdev->priv;
+	int ret;
+
+	ret = init_vqs(vdev->priv);
+	if (ret)
+		return ret;
+
+	fill_balloon(vb, towards_target(vb));
+	update_balloon_size(vb);
+	return 0;
+}
+
+static int virtballoon_thaw(struct virtio_device *vdev)
+{
+	return restore_common(vdev);
+}
+
+static int virtballoon_restore(struct virtio_device *vdev)
+{
+	struct virtio_balloon *vb = vdev->priv;
+
+	/*
+	 * If a request wasn't complete at the time of freezing, this
+	 * could have been set.
+	 */
+	vb->need_stats_update = 0;
+
+	return restore_common(vdev);
+}
+#endif
+
 static unsigned int features[] = {
 	VIRTIO_BALLOON_F_MUST_TELL_HOST,
 	VIRTIO_BALLOON_F_STATS_VQ,
@@ -369,6 +431,11 @@ static struct virtio_driver virtio_balloon_driver = {
 	.probe =	virtballoon_probe,
 	.remove =	__devexit_p(virtballoon_remove),
 	.config_changed = virtballoon_changed,
+#ifdef CONFIG_PM
+	.freeze	=	virtballoon_freeze,
+	.restore =	virtballoon_restore,
+	.thaw =		virtballoon_thaw,
+#endif
 };
 
 static int __init init(void)

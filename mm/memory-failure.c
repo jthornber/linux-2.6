@@ -42,6 +42,7 @@
 #include <linux/sched.h>
 #include <linux/ksm.h>
 #include <linux/rmap.h>
+#include <linux/export.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/backing-dev.h>
@@ -52,6 +53,8 @@
 #include <linux/swapops.h>
 #include <linux/hugetlb.h>
 #include <linux/memory_hotplug.h>
+#include <linux/mm_inline.h>
+#include <linux/kfifo.h>
 #include "internal.h"
 
 int sysctl_memory_failure_early_kill __read_mostly = 0;
@@ -239,7 +242,11 @@ void shake_page(struct page *p, int access)
 	if (access) {
 		int nr;
 		do {
-			nr = shrink_slab(1000, GFP_KERNEL, 1000);
+			struct shrink_control shrink = {
+				.gfp_mask = GFP_KERNEL,
+			};
+
+			nr = shrink_slab(&shrink, 1000, 1000);
 			if (page_count(p) == 1)
 				break;
 		} while (nr > 10);
@@ -386,10 +393,11 @@ static void collect_procs_anon(struct page *page, struct list_head *to_kill,
 	struct task_struct *tsk;
 	struct anon_vma *av;
 
-	read_lock(&tasklist_lock);
 	av = page_lock_anon_vma(page);
 	if (av == NULL)	/* Not actually mapped anymore */
-		goto out;
+		return;
+
+	read_lock(&tasklist_lock);
 	for_each_process (tsk) {
 		struct anon_vma_chain *vmac;
 
@@ -403,9 +411,8 @@ static void collect_procs_anon(struct page *page, struct list_head *to_kill,
 				add_to_kill(tsk, page, vma, to_kill, tkc);
 		}
 	}
-	page_unlock_anon_vma(av);
-out:
 	read_unlock(&tasklist_lock);
+	page_unlock_anon_vma(av);
 }
 
 /*
@@ -419,17 +426,8 @@ static void collect_procs_file(struct page *page, struct list_head *to_kill,
 	struct prio_tree_iter iter;
 	struct address_space *mapping = page->mapping;
 
-	/*
-	 * A note on the locking order between the two locks.
-	 * We don't rely on this particular order.
-	 * If you have some other code that needs a different order
-	 * feel free to switch them around. Or add a reverse link
-	 * from mm_struct to task_struct, then this could be all
-	 * done without taking tasklist_lock and looping over all tasks.
-	 */
-
+	mutex_lock(&mapping->i_mmap_mutex);
 	read_lock(&tasklist_lock);
-	spin_lock(&mapping->i_mmap_lock);
 	for_each_process(tsk) {
 		pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
 
@@ -449,8 +447,8 @@ static void collect_procs_file(struct page *page, struct list_head *to_kill,
 				add_to_kill(tsk, page, vma, to_kill, tkc);
 		}
 	}
-	spin_unlock(&mapping->i_mmap_lock);
 	read_unlock(&tasklist_lock);
+	mutex_unlock(&mapping->i_mmap_mutex);
 }
 
 /*
@@ -1182,6 +1180,97 @@ void memory_failure(unsigned long pfn, int trapno)
 	__memory_failure(pfn, trapno, 0);
 }
 
+#define MEMORY_FAILURE_FIFO_ORDER	4
+#define MEMORY_FAILURE_FIFO_SIZE	(1 << MEMORY_FAILURE_FIFO_ORDER)
+
+struct memory_failure_entry {
+	unsigned long pfn;
+	int trapno;
+	int flags;
+};
+
+struct memory_failure_cpu {
+	DECLARE_KFIFO(fifo, struct memory_failure_entry,
+		      MEMORY_FAILURE_FIFO_SIZE);
+	spinlock_t lock;
+	struct work_struct work;
+};
+
+static DEFINE_PER_CPU(struct memory_failure_cpu, memory_failure_cpu);
+
+/**
+ * memory_failure_queue - Schedule handling memory failure of a page.
+ * @pfn: Page Number of the corrupted page
+ * @trapno: Trap number reported in the signal to user space.
+ * @flags: Flags for memory failure handling
+ *
+ * This function is called by the low level hardware error handler
+ * when it detects hardware memory corruption of a page. It schedules
+ * the recovering of error page, including dropping pages, killing
+ * processes etc.
+ *
+ * The function is primarily of use for corruptions that
+ * happen outside the current execution context (e.g. when
+ * detected by a background scrubber)
+ *
+ * Can run in IRQ context.
+ */
+void memory_failure_queue(unsigned long pfn, int trapno, int flags)
+{
+	struct memory_failure_cpu *mf_cpu;
+	unsigned long proc_flags;
+	struct memory_failure_entry entry = {
+		.pfn =		pfn,
+		.trapno =	trapno,
+		.flags =	flags,
+	};
+
+	mf_cpu = &get_cpu_var(memory_failure_cpu);
+	spin_lock_irqsave(&mf_cpu->lock, proc_flags);
+	if (kfifo_put(&mf_cpu->fifo, &entry))
+		schedule_work_on(smp_processor_id(), &mf_cpu->work);
+	else
+		pr_err("Memory failure: buffer overflow when queuing memory failure at 0x%#lx\n",
+		       pfn);
+	spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
+	put_cpu_var(memory_failure_cpu);
+}
+EXPORT_SYMBOL_GPL(memory_failure_queue);
+
+static void memory_failure_work_func(struct work_struct *work)
+{
+	struct memory_failure_cpu *mf_cpu;
+	struct memory_failure_entry entry = { 0, };
+	unsigned long proc_flags;
+	int gotten;
+
+	mf_cpu = &__get_cpu_var(memory_failure_cpu);
+	for (;;) {
+		spin_lock_irqsave(&mf_cpu->lock, proc_flags);
+		gotten = kfifo_get(&mf_cpu->fifo, &entry);
+		spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
+		if (!gotten)
+			break;
+		__memory_failure(entry.pfn, entry.trapno, entry.flags);
+	}
+}
+
+static int __init memory_failure_init(void)
+{
+	struct memory_failure_cpu *mf_cpu;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		mf_cpu = &per_cpu(memory_failure_cpu, cpu);
+		spin_lock_init(&mf_cpu->lock);
+		INIT_KFIFO(mf_cpu->fifo);
+		INIT_WORK(&mf_cpu->work, memory_failure_work_func);
+	}
+
+	return 0;
+}
+core_initcall(memory_failure_init);
+
 /**
  * unpoison_memory - Unpoison a previously poisoned page
  * @pfn: Page number of the to be unpoisoned page
@@ -1222,7 +1311,7 @@ int unpoison_memory(unsigned long pfn)
 		 * to the end.
 		 */
 		if (PageHuge(page)) {
-			pr_debug("MCE: Memory failure is now running on free hugepage %#lx\n", pfn);
+			pr_info("MCE: Memory failure is now running on free hugepage %#lx\n", pfn);
 			return 0;
 		}
 		if (TestClearPageHWPoison(p))
@@ -1331,7 +1420,7 @@ static int soft_offline_huge_page(struct page *page, int flags)
 
 	if (PageHWPoison(hpage)) {
 		put_page(hpage);
-		pr_debug("soft offline: %#lx hugepage already poisoned\n", pfn);
+		pr_info("soft offline: %#lx hugepage already poisoned\n", pfn);
 		return -EBUSY;
 	}
 
@@ -1345,8 +1434,8 @@ static int soft_offline_huge_page(struct page *page, int flags)
 		list_for_each_entry_safe(page1, page2, &pagelist, lru)
 			put_page(page1);
 
-		pr_debug("soft offline: %#lx: migration failed %d, type %lx\n",
-			 pfn, ret, page->flags);
+		pr_info("soft offline: %#lx: migration failed %d, type %lx\n",
+			pfn, ret, page->flags);
 		if (ret > 0)
 			ret = -EIO;
 		return ret;
@@ -1417,7 +1506,7 @@ int soft_offline_page(struct page *page, int flags)
 	}
 	if (!PageLRU(page)) {
 		pr_info("soft_offline: %#lx: unknown non LRU page type %lx\n",
-				pfn, page->flags);
+			pfn, page->flags);
 		return -EIO;
 	}
 
@@ -1440,16 +1529,12 @@ int soft_offline_page(struct page *page, int flags)
 	 */
 	ret = invalidate_inode_page(page);
 	unlock_page(page);
-
 	/*
-	 * Drop count because page migration doesn't like raised
-	 * counts. The page could get re-allocated, but if it becomes
-	 * LRU the isolation will just fail.
 	 * RED-PEN would be better to keep it isolated here, but we
 	 * would need to fix isolation locking first.
 	 */
-	put_page(page);
 	if (ret == 1) {
+		put_page(page);
 		ret = 0;
 		pr_info("soft_offline: %#lx: invalidated\n", pfn);
 		goto done;
@@ -1461,12 +1546,18 @@ int soft_offline_page(struct page *page, int flags)
 	 * handles a large number of cases for us.
 	 */
 	ret = isolate_lru_page(page);
+	/*
+	 * Drop page reference which is came from get_any_page()
+	 * successful isolate_lru_page() already took another one.
+	 */
+	put_page(page);
 	if (!ret) {
 		LIST_HEAD(pagelist);
-
+		inc_zone_page_state(page, NR_ISOLATED_ANON +
+					    page_is_file_cache(page));
 		list_add(&page->lru, &pagelist);
 		ret = migrate_pages(&pagelist, new_page, MPOL_MF_MOVE_ALL,
-								0, true);
+							0, MIGRATE_SYNC);
 		if (ret) {
 			putback_lru_pages(&pagelist);
 			pr_info("soft offline: %#lx: migration failed %d, type %lx\n",
@@ -1476,7 +1567,7 @@ int soft_offline_page(struct page *page, int flags)
 		}
 	} else {
 		pr_info("soft offline: %#lx: isolation failed: %d, page count %d, type %lx\n",
-				pfn, ret, page_count(page), page->flags);
+			pfn, ret, page_count(page), page->flags);
 	}
 	if (ret)
 		return ret;

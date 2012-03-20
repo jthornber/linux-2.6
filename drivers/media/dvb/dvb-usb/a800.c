@@ -78,17 +78,26 @@ static struct rc_map_table rc_map_a800_table[] = {
 
 static int a800_rc_query(struct dvb_usb_device *d, u32 *event, int *state)
 {
-	u8 key[5];
+	int ret;
+	u8 *key = kmalloc(5, GFP_KERNEL);
+	if (!key)
+		return -ENOMEM;
+
 	if (usb_control_msg(d->udev,usb_rcvctrlpipe(d->udev,0),
 				0x04, USB_TYPE_VENDOR | USB_DIR_IN, 0, 0, key, 5,
-				2000) != 5)
-		return -ENODEV;
+				2000) != 5) {
+		ret = -ENODEV;
+		goto out;
+	}
 
 	/* call the universal NEC remote processor, to find out the key's state and event */
 	dvb_usb_nec_rc_key_to_event(d,key,event,state);
 	if (key[0] != 0)
 		deb_rc("key: %x %x %x %x %x\n",key[0],key[1],key[2],key[3],key[4]);
-	return 0;
+	ret = 0;
+out:
+	kfree(key);
+	return ret;
 }
 
 /* USB Driver stuff */
@@ -118,6 +127,8 @@ static struct dvb_usb_device_properties a800_properties = {
 	.num_adapters = 1,
 	.adapter = {
 		{
+		.num_frontends = 1,
+		.fe = {{
 			.caps = DVB_USB_ADAP_HAS_PID_FILTER | DVB_USB_ADAP_PID_FILTER_CAN_BE_TURNED_OFF,
 			.pid_filter_count = 32,
 			.streaming_ctrl   = dibusb2_0_streaming_ctrl,
@@ -138,7 +149,7 @@ static struct dvb_usb_device_properties a800_properties = {
 					}
 				}
 			},
-
+		}},
 			.size_of_priv     = sizeof(struct dibusb_state),
 		},
 	},
@@ -172,26 +183,7 @@ static struct usb_driver a800_driver = {
 	.id_table	= a800_table,
 };
 
-/* module stuff */
-static int __init a800_module_init(void)
-{
-	int result;
-	if ((result = usb_register(&a800_driver))) {
-		err("usb_register failed. Error number %d",result);
-		return result;
-	}
-
-	return 0;
-}
-
-static void __exit a800_module_exit(void)
-{
-	/* deregister this driver from the USB subsystem */
-	usb_deregister(&a800_driver);
-}
-
-module_init (a800_module_init);
-module_exit (a800_module_exit);
+module_usb_driver(a800_driver);
 
 MODULE_AUTHOR("Patrick Boettcher <patrick.boettcher@desy.de>");
 MODULE_DESCRIPTION("AVerMedia AverTV DVB-T USB 2.0 (A800)");

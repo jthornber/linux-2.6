@@ -8,14 +8,11 @@
  * published by the Free Software Foundation.
  *
  */
-#ifndef __ASM_MIPS_PROM_H
-#define __ASM_MIPS_PROM_H
+#ifndef __ASM_PROM_H
+#define __ASM_PROM_H
 
 #ifdef CONFIG_OF
 #include <asm/bootinfo.h>
-
-/* which is compatible with the flattened device tree (FDT) */
-#define cmd_line arcs_cmdline
 
 extern int early_init_dt_scan_memory_arch(unsigned long node,
 	const char *uname, int depth, void *data);
@@ -28,4 +25,4 @@ extern void device_tree_init(void);
 static inline void device_tree_init(void) { }
 #endif /* CONFIG_OF */
 
-#endif /* _ASM_MIPS_PROM_H */
+#endif /* __ASM_PROM_H */

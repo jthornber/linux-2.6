@@ -179,6 +179,7 @@ int ivtv_set_speed(struct ivtv *itv, int speed)
 		ivtv_vapi(itv, CX2341X_DEC_PAUSE_PLAYBACK, 1, 0);
 
 		/* Wait for any DMA to finish */
+		mutex_unlock(&itv->serialize_lock);
 		prepare_to_wait(&itv->dma_waitq, &wait, TASK_INTERRUPTIBLE);
 		while (test_bit(IVTV_F_I_DMA, &itv->i_flags)) {
 			got_sig = signal_pending(current);
@@ -188,6 +189,7 @@ int ivtv_set_speed(struct ivtv *itv, int speed)
 			schedule();
 		}
 		finish_wait(&itv->dma_waitq, &wait);
+		mutex_lock(&itv->serialize_lock);
 		if (got_sig)
 			return -EINTR;
 
@@ -757,7 +759,6 @@ static int ivtv_querycap(struct file *file, void *fh, struct v4l2_capability *vc
 	strlcpy(vcap->driver, IVTV_DRIVER_NAME, sizeof(vcap->driver));
 	strlcpy(vcap->card, itv->card_name, sizeof(vcap->card));
 	snprintf(vcap->bus_info, sizeof(vcap->bus_info), "PCI:%s", pci_name(itv->pdev));
-	vcap->version = IVTV_DRIVER_VERSION; 	    /* version */
 	vcap->capabilities = itv->v4l2_cap; 	    /* capabilities */
 	return 0;
 }
@@ -1071,28 +1072,8 @@ static int ivtv_g_std(struct file *file, void *fh, v4l2_std_id *std)
 	return 0;
 }
 
-int ivtv_s_std(struct file *file, void *fh, v4l2_std_id *std)
+void ivtv_s_std_enc(struct ivtv *itv, v4l2_std_id *std)
 {
-	DEFINE_WAIT(wait);
-	struct ivtv *itv = fh2id(fh)->itv;
-	struct yuv_playback_info *yi = &itv->yuv_info;
-	int f;
-
-	if ((*std & V4L2_STD_ALL) == 0)
-		return -EINVAL;
-
-	if (*std == itv->std)
-		return 0;
-
-	if (test_bit(IVTV_F_I_RADIO_USER, &itv->i_flags) ||
-	    atomic_read(&itv->capturing) > 0 ||
-	    atomic_read(&itv->decoding) > 0) {
-		/* Switching standard would turn off the radio or mess
-		   with already running streams, prevent that by
-		   returning EBUSY. */
-		return -EBUSY;
-	}
-
 	itv->std = *std;
 	itv->is_60hz = (*std & V4L2_STD_525_60) ? 1 : 0;
 	itv->is_50hz = !itv->is_60hz;
@@ -1106,48 +1087,81 @@ int ivtv_s_std(struct file *file, void *fh, v4l2_std_id *std)
 	if (itv->hw_flags & IVTV_HW_CX25840)
 		itv->vbi.sliced_decoder_line_size = itv->is_60hz ? 272 : 284;
 
-	IVTV_DEBUG_INFO("Switching standard to %llx.\n", (unsigned long long)itv->std);
-
 	/* Tuner */
 	ivtv_call_all(itv, core, s_std, itv->std);
+}
 
-	if (itv->v4l2_cap & V4L2_CAP_VIDEO_OUTPUT) {
-		/* set display standard */
-		itv->std_out = *std;
-		itv->is_out_60hz = itv->is_60hz;
-		itv->is_out_50hz = itv->is_50hz;
-		ivtv_call_all(itv, video, s_std_output, itv->std_out);
+void ivtv_s_std_dec(struct ivtv *itv, v4l2_std_id *std)
+{
+	struct yuv_playback_info *yi = &itv->yuv_info;
+	DEFINE_WAIT(wait);
+	int f;
 
-		/*
-		 * The next firmware call is time sensitive. Time it to
-		 * avoid risk of a hard lock, by trying to ensure the call
-		 * happens within the first 100 lines of the top field.
-		 * Make 4 attempts to sync to the decoder before giving up.
-		 */
-		for (f = 0; f < 4; f++) {
-			prepare_to_wait(&itv->vsync_waitq, &wait,
-					TASK_UNINTERRUPTIBLE);
-			if ((read_reg(IVTV_REG_DEC_LINE_FIELD) >> 16) < 100)
-				break;
-			schedule_timeout(msecs_to_jiffies(25));
-		}
-		finish_wait(&itv->vsync_waitq, &wait);
+	/* set display standard */
+	itv->std_out = *std;
+	itv->is_out_60hz = (*std & V4L2_STD_525_60) ? 1 : 0;
+	itv->is_out_50hz = !itv->is_out_60hz;
+	ivtv_call_all(itv, video, s_std_output, itv->std_out);
 
-		if (f == 4)
-			IVTV_WARN("Mode change failed to sync to decoder\n");
-
-		ivtv_vapi(itv, CX2341X_DEC_SET_STANDARD, 1, itv->is_out_50hz);
-		itv->main_rect.left = itv->main_rect.top = 0;
-		itv->main_rect.width = 720;
-		itv->main_rect.height = itv->cxhdl.height;
-		ivtv_vapi(itv, CX2341X_OSD_SET_FRAMEBUFFER_WINDOW, 4,
-			720, itv->main_rect.height, 0, 0);
-		yi->main_rect = itv->main_rect;
-		if (!itv->osd_info) {
-			yi->osd_full_w = 720;
-			yi->osd_full_h = itv->is_out_50hz ? 576 : 480;
-		}
+	/*
+	 * The next firmware call is time sensitive. Time it to
+	 * avoid risk of a hard lock, by trying to ensure the call
+	 * happens within the first 100 lines of the top field.
+	 * Make 4 attempts to sync to the decoder before giving up.
+	 */
+	mutex_unlock(&itv->serialize_lock);
+	for (f = 0; f < 4; f++) {
+		prepare_to_wait(&itv->vsync_waitq, &wait,
+				TASK_UNINTERRUPTIBLE);
+		if ((read_reg(IVTV_REG_DEC_LINE_FIELD) >> 16) < 100)
+			break;
+		schedule_timeout(msecs_to_jiffies(25));
 	}
+	finish_wait(&itv->vsync_waitq, &wait);
+	mutex_lock(&itv->serialize_lock);
+
+	if (f == 4)
+		IVTV_WARN("Mode change failed to sync to decoder\n");
+
+	ivtv_vapi(itv, CX2341X_DEC_SET_STANDARD, 1, itv->is_out_50hz);
+	itv->main_rect.left = 0;
+	itv->main_rect.top = 0;
+	itv->main_rect.width = 720;
+	itv->main_rect.height = itv->is_out_50hz ? 576 : 480;
+	ivtv_vapi(itv, CX2341X_OSD_SET_FRAMEBUFFER_WINDOW, 4,
+		720, itv->main_rect.height, 0, 0);
+	yi->main_rect = itv->main_rect;
+	if (!itv->osd_info) {
+		yi->osd_full_w = 720;
+		yi->osd_full_h = itv->is_out_50hz ? 576 : 480;
+	}
+}
+
+int ivtv_s_std(struct file *file, void *fh, v4l2_std_id *std)
+{
+	struct ivtv *itv = fh2id(fh)->itv;
+
+	if ((*std & V4L2_STD_ALL) == 0)
+		return -EINVAL;
+
+	if (*std == itv->std)
+		return 0;
+
+	if (test_bit(IVTV_F_I_RADIO_USER, &itv->i_flags) ||
+	    atomic_read(&itv->capturing) > 0 ||
+	    atomic_read(&itv->decoding) > 0) {
+		/* Switching standard would mess with already running
+		   streams, prevent that by returning EBUSY. */
+		return -EBUSY;
+	}
+
+	IVTV_DEBUG_INFO("Switching standard to %llx.\n",
+		(unsigned long long)itv->std);
+
+	ivtv_s_std_enc(itv, std);
+	if (itv->v4l2_cap & V4L2_CAP_VIDEO_OUTPUT)
+		ivtv_s_std_dec(itv, std);
+
 	return 0;
 }
 
@@ -1173,14 +1187,10 @@ static int ivtv_g_tuner(struct file *file, void *fh, struct v4l2_tuner *vt)
 
 	ivtv_call_all(itv, tuner, g_tuner, vt);
 
-	if (test_bit(IVTV_F_I_RADIO_USER, &itv->i_flags)) {
+	if (vt->type == V4L2_TUNER_RADIO)
 		strlcpy(vt->name, "ivtv Radio Tuner", sizeof(vt->name));
-		vt->type = V4L2_TUNER_RADIO;
-	} else {
+	else
 		strlcpy(vt->name, "ivtv TV Tuner", sizeof(vt->name));
-		vt->type = V4L2_TUNER_ANALOG_TV;
-	}
-
 	return 0;
 }
 
@@ -1197,9 +1207,7 @@ static int ivtv_g_sliced_vbi_cap(struct file *file, void *fh, struct v4l2_sliced
 					cap->service_lines[f][l] = set;
 			}
 		}
-		return 0;
-	}
-	if (cap->type == V4L2_BUF_TYPE_SLICED_VBI_OUTPUT) {
+	} else if (cap->type == V4L2_BUF_TYPE_SLICED_VBI_OUTPUT) {
 		if (!(itv->v4l2_cap & V4L2_CAP_SLICED_VBI_OUTPUT))
 			return -EINVAL;
 		if (itv->is_60hz) {
@@ -1209,9 +1217,16 @@ static int ivtv_g_sliced_vbi_cap(struct file *file, void *fh, struct v4l2_sliced
 			cap->service_lines[0][23] = V4L2_SLICED_WSS_625;
 			cap->service_lines[0][16] = V4L2_SLICED_VPS;
 		}
-		return 0;
+	} else {
+		return -EINVAL;
 	}
-	return -EINVAL;
+
+	set = 0;
+	for (f = 0; f < 2; f++)
+		for (l = 0; l < 24; l++)
+			set |= cap->service_lines[f][l];
+	cap->service_set = set;
+	return 0;
 }
 
 static int ivtv_g_enc_index(struct file *file, void *fh, struct v4l2_enc_idx *idx)
@@ -1444,11 +1459,11 @@ static int ivtv_subscribe_event(struct v4l2_fh *fh, struct v4l2_event_subscripti
 	switch (sub->type) {
 	case V4L2_EVENT_VSYNC:
 	case V4L2_EVENT_EOS:
-		break;
+	case V4L2_EVENT_CTRL:
+		return v4l2_event_subscribe(fh, sub, 0);
 	default:
 		return -EINVAL;
 	}
-	return v4l2_event_subscribe(fh, sub);
 }
 
 static int ivtv_log_status(struct file *file, void *fh)
@@ -1831,8 +1846,7 @@ static long ivtv_default(struct file *file, void *fh, bool valid_prio,
 	return 0;
 }
 
-static long ivtv_serialized_ioctl(struct ivtv *itv, struct file *filp,
-		unsigned int cmd, unsigned long arg)
+long ivtv_v4l2_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct video_device *vfd = video_devdata(filp);
 	long ret;
@@ -1842,21 +1856,6 @@ static long ivtv_serialized_ioctl(struct ivtv *itv, struct file *filp,
 	ret = video_ioctl2(filp, cmd, arg);
 	vfd->debug = 0;
 	return ret;
-}
-
-long ivtv_v4l2_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
-{
-	struct ivtv_open_id *id = fh2id(filp->private_data);
-	struct ivtv *itv = id->itv;
-	long res;
-
-	/* DQEVENT can block, so this should not run with the serialize lock */
-	if (cmd == VIDIOC_DQEVENT)
-		return ivtv_serialized_ioctl(itv, filp, cmd, arg);
-	mutex_lock(&itv->serialize_lock);
-	res = ivtv_serialized_ioctl(itv, filp, cmd, arg);
-	mutex_unlock(&itv->serialize_lock);
-	return res;
 }
 
 static const struct v4l2_ioctl_ops ivtv_ioctl_ops = {

@@ -110,8 +110,8 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	struct list_head *tmp1, *tmp2, *tmp3;
 	struct mid_q_entry *mid_entry;
 	struct TCP_Server_Info *server;
-	struct cifsSesInfo *ses;
-	struct cifsTconInfo *tcon;
+	struct cifs_ses *ses;
+	struct cifs_tcon *tcon;
 	int i, j;
 	__u32 dev_type;
 
@@ -152,7 +152,7 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 				    tcp_ses_list);
 		i++;
 		list_for_each(tmp2, &server->smb_ses_list) {
-			ses = list_entry(tmp2, struct cifsSesInfo,
+			ses = list_entry(tmp2, struct cifs_ses,
 					 smb_ses_list);
 			if ((ses->serverDomain == NULL) ||
 				(ses->serverOS == NULL) ||
@@ -171,19 +171,19 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 			seq_printf(m, "TCP status: %d\n\tLocal Users To "
 				   "Server: %d SecMode: 0x%x Req On Wire: %d",
 				   server->tcpStatus, server->srv_count,
-				   server->secMode,
+				   server->sec_mode,
 				   atomic_read(&server->inFlight));
 
 #ifdef CONFIG_CIFS_STATS2
 			seq_printf(m, " In Send: %d In MaxReq Wait: %d",
-				atomic_read(&server->inSend),
+				atomic_read(&server->in_send),
 				atomic_read(&server->num_waiters));
 #endif
 
 			seq_puts(m, "\n\tShares:");
 			j = 0;
 			list_for_each(tmp3, &ses->tcon_list) {
-				tcon = list_entry(tmp3, struct cifsTconInfo,
+				tcon = list_entry(tmp3, struct cifs_tcon,
 						  tcon_list);
 				++j;
 				dev_type = le32_to_cpu(tcon->fsDevInfo.DeviceType);
@@ -256,8 +256,8 @@ static ssize_t cifs_stats_proc_write(struct file *file,
 	int rc;
 	struct list_head *tmp1, *tmp2, *tmp3;
 	struct TCP_Server_Info *server;
-	struct cifsSesInfo *ses;
-	struct cifsTconInfo *tcon;
+	struct cifs_ses *ses;
+	struct cifs_tcon *tcon;
 
 	rc = get_user(c, buffer);
 	if (rc)
@@ -273,11 +273,11 @@ static ssize_t cifs_stats_proc_write(struct file *file,
 			server = list_entry(tmp1, struct TCP_Server_Info,
 					    tcp_ses_list);
 			list_for_each(tmp2, &server->smb_ses_list) {
-				ses = list_entry(tmp2, struct cifsSesInfo,
+				ses = list_entry(tmp2, struct cifs_ses,
 						 smb_ses_list);
 				list_for_each(tmp3, &ses->tcon_list) {
 					tcon = list_entry(tmp3,
-							  struct cifsTconInfo,
+							  struct cifs_tcon,
 							  tcon_list);
 					atomic_set(&tcon->num_smbs_sent, 0);
 					atomic_set(&tcon->num_writes, 0);
@@ -312,8 +312,8 @@ static int cifs_stats_proc_show(struct seq_file *m, void *v)
 	int i;
 	struct list_head *tmp1, *tmp2, *tmp3;
 	struct TCP_Server_Info *server;
-	struct cifsSesInfo *ses;
-	struct cifsTconInfo *tcon;
+	struct cifs_ses *ses;
+	struct cifs_tcon *tcon;
 
 	seq_printf(m,
 			"Resources in use\nCIFS Session: %d\n",
@@ -346,11 +346,11 @@ static int cifs_stats_proc_show(struct seq_file *m, void *v)
 		server = list_entry(tmp1, struct TCP_Server_Info,
 				    tcp_ses_list);
 		list_for_each(tmp2, &server->smb_ses_list) {
-			ses = list_entry(tmp2, struct cifsSesInfo,
+			ses = list_entry(tmp2, struct cifs_ses,
 					 smb_ses_list);
 			list_for_each(tmp3, &ses->tcon_list) {
 				tcon = list_entry(tmp3,
-						  struct cifsTconInfo,
+						  struct cifs_tcon,
 						  tcon_list);
 				i++;
 				seq_printf(m, "\n%d) %s", i, tcon->treeName);
@@ -511,7 +511,7 @@ static const struct file_operations cifsFYI_proc_fops = {
 
 static int cifs_oplock_proc_show(struct seq_file *m, void *v)
 {
-	seq_printf(m, "%d\n", oplockEnabled);
+	seq_printf(m, "%d\n", enable_oplocks);
 	return 0;
 }
 
@@ -526,13 +526,16 @@ static ssize_t cifs_oplock_proc_write(struct file *file,
 	char c;
 	int rc;
 
+	printk(KERN_WARNING "CIFS: The /proc/fs/cifs/OplockEnabled interface "
+	       "will be removed in kernel version 3.4. Please migrate to "
+	       "using the 'enable_oplocks' module parameter in cifs.ko.\n");
 	rc = get_user(c, buffer);
 	if (rc)
 		return rc;
 	if (c == '0' || c == 'n' || c == 'N')
-		oplockEnabled = 0;
+		enable_oplocks = false;
 	else if (c == '1' || c == 'y' || c == 'Y')
-		oplockEnabled = 1;
+		enable_oplocks = true;
 
 	return count;
 }
@@ -673,14 +676,23 @@ static ssize_t cifs_multiuser_mount_proc_write(struct file *file,
 {
 	char c;
 	int rc;
+	static bool warned;
 
 	rc = get_user(c, buffer);
 	if (rc)
 		return rc;
 	if (c == '0' || c == 'n' || c == 'N')
 		multiuser_mount = 0;
-	else if (c == '1' || c == 'y' || c == 'Y')
+	else if (c == '1' || c == 'y' || c == 'Y') {
 		multiuser_mount = 1;
+		if (!warned) {
+			warned = true;
+			printk(KERN_WARNING "CIFS VFS: The legacy multiuser "
+				"mount code is scheduled to be deprecated in "
+				"3.5. Please switch to using the multiuser "
+				"mount option.");
+		}
+	}
 
 	return count;
 }

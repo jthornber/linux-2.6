@@ -42,6 +42,9 @@
 #define CAYMAN_MAX_TCC_MASK          0xFF
 
 #define DMIF_ADDR_CONFIG  				0xBD4
+#define	SRBM_GFX_CNTL				        0x0E44
+#define		RINGID(x)					(((x) & 0x3) << 0)
+#define		VMID(x)						(((x) & 0x7) << 0)
 #define	SRBM_STATUS				        0x0E50
 
 #define VM_CONTEXT0_REQUEST_RESPONSE			0x1470
@@ -136,6 +139,8 @@
 #define	HDP_NONSURFACE_INFO				0x2C08
 #define	HDP_NONSURFACE_SIZE				0x2C0C
 #define HDP_ADDR_CONFIG  				0x2F48
+#define HDP_MISC_CNTL					0x2F4C
+#define 	HDP_FLUSH_INVALIDATE_CACHE			(1 << 0)
 
 #define	CC_SYS_RB_BACKEND_DISABLE			0x3F88
 #define	GC_USER_SYS_RB_BACKEND_DISABLE			0x3F8C
@@ -217,6 +222,8 @@
 #define	SCRATCH_UMSK					0x8540
 #define	SCRATCH_ADDR					0x8544
 #define	CP_SEM_WAIT_TIMER				0x85BC
+#define	CP_SEM_INCOMPLETE_TIMER_CNTL			0x85C8
+#define	CP_COHER_CNTL2					0x85E8
 #define CP_ME_CNTL					0x86D8
 #define		CP_ME_HALT					(1 << 28)
 #define		CP_PFP_HALT					(1 << 26)
@@ -318,7 +325,7 @@
 #define	CGTS_USER_TCC_DISABLE				0x914C
 #define		TCC_DISABLE_MASK				0xFFFF0000
 #define		TCC_DISABLE_SHIFT				16
-#define	CGTS_SM_CTRL_REG				0x915C
+#define	CGTS_SM_CTRL_REG				0x9150
 #define		OVERRIDE				(1 << 21)
 
 #define	TA_CNTL_AUX					0x9508
@@ -351,7 +358,7 @@
 #define		MULTI_GPU_TILE_SIZE_MASK		0x03000000
 #define		MULTI_GPU_TILE_SIZE_SHIFT		24
 #define		ROW_SIZE(x)             		((x) << 28)
-#define		ROW_SIZE_MASK				0x30000007
+#define		ROW_SIZE_MASK				0x30000000
 #define		ROW_SIZE_SHIFT				28
 #define		NUM_LOWER_PIPES(x)			((x) << 30)
 #define		NUM_LOWER_PIPES_MASK			0x40000000
@@ -392,6 +399,12 @@
 #define	CP_RB0_RPTR_ADDR				0xC10C
 #define	CP_RB0_RPTR_ADDR_HI				0xC110
 #define	CP_RB0_WPTR					0xC114
+
+#define CP_INT_CNTL                                     0xC124
+#       define CNTX_BUSY_INT_ENABLE                     (1 << 19)
+#       define CNTX_EMPTY_INT_ENABLE                    (1 << 20)
+#       define TIME_STAMP_INT_ENABLE                    (1 << 26)
+
 #define	CP_RB1_BASE					0xC180
 #define	CP_RB1_CNTL					0xC184
 #define	CP_RB1_RPTR_ADDR				0xC188
@@ -408,6 +421,10 @@
 #define	CP_ME_RAM_WADDR					0xC15C
 #define	CP_ME_RAM_DATA					0xC160
 #define	CP_DEBUG					0xC1FC
+
+#define VGT_EVENT_INITIATOR                             0x28a90
+#       define CACHE_FLUSH_AND_INV_EVENT_TS                     (0x14 << 0)
+#       define CACHE_FLUSH_AND_INV_EVENT                        (0x16 << 0)
 
 /*
  * PM4
@@ -443,6 +460,7 @@
 #define	PACKET3_DISPATCH_DIRECT				0x15
 #define	PACKET3_DISPATCH_INDIRECT			0x16
 #define	PACKET3_INDIRECT_BUFFER_END			0x17
+#define	PACKET3_MODE_CONTROL				0x18
 #define	PACKET3_SET_PREDICATION				0x20
 #define	PACKET3_REG_RMW					0x21
 #define	PACKET3_COND_EXEC				0x22
@@ -492,7 +510,27 @@
 #define		PACKET3_ME_INITIALIZE_DEVICE_ID(x) ((x) << 16)
 #define	PACKET3_COND_WRITE				0x45
 #define	PACKET3_EVENT_WRITE				0x46
+#define		EVENT_TYPE(x)                           ((x) << 0)
+#define		EVENT_INDEX(x)                          ((x) << 8)
+                /* 0 - any non-TS event
+		 * 1 - ZPASS_DONE
+		 * 2 - SAMPLE_PIPELINESTAT
+		 * 3 - SAMPLE_STREAMOUTSTAT*
+		 * 4 - *S_PARTIAL_FLUSH
+		 * 5 - TS events
+		 */
 #define	PACKET3_EVENT_WRITE_EOP				0x47
+#define		DATA_SEL(x)                             ((x) << 29)
+                /* 0 - discard
+		 * 1 - send low 32bit data
+		 * 2 - send 64bit data
+		 * 3 - send 64bit counter value
+		 */
+#define		INT_SEL(x)                              ((x) << 24)
+                /* 0 - none
+		 * 1 - interrupt only (DATA_SEL = 0)
+		 * 2 - interrupt when data write is confirmed
+		 */
 #define	PACKET3_EVENT_WRITE_EOS				0x48
 #define	PACKET3_PREAMBLE_CNTL				0x4A
 #              define PACKET3_PREAMBLE_BEGIN_CLEAR_STATE     (2 << 28)

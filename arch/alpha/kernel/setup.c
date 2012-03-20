@@ -43,6 +43,7 @@
 #include <asm/setup.h>
 #include <asm/io.h>
 #include <linux/log2.h>
+#include <linux/export.h>
 
 extern struct atomic_notifier_head panic_notifier_list;
 static int alpha_panic_event(struct notifier_block *, unsigned long, void *);
@@ -1257,7 +1258,7 @@ show_cpuinfo(struct seq_file *f, void *slot)
 #ifdef CONFIG_SMP
 	seq_printf(f, "cpus active\t\t: %u\n"
 		      "cpu active mask\t\t: %016lx\n",
-		       num_online_cpus(), cpus_addr(cpu_possible_map)[0]);
+		       num_online_cpus(), cpumask_bits(cpu_possible_mask)[0]);
 #endif
 
 	show_cache_size (f, "L1 Icache", alpha_l1i_cacheshape);

@@ -52,6 +52,7 @@
 #include "bsru6.h"
 #include "tda1002x.h"
 #include "tda827x.h"
+#include "bsbe1-d01a.h"
 
 #define MODULE_NAME "budget_ci"
 
@@ -192,7 +193,6 @@ static int msp430_ir_init(struct budget_ci *budget_ci)
 	dev->input_phys = budget_ci->ir.phys;
 	dev->input_id.bustype = BUS_PCI;
 	dev->input_id.version = 1;
-	dev->scanmask = 0xff;
 	if (saa->pci->subsystem_vendor) {
 		dev->input_id.vendor = saa->pci->subsystem_vendor;
 		dev->input_id.product = saa->pci->subsystem_device;
@@ -224,6 +224,7 @@ static int msp430_ir_init(struct budget_ci *budget_ci)
 	case 0x1017:
 	case 0x1019:
 	case 0x101a:
+	case 0x101b:
 		/* for the Technotrend 1500 bundled remote */
 		dev->map_name = RC_MAP_TT_1500;
 		break;
@@ -232,6 +233,8 @@ static int msp430_ir_init(struct budget_ci *budget_ci)
 		dev->map_name = RC_MAP_BUDGET_CI_OLD;
 		break;
 	}
+	if (!budget_ci->ir.full_rc5)
+		dev->scanmask = 0xff;
 
 	error = rc_register_device(dev);
 	if (error) {
@@ -657,33 +660,33 @@ static int philips_su1278_tt_set_symbol_rate(struct dvb_frontend *fe, u32 srate,
 	return 0;
 }
 
-static int philips_su1278_tt_tuner_set_params(struct dvb_frontend *fe,
-					   struct dvb_frontend_parameters *params)
+static int philips_su1278_tt_tuner_set_params(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
 	struct budget_ci *budget_ci = (struct budget_ci *) fe->dvb->priv;
 	u32 div;
 	u8 buf[4];
 	struct i2c_msg msg = {.addr = 0x60,.flags = 0,.buf = buf,.len = sizeof(buf) };
 
-	if ((params->frequency < 950000) || (params->frequency > 2150000))
+	if ((p->frequency < 950000) || (p->frequency > 2150000))
 		return -EINVAL;
 
-	div = (params->frequency + (500 - 1)) / 500;	// round correctly
+	div = (p->frequency + (500 - 1)) / 500;	/* round correctly */
 	buf[0] = (div >> 8) & 0x7f;
 	buf[1] = div & 0xff;
 	buf[2] = 0x80 | ((div & 0x18000) >> 10) | 2;
 	buf[3] = 0x20;
 
-	if (params->u.qpsk.symbol_rate < 4000000)
+	if (p->symbol_rate < 4000000)
 		buf[3] |= 1;
 
-	if (params->frequency < 1250000)
+	if (p->frequency < 1250000)
 		buf[3] |= 0;
-	else if (params->frequency < 1550000)
+	else if (p->frequency < 1550000)
 		buf[3] |= 0x40;
-	else if (params->frequency < 2050000)
+	else if (p->frequency < 2050000)
 		buf[3] |= 0x80;
-	else if (params->frequency < 2150000)
+	else if (p->frequency < 2150000)
 		buf[3] |= 0xC0;
 
 	if (fe->ops.i2c_gate_ctrl)
@@ -738,8 +741,9 @@ static int philips_tdm1316l_tuner_init(struct dvb_frontend *fe)
 	return 0;
 }
 
-static int philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struct dvb_frontend_parameters *params)
+static int philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
 	struct budget_ci *budget_ci = (struct budget_ci *) fe->dvb->priv;
 	u8 tuner_buf[4];
 	struct i2c_msg tuner_msg = {.addr = budget_ci->tuner_pll_address,.flags = 0,.buf = tuner_buf,.len = sizeof(tuner_buf) };
@@ -747,7 +751,7 @@ static int philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struct dvb
 	u8 band, cp, filter;
 
 	// determine charge pump
-	tuner_frequency = params->frequency + 36130000;
+	tuner_frequency = p->frequency + 36130000;
 	if (tuner_frequency < 87000000)
 		return -EINVAL;
 	else if (tuner_frequency < 130000000)
@@ -772,30 +776,30 @@ static int philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struct dvb
 		return -EINVAL;
 
 	// determine band
-	if (params->frequency < 49000000)
+	if (p->frequency < 49000000)
 		return -EINVAL;
-	else if (params->frequency < 159000000)
+	else if (p->frequency < 159000000)
 		band = 1;
-	else if (params->frequency < 444000000)
+	else if (p->frequency < 444000000)
 		band = 2;
-	else if (params->frequency < 861000000)
+	else if (p->frequency < 861000000)
 		band = 4;
 	else
 		return -EINVAL;
 
 	// setup PLL filter and TDA9889
-	switch (params->u.ofdm.bandwidth) {
-	case BANDWIDTH_6_MHZ:
+	switch (p->bandwidth_hz) {
+	case 6000000:
 		tda1004x_writereg(fe, 0x0C, 0x14);
 		filter = 0;
 		break;
 
-	case BANDWIDTH_7_MHZ:
+	case 7000000:
 		tda1004x_writereg(fe, 0x0C, 0x80);
 		filter = 0;
 		break;
 
-	case BANDWIDTH_8_MHZ:
+	case 8000000:
 		tda1004x_writereg(fe, 0x0C, 0x14);
 		filter = 1;
 		break;
@@ -806,7 +810,7 @@ static int philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struct dvb
 
 	// calculate divisor
 	// ((36130000+((1000000/6)/2)) + Finput)/(1000000/6)
-	tuner_frequency = (((params->frequency / 1000) * 6) + 217280) / 1000;
+	tuner_frequency = (((p->frequency / 1000) * 6) + 217280) / 1000;
 
 	// setup tuner buffer
 	tuner_buf[0] = tuner_frequency >> 8;
@@ -853,8 +857,9 @@ static struct tda1004x_config philips_tdm1316l_config_invert = {
 	.request_firmware = philips_tdm1316l_request_firmware,
 };
 
-static int dvbc_philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struct dvb_frontend_parameters *params)
+static int dvbc_philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
 	struct budget_ci *budget_ci = (struct budget_ci *) fe->dvb->priv;
 	u8 tuner_buf[5];
 	struct i2c_msg tuner_msg = {.addr = budget_ci->tuner_pll_address,
@@ -865,7 +870,7 @@ static int dvbc_philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struc
 	u8 band, cp, filter;
 
 	// determine charge pump
-	tuner_frequency = params->frequency + 36125000;
+	tuner_frequency = p->frequency + 36125000;
 	if (tuner_frequency < 87000000)
 		return -EINVAL;
 	else if (tuner_frequency < 130000000) {
@@ -902,7 +907,7 @@ static int dvbc_philips_tdm1316l_tuner_set_params(struct dvb_frontend *fe, struc
 	filter = 1;
 
 	// calculate divisor
-	tuner_frequency = (params->frequency + 36125000 + (62500/2)) / 62500;
+	tuner_frequency = (p->frequency + 36125000 + (62500/2)) / 62500;
 
 	// setup tuner buffer
 	tuner_buf[0] = tuner_frequency >> 8;
@@ -1051,7 +1056,6 @@ static const struct stb0899_s1_reg tt3200_stb0899_s1_init_1[] = {
 	{ STB0899_DISRX_ST0     	, 0x04 },
 	{ STB0899_DISRX_ST1     	, 0x00 },
 	{ STB0899_DISPARITY     	, 0x00 },
-	{ STB0899_DISFIFO       	, 0x00 },
 	{ STB0899_DISSTATUS		, 0x20 },
 	{ STB0899_DISF22        	, 0x8c },
 	{ STB0899_DISF22RX      	, 0x9a },
@@ -1388,6 +1392,23 @@ static void frontend_init(struct budget_ci *budget_ci)
 		}
 		break;
 
+	case 0x101b: /* TT S-1500B (BSBE1-D01A - STV0288/STB6000/LNBP21) */
+		budget_ci->budget.dvb_frontend = dvb_attach(stv0288_attach, &stv0288_bsbe1_d01a_config, &budget_ci->budget.i2c_adap);
+		if (budget_ci->budget.dvb_frontend) {
+			if (dvb_attach(stb6000_attach, budget_ci->budget.dvb_frontend, 0x63, &budget_ci->budget.i2c_adap)) {
+				if (!dvb_attach(lnbp21_attach, budget_ci->budget.dvb_frontend, &budget_ci->budget.i2c_adap, 0, 0)) {
+					printk(KERN_ERR "%s: No LNBP21 found!\n", __func__);
+					dvb_frontend_detach(budget_ci->budget.dvb_frontend);
+					budget_ci->budget.dvb_frontend = NULL;
+				}
+			} else {
+				printk(KERN_ERR "%s: No STB6000 found!\n", __func__);
+				dvb_frontend_detach(budget_ci->budget.dvb_frontend);
+				budget_ci->budget.dvb_frontend = NULL;
+			}
+		}
+		break;
+
 	case 0x1019:		// TT S2-3200 PCI
 		/*
 		 * NOTE! on some STB0899 versions, the internal PLL takes a longer time
@@ -1518,6 +1539,7 @@ MAKE_BUDGET_INFO(ttbtci, "TT-Budget-T-CI PCI", BUDGET_TT);
 MAKE_BUDGET_INFO(ttbcci, "TT-Budget-C-CI PCI", BUDGET_TT);
 MAKE_BUDGET_INFO(ttc1501, "TT-Budget C-1501 PCI", BUDGET_TT);
 MAKE_BUDGET_INFO(tt3200, "TT-Budget S2-3200 PCI", BUDGET_TT);
+MAKE_BUDGET_INFO(ttbs1500b, "TT-Budget S-1500B PCI", BUDGET_TT);
 
 static struct pci_device_id pci_tbl[] = {
 	MAKE_EXTENSION_PCI(ttbci, 0x13c2, 0x100c),
@@ -1528,6 +1550,7 @@ static struct pci_device_id pci_tbl[] = {
 	MAKE_EXTENSION_PCI(ttbs2, 0x13c2, 0x1017),
 	MAKE_EXTENSION_PCI(ttc1501, 0x13c2, 0x101a),
 	MAKE_EXTENSION_PCI(tt3200, 0x13c2, 0x1019),
+	MAKE_EXTENSION_PCI(ttbs1500b, 0x13c2, 0x101b),
 	{
 	 .vendor = 0,
 	 }

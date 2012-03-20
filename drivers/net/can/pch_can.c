@@ -66,6 +66,7 @@
 #define PCH_IF_CREQ_BUSY	BIT(15)
 
 #define PCH_STATUS_INT		0x8000
+#define PCH_RP			0x00008000
 #define PCH_REC			0x00007f00
 #define PCH_TEC			0x000000ff
 
@@ -527,7 +528,7 @@ static void pch_can_error(struct net_device *ndev, u32 status)
 		priv->can.can_stats.error_passive++;
 		state = CAN_STATE_ERROR_PASSIVE;
 		cf->can_id |= CAN_ERR_CRTL;
-		if (((errc & PCH_REC) >> 8) > 127)
+		if (errc & PCH_RP)
 			cf->data[1] |= CAN_ERR_CRTL_RX_PASSIVE;
 		if ((errc & PCH_TEC) > 127)
 			cf->data[1] |= CAN_ERR_CRTL_TX_PASSIVE;
@@ -653,7 +654,7 @@ static int pch_can_rx_normal(struct net_device *ndev, u32 obj_num, int quota)
 	u16 data_reg;
 
 	do {
-		/* Reading the messsage object from the Message RAM */
+		/* Reading the message object from the Message RAM */
 		iowrite32(PCH_CMASK_RX_TX_GET, &priv->regs->ifregs[0].cmask);
 		pch_can_rw_msg_obj(&priv->regs->ifregs[0].creq, obj_num);
 

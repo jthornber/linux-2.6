@@ -196,7 +196,7 @@ static inline int dvb_isoc_copy(struct cx231xx *dev, struct urb *urb)
 	if (!dev)
 		return 0;
 
-	if ((dev->state & DEV_DISCONNECTED) || (dev->state & DEV_MISCONFIGURED))
+	if (dev->state & DEV_DISCONNECTED)
 		return 0;
 
 	if (urb->status < 0) {
@@ -228,7 +228,7 @@ static inline int dvb_bulk_copy(struct cx231xx *dev, struct urb *urb)
 	if (!dev)
 		return 0;
 
-	if ((dev->state & DEV_DISCONNECTED) || (dev->state & DEV_MISCONFIGURED))
+	if (dev->state & DEV_DISCONNECTED)
 		return 0;
 
 	if (urb->status < 0) {
@@ -704,6 +704,7 @@ static int dvb_init(struct cx231xx *dev)
 		break;
 
 	case CX231XX_BOARD_PV_PLAYTV_USB_HYBRID:
+	case CX231XX_BOARD_KWORLD_UB430_USB_HYBRID:
 
 		printk(KERN_INFO "%s: looking for demod on i2c bus: %d\n",
 		       __func__, i2c_adapter_id(&dev->i2c_bus[dev->board.tuner_i2c_master].i2c_adap));

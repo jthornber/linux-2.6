@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2010-2011 Atheros Communications Inc.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 #ifndef AR9003_EEPROM_H
 #define AR9003_EEPROM_H
 
@@ -200,10 +216,8 @@ struct ar9300_modal_eep_header {
 	u8 spurChans[AR_EEPROM_MODAL_SPURS];
 	/* 3  Check if the register is per chain */
 	int8_t noiseFloorThreshCh[AR9300_MAX_CHAINS];
-	u8 ob[AR9300_MAX_CHAINS];
-	u8 db_stage2[AR9300_MAX_CHAINS];
-	u8 db_stage3[AR9300_MAX_CHAINS];
-	u8 db_stage4[AR9300_MAX_CHAINS];
+	u8 reserved[11];
+	int8_t quick_drop;
 	u8 xpaBiasLvl;
 	u8 txFrameToDataStart;
 	u8 txFrameToPaOn;
@@ -217,7 +231,8 @@ struct ar9300_modal_eep_header {
 	u8 thresh62;
 	__le32 papdRateMaskHt20;
 	__le32 papdRateMaskHt40;
-	u8 futureModal[10];
+	__le16 switchcomspdt;
+	u8 futureModal[8];
 } __packed;
 
 struct ar9300_cal_data_per_freq_op_loop {
@@ -252,7 +267,9 @@ struct cal_ctl_data_5g {
 
 struct ar9300_BaseExtension_1 {
 	u8 ant_div_control;
-	u8 future[13];
+	u8 future[11];
+	int8_t quick_drop_low;
+	int8_t quick_drop_high;
 } __packed;
 
 struct ar9300_BaseExtension_2 {

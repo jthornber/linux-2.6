@@ -1,61 +1,52 @@
+/*
+ * Copyright (C) 2011 Red Hat, Inc.
+ *
+ * This file is released under the GPL.
+ */
+
 #ifndef DM_BTREE_INTERNAL_H
 #define DM_BTREE_INTERNAL_H
 
 #include "dm-btree.h"
 
-#include <linux/list.h>
-
 /*----------------------------------------------------------------*/
 
-/* FIXME: move all this into btree.c */
+/*
+ * We'll need 2 accessor functions for n->csum and n->blocknr
+ * to support dm-btree-spine.c in that case.
+ */
 
 enum node_flags {
-        INTERNAL_NODE = 1,
-        LEAF_NODE = 1 << 1
+	INTERNAL_NODE = 1,
+	LEAF_NODE = 1 << 1
 };
 
 /*
- * To ease coding I'm packing all the different node types into one
- * structure.  We can optimise later.
+ * Every btree node begins with this structure.  Make sure it's a multiple
+ * of 8-bytes in size, otherwise the 64bit keys will be mis-aligned.
  */
 struct node_header {
-        __le32 flags;
-        __le32 nr_entries;
-	__le32 max_entries;
-	__le32 magic;
-};
+	__le32 csum;
+	__le32 flags;
+	__le64 blocknr; /* Block this node is supposed to live in. */
 
-#define BTREE_NODE_MAGIC 160774
+	__le32 nr_entries;
+	__le32 max_entries;
+	__le32 value_size;
+	__le32 padding;
+} __packed;
 
 struct node {
 	struct node_header header;
 	__le64 keys[0];
-};
+} __packed;
 
-
-/*
- * Based on the ideas in ["B-trees, Shadowing, and Clones" Ohad Rodeh]
- */
-
-/* FIXME: enable close packing for on disk structures */
 
 void inc_children(struct dm_transaction_manager *tm, struct node *n,
 		  struct dm_btree_value_type *vt);
 
-static inline struct node *to_node(struct dm_block *b)
-{
-	/* FIXME: this function should fail, rather than fall over */
-	struct node *n = (struct node *) dm_block_data(b);
-	BUG_ON(__le32_to_cpu(n->header.magic) != BTREE_NODE_MAGIC);
-	return n;
-}
-
-// FIXME: I don't like the bn_ prefix for these, refers to an old struct block_node
-int bn_read_lock(struct dm_btree_info *info, dm_block_t b, struct dm_block **result);
-int bn_shadow(struct dm_btree_info *info, dm_block_t orig,
-	      struct dm_btree_value_type *vt, struct dm_block **result, int *inc);
-int bn_new_block(struct dm_btree_info *info, struct dm_block **result);
-int bn_unlock(struct dm_btree_info *info, struct dm_block *b);
+int new_block(struct dm_btree_info *info, struct dm_block **result);
+int unlock_block(struct dm_btree_info *info, struct dm_block *b);
 
 /*
  * Spines keep track of the rolling locks.  There are 2 variants, read-only
@@ -88,11 +79,19 @@ void init_shadow_spine(struct shadow_spine *s, struct dm_btree_info *info);
 int exit_shadow_spine(struct shadow_spine *s);
 
 int shadow_step(struct shadow_spine *s, dm_block_t b,
-		struct dm_btree_value_type *vt, int *inc);
+		struct dm_btree_value_type *vt);
 
+/*
+ * The spine must have at least one entry before calling this.
+ */
 struct dm_block *shadow_current(struct shadow_spine *s);
 
+/*
+ * The spine must have at least two entries before calling this.
+ */
 struct dm_block *shadow_parent(struct shadow_spine *s);
+
+int shadow_has_parent(struct shadow_spine *s);
 
 int shadow_root(struct shadow_spine *s);
 
@@ -106,37 +105,30 @@ static inline __le64 *key_ptr(struct node *n, uint32_t index)
 
 static inline void *value_base(struct node *n)
 {
-	return &n->keys[__le32_to_cpu(n->header.max_entries)];
+	return &n->keys[le32_to_cpu(n->header.max_entries)];
 }
 
-static inline void *value_ptr(struct node *n, uint32_t index, size_t value_size)
+static inline void *value_ptr(struct node *n, uint32_t index)
 {
+	uint32_t value_size = le32_to_cpu(n->header.value_size);
 	return value_base(n) + (value_size * index);
 }
 
-/* assumes the values are suitably aligned and converts to core format */
+/*
+ * Assumes the values are suitably-aligned and converts to core format.
+ */
 static inline uint64_t value64(struct node *n, uint32_t index)
 {
-	__le64 *values = value_base(n);
-	return __le64_to_cpu(values[index]);
+	__le64 *values_le = value_base(n);
+
+	return le64_to_cpu(values_le[index]);
 }
 
-/* searching for a key within a single node */
+/*
+ * Searching for a key within a single node.
+ */
 int lower_bound(struct node *n, uint64_t key);
 
-int upper_bound(struct node *n, uint64_t key);
+extern struct dm_block_validator btree_node_validator;
 
-/*
- * Exported for testing.
- */
-uint32_t calc_max_entries(size_t value_size, size_t block_size);
-
-void insert_at(size_t value_size, struct node *node,
-	       unsigned index, uint64_t key, void *value);
-
-int dm_btree_merge(struct shadow_spine *s, unsigned parent_index,
-		   size_t value_size);
-
-/*----------------------------------------------------------------*/
-
-#endif
+#endif	/* DM_BTREE_INTERNAL_H */

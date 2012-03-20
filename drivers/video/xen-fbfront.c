@@ -395,10 +395,9 @@ static int __devinit xenfb_probe(struct xenbus_device *dev,
 	spin_lock_init(&info->dirty_lock);
 	spin_lock_init(&info->resize_lock);
 
-	info->fb = vmalloc(fb_size);
+	info->fb = vzalloc(fb_size);
 	if (info->fb == NULL)
 		goto error_nomem;
-	memset(info->fb, 0, fb_size);
 
 	info->nr_pages = (fb_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
@@ -672,20 +671,17 @@ InitWait:
 	}
 }
 
-static struct xenbus_device_id xenfb_ids[] = {
+static const struct xenbus_device_id xenfb_ids[] = {
 	{ "vfb" },
 	{ "" }
 };
 
-static struct xenbus_driver xenfb_driver = {
-	.name = "vfb",
-	.owner = THIS_MODULE,
-	.ids = xenfb_ids,
+static DEFINE_XENBUS_DRIVER(xenfb, ,
 	.probe = xenfb_probe,
 	.remove = xenfb_remove,
 	.resume = xenfb_resume,
 	.otherend_changed = xenfb_backend_changed,
-};
+);
 
 static int __init xenfb_init(void)
 {

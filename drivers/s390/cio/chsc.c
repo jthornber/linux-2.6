@@ -326,6 +326,36 @@ static void chsc_process_sei_res_acc(struct chsc_sei_area *sei_area)
 	s390_process_res_acc(&link);
 }
 
+static void chsc_process_sei_chp_avail(struct chsc_sei_area *sei_area)
+{
+	struct channel_path *chp;
+	struct chp_id chpid;
+	u8 *data;
+	int num;
+
+	CIO_CRW_EVENT(4, "chsc: channel path availability information\n");
+	if (sei_area->rs != 0)
+		return;
+	data = sei_area->ccdf;
+	chp_id_init(&chpid);
+	for (num = 0; num <= __MAX_CHPID; num++) {
+		if (!chp_test_bit(data, num))
+			continue;
+		chpid.id = num;
+
+		CIO_CRW_EVENT(4, "Update information for channel path "
+			      "%x.%02x\n", chpid.cssid, chpid.id);
+		chp = chpid_to_chp(chpid);
+		if (!chp) {
+			chp_new(chpid);
+			continue;
+		}
+		mutex_lock(&chp->lock);
+		chsc_determine_base_channel_path_desc(chpid, &chp->desc);
+		mutex_unlock(&chp->lock);
+	}
+}
+
 struct chp_config_data {
 	u8 map[32];
 	u8 op;
@@ -376,8 +406,11 @@ static void chsc_process_sei(struct chsc_sei_area *sei_area)
 	case 1: /* link incident*/
 		chsc_process_sei_link_incident(sei_area);
 		break;
-	case 2: /* i/o resource accessibiliy */
+	case 2: /* i/o resource accessibility */
 		chsc_process_sei_res_acc(sei_area);
+		break;
+	case 7: /* channel-path-availability information */
+		chsc_process_sei_chp_avail(sei_area);
 		break;
 	case 8: /* channel-path-configuration notification */
 		chsc_process_sei_chp_config(sei_area);
@@ -496,10 +529,7 @@ __s390_vary_chpid_on(struct subchannel_id schid, void *data)
 int chsc_chp_vary(struct chp_id chpid, int on)
 {
 	struct channel_path *chp = chpid_to_chp(chpid);
-	struct chp_link link;
 
-	memset(&link, 0, sizeof(struct chp_link));
-	link.chpid = chpid;
 	/* Wait until previous actions have settled. */
 	css_wait_for_slow_path();
 	/*
@@ -509,10 +539,10 @@ int chsc_chp_vary(struct chp_id chpid, int on)
 		/* Try to update the channel path descritor. */
 		chsc_determine_base_channel_path_desc(chpid, &chp->desc);
 		for_each_subchannel_staged(s390_subchannel_vary_chpid_on,
-					   __s390_vary_chpid_on, &link);
+					   __s390_vary_chpid_on, &chpid);
 	} else
 		for_each_subchannel_staged(s390_subchannel_vary_chpid_off,
-					   NULL, &link);
+					   NULL, &chpid);
 
 	return 0;
 }

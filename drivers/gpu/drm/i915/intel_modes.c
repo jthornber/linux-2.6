@@ -26,6 +26,7 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/fb.h>
+#include <drm/drm_edid.h>
 #include "drmP.h"
 #include "intel_drv.h"
 #include "i915_drv.h"
@@ -74,11 +75,42 @@ int intel_ddc_get_modes(struct drm_connector *connector,
 	if (edid) {
 		drm_mode_connector_update_edid_property(connector, edid);
 		ret = drm_add_edid_modes(connector, edid);
+		drm_edid_to_eld(connector, edid);
 		connector->display_info.raw_edid = NULL;
 		kfree(edid);
 	}
 
 	return ret;
+}
+
+static const char *force_audio_names[] = {
+	"off",
+	"auto",
+	"on",
+};
+
+void
+intel_attach_force_audio_property(struct drm_connector *connector)
+{
+	struct drm_device *dev = connector->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct drm_property *prop;
+	int i;
+
+	prop = dev_priv->force_audio_property;
+	if (prop == NULL) {
+		prop = drm_property_create(dev, DRM_MODE_PROP_ENUM,
+					   "audio",
+					   ARRAY_SIZE(force_audio_names));
+		if (prop == NULL)
+			return;
+
+		for (i = 0; i < ARRAY_SIZE(force_audio_names); i++)
+			drm_property_add_enum(prop, i, i-1, force_audio_names[i]);
+
+		dev_priv->force_audio_property = prop;
+	}
+	drm_connector_attach_property(connector, prop, 0);
 }
 
 static const char *broadcast_rgb_names[] = {

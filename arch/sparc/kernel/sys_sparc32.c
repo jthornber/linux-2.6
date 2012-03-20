@@ -23,7 +23,6 @@
 #include <linux/uio.h>
 #include <linux/nfs_fs.h>
 #include <linux/quota.h>
-#include <linux/module.h>
 #include <linux/poll.h>
 #include <linux/personality.h>
 #include <linux/stat.h>
@@ -109,7 +108,7 @@ asmlinkage long compat_sys_ipc(u32 call, u32 first, u32 second, u32 third, compa
 
 	default:
 		return -ENOSYS;
-	};
+	}
 
 	return -ENOSYS;
 }

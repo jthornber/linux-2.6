@@ -1,10 +1,12 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/err.h>
 #include <linux/sched.h>
 #include <asm/uaccess.h>
+
+#include "internal.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/kmem.h>
@@ -214,6 +216,28 @@ char *strndup_user(const char __user *s, long n)
 	return p;
 }
 EXPORT_SYMBOL(strndup_user);
+
+void __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
+		struct vm_area_struct *prev, struct rb_node *rb_parent)
+{
+	struct vm_area_struct *next;
+
+	vma->vm_prev = prev;
+	if (prev) {
+		next = prev->vm_next;
+		prev->vm_next = vma;
+	} else {
+		mm->mmap = vma;
+		if (rb_parent)
+			next = rb_entry(rb_parent,
+					struct vm_area_struct, vm_rb);
+		else
+			next = NULL;
+	}
+	vma->vm_next = next;
+	if (next)
+		next->vm_prev = vma;
+}
 
 #if defined(CONFIG_MMU) && !defined(HAVE_ARCH_PICK_MMAP_LAYOUT)
 void arch_pick_mmap_layout(struct mm_struct *mm)

@@ -101,7 +101,7 @@ int uflash_devinit(struct platform_device *op, struct device_node *dp)
 
 	up->mtd->owner = THIS_MODULE;
 
-	add_mtd_device(up->mtd);
+	mtd_device_register(up->mtd, NULL, 0);
 
 	dev_set_drvdata(&op->dev, up);
 
@@ -126,7 +126,7 @@ static int __devexit uflash_remove(struct platform_device *op)
 	struct uflash_dev *up = dev_get_drvdata(&op->dev);
 
 	if (up->mtd) {
-		del_mtd_device(up->mtd);
+		mtd_device_unregister(up->mtd);
 		map_destroy(up->mtd);
 	}
 	if (up->map.virt) {
@@ -158,15 +158,4 @@ static struct platform_driver uflash_driver = {
 	.remove		= __devexit_p(uflash_remove),
 };
 
-static int __init uflash_init(void)
-{
-	return platform_driver_register(&uflash_driver);
-}
-
-static void __exit uflash_exit(void)
-{
-	platform_driver_unregister(&uflash_driver);
-}
-
-module_init(uflash_init);
-module_exit(uflash_exit);
+module_platform_driver(uflash_driver);

@@ -25,6 +25,11 @@
 #include <linux/mmc/core.h>
 #include <linux/mmc/host.h>
 
+/* For archs that don't support NO_IRQ (such as mips), provide a dummy value */
+#ifndef NO_IRQ
+#define NO_IRQ 0
+#endif
+
 MODULE_LICENSE("GPL");
 
 enum {
@@ -108,8 +113,8 @@ struct mmc_spi_platform_data *mmc_spi_get_pdata(struct spi_device *spi)
 		const int j = i * 2;
 		u32 mask;
 
-		mask = mmc_vddrange_to_ocrmask(voltage_ranges[j],
-					       voltage_ranges[j + 1]);
+		mask = mmc_vddrange_to_ocrmask(be32_to_cpu(voltage_ranges[j]),
+					       be32_to_cpu(voltage_ranges[j + 1]));
 		if (!mask) {
 			ret = -EINVAL;
 			dev_err(dev, "OF: voltage-range #%d is invalid\n", i);

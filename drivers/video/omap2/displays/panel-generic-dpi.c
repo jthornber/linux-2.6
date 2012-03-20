@@ -33,8 +33,9 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <video/omapdss.h>
 
-#include <plat/panel-generic-dpi.h>
+#include <video/omap-panel-generic-dpi.h>
 
 struct panel_config {
 	struct omap_video_timings timings;
@@ -57,30 +58,6 @@ struct panel_config {
 
 /* Panel configurations */
 static struct panel_config generic_dpi_panels[] = {
-	/* Generic Panel */
-	{
-		{
-			.x_res		= 640,
-			.y_res		= 480,
-
-			.pixel_clock	= 23500,
-
-			.hfp		= 48,
-			.hsw		= 32,
-			.hbp		= 80,
-
-			.vfp		= 3,
-			.vsw		= 4,
-			.vbp		= 7,
-		},
-		.acbi			= 0x0,
-		.acb			= 0x0,
-		.config			= OMAP_DSS_LCD_TFT,
-		.power_on_delay		= 0,
-		.power_off_delay	= 0,
-		.name			= "generic",
-	},
-
 	/* Sharp LQ043T1DG01 */
 	{
 		{
@@ -180,6 +157,211 @@ static struct panel_config generic_dpi_panels[] = {
 		.power_on_delay		= 0,
 		.power_off_delay	= 0,
 		.name			= "samsung_lte430wq_f0c",
+	},
+
+	/* Seiko 70WVW1TZ3Z3 */
+	{
+		{
+			.x_res		= 800,
+			.y_res		= 480,
+
+			.pixel_clock	= 33000,
+
+			.hsw		= 128,
+			.hfp		= 10,
+			.hbp		= 10,
+
+			.vsw		= 2,
+			.vfp		= 4,
+			.vbp		= 11,
+		},
+		.acbi			= 0x0,
+		.acb			= 0x0,
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+						OMAP_DSS_LCD_IHS,
+		.power_on_delay		= 0,
+		.power_off_delay	= 0,
+		.name			= "seiko_70wvw1tz3",
+	},
+
+	/* Powertip PH480272T */
+	{
+		{
+			.x_res		= 480,
+			.y_res		= 272,
+
+			.pixel_clock	= 9000,
+
+			.hsw		= 40,
+			.hfp		= 2,
+			.hbp		= 2,
+
+			.vsw		= 10,
+			.vfp		= 2,
+			.vbp		= 2,
+		},
+		.acbi			= 0x0,
+		.acb			= 0x0,
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+					  OMAP_DSS_LCD_IHS | OMAP_DSS_LCD_IEO,
+		.power_on_delay		= 0,
+		.power_off_delay	= 0,
+		.name			= "powertip_ph480272t",
+	},
+
+	/* Innolux AT070TN83 */
+	{
+		{
+			.x_res		= 800,
+			.y_res		= 480,
+
+			.pixel_clock	= 40000,
+
+			.hsw		= 48,
+			.hfp		= 1,
+			.hbp		= 1,
+
+			.vsw		= 3,
+			.vfp		= 12,
+			.vbp		= 25,
+		},
+		.acbi			= 0x0,
+		.acb			= 0x28,
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+					  OMAP_DSS_LCD_IHS,
+		.power_on_delay		= 0,
+		.power_off_delay	= 0,
+		.name			= "innolux_at070tn83",
+	},
+
+	/* NEC NL2432DR22-11B */
+	{
+		{
+			.x_res		= 240,
+			.y_res		= 320,
+
+			.pixel_clock	= 5400,
+
+			.hsw		= 3,
+			.hfp		= 3,
+			.hbp		= 39,
+
+			.vsw		= 1,
+			.vfp		= 2,
+			.vbp		= 7,
+		},
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+						OMAP_DSS_LCD_IHS,
+		.name			= "nec_nl2432dr22-11b",
+	},
+
+	/* Unknown panel used in OMAP H4 */
+	{
+		{
+			.x_res		= 240,
+			.y_res		= 320,
+
+			.pixel_clock	= 6250,
+
+			.hsw		= 15,
+			.hfp		= 15,
+			.hbp		= 60,
+
+			.vsw		= 1,
+			.vfp		= 1,
+			.vbp		= 1,
+		},
+		.config			= OMAP_DSS_LCD_TFT,
+
+		.name			= "h4",
+	},
+
+	/* Unknown panel used in Samsung OMAP2 Apollon */
+	{
+		{
+			.x_res		= 480,
+			.y_res		= 272,
+
+			.pixel_clock	= 6250,
+
+			.hsw		= 41,
+			.hfp		= 2,
+			.hbp		= 2,
+
+			.vsw		= 10,
+			.vfp		= 2,
+			.vbp		= 2,
+		},
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+						OMAP_DSS_LCD_IHS,
+
+		.name			= "apollon",
+	},
+	/* FocalTech ETM070003DH6 */
+	{
+		{
+			.x_res		= 800,
+			.y_res		= 480,
+
+			.pixel_clock	= 28000,
+
+			.hsw		= 48,
+			.hfp		= 40,
+			.hbp		= 40,
+
+			.vsw		= 3,
+			.vfp		= 13,
+			.vbp		= 29,
+		},
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+					  OMAP_DSS_LCD_IHS,
+		.name			= "focaltech_etm070003dh6",
+	},
+
+	/* Microtips Technologies - UMSH-8173MD */
+	{
+		{
+			.x_res		= 800,
+			.y_res		= 480,
+
+			.pixel_clock	= 34560,
+
+			.hsw		= 13,
+			.hfp		= 101,
+			.hbp		= 101,
+
+			.vsw		= 23,
+			.vfp		= 1,
+			.vbp		= 1,
+		},
+		.acbi			= 0x0,
+		.acb			= 0x0,
+		.config			= OMAP_DSS_LCD_TFT | OMAP_DSS_LCD_IVS |
+					  OMAP_DSS_LCD_IHS | OMAP_DSS_LCD_IPC,
+		.power_on_delay		= 0,
+		.power_off_delay	= 0,
+		.name			= "microtips_umsh_8173md",
+	},
+
+	/* OrtusTech COM43H4M10XTC */
+	{
+		{
+			.x_res		= 480,
+			.y_res		= 272,
+
+			.pixel_clock	= 8000,
+
+			.hsw		= 41,
+			.hfp		= 8,
+			.hbp		= 4,
+
+			.vsw		= 10,
+			.vfp		= 4,
+			.vbp		= 2,
+		},
+		.config			= OMAP_DSS_LCD_TFT,
+
+		.name			= "ortustech_com43h4m10xtc",
 	},
 };
 
@@ -285,7 +467,7 @@ static int generic_dpi_panel_probe(struct omap_dss_device *dssdev)
 	return 0;
 }
 
-static void generic_dpi_panel_remove(struct omap_dss_device *dssdev)
+static void __exit generic_dpi_panel_remove(struct omap_dss_device *dssdev)
 {
 	struct panel_drv_data *drv_data = dev_get_drvdata(&dssdev->dev);
 
@@ -358,7 +540,7 @@ static int generic_dpi_panel_check_timings(struct omap_dss_device *dssdev,
 
 static struct omap_dss_driver dpi_driver = {
 	.probe		= generic_dpi_panel_probe,
-	.remove		= generic_dpi_panel_remove,
+	.remove		= __exit_p(generic_dpi_panel_remove),
 
 	.enable		= generic_dpi_panel_enable,
 	.disable	= generic_dpi_panel_disable,

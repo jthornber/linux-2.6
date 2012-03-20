@@ -34,65 +34,9 @@ struct of_flash_list {
 
 struct of_flash {
 	struct mtd_info		*cmtd;
-#ifdef CONFIG_MTD_PARTITIONS
-	struct mtd_partition	*parts;
-#endif
 	int list_size; /* number of elements in of_flash_list */
 	struct of_flash_list	list[0];
 };
-
-#ifdef CONFIG_MTD_PARTITIONS
-#define OF_FLASH_PARTS(info)	((info)->parts)
-
-static int parse_obsolete_partitions(struct platform_device *dev,
-				     struct of_flash *info,
-				     struct device_node *dp)
-{
-	int i, plen, nr_parts;
-	const struct {
-		__be32 offset, len;
-	} *part;
-	const char *names;
-
-	part = of_get_property(dp, "partitions", &plen);
-	if (!part)
-		return 0; /* No partitions found */
-
-	dev_warn(&dev->dev, "Device tree uses obsolete partition map binding\n");
-
-	nr_parts = plen / sizeof(part[0]);
-
-	info->parts = kzalloc(nr_parts * sizeof(*info->parts), GFP_KERNEL);
-	if (!info->parts)
-		return -ENOMEM;
-
-	names = of_get_property(dp, "partition-names", &plen);
-
-	for (i = 0; i < nr_parts; i++) {
-		info->parts[i].offset = be32_to_cpu(part->offset);
-		info->parts[i].size   = be32_to_cpu(part->len) & ~1;
-		if (be32_to_cpu(part->len) & 1) /* bit 0 set signifies read only partition */
-			info->parts[i].mask_flags = MTD_WRITEABLE;
-
-		if (names && (plen > 0)) {
-			int len = strlen(names) + 1;
-
-			info->parts[i].name = (char *)names;
-			plen -= len;
-			names += len;
-		} else {
-			info->parts[i].name = "unnamed";
-		}
-
-		part++;
-	}
-
-	return nr_parts;
-}
-#else /* MTD_PARTITIONS */
-#define	OF_FLASH_PARTS(info)		(0)
-#define parse_partitions(info, dev)	(0)
-#endif /* MTD_PARTITIONS */
 
 static int of_flash_remove(struct platform_device *dev)
 {
@@ -105,18 +49,12 @@ static int of_flash_remove(struct platform_device *dev)
 	dev_set_drvdata(&dev->dev, NULL);
 
 	if (info->cmtd != info->list[0].mtd) {
-		del_mtd_device(info->cmtd);
+		mtd_device_unregister(info->cmtd);
 		mtd_concat_destroy(info->cmtd);
 	}
 
-	if (info->cmtd) {
-		if (OF_FLASH_PARTS(info)) {
-			del_mtd_partitions(info->cmtd);
-			kfree(OF_FLASH_PARTS(info));
-		} else {
-			del_mtd_device(info->cmtd);
-		}
-	}
+	if (info->cmtd)
+		mtd_device_unregister(info->cmtd);
 
 	for (i = 0; i < info->list_size; i++) {
 		if (info->list[i].mtd)
@@ -172,12 +110,12 @@ static struct mtd_info * __devinit obsolete_probe(struct platform_device *dev,
 	}
 }
 
-#ifdef CONFIG_MTD_PARTITIONS
 /* When partitions are set we look for a linux,part-probe property which
    specifies the list of partition probers to use. If none is given then the
    default is use. These take precedence over other device tree
    information. */
-static const char *part_probe_types_def[] = { "cmdlinepart", "RedBoot", NULL };
+static const char *part_probe_types_def[] = { "cmdlinepart", "RedBoot",
+					"ofpart", "ofoldpart", NULL };
 static const char ** __devinit of_get_probes(struct device_node *dp)
 {
 	const char *cp;
@@ -212,14 +150,11 @@ static void __devinit of_free_probes(const char **probes)
 	if (probes != part_probe_types_def)
 		kfree(probes);
 }
-#endif
 
 static struct of_device_id of_flash_match[];
 static int __devinit of_flash_probe(struct platform_device *dev)
 {
-#ifdef CONFIG_MTD_PARTITIONS
 	const char **part_probe_types;
-#endif
 	const struct of_device_id *match;
 	struct device_node *dp = dev->dev.of_node;
 	struct resource res;
@@ -233,6 +168,7 @@ static int __devinit of_flash_probe(struct platform_device *dev)
 	int reg_tuple_size;
 	struct mtd_info **mtd_list = NULL;
 	resource_size_t res_size;
+	struct mtd_part_parser_data ppdata;
 
 	match = of_match_device(of_flash_match, &dev->dev);
 	if (!match)
@@ -346,35 +282,11 @@ static int __devinit of_flash_probe(struct platform_device *dev)
 	if (err)
 		goto err_out;
 
-#ifdef CONFIG_MTD_PARTITIONS
+	ppdata.of_node = dp;
 	part_probe_types = of_get_probes(dp);
-	err = parse_mtd_partitions(info->cmtd, part_probe_types,
-				   &info->parts, 0);
-	if (err < 0) {
-		of_free_probes(part_probe_types);
-		goto err_out;
-	}
+	mtd_device_parse_register(info->cmtd, part_probe_types, &ppdata,
+			NULL, 0);
 	of_free_probes(part_probe_types);
-
-#ifdef CONFIG_MTD_OF_PARTS
-	if (err == 0) {
-		err = of_mtd_parse_partitions(&dev->dev, dp, &info->parts);
-		if (err < 0)
-			goto err_out;
-	}
-#endif
-
-	if (err == 0) {
-		err = parse_obsolete_partitions(dev, info, dp);
-		if (err < 0)
-			goto err_out;
-	}
-
-	if (err > 0)
-		add_mtd_partitions(info->cmtd, info->parts, err);
-	else
-#endif
-		add_mtd_device(info->cmtd);
 
 	kfree(mtd_list);
 
@@ -426,18 +338,7 @@ static struct platform_driver of_flash_driver = {
 	.remove		= of_flash_remove,
 };
 
-static int __init of_flash_init(void)
-{
-	return platform_driver_register(&of_flash_driver);
-}
-
-static void __exit of_flash_exit(void)
-{
-	platform_driver_unregister(&of_flash_driver);
-}
-
-module_init(of_flash_init);
-module_exit(of_flash_exit);
+module_platform_driver(of_flash_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Vitaly Wool <vwool@ru.mvista.com>");

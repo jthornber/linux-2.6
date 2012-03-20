@@ -859,7 +859,7 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 	 * Most of the libertas cards can do unaligned register access, but some
 	 * weird ones cannot. That's especially true for the CF8305 card.
 	 */
-	card->align_regs = 0;
+	card->align_regs = false;
 
 	card->model = get_model(p_dev->manf_id, p_dev->card_id);
 	if (card->model == MODEL_UNKNOWN) {
@@ -871,7 +871,7 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 	/* Check if we have a current silicon */
 	prod_id = if_cs_read8(card, IF_CS_PRODUCT_ID);
 	if (card->model == MODEL_8305) {
-		card->align_regs = 1;
+		card->align_regs = true;
 		if (prod_id < IF_CS_CF8305_B1_REV) {
 			pr_err("8305 rev B0 and older are not supported\n");
 			ret = -ENODEV;
@@ -983,7 +983,7 @@ static void if_cs_detach(struct pcmcia_device *p_dev)
 /* Module initialization                                            */
 /********************************************************************/
 
-static struct pcmcia_device_id if_cs_ids[] = {
+static const struct pcmcia_device_id if_cs_ids[] = {
 	PCMCIA_DEVICE_MANF_CARD(CF8305_MANFID, CF8305_CARDID),
 	PCMCIA_DEVICE_MANF_CARD(CF8381_MANFID, CF8381_CARDID),
 	PCMCIA_DEVICE_MANF_CARD(CF8385_MANFID, CF8385_CARDID),

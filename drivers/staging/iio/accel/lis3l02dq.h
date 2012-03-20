@@ -148,65 +148,57 @@ Form of high byte dependent on justification set in ctrl reg */
 #define LIS3L02DQ_MAX_RX 12
 /**
  * struct lis3l02dq_state - device instance specific data
- * @helper:		data and func pointer allowing generic functions
  * @us:			actual spi_device
- * @work_thresh:	bh for threshold events
- * @thresh_timestamp:	timestamp for threshold interrupts.
- * @inter:		used to check if new interrupt has been triggered
  * @trig:		data ready trigger registered with iio
  * @tx:			transmit buffer
  * @rx:			receive buffer
  * @buf_lock:		mutex to protect tx and rx
  **/
 struct lis3l02dq_state {
-	struct iio_sw_ring_helper_state	help;
 	struct spi_device		*us;
-	struct work_struct		work_thresh;
-	s64				thresh_timestamp;
-	bool				inter;
 	struct iio_trigger		*trig;
-	u8				*tx;
-	u8				*rx;
 	struct mutex			buf_lock;
+	bool				trigger_on;
+
+	u8	tx[LIS3L02DQ_MAX_RX] ____cacheline_aligned;
+	u8	rx[LIS3L02DQ_MAX_RX] ____cacheline_aligned;
 };
 
-#define lis3l02dq_h_to_s(_h)				\
-	container_of(_h, struct lis3l02dq_state, help)
-
-int lis3l02dq_spi_read_reg_8(struct device *dev,
+int lis3l02dq_spi_read_reg_8(struct iio_dev *indio_dev,
 			     u8 reg_address,
 			     u8 *val);
 
-int lis3l02dq_spi_write_reg_8(struct device *dev,
+int lis3l02dq_spi_write_reg_8(struct iio_dev *indio_dev,
 			      u8 reg_address,
-			      u8 *val);
+			      u8 val);
 
-#ifdef CONFIG_IIO_RING_BUFFER
-/* At the moment triggers are only used for ring buffer
+int lis3l02dq_disable_all_events(struct iio_dev *indio_dev);
+
+#ifdef CONFIG_IIO_BUFFER
+/* At the moment triggers are only used for buffer
  * filling. This may change!
  */
 void lis3l02dq_remove_trigger(struct iio_dev *indio_dev);
 int lis3l02dq_probe_trigger(struct iio_dev *indio_dev);
 
-ssize_t lis3l02dq_read_accel_from_ring(struct device *dev,
-				       struct device_attribute *attr,
-				       char *buf);
-
-
-int lis3l02dq_configure_ring(struct iio_dev *indio_dev);
-void lis3l02dq_unconfigure_ring(struct iio_dev *indio_dev);
+int lis3l02dq_configure_buffer(struct iio_dev *indio_dev);
+void lis3l02dq_unconfigure_buffer(struct iio_dev *indio_dev);
 
 #ifdef CONFIG_LIS3L02DQ_BUF_RING_SW
 #define lis3l02dq_free_buf iio_sw_rb_free
 #define lis3l02dq_alloc_buf iio_sw_rb_allocate
-#define lis3l02dq_register_buf_funcs iio_ring_sw_register_funcs
+#define lis3l02dq_access_funcs ring_sw_access_funcs
 #endif
 #ifdef CONFIG_LIS3L02DQ_BUF_KFIFO
 #define lis3l02dq_free_buf iio_kfifo_free
 #define lis3l02dq_alloc_buf iio_kfifo_allocate
-#define lis3l02dq_register_buf_funcs iio_kfifo_register_funcs
+#define lis3l02dq_access_funcs kfifo_access_funcs
 #endif
-#else /* CONFIG_IIO_RING_BUFFER */
+irqreturn_t lis3l02dq_data_rdy_trig_poll(int irq, void *private);
+#define lis3l02dq_th lis3l02dq_data_rdy_trig_poll
+
+#else /* CONFIG_IIO_BUFFER */
+#define lis3l02dq_th lis3l02dq_nobuffer
 
 static inline void lis3l02dq_remove_trigger(struct iio_dev *indio_dev)
 {
@@ -216,20 +208,12 @@ static inline int lis3l02dq_probe_trigger(struct iio_dev *indio_dev)
 	return 0;
 }
 
-static inline ssize_t
-lis3l02dq_read_accel_from_ring(struct device *dev,
-			       struct device_attribute *attr,
-			       char *buf)
+static int lis3l02dq_configure_buffer(struct iio_dev *indio_dev)
 {
 	return 0;
 }
-
-static int lis3l02dq_configure_ring(struct iio_dev *indio_dev)
-{
-	return 0;
-}
-static inline void lis3l02dq_unconfigure_ring(struct iio_dev *indio_dev)
+static inline void lis3l02dq_unconfigure_buffer(struct iio_dev *indio_dev)
 {
 }
-#endif /* CONFIG_IIO_RING_BUFFER */
+#endif /* CONFIG_IIO_BUFFER */
 #endif /* SPI_LIS3L02DQ_H_ */

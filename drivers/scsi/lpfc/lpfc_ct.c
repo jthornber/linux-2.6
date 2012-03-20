@@ -352,6 +352,8 @@ lpfc_gen_req(struct lpfc_vport *vport, struct lpfc_dmabuf *bmp,
 	icmd->ulpLe = 1;
 	icmd->ulpClass = CLASS3;
 	icmd->ulpContext = ndlp->nlp_rpi;
+	if (phba->sli_rev == LPFC_SLI_REV4)
+		icmd->ulpContext = phba->sli4_hba.rpi_ids[ndlp->nlp_rpi];
 
 	if (phba->sli3_options & LPFC_SLI3_NPIV_ENABLED) {
 		/* For GEN_REQUEST64_CR, use the RPI */
@@ -1853,6 +1855,9 @@ lpfc_decode_firmware_rev(struct lpfc_hba *phba, char *fwrevision, int flag)
 			break;
 		case 2:
 			c = 'B';
+			break;
+		case 3:
+			c = 'X';
 			break;
 		default:
 			c = 0;

@@ -38,7 +38,7 @@ static int ehci_spear_setup(struct usb_hcd *hcd)
 
 	/* registers start at offset 0x0 */
 	ehci->caps = hcd->regs;
-	ehci->regs = hcd->regs + HC_LENGTH(ehci_readl(ehci,
+	ehci->regs = hcd->regs + HC_LENGTH(ehci, ehci_readl(ehci,
 				&ehci->caps->hc_capbase));
 	/* cache this readonly data; minimize chip reads */
 	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
@@ -154,7 +154,7 @@ static int spear_ehci_hcd_drv_probe(struct platform_device *pdev)
 	ehci->clk = usbh_clk;
 
 	spear_start_ehci(ehci);
-	retval = usb_add_hcd(hcd, irq, IRQF_SHARED | IRQF_DISABLED);
+	retval = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (retval)
 		goto fail_add_hcd;
 

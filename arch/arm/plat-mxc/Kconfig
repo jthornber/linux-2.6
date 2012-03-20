@@ -6,50 +6,28 @@ menu "Freescale MXC Implementations"
 
 choice
 	prompt "Freescale CPU family:"
-	default ARCH_MX3
+	default ARCH_IMX_V6_V7
 
-config ARCH_MX1
-	bool "MX1-based"
-	select SOC_IMX1
+config ARCH_IMX_V4_V5
+	bool "i.MX1, i.MX21, i.MX25, i.MX27"
+	select AUTO_ZRELADDR if !ZBOOT_ROM
+	select ARM_PATCH_PHYS_VIRT
 	help
-	  This enables support for systems based on the Freescale i.MX1 family
+	  This enables support for systems based on the Freescale i.MX ARMv4
+	  and ARMv5 SoCs
 
-config ARCH_MX2
-	bool "MX2-based"
+config ARCH_IMX_V6_V7
+	bool "i.MX3, i.MX5, i.MX6"
+	select AUTO_ZRELADDR if !ZBOOT_ROM
+	select ARM_PATCH_PHYS_VIRT
+	select MIGHT_HAVE_CACHE_L2X0
 	help
-	  This enables support for systems based on the Freescale i.MX2 family
-
-config ARCH_MX25
-	bool "MX25-based"
-	help
-	  This enables support for systems based on the Freescale i.MX25 family
-
-config ARCH_MX3
-	bool "MX3-based"
-	select CPU_V6
-	help
-	  This enables support for systems based on the Freescale i.MX3 family
-
-config ARCH_MXC91231
-	bool "MXC91231-based"
-	select CPU_V6
-	select MXC_AVIC
-	help
-	  This enables support for systems based on the Freescale MXC91231 family
-
-config ARCH_MX5
-	bool "MX5-based"
-	select CPU_V7
-	select ARM_L1_CACHE_SHIFT_6
-	help
-	  This enables support for systems based on the Freescale i.MX51 family
+	  This enables support for systems based on the Freescale i.MX3, i.MX5
+	  and i.MX6 family.
 
 endchoice
 
 source "arch/arm/mach-imx/Kconfig"
-source "arch/arm/mach-mx3/Kconfig"
-source "arch/arm/mach-mxc91231/Kconfig"
-source "arch/arm/mach-mx5/Kconfig"
 
 endmenu
 

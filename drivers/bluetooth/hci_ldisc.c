@@ -48,7 +48,7 @@
 
 #define VERSION "2.2"
 
-static int reset = 0;
+static bool reset = 0;
 
 static struct hci_uart_proto *hup[HCI_UART_MAX_PROTO];
 
@@ -359,7 +359,6 @@ static void hci_uart_tty_wakeup(struct tty_struct *tty)
  */
 static void hci_uart_tty_receive(struct tty_struct *tty, const u8 *data, char *flags, int count)
 {
-	int ret;
 	struct hci_uart *hu = (void *)tty->disc_data;
 
 	if (!hu || tty != hu->tty)
@@ -369,9 +368,8 @@ static void hci_uart_tty_receive(struct tty_struct *tty, const u8 *data, char *f
 		return;
 
 	spin_lock(&hu->rx_lock);
-	ret = hu->proto->recv(hu, (void *) data, count);
-	if (ret > 0)
-		hu->hdev->stat.byte_rx += count;
+	hu->proto->recv(hu, (void *) data, count);
+	hu->hdev->stat.byte_rx += count;
 	spin_unlock(&hu->rx_lock);
 
 	tty_unthrottle(tty);

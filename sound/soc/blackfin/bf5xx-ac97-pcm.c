@@ -243,6 +243,9 @@ static snd_pcm_uframes_t bf5xx_pcm_pointer(struct snd_pcm_substream *substream)
 
 static int bf5xx_pcm_open(struct snd_pcm_substream *substream)
 {
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct sport_device *sport_handle = snd_soc_dai_get_drvdata(cpu_dai);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int ret;
 
@@ -314,6 +317,9 @@ static struct snd_pcm_ops bf5xx_pcm_ac97_ops = {
 
 static int bf5xx_pcm_preallocate_dma_buffer(struct snd_pcm *pcm, int stream)
 {
+	struct snd_soc_pcm_runtime *rtd = pcm->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct sport_device *sport_handle = snd_soc_dai_get_drvdata(cpu_dai);
 	struct snd_pcm_substream *substream = pcm->streams[stream].substream;
 	struct snd_dma_buffer *buf = &substream->dma_buffer;
 	size_t size = bf5xx_pcm_hardware.buffer_bytes_max
@@ -377,6 +383,9 @@ static void bf5xx_pcm_free_dma_buffers(struct snd_pcm *pcm)
 	struct snd_dma_buffer *buf;
 	int stream;
 #if defined(CONFIG_SND_BF5XX_MMAP_SUPPORT)
+	struct snd_soc_pcm_runtime *rtd = pcm->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct sport_device *sport_handle = snd_soc_dai_get_drvdata(cpu_dai);
 	size_t size = bf5xx_pcm_hardware.buffer_bytes_max *
 		sizeof(struct ac97_frame) / 4;
 #endif
@@ -405,15 +414,14 @@ static void bf5xx_pcm_free_dma_buffers(struct snd_pcm *pcm)
 	}
 #endif
 	}
-	if (sport_handle)
-		sport_done(sport_handle);
 }
 
 static u64 bf5xx_pcm_dmamask = DMA_BIT_MASK(32);
 
-int bf5xx_pcm_ac97_new(struct snd_card *card, struct snd_soc_dai *dai,
-	struct snd_pcm *pcm)
+static int bf5xx_pcm_ac97_new(struct snd_soc_pcm_runtime *rtd)
 {
+	struct snd_card *card = rtd->card->snd_card;
+	struct snd_pcm *pcm = rtd->pcm;
 	int ret = 0;
 
 	pr_debug("%s enter\n", __func__);
@@ -422,14 +430,14 @@ int bf5xx_pcm_ac97_new(struct snd_card *card, struct snd_soc_dai *dai,
 	if (!card->dev->coherent_dma_mask)
 		card->dev->coherent_dma_mask = DMA_BIT_MASK(32);
 
-	if (dai->driver->playback.channels_min) {
+	if (pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream) {
 		ret = bf5xx_pcm_preallocate_dma_buffer(pcm,
 			SNDRV_PCM_STREAM_PLAYBACK);
 		if (ret)
 			goto out;
 	}
 
-	if (dai->driver->capture.channels_min) {
+	if (pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream) {
 		ret = bf5xx_pcm_preallocate_dma_buffer(pcm,
 			SNDRV_PCM_STREAM_CAPTURE);
 		if (ret)
@@ -458,7 +466,7 @@ static int __devexit bf5xx_soc_platform_remove(struct platform_device *pdev)
 
 static struct platform_driver bf5xx_pcm_driver = {
 	.driver = {
-			.name = "bf5xx-pcm-audio",
+			.name = "bfin-ac97-pcm-audio",
 			.owner = THIS_MODULE,
 	},
 
@@ -466,17 +474,7 @@ static struct platform_driver bf5xx_pcm_driver = {
 	.remove = __devexit_p(bf5xx_soc_platform_remove),
 };
 
-static int __init snd_bf5xx_pcm_init(void)
-{
-	return platform_driver_register(&bf5xx_pcm_driver);
-}
-module_init(snd_bf5xx_pcm_init);
-
-static void __exit snd_bf5xx_pcm_exit(void)
-{
-	platform_driver_unregister(&bf5xx_pcm_driver);
-}
-module_exit(snd_bf5xx_pcm_exit);
+module_platform_driver(bf5xx_pcm_driver);
 
 MODULE_AUTHOR("Cliff Cai");
 MODULE_DESCRIPTION("ADI Blackfin AC97 PCM DMA module");

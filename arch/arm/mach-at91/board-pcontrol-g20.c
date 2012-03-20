@@ -37,9 +37,9 @@
 #include "generic.h"
 
 
-static void __init pcontrol_g20_map_io(void)
+static void __init pcontrol_g20_init_early(void)
 {
-	stamp9g20_map_io();
+	stamp9g20_init_early();
 
 	/* USART0 on ttyS1. (Rx, Tx, CTS, RTS) piggyback  A2 */
 	at91_register_uart(AT91SAM9260_ID_US0, 1, ATMEL_UART_CTS
@@ -52,13 +52,6 @@ static void __init pcontrol_g20_map_io(void)
 	/* USART2 on ttyS3. (Rx, Tx)  9bit-Bus  Multidrop-mode  X4 */
 	at91_register_uart(AT91SAM9260_ID_US4, 3, 0);
 }
-
-
-static void __init init_irq(void)
-{
-	at91sam9260_init_interrupts(NULL);
-}
-
 
 static struct sam9_smc_config __initdata pcontrol_smc_config[2] = { {
 	.ncs_read_setup		= 16,
@@ -103,9 +96,9 @@ static struct sam9_smc_config __initdata pcontrol_smc_config[2] = { {
 static void __init add_device_pcontrol(void)
 {
 	/* configure chip-select 4 (IO compatible to 8051  X4 ) */
-	sam9_smc_configure(4, &pcontrol_smc_config[0]);
+	sam9_smc_configure(0, 4, &pcontrol_smc_config[0]);
 	/* configure chip-select 7 (FerroRAM 256KiBx16bit MR2A16A  D4 ) */
-	sam9_smc_configure(7, &pcontrol_smc_config[1]);
+	sam9_smc_configure(0, 7, &pcontrol_smc_config[1]);
 }
 
 
@@ -114,6 +107,8 @@ static void __init add_device_pcontrol(void)
  */
 static struct at91_usbh_data __initdata usbh_data = {
 	.ports		= 2,
+	.vbus_pin	= {-EINVAL, -EINVAL},
+	.overcurrent_pin= {-EINVAL, -EINVAL},
 };
 
 
@@ -129,7 +124,7 @@ static struct at91_udc_data __initdata pcontrol_g20_udc_data = {
 /*
  * MACB Ethernet device
  */
-static struct at91_eth_data __initdata macb_data = {
+static struct macb_platform_data __initdata macb_data = {
 	.phy_irq_pin	= AT91_PIN_PA28,
 	.is_rmii	= 1,
 };
@@ -222,9 +217,9 @@ static void __init pcontrol_g20_board_init(void)
 
 MACHINE_START(PCONTROL_G20, "PControl G20")
 	/* Maintainer: pgsellmann@portner-elektronik.at */
-	.boot_params	= AT91_SDRAM_BASE + 0x100,
 	.timer		= &at91sam926x_timer,
-	.map_io		= pcontrol_g20_map_io,
-	.init_irq	= init_irq,
+	.map_io		= at91_map_io,
+	.init_early	= pcontrol_g20_init_early,
+	.init_irq	= at91_init_irq_default,
 	.init_machine	= pcontrol_g20_board_init,
 MACHINE_END

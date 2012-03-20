@@ -39,7 +39,6 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/hdreg.h>
-#include <linux/version.h>
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <asm/irq.h>
@@ -3871,6 +3870,9 @@ static long pmcraid_ioctl_passthrough(
 			pmcraid_err("couldn't build passthrough ioadls\n");
 			goto out_free_buffer;
 		}
+	} else if (request_size < 0) {
+		rc = -EINVAL;
+		goto out_free_buffer;
 	}
 
 	/* If data is being written into the device, copy the data from user
@@ -4100,10 +4102,10 @@ static long pmcraid_chr_ioctl(
 	struct pmcraid_ioctl_header *hdr = NULL;
 	int retval = -ENOTTY;
 
-	hdr = kmalloc(GFP_KERNEL, sizeof(struct pmcraid_ioctl_header));
+	hdr = kmalloc(sizeof(struct pmcraid_ioctl_header), GFP_KERNEL);
 
 	if (!hdr) {
-		pmcraid_err("faile to allocate memory for ioctl header\n");
+		pmcraid_err("failed to allocate memory for ioctl header\n");
 		return -ENOMEM;
 	}
 
@@ -4252,8 +4254,8 @@ static ssize_t pmcraid_show_drv_version(
 	char *buf
 )
 {
-	return snprintf(buf, PAGE_SIZE, "version: %s, build date: %s\n",
-			PMCRAID_DRIVER_VERSION, PMCRAID_DRIVER_DATE);
+	return snprintf(buf, PAGE_SIZE, "version: %s\n",
+			PMCRAID_DRIVER_VERSION);
 }
 
 static struct device_attribute pmcraid_driver_version_attr = {
@@ -6096,9 +6098,8 @@ static int __init pmcraid_init(void)
 	dev_t dev;
 	int error;
 
-	pmcraid_info("%s Device Driver version: %s %s\n",
-			 PMCRAID_DRIVER_NAME,
-			 PMCRAID_DRIVER_VERSION, PMCRAID_DRIVER_DATE);
+	pmcraid_info("%s Device Driver version: %s\n",
+			 PMCRAID_DRIVER_NAME, PMCRAID_DRIVER_VERSION);
 
 	error = alloc_chrdev_region(&dev, 0,
 				    PMCRAID_MAX_ADAPTERS,

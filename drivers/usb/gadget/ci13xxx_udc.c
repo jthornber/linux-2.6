@@ -71,6 +71,9 @@
 /******************************************************************************
  * DEFINE
  *****************************************************************************/
+
+#define DMA_ADDR_INVALID	(~(dma_addr_t)0)
+
 /* ctrl register bank access */
 static DEFINE_SPINLOCK(udc_lock);
 
@@ -177,6 +180,16 @@ static unsigned hw_ep_max;
 static inline int hw_ep_bit(int num, int dir)
 {
 	return num + (dir ? 16 : 0);
+}
+
+static int ep_to_bit(int n)
+{
+	int fill = 16 - hw_ep_max / 2;
+
+	if (n >= hw_ep_max / 2)
+		n += fill;
+
+	return n;
 }
 
 /**
@@ -310,7 +323,7 @@ static int hw_device_reset(struct ci13xxx *udc)
 		udc->udc_driver->notify_event(udc,
 			CI13XXX_CONTROLLER_RESET_EVENT);
 
-	if (udc->udc_driver->flags && CI13XXX_DISABLE_STREAMING)
+	if (udc->udc_driver->flags & CI13XXX_DISABLE_STREAMING)
 		hw_cwrite(CAP_USBMODE, USBMODE_SDIS, USBMODE_SDIS);
 
 	/* USBMODE should be configured step by step */
@@ -437,12 +450,13 @@ static int hw_ep_get_halt(int num, int dir)
 /**
  * hw_test_and_clear_setup_status: test & clear setup status (execute without
  *                                 interruption)
- * @n: bit number (endpoint)
+ * @n: endpoint number
  *
  * This function returns setup status
  */
 static int hw_test_and_clear_setup_status(int n)
 {
+	n = ep_to_bit(n);
 	return hw_ctest_and_clear(CAP_ENDPTSETUPSTAT, BIT(n));
 }
 
@@ -638,12 +652,13 @@ static int hw_register_write(u16 addr, u32 data)
 /**
  * hw_test_and_clear_complete: test & clear complete status (execute without
  *                             interruption)
- * @n: bit number (endpoint)
+ * @n: endpoint number
  *
  * This function returns complete status
  */
 static int hw_test_and_clear_complete(int n)
 {
+	n = ep_to_bit(n);
 	return hw_ctest_and_clear(CAP_ENDPTCOMPLETE, BIT(n));
 }
 
@@ -751,8 +766,11 @@ static ssize_t show_device(struct device *dev, struct device_attribute *attr,
 
 	n += scnprintf(buf + n, PAGE_SIZE - n, "speed             = %d\n",
 		       gadget->speed);
+	n += scnprintf(buf + n, PAGE_SIZE - n, "max_speed         = %d\n",
+		       gadget->max_speed);
+	/* TODO: Scheduled for removal in 3.8. */
 	n += scnprintf(buf + n, PAGE_SIZE - n, "is_dualspeed      = %d\n",
-		       gadget->is_dualspeed);
+		       gadget_is_dualspeed(gadget));
 	n += scnprintf(buf + n, PAGE_SIZE - n, "is_otg            = %d\n",
 		       gadget->is_otg);
 	n += scnprintf(buf + n, PAGE_SIZE - n, "is_a_peripheral   = %d\n",
@@ -795,7 +813,7 @@ static ssize_t show_driver(struct device *dev, struct device_attribute *attr,
 	n += scnprintf(buf + n, PAGE_SIZE - n, "function  = %s\n",
 		       (driver->function ? driver->function : ""));
 	n += scnprintf(buf + n, PAGE_SIZE - n, "max speed = %d\n",
-		       driver->speed);
+		       driver->max_speed);
 
 	return n;
 }
@@ -857,7 +875,7 @@ static void dbg_print(u8 addr, const char *name, int status, const char *extra)
 	stamp = stamp * 1000000 + tval.tv_usec;
 
 	scnprintf(dbg_data.buf[dbg_data.idx], DBG_DATA_MSG,
-		  "%04X\t» %02X %-7.7s %4i «\t%s\n",
+		  "%04X\t? %02X %-7.7s %4i ?\t%s\n",
 		  stamp, addr, name, status, extra);
 
 	dbg_inc(&dbg_data.idx);
@@ -865,7 +883,7 @@ static void dbg_print(u8 addr, const char *name, int status, const char *extra)
 	write_unlock_irqrestore(&dbg_data.lck, flags);
 
 	if (dbg_data.tty != 0)
-		pr_notice("%04X\t» %02X %-7.7s %4i «\t%s\n",
+		pr_notice("%04X\t? %02X %-7.7s %4i ?\t%s\n",
 			  stamp, addr, name, status, extra);
 }
 
@@ -1025,15 +1043,15 @@ static ssize_t show_inters(struct device *dev, struct device_attribute *attr,
 
 	n += scnprintf(buf + n, PAGE_SIZE - n, "*test = %d\n",
 		       isr_statistics.test);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» ui  = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, "? ui  = %d\n",
 		       isr_statistics.ui);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» uei = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, "? uei = %d\n",
 		       isr_statistics.uei);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» pci = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, "? pci = %d\n",
 		       isr_statistics.pci);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» uri = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, "? uri = %d\n",
 		       isr_statistics.uri);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» sli = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, "? sli = %d\n",
 		       isr_statistics.sli);
 	n += scnprintf(buf + n, PAGE_SIZE - n, "*none = %d\n",
 		       isr_statistics.none);
@@ -1214,12 +1232,13 @@ static DEVICE_ATTR(qheads, S_IRUSR, show_qheads, NULL);
  *
  * Check "device.h" for details
  */
+#define DUMP_ENTRIES	512
 static ssize_t show_registers(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
 	struct ci13xxx *udc = container_of(dev, struct ci13xxx, gadget.dev);
 	unsigned long flags;
-	u32 dump[512];
+	u32 *dump;
 	unsigned i, k, n = 0;
 
 	dbg_trace("[%s] %p\n", __func__, buf);
@@ -1228,8 +1247,14 @@ static ssize_t show_registers(struct device *dev,
 		return 0;
 	}
 
+	dump = kmalloc(sizeof(u32) * DUMP_ENTRIES, GFP_KERNEL);
+	if (!dump) {
+		dev_err(dev, "%s: out of memory\n", __func__);
+		return 0;
+	}
+
 	spin_lock_irqsave(udc->lock, flags);
-	k = hw_register_read(dump, sizeof(dump)/sizeof(u32));
+	k = hw_register_read(dump, DUMP_ENTRIES);
 	spin_unlock_irqrestore(udc->lock, flags);
 
 	for (i = 0; i < k; i++) {
@@ -1237,6 +1262,7 @@ static ssize_t show_registers(struct device *dev,
 			       "reg[0x%04X] = 0x%08X\n",
 			       i * (unsigned)sizeof(u32), dump[i]);
 	}
+	kfree(dump);
 
 	return n;
 }
@@ -1426,7 +1452,7 @@ static int _hardware_enqueue(struct ci13xxx_ep *mEp, struct ci13xxx_req *mReq)
 		return -EALREADY;
 
 	mReq->req.status = -EALREADY;
-	if (length && !mReq->req.dma) {
+	if (length && mReq->req.dma == DMA_ADDR_INVALID) {
 		mReq->req.dma = \
 			dma_map_single(mEp->device, mReq->req.buf,
 				       length, mEp->dir ? DMA_TO_DEVICE :
@@ -1445,7 +1471,7 @@ static int _hardware_enqueue(struct ci13xxx_ep *mEp, struct ci13xxx_req *mReq)
 				dma_unmap_single(mEp->device, mReq->req.dma,
 					length, mEp->dir ? DMA_TO_DEVICE :
 					DMA_FROM_DEVICE);
-				mReq->req.dma = 0;
+				mReq->req.dma = DMA_ADDR_INVALID;
 				mReq->map     = 0;
 			}
 			return -ENOMEM;
@@ -1541,7 +1567,7 @@ static int _hardware_dequeue(struct ci13xxx_ep *mEp, struct ci13xxx_req *mReq)
 	if (mReq->map) {
 		dma_unmap_single(mEp->device, mReq->req.dma, mReq->req.length,
 				 mEp->dir ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-		mReq->req.dma = 0;
+		mReq->req.dma = DMA_ADDR_INVALID;
 		mReq->map     = 0;
 	}
 
@@ -1602,7 +1628,6 @@ __acquires(mEp->lock)
  * @gadget: gadget
  *
  * This function returns an error code
- * Caller must hold lock
  */
 static int _gadget_stop_activity(struct usb_gadget *gadget)
 {
@@ -1634,8 +1659,6 @@ static int _gadget_stop_activity(struct usb_gadget *gadget)
 	gadget_for_each_ep(ep, gadget) {
 		usb_ep_disable(ep);
 	}
-	usb_ep_disable(&udc->ep0out.ep);
-	usb_ep_disable(&udc->ep0in.ep);
 
 	if (udc->status != NULL) {
 		usb_ep_free_request(&udc->ep0in.ep, udc->status);
@@ -1678,18 +1701,10 @@ __acquires(udc->lock)
 	if (retval)
 		goto done;
 
-	retval = usb_ep_enable(&udc->ep0out.ep, &ctrl_endpt_out_desc);
-	if (retval)
-		goto done;
+	udc->status = usb_ep_alloc_request(&udc->ep0in.ep, GFP_ATOMIC);
+	if (udc->status == NULL)
+		retval = -ENOMEM;
 
-	retval = usb_ep_enable(&udc->ep0in.ep, &ctrl_endpt_in_desc);
-	if (!retval) {
-		udc->status = usb_ep_alloc_request(&udc->ep0in.ep, GFP_ATOMIC);
-		if (udc->status == NULL) {
-			usb_ep_disable(&udc->ep0out.ep);
-			retval = -ENOMEM;
-		}
-	}
 	spin_lock(udc->lock);
 
  done:
@@ -1843,7 +1858,8 @@ __releases(mEp->lock)
 __acquires(mEp->lock)
 {
 	struct ci13xxx_req *mReq, *mReqTemp;
-	int retval;
+	struct ci13xxx_ep *mEpTemp = mEp;
+	int uninitialized_var(retval);
 
 	trace("%p", mEp);
 
@@ -1859,12 +1875,15 @@ __acquires(mEp->lock)
 		dbg_done(_usb_addr(mEp), mReq->ptr->token, retval);
 		if (mReq->req.complete != NULL) {
 			spin_unlock(mEp->lock);
-			mReq->req.complete(&mEp->ep, &mReq->req);
+			if ((mEp->type == USB_ENDPOINT_XFER_CONTROL) &&
+					mReq->req.length)
+				mEpTemp = &_udc->ep0in;
+			mReq->req.complete(&mEpTemp->ep, &mReq->req);
 			spin_lock(mEp->lock);
 		}
 	}
 
-	if (retval == EBUSY)
+	if (retval == -EBUSY)
 		retval = 0;
 	if (retval < 0)
 		dbg_event(_usb_addr(mEp), "DONE", retval);
@@ -1894,7 +1913,7 @@ __acquires(udc->lock)
 
 	for (i = 0; i < hw_ep_max; i++) {
 		struct ci13xxx_ep *mEp  = &udc->ci13xxx_ep[i];
-		int type, num, err = -EINVAL;
+		int type, num, dir, err = -EINVAL;
 		struct usb_ctrlrequest req;
 
 		if (mEp->desc == NULL)
@@ -1952,7 +1971,10 @@ __acquires(udc->lock)
 				if (req.wLength != 0)
 					break;
 				num  = le16_to_cpu(req.wIndex);
+				dir = num & USB_ENDPOINT_DIR_MASK;
 				num &= USB_ENDPOINT_NUMBER_MASK;
+				if (dir) /* TX */
+					num += hw_ep_max/2;
 				if (!udc->ci13xxx_ep[num].wedge) {
 					spin_unlock(udc->lock);
 					err = usb_ep_clear_halt(
@@ -2001,7 +2023,10 @@ __acquires(udc->lock)
 				if (req.wLength != 0)
 					break;
 				num  = le16_to_cpu(req.wIndex);
+				dir = num & USB_ENDPOINT_DIR_MASK;
 				num &= USB_ENDPOINT_NUMBER_MASK;
+				if (dir) /* TX */
+					num += hw_ep_max/2;
 
 				spin_unlock(udc->lock);
 				err = usb_ep_set_halt(&udc->ci13xxx_ep[num].ep);
@@ -2093,7 +2118,7 @@ static int ep_enable(struct usb_ep *ep,
 	mEp->num  = usb_endpoint_num(desc);
 	mEp->type = usb_endpoint_type(desc);
 
-	mEp->ep.maxpacket = __constant_le16_to_cpu(desc->wMaxPacketSize);
+	mEp->ep.maxpacket = usb_endpoint_maxp(desc);
 
 	dbg_event(_usb_addr(mEp), "ENABLE", 0);
 
@@ -2110,7 +2135,12 @@ static int ep_enable(struct usb_ep *ep,
 		(mEp->ep.maxpacket << ffs_nr(QH_MAX_PKT)) & QH_MAX_PKT;
 	mEp->qh.ptr->td.next |= TD_TERMINATE;   /* needed? */
 
-	retval |= hw_ep_enable(mEp->num, mEp->dir, mEp->type);
+	/*
+	 * Enable endpoints in the HW other than ep0 as ep0
+	 * is always enabled
+	 */
+	if (mEp->num)
+		retval |= hw_ep_enable(mEp->num, mEp->dir, mEp->type);
 
 	spin_unlock_irqrestore(mEp->lock, flags);
 	return retval;
@@ -2176,6 +2206,7 @@ static struct usb_request *ep_alloc_request(struct usb_ep *ep, gfp_t gfp_flags)
 	mReq = kzalloc(sizeof(struct ci13xxx_req), gfp_flags);
 	if (mReq != NULL) {
 		INIT_LIST_HEAD(&mReq->queue);
+		mReq->req.dma = DMA_ADDR_INVALID;
 
 		mReq->ptr = dma_pool_alloc(mEp->td_pool, gfp_flags,
 					   &mReq->dma);
@@ -2242,11 +2273,15 @@ static int ep_queue(struct usb_ep *ep, struct usb_request *req,
 
 	spin_lock_irqsave(mEp->lock, flags);
 
-	if (mEp->type == USB_ENDPOINT_XFER_CONTROL &&
-	    !list_empty(&mEp->qh.queue)) {
-		_ep_nuke(mEp);
-		retval = -EOVERFLOW;
-		warn("endpoint ctrl %X nuked", _usb_addr(mEp));
+	if (mEp->type == USB_ENDPOINT_XFER_CONTROL) {
+		if (req->length)
+			mEp = (_udc->ep0_dir == RX) ?
+				&_udc->ep0out : &_udc->ep0in;
+		if (!list_empty(&mEp->qh.queue)) {
+			_ep_nuke(mEp);
+			retval = -EOVERFLOW;
+			warn("endpoint ctrl %X nuked", _usb_addr(mEp));
+		}
 	}
 
 	/* first nuke then test link, e.g. previous status has not sent */
@@ -2311,7 +2346,7 @@ static int ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 	if (mReq->map) {
 		dma_unmap_single(mEp->device, mReq->req.dma, mReq->req.length,
 				 mEp->dir ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-		mReq->req.dma = 0;
+		mReq->req.dma = DMA_ADDR_INVALID;
 		mReq->map     = 0;
 	}
 	req->status = -ECONNRESET;
@@ -2483,12 +2518,12 @@ static int ci13xxx_wakeup(struct usb_gadget *_gadget)
 	spin_lock_irqsave(udc->lock, flags);
 	if (!udc->remote_wakeup) {
 		ret = -EOPNOTSUPP;
-		dbg_trace("remote wakeup feature is not enabled\n");
+		trace("remote wakeup feature is not enabled\n");
 		goto out;
 	}
 	if (!hw_cread(CAP_PORTSC, PORTSC_SUSP)) {
 		ret = -EINVAL;
-		dbg_trace("port is not suspended\n");
+		trace("port is not suspended\n");
 		goto out;
 	}
 	hw_cwrite(CAP_PORTSC, PORTSC_FPR, PORTSC_FPR);
@@ -2497,6 +2532,18 @@ out:
 	return ret;
 }
 
+static int ci13xxx_vbus_draw(struct usb_gadget *_gadget, unsigned mA)
+{
+	struct ci13xxx *udc = container_of(_gadget, struct ci13xxx, gadget);
+
+	if (udc->transceiver)
+		return otg_set_power(udc->transceiver, mA);
+	return -ENOTSUPP;
+}
+
+static int ci13xxx_start(struct usb_gadget_driver *driver,
+		int (*bind)(struct usb_gadget *));
+static int ci13xxx_stop(struct usb_gadget_driver *driver);
 /**
  * Device operations part of the API to the USB controller hardware,
  * which don't involve endpoints (or i/o)
@@ -2505,17 +2552,20 @@ out:
 static const struct usb_gadget_ops usb_gadget_ops = {
 	.vbus_session	= ci13xxx_vbus_session,
 	.wakeup		= ci13xxx_wakeup,
+	.vbus_draw	= ci13xxx_vbus_draw,
+	.start		= ci13xxx_start,
+	.stop		= ci13xxx_stop,
 };
 
 /**
- * usb_gadget_probe_driver: register a gadget driver
+ * ci13xxx_start: register a gadget driver
  * @driver: the driver being registered
  * @bind: the driver's bind callback
  *
- * Check usb_gadget_probe_driver() at <linux/usb/gadget.h> for details.
+ * Check ci13xxx_start() at <linux/usb/gadget.h> for details.
  * Interrupts are enabled here.
  */
-int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
+static int ci13xxx_start(struct usb_gadget_driver *driver,
 		int (*bind)(struct usb_gadget *))
 {
 	struct ci13xxx *udc = _udc;
@@ -2528,9 +2578,7 @@ int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
 	if (driver             == NULL ||
 	    bind               == NULL ||
 	    driver->setup      == NULL ||
-	    driver->disconnect == NULL ||
-	    driver->suspend    == NULL ||
-	    driver->resume     == NULL)
+	    driver->disconnect == NULL)
 		return -EINVAL;
 	else if (udc         == NULL)
 		return -ENODEV;
@@ -2595,6 +2643,17 @@ int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
 	}
 	if (retval)
 		goto done;
+	spin_unlock_irqrestore(udc->lock, flags);
+	udc->ep0out.ep.desc = &ctrl_endpt_out_desc;
+	retval = usb_ep_enable(&udc->ep0out.ep);
+	if (retval)
+		return retval;
+
+	udc->ep0in.ep.desc = &ctrl_endpt_in_desc;
+	retval = usb_ep_enable(&udc->ep0in.ep);
+	if (retval)
+		return retval;
+	spin_lock_irqsave(udc->lock, flags);
 
 	udc->gadget.ep0 = &udc->ep0in.ep;
 	/* bind gadget */
@@ -2630,14 +2689,13 @@ int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
 	spin_unlock_irqrestore(udc->lock, flags);
 	return retval;
 }
-EXPORT_SYMBOL(usb_gadget_probe_driver);
 
 /**
- * usb_gadget_unregister_driver: unregister a gadget driver
+ * ci13xxx_stop: unregister a gadget driver
  *
  * Check usb_gadget_unregister_driver() at "usb_gadget.h" for details
  */
-int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
+static int ci13xxx_stop(struct usb_gadget_driver *driver)
 {
 	struct ci13xxx *udc = _udc;
 	unsigned long i, flags;
@@ -2648,8 +2706,6 @@ int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
 	    driver->unbind     == NULL ||
 	    driver->setup      == NULL ||
 	    driver->disconnect == NULL ||
-	    driver->suspend    == NULL ||
-	    driver->resume     == NULL ||
 	    driver             != udc->driver)
 		return -EINVAL;
 
@@ -2661,7 +2717,9 @@ int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
 		if (udc->udc_driver->notify_event)
 			udc->udc_driver->notify_event(udc,
 			CI13XXX_CONTROLLER_STOPPED_EVENT);
+		spin_unlock_irqrestore(udc->lock, flags);
 		_gadget_stop_activity(&udc->gadget);
+		spin_lock_irqsave(udc->lock, flags);
 		pm_runtime_put(&udc->gadget.dev);
 	}
 
@@ -2699,7 +2757,6 @@ int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
 
 	return 0;
 }
-EXPORT_SYMBOL(usb_gadget_unregister_driver);
 
 /******************************************************************************
  * BUS block
@@ -2747,7 +2804,7 @@ static irqreturn_t udc_irq(void)
 			isr_statistics.pci++;
 			udc->gadget.speed = hw_port_is_high_speed() ?
 				USB_SPEED_HIGH : USB_SPEED_FULL;
-			if (udc->suspended) {
+			if (udc->suspended && udc->driver->resume) {
 				spin_unlock(udc->lock);
 				udc->driver->resume(&udc->gadget);
 				spin_lock(udc->lock);
@@ -2761,7 +2818,8 @@ static irqreturn_t udc_irq(void)
 			isr_tr_complete_handler(udc);
 		}
 		if (USBi_SLI & intr) {
-			if (udc->gadget.speed != USB_SPEED_UNKNOWN) {
+			if (udc->gadget.speed != USB_SPEED_UNKNOWN &&
+			    udc->driver->suspend) {
 				udc->suspended = 1;
 				spin_unlock(udc->lock);
 				udc->driver->suspend(&udc->gadget);
@@ -2809,7 +2867,7 @@ static int udc_probe(struct ci13xxx_udc_driver *driver, struct device *dev,
 	struct ci13xxx *udc;
 	int retval = 0;
 
-	trace("%p, %p, %p", dev, regs, name);
+	trace("%p, %p, %p", dev, regs, driver->name);
 
 	if (dev == NULL || regs == NULL || driver == NULL ||
 			driver->name == NULL)
@@ -2825,7 +2883,7 @@ static int udc_probe(struct ci13xxx_udc_driver *driver, struct device *dev,
 
 	udc->gadget.ops          = &usb_gadget_ops;
 	udc->gadget.speed        = USB_SPEED_UNKNOWN;
-	udc->gadget.is_dualspeed = 1;
+	udc->gadget.max_speed    = USB_SPEED_HIGH;
 	udc->gadget.is_otg       = 0;
 	udc->gadget.name         = driver->name;
 
@@ -2874,11 +2932,22 @@ static int udc_probe(struct ci13xxx_udc_driver *driver, struct device *dev,
 		if (retval)
 			goto remove_dbg;
 	}
+
+	retval = usb_add_gadget_udc(dev, &udc->gadget);
+	if (retval)
+		goto remove_trans;
+
 	pm_runtime_no_callbacks(&udc->gadget.dev);
 	pm_runtime_enable(&udc->gadget.dev);
 
 	_udc = udc;
 	return retval;
+
+remove_trans:
+	if (udc->transceiver) {
+		otg_set_peripheral(udc->transceiver, &udc->gadget);
+		otg_put_transceiver(udc->transceiver);
+	}
 
 	err("error = %i", retval);
 remove_dbg:
@@ -2909,6 +2978,7 @@ static void udc_remove(void)
 		err("EINVAL");
 		return;
 	}
+	usb_del_gadget_udc(&udc->gadget);
 
 	if (udc->transceiver) {
 		otg_set_peripheral(udc->transceiver, &udc->gadget);

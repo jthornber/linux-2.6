@@ -457,6 +457,9 @@ A partial list of the supported mount options follows:
 		otherwise - read from the server. All written data are stored
 		in the cache, but if the client doesn't have Exclusive Oplock,
 		it writes the data to the server.
+  rwpidforward  Forward pid of a process who opened a file to any read or write
+		operation on that file. This prevent applications like WINE
+		from failing on read and write if we use mandatory brlock style.
   acl   	Allow setfacl and getfacl to manage posix ACLs if server
 		supports them.  (default)
   noacl 	Do not allow setfacl and getfacl calls on this mount
@@ -742,4 +745,18 @@ installed and something like the following lines should be added to the
 create cifs.spnego * * /usr/local/sbin/cifs.upcall %k
 create dns_resolver * * /usr/local/sbin/cifs.upcall %k
 
+CIFS kernel module parameters
+=============================
+These module parameters can be specified or modified either during the time of
+module loading or during the runtime by using the interface
+	/proc/module/cifs/parameters/<param>
+
+i.e. echo "value" > /sys/module/cifs/parameters/<param>
+
+1. echo_retries - The number of echo attempts before giving up and
+		  reconnecting to the server. The default is 5. The value 0
+		  means never reconnect.
+
+2. enable_oplocks - Enable or disable oplocks. Oplocks are enabled by default.
+		    [Y/y/1]. To disable use any of [N/n/0].
 

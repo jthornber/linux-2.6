@@ -24,6 +24,7 @@
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/system.h>
+#include <asm/traps.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
 #ifdef CONFIG_ATARI
@@ -31,8 +32,6 @@
 #endif
 #include <asm/sections.h>
 #include <asm/tlb.h>
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 pg_data_t pg_data_map[MAX_NUMNODES];
 EXPORT_SYMBOL(pg_data_map);
@@ -77,6 +76,38 @@ extern void init_pointer_table(unsigned long ptable);
 
 extern pmd_t *zero_pgtable;
 
+#if defined(CONFIG_MMU) && !defined(CONFIG_COLDFIRE)
+#define VECTORS	&vectors[0]
+#else
+#define VECTORS	_ramvec
+#endif
+
+void __init print_memmap(void)
+{
+#define UL(x) ((unsigned long) (x))
+#define MLK(b, t) UL(b), UL(t), (UL(t) - UL(b)) >> 10
+#define MLM(b, t) UL(b), UL(t), (UL(t) - UL(b)) >> 20
+#define MLK_ROUNDUP(b, t) b, t, DIV_ROUND_UP(((t) - (b)), 1024)
+
+	pr_notice("Virtual kernel memory layout:\n"
+		"    vector  : 0x%08lx - 0x%08lx   (%4ld KiB)\n"
+		"    kmap    : 0x%08lx - 0x%08lx   (%4ld MiB)\n"
+		"    vmalloc : 0x%08lx - 0x%08lx   (%4ld MiB)\n"
+		"    lowmem  : 0x%08lx - 0x%08lx   (%4ld MiB)\n"
+		"      .init : 0x%p" " - 0x%p" "   (%4d KiB)\n"
+		"      .text : 0x%p" " - 0x%p" "   (%4d KiB)\n"
+		"      .data : 0x%p" " - 0x%p" "   (%4d KiB)\n"
+		"      .bss  : 0x%p" " - 0x%p" "   (%4d KiB)\n",
+		MLK(VECTORS, VECTORS + 256),
+		MLM(KMAP_START, KMAP_END),
+		MLM(VMALLOC_START, VMALLOC_END),
+		MLM(PAGE_OFFSET, (unsigned long)high_memory),
+		MLK_ROUNDUP(__init_begin, __init_end),
+		MLK_ROUNDUP(_stext, _etext),
+		MLK_ROUNDUP(_sdata, _edata),
+		MLK_ROUNDUP(_sbss, _ebss));
+}
+
 void __init mem_init(void)
 {
 	pg_data_t *pgdat;
@@ -84,11 +115,6 @@ void __init mem_init(void)
 	int datapages = 0;
 	int initpages = 0;
 	int i;
-
-#ifdef CONFIG_ATARI
-	if (MACH_IS_ATARI)
-		atari_stram_mem_init_hook();
-#endif
 
 	/* this will put all memory onto the freelists */
 	totalram_pages = num_physpages = 0;
@@ -113,7 +139,7 @@ void __init mem_init(void)
 		}
 	}
 
-#ifndef CONFIG_SUN3
+#if !defined(CONFIG_SUN3) && !defined(CONFIG_COLDFIRE)
 	/* insert pointer tables allocated so far into the tablelist */
 	init_pointer_table((unsigned long)kernel_pg_dir);
 	for (i = 0; i < PTRS_PER_PGD; i++) {
@@ -132,6 +158,7 @@ void __init mem_init(void)
 	       codepages << (PAGE_SHIFT-10),
 	       datapages << (PAGE_SHIFT-10),
 	       initpages << (PAGE_SHIFT-10));
+	print_memmap();
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD

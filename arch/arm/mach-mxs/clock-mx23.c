@@ -446,6 +446,8 @@ static struct clk_lookup lookups[] = {
 	_REGISTER_CLOCK("rtc", NULL, rtc_clk)
 	_REGISTER_CLOCK("mxs-dma-apbh", NULL, hbus_clk)
 	_REGISTER_CLOCK("mxs-dma-apbx", NULL, xbus_clk)
+	_REGISTER_CLOCK("mxs-mmc.0", NULL, ssp_clk)
+	_REGISTER_CLOCK("mxs-mmc.1", NULL, ssp_clk)
 	_REGISTER_CLOCK(NULL, "usb", usb_clk)
 	_REGISTER_CLOCK(NULL, "audio", audio_clk)
 	_REGISTER_CLOCK("mxs-pwm.0", NULL, pwm_clk)
@@ -543,11 +545,11 @@ int __init mx23_clocks_init(void)
 	 */
 	clk_set_parent(&ssp_clk, &ref_io_clk);
 
-	clk_enable(&cpu_clk);
-	clk_enable(&hbus_clk);
-	clk_enable(&xbus_clk);
-	clk_enable(&emi_clk);
-	clk_enable(&uart_clk);
+	clk_prepare_enable(&cpu_clk);
+	clk_prepare_enable(&hbus_clk);
+	clk_prepare_enable(&xbus_clk);
+	clk_prepare_enable(&emi_clk);
+	clk_prepare_enable(&uart_clk);
 
 	clkdev_add_table(lookups, ARRAY_SIZE(lookups));
 

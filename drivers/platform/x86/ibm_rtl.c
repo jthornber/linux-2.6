@@ -22,15 +22,18 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/io.h>
-#include <linux/sysdev.h>
 #include <linux/dmi.h>
 #include <linux/efi.h>
 #include <linux/mutex.h>
 #include <asm/bios_ebda.h>
+
+#include <asm-generic/io-64-nonatomic-lo-hi.h>
 
 static bool force;
 module_param(force, bool, 0);
@@ -69,9 +72,10 @@ struct ibm_rtl_table {
 #define RTL_SIGNATURE 0x0000005f4c54525fULL
 #define RTL_MASK      0x000000ffffffffffULL
 
-#define RTL_DEBUG(A, ...) do { \
-	if (debug) \
-		pr_info("ibm-rtl: " A, ##__VA_ARGS__ ); \
+#define RTL_DEBUG(fmt, ...)				\
+do {							\
+	if (debug)					\
+		pr_info(fmt, ##__VA_ARGS__);		\
 } while (0)
 
 static DEFINE_MUTEX(rtl_lock);
@@ -101,7 +105,7 @@ static int ibm_rtl_write(u8 value)
 	int ret = 0, count = 0;
 	static u32 cmd_port_val;
 
-	RTL_DEBUG("%s(%d)\n", __FUNCTION__, value);
+	RTL_DEBUG("%s(%d)\n", __func__, value);
 
 	value = value == 1 ? RTL_CMD_ENTER_PRTM : RTL_CMD_EXIT_PRTM;
 
@@ -131,8 +135,8 @@ static int ibm_rtl_write(u8 value)
 		while (ioread8(&rtl_table->command)) {
 			msleep(10);
 			if (count++ > 500) {
-				pr_err("ibm-rtl: Hardware not responding to "
-					"mode switch request\n");
+				pr_err("Hardware not responding to "
+				       "mode switch request\n");
 				ret = -EIO;
 				break;
 			}
@@ -149,22 +153,22 @@ static int ibm_rtl_write(u8 value)
 	return ret;
 }
 
-static ssize_t rtl_show_version(struct sysdev_class * dev,
-                                struct sysdev_class_attribute *attr,
+static ssize_t rtl_show_version(struct device *dev,
+                                struct device_attribute *attr,
                                 char *buf)
 {
 	return sprintf(buf, "%d\n", (int)ioread8(&rtl_table->version));
 }
 
-static ssize_t rtl_show_state(struct sysdev_class *dev,
-                              struct sysdev_class_attribute *attr,
+static ssize_t rtl_show_state(struct device *dev,
+                              struct device_attribute *attr,
                               char *buf)
 {
 	return sprintf(buf, "%d\n", ioread8(&rtl_table->rt_status));
 }
 
-static ssize_t rtl_set_state(struct sysdev_class *dev,
-                             struct sysdev_class_attribute *attr,
+static ssize_t rtl_set_state(struct device *dev,
+                             struct device_attribute *attr,
                              const char *buf,
                              size_t count)
 {
@@ -189,27 +193,28 @@ static ssize_t rtl_set_state(struct sysdev_class *dev,
 	return ret;
 }
 
-static struct sysdev_class class_rtl = {
+static struct bus_type rtl_subsys = {
 	.name = "ibm_rtl",
+	.dev_name = "ibm_rtl",
 };
 
-static SYSDEV_CLASS_ATTR(version, S_IRUGO, rtl_show_version, NULL);
-static SYSDEV_CLASS_ATTR(state, 0600, rtl_show_state, rtl_set_state);
+static DEVICE_ATTR(version, S_IRUGO, rtl_show_version, NULL);
+static DEVICE_ATTR(state, 0600, rtl_show_state, rtl_set_state);
 
-static struct sysdev_class_attribute *rtl_attributes[] = {
-	&attr_version,
-	&attr_state,
+static struct device_attribute *rtl_attributes[] = {
+	&dev_attr_version,
+	&dev_attr_state,
 	NULL
 };
 
 
 static int rtl_setup_sysfs(void) {
 	int ret, i;
-	ret = sysdev_class_register(&class_rtl);
 
+	ret = subsys_system_register(&rtl_subsys, NULL);
 	if (!ret) {
 		for (i = 0; rtl_attributes[i]; i ++)
-			sysdev_class_create_file(&class_rtl, rtl_attributes[i]);
+			device_create_file(rtl_subsys.dev_root, rtl_attributes[i]);
 	}
 	return ret;
 }
@@ -217,8 +222,8 @@ static int rtl_setup_sysfs(void) {
 static void rtl_teardown_sysfs(void) {
 	int i;
 	for (i = 0; rtl_attributes[i]; i ++)
-		sysdev_class_remove_file(&class_rtl, rtl_attributes[i]);
-	sysdev_class_unregister(&class_rtl);
+		device_remove_file(rtl_subsys.dev_root, rtl_attributes[i]);
+	bus_unregister(&rtl_subsys);
 }
 
 
@@ -237,7 +242,7 @@ static int __init ibm_rtl_init(void) {
 	int ret = -ENODEV, i;
 
 	if (force)
-		pr_warning("ibm-rtl: module loaded by force\n");
+		pr_warn("module loaded by force\n");
 	/* first ensure that we are running on IBM HW */
 	else if (efi_enabled || !dmi_check_system(ibm_rtl_dmi_table))
 		return -ENODEV;
@@ -275,19 +280,19 @@ static int __init ibm_rtl_init(void) {
 		if ((readq(&tmp->signature) & RTL_MASK) == RTL_SIGNATURE) {
 			phys_addr_t addr;
 			unsigned int plen;
-			RTL_DEBUG("found RTL_SIGNATURE at %#llx\n", (u64)tmp);
+			RTL_DEBUG("found RTL_SIGNATURE at %p\n", tmp);
 			rtl_table = tmp;
 			/* The address, value, width and offset are platform
 			 * dependent and found in the ibm_rtl_table */
 			rtl_cmd_width = ioread8(&rtl_table->cmd_granularity);
 			rtl_cmd_type = ioread8(&rtl_table->cmd_address_type);
 			RTL_DEBUG("rtl_cmd_width = %u, rtl_cmd_type = %u\n",
-			      rtl_cmd_width, rtl_cmd_type);
+				  rtl_cmd_width, rtl_cmd_type);
 			addr = ioread32(&rtl_table->cmd_port_address);
 			RTL_DEBUG("addr = %#llx\n", (unsigned long long)addr);
 			plen = rtl_cmd_width/sizeof(char);
 			rtl_cmd_addr = rtl_port_map(addr, plen);
-			RTL_DEBUG("rtl_cmd_addr = %#llx\n", (u64)rtl_cmd_addr);
+			RTL_DEBUG("rtl_cmd_addr = %p\n", rtl_cmd_addr);
 			if (!rtl_cmd_addr) {
 				ret = -ENOMEM;
 				break;

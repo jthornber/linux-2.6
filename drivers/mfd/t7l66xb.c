@@ -170,7 +170,8 @@ static struct mfd_cell t7l66xb_cells[] = {
 		.name = "tmio-mmc",
 		.enable = t7l66xb_mmc_enable,
 		.disable = t7l66xb_mmc_disable,
-		.mfd_data = &t7166xb_mmc_data,
+		.platform_data = &t7166xb_mmc_data,
+		.pdata_size    = sizeof(t7166xb_mmc_data),
 		.num_resources = ARRAY_SIZE(t7l66xb_mmc_resources),
 		.resources = t7l66xb_mmc_resources,
 	},
@@ -382,7 +383,8 @@ static int t7l66xb_probe(struct platform_device *dev)
 
 	t7l66xb_attach_irq(dev);
 
-	t7l66xb_cells[T7L66XB_CELL_NAND].mfd_data = pdata->nand_data;
+	t7l66xb_cells[T7L66XB_CELL_NAND].platform_data = pdata->nand_data;
+	t7l66xb_cells[T7L66XB_CELL_NAND].pdata_size = sizeof(*pdata->nand_data);
 
 	ret = mfd_add_devices(&dev->dev, dev->id,
 			      t7l66xb_cells, ARRAY_SIZE(t7l66xb_cells),
@@ -440,21 +442,7 @@ static struct platform_driver t7l66xb_platform_driver = {
 
 /*--------------------------------------------------------------------------*/
 
-static int __init t7l66xb_init(void)
-{
-	int retval = 0;
-
-	retval = platform_driver_register(&t7l66xb_platform_driver);
-	return retval;
-}
-
-static void __exit t7l66xb_exit(void)
-{
-	platform_driver_unregister(&t7l66xb_platform_driver);
-}
-
-module_init(t7l66xb_init);
-module_exit(t7l66xb_exit);
+module_platform_driver(t7l66xb_platform_driver);
 
 MODULE_DESCRIPTION("Toshiba T7L66XB core driver");
 MODULE_LICENSE("GPL v2");

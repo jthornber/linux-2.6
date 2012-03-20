@@ -10,6 +10,7 @@
  */
 
 #include <linux/platform_device.h>
+#include <linux/module.h>
 #include <sound/sh_fsi.h>
 
 struct fsi_hdmi_data {
@@ -38,6 +39,7 @@ static struct snd_soc_dai_link fsi_dai_link = {
 };
 
 static struct snd_soc_card fsi_soc_card  = {
+	.owner		= THIS_MODULE,
 	.dai_link	= &fsi_dai_link,
 	.num_links	= 1,
 };
@@ -83,13 +85,13 @@ static int fsi_hdmi_remove(struct platform_device *pdev)
 
 static struct fsi_hdmi_data fsi2_a_hdmi = {
 	.cpu_dai	= "fsia-dai",
-	.card		= "FSI2A (SH MOBILE HDMI)",
+	.card		= "FSI2A-HDMI",
 	.id		= FSI_PORT_A,
 };
 
 static struct fsi_hdmi_data fsi2_b_hdmi = {
 	.cpu_dai	= "fsib-dai",
-	.card		= "FSI2B (SH MOBILE HDMI)",
+	.card		= "FSI2B-HDMI",
 	.id		= FSI_PORT_B,
 };
 
@@ -109,18 +111,7 @@ static struct platform_driver fsi_hdmi = {
 	.id_table	= fsi_id_table,
 };
 
-static int __init fsi_hdmi_init(void)
-{
-	return platform_driver_register(&fsi_hdmi);
-}
-
-static void __exit fsi_hdmi_exit(void)
-{
-	platform_driver_unregister(&fsi_hdmi);
-}
-
-module_init(fsi_hdmi_init);
-module_exit(fsi_hdmi_exit);
+module_platform_driver(fsi_hdmi);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Generic SH4 FSI-HDMI sound card");

@@ -15,8 +15,6 @@
 /*
  *	IRQ list.
  */
-#define AT91_ID_FIQ		0	/* FIQ */
-#define AT91_ID_SYS		1	/* System Peripheral */
 #define AT91X40_ID_USART0	2	/* USART port 0 */
 #define AT91X40_ID_USART1	3	/* USART port 1 */
 #define AT91X40_ID_TC0		4	/* Timer/Counter 0 */
@@ -42,7 +40,6 @@
 #define AT91_PIOA	(0xffff0000 - AT91_BASE_SYS)	/* PIO Controller A */
 #define AT91_PS		(0xffff4000 - AT91_BASE_SYS)	/* Power Save */
 #define AT91_WD		(0xffff8000 - AT91_BASE_SYS)	/* Watchdog Timer */
-#define AT91_AIC	(0xfffff000 - AT91_BASE_SYS)	/* Advanced Interrupt Controller */
 
 /*
  * The AT91x40 series doesn't have a debug unit like the other AT91 parts.

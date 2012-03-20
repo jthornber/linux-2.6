@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/irqflags.h>
 #include <linux/interrupt.h>
+#include <asm/div64.h>
 
 void __delay(unsigned long loops)
 {
@@ -31,7 +32,8 @@ static void __udelay_disabled(unsigned long long usecs)
 	u64 clock_saved;
 	u64 end;
 
-	mask = psw_kernel_bits | PSW_MASK_WAIT | PSW_MASK_EXT;
+	mask = psw_kernel_bits | PSW_MASK_DAT | PSW_MASK_WAIT |
+		PSW_MASK_EXT | PSW_MASK_MCHECK;
 	end = get_clock() + (usecs << 12);
 	clock_saved = local_tick_disable();
 	__ctl_store(cr0_saved, 0, 0);
@@ -116,3 +118,17 @@ void udelay_simple(unsigned long long usecs)
 	while (get_clock() < end)
 		cpu_relax();
 }
+
+void __ndelay(unsigned long long nsecs)
+{
+	u64 end;
+
+	nsecs <<= 9;
+	do_div(nsecs, 125);
+	end = get_clock() + nsecs;
+	if (nsecs & ~0xfffUL)
+		__udelay(nsecs >> 12);
+	while (get_clock() < end)
+		barrier();
+}
+EXPORT_SYMBOL(__ndelay);

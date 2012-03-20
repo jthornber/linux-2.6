@@ -7,6 +7,7 @@
 #include <linux/time.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
+#include <linux/pid_namespace.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/stat.h>
@@ -17,7 +18,9 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/sysctl.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/mount.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -28,6 +31,7 @@ static void proc_evict_inode(struct inode *inode)
 {
 	struct proc_dir_entry *de;
 	struct ctl_table_header *head;
+	const struct proc_ns_operations *ns_ops;
 
 	truncate_inode_pages(&inode->i_data, 0);
 	end_writeback(inode);
@@ -44,6 +48,10 @@ static void proc_evict_inode(struct inode *inode)
 		rcu_assign_pointer(PROC_I(inode)->sysctl, NULL);
 		sysctl_head_put(head);
 	}
+	/* Release any associated namespace */
+	ns_ops = PROC_I(inode)->ns_ops;
+	if (ns_ops && ns_ops->put)
+		ns_ops->put(PROC_I(inode)->ns);
 }
 
 static struct kmem_cache * proc_inode_cachep;
@@ -62,6 +70,8 @@ static struct inode *proc_alloc_inode(struct super_block *sb)
 	ei->pde = NULL;
 	ei->sysctl = NULL;
 	ei->sysctl_entry = NULL;
+	ei->ns = NULL;
+	ei->ns_ops = NULL;
 	inode = &ei->vfs_inode;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	return inode;
@@ -70,7 +80,6 @@ static struct inode *proc_alloc_inode(struct super_block *sb)
 static void proc_i_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
-	INIT_LIST_HEAD(&inode->i_dentry);
 	kmem_cache_free(proc_inode_cachep, PROC_I(inode));
 }
 
@@ -95,12 +104,27 @@ void __init proc_init_inodecache(void)
 					     init_once);
 }
 
+static int proc_show_options(struct seq_file *seq, struct dentry *root)
+{
+	struct super_block *sb = root->d_sb;
+	struct pid_namespace *pid = sb->s_fs_info;
+
+	if (pid->pid_gid)
+		seq_printf(seq, ",gid=%lu", (unsigned long)pid->pid_gid);
+	if (pid->hide_pid != 0)
+		seq_printf(seq, ",hidepid=%u", pid->hide_pid);
+
+	return 0;
+}
+
 static const struct super_operations proc_sops = {
 	.alloc_inode	= proc_alloc_inode,
 	.destroy_inode	= proc_destroy_inode,
 	.drop_inode	= generic_delete_inode,
 	.evict_inode	= proc_evict_inode,
 	.statfs		= simple_statfs,
+	.remount_fs	= proc_remount,
+	.show_options	= proc_show_options,
 };
 
 static void __pde_users_dec(struct proc_dir_entry *pde)
@@ -312,7 +336,7 @@ static int proc_reg_open(struct inode *inode, struct file *file)
 	if (!pde->proc_fops) {
 		spin_unlock(&pde->pde_unload_lock);
 		kfree(pdeo);
-		return -EINVAL;
+		return -ENOENT;
 	}
 	pde->pde_users++;
 	open = pde->proc_fops->open;
@@ -438,7 +462,7 @@ struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 		if (de->size)
 			inode->i_size = de->size;
 		if (de->nlink)
-			inode->i_nlink = de->nlink;
+			set_nlink(inode, de->nlink);
 		if (de->proc_iops)
 			inode->i_op = de->proc_iops;
 		if (de->proc_fops) {

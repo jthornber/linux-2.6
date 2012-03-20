@@ -1781,7 +1781,7 @@ static int wl3501_get_encode(struct net_device *dev,
 				  keys, len_keys);
 	if (rc)
 		goto out;
-	tocopy = min_t(u8, len_keys, wrqu->encoding.length);
+	tocopy = min_t(u16, len_keys, wrqu->encoding.length);
 	tocopy = min_t(u8, tocopy, 100);
 	wrqu->encoding.length = tocopy;
 	memcpy(extra, keys, tocopy);
@@ -2000,7 +2000,7 @@ static int wl3501_resume(struct pcmcia_device *link)
 }
 
 
-static struct pcmcia_device_id wl3501_ids[] = {
+static const struct pcmcia_device_id wl3501_ids[] = {
 	PCMCIA_DEVICE_MANF_CARD(0xd601, 0x0001),
 	PCMCIA_DEVICE_NULL
 };

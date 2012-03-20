@@ -18,9 +18,9 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/list.h>
-#include <linux/mfd/ab8500.h>
 #include <linux/mfd/abx500.h>
-#include <linux/mfd/ab8500/gpadc.h>
+#include <linux/mfd/abx500/ab8500.h>
+#include <linux/mfd/abx500/ab8500-gpadc.h>
 
 /*
  * GPADC register offsets
@@ -57,6 +57,7 @@
 #define SW_AVG_16			0x60
 #define ADC_SW_CONV			0x04
 #define EN_ICHAR			0x80
+#define BTEMP_PULL_UP			0x08
 #define EN_BUF				0x40
 #define DIS_ZERO			0x00
 #define GPADC_BUSY			0x01
@@ -101,6 +102,7 @@ struct adc_cal_data {
 
 /**
  * struct ab8500_gpadc - AB8500 GPADC device information
+ * @chip_id			ABB chip id
  * @dev:			pointer to the struct device
  * @node:			a list of AB8500 GPADCs, hence prepared for
 				reentrance
@@ -112,6 +114,7 @@ struct adc_cal_data {
  * @cal_data			array of ADC calibration data structs
  */
 struct ab8500_gpadc {
+	u8 chip_id;
 	struct device *dev;
 	struct list_head node;
 	struct completion ab8500_gpadc_complete;
@@ -140,12 +143,15 @@ struct ab8500_gpadc *ab8500_gpadc_get(char *name)
 }
 EXPORT_SYMBOL(ab8500_gpadc_get);
 
-static int ab8500_gpadc_ad_to_voltage(struct ab8500_gpadc *gpadc, u8 input,
+/**
+ * ab8500_gpadc_ad_to_voltage() - Convert a raw ADC value to a voltage
+ */
+int ab8500_gpadc_ad_to_voltage(struct ab8500_gpadc *gpadc, u8 channel,
 	int ad_value)
 {
 	int res;
 
-	switch (input) {
+	switch (channel) {
 	case MAIN_CHARGER_V:
 		/* For some reason we don't have calibrated data */
 		if (!gpadc->cal_data[ADC_INPUT_VMAIN].gain) {
@@ -229,18 +235,46 @@ static int ab8500_gpadc_ad_to_voltage(struct ab8500_gpadc *gpadc, u8 input,
 	}
 	return res;
 }
+EXPORT_SYMBOL(ab8500_gpadc_ad_to_voltage);
 
 /**
  * ab8500_gpadc_convert() - gpadc conversion
- * @input:	analog input to be converted to digital data
+ * @channel:	analog channel to be converted to digital data
  *
  * This function converts the selected analog i/p to digital
  * data.
  */
-int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 input)
+int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 channel)
+{
+	int ad_value;
+	int voltage;
+
+	ad_value = ab8500_gpadc_read_raw(gpadc, channel);
+	if (ad_value < 0) {
+		dev_err(gpadc->dev, "GPADC raw value failed ch: %d\n", channel);
+		return ad_value;
+	}
+
+	voltage = ab8500_gpadc_ad_to_voltage(gpadc, channel, ad_value);
+
+	if (voltage < 0)
+		dev_err(gpadc->dev, "GPADC to voltage conversion failed ch:"
+			" %d AD: 0x%x\n", channel, ad_value);
+
+	return voltage;
+}
+EXPORT_SYMBOL(ab8500_gpadc_convert);
+
+/**
+ * ab8500_gpadc_read_raw() - gpadc read
+ * @channel:	analog channel to be read
+ *
+ * This function obtains the raw ADC value, this then needs
+ * to be converted by calling ab8500_gpadc_ad_to_voltage()
+ */
+int ab8500_gpadc_read_raw(struct ab8500_gpadc *gpadc, u8 channel)
 {
 	int ret;
-	u16 data = 0;
 	int looplimit = 0;
 	u8 val, low_data, high_data;
 
@@ -274,19 +308,22 @@ int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 input)
 		dev_err(gpadc->dev, "gpadc_conversion: enable gpadc failed\n");
 		goto out;
 	}
-	/* Select the input source and set average samples to 16 */
+
+	/* Select the channel source and set average samples to 16 */
 	ret = abx500_set_register_interruptible(gpadc->dev, AB8500_GPADC,
-		AB8500_GPADC_CTRL2_REG, (input | SW_AVG_16));
+		AB8500_GPADC_CTRL2_REG, (channel | SW_AVG_16));
 	if (ret < 0) {
 		dev_err(gpadc->dev,
 			"gpadc_conversion: set avg samples failed\n");
 		goto out;
 	}
+
 	/*
 	 * Enable ADC, buffering, select rising edge and enable ADC path
-	 * charging current sense if it needed
+	 * charging current sense if it needed, ABB 3.0 needs some special
+	 * treatment too.
 	 */
-	switch (input) {
+	switch (channel) {
 	case MAIN_CHARGER_C:
 	case USB_CHARGER_C:
 		ret = abx500_mask_and_set_register_interruptible(gpadc->dev,
@@ -294,6 +331,23 @@ int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 input)
 			EN_BUF | EN_ICHAR,
 			EN_BUF | EN_ICHAR);
 		break;
+	case BTEMP_BALL:
+		if (gpadc->chip_id >= AB8500_CUT3P0) {
+			/* Turn on btemp pull-up on ABB 3.0 */
+			ret = abx500_mask_and_set_register_interruptible(
+				gpadc->dev,
+				AB8500_GPADC, AB8500_GPADC_CTRL1_REG,
+				EN_BUF | BTEMP_PULL_UP,
+				EN_BUF | BTEMP_PULL_UP);
+
+		 /*
+		  * Delay might be needed for ABB8500 cut 3.0, if not, remove
+		  * when hardware will be availible
+		  */
+			msleep(1);
+			break;
+		}
+		/* Intentional fallthrough */
 	default:
 		ret = abx500_mask_and_set_register_interruptible(gpadc->dev,
 			AB8500_GPADC, AB8500_GPADC_CTRL1_REG, EN_BUF, EN_BUF);
@@ -304,6 +358,7 @@ int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 input)
 			"gpadc_conversion: select falling edge failed\n");
 		goto out;
 	}
+
 	ret = abx500_mask_and_set_register_interruptible(gpadc->dev,
 		AB8500_GPADC, AB8500_GPADC_CTRL1_REG, ADC_SW_CONV, ADC_SW_CONV);
 	if (ret < 0) {
@@ -335,7 +390,6 @@ int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 input)
 		goto out;
 	}
 
-	data = (high_data << 8) | low_data;
 	/* Disable GPADC */
 	ret = abx500_set_register_interruptible(gpadc->dev, AB8500_GPADC,
 		AB8500_GPADC_CTRL1_REG, DIS_GPADC);
@@ -346,8 +400,8 @@ int ab8500_gpadc_convert(struct ab8500_gpadc *gpadc, u8 input)
 	/* Disable VTVout LDO this is required for GPADC */
 	regulator_disable(gpadc->regu);
 	mutex_unlock(&gpadc->ab8500_gpadc_lock);
-	ret = ab8500_gpadc_ad_to_voltage(gpadc, input, data);
-	return ret;
+
+	return (high_data << 8) | low_data;
 
 out:
 	/*
@@ -361,10 +415,10 @@ out:
 	regulator_disable(gpadc->regu);
 	mutex_unlock(&gpadc->ab8500_gpadc_lock);
 	dev_err(gpadc->dev,
-		"gpadc_conversion: Failed to AD convert channel %d\n", input);
+		"gpadc_conversion: Failed to AD convert channel %d\n", channel);
 	return ret;
 }
-EXPORT_SYMBOL(ab8500_gpadc_convert);
+EXPORT_SYMBOL(ab8500_gpadc_read_raw);
 
 /**
  * ab8500_bm_gpswadcconvend_handler() - isr for s/w gpadc conversion completion
@@ -551,6 +605,14 @@ static int __devinit ab8500_gpadc_probe(struct platform_device *pdev)
 			gpadc->irq);
 		goto fail;
 	}
+
+	/* Get Chip ID of the ABB ASIC  */
+	ret = abx500_get_chip_id(gpadc->dev);
+	if (ret < 0) {
+		dev_err(gpadc->dev, "failed to get chip ID\n");
+		goto fail_irq;
+	}
+	gpadc->chip_id = (u8) ret;
 
 	/* VTVout LDO used to power up ab8500-GPADC */
 	gpadc->regu = regulator_get(&pdev->dev, "vddadc");

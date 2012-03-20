@@ -84,7 +84,6 @@ static struct sys_timer wbd222_timer = {
 	.init	= gemini_timer_init,
 };
 
-#ifdef CONFIG_MTD_PARTITIONS
 static struct mtd_partition wbd222_partitions[] = {
 	{
 		.name		= "RedBoot",
@@ -116,11 +115,7 @@ static struct mtd_partition wbd222_partitions[] = {
 		.mask_flags	= MTD_WRITEABLE,
 	}
 };
-#define wbd222_num_partitions	ARRAY_SIZE(wbd222_partitions)
-#else
-#define wbd222_partitions	NULL
-#define wbd222_num_partitions	0
-#endif /* CONFIG_MTD_PARTITIONS */
+#define wbd222_num_partitions  ARRAY_SIZE(wbd222_partitions)
 
 static void __init wbd222_init(void)
 {
@@ -134,7 +129,7 @@ static void __init wbd222_init(void)
 }
 
 MACHINE_START(WBD222, "Wiliboard WBD-222")
-	.boot_params	= 0x100,
+	.atag_offset	= 0x100,
 	.map_io		= gemini_map_io,
 	.init_irq	= gemini_init_irq,
 	.timer		= &wbd222_timer,

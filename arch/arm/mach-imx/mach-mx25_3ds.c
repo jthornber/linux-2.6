@@ -29,7 +29,6 @@
 #include <linux/irq.h>
 #include <linux/gpio.h>
 #include <linux/platform_device.h>
-#include <linux/input/matrix_keypad.h>
 #include <linux/usb/otg.h>
 
 #include <mach/hardware.h>
@@ -43,6 +42,8 @@
 #include <mach/iomux-mx25.h>
 
 #include "devices-imx25.h"
+
+#define MX25PDK_CAN_PWDN	IMX_GPIO_NR(4, 6)
 
 static const struct imxuart_platform_data uart_pdata __initconst = {
 	.flags = IMXUART_HAVE_RTSCTS,
@@ -103,10 +104,17 @@ static iomux_v3_cfg_t mx25pdk_pads[] = {
 	MX25_PAD_SD1_DATA1__SD1_DATA1,
 	MX25_PAD_SD1_DATA2__SD1_DATA2,
 	MX25_PAD_SD1_DATA3__SD1_DATA3,
+	MX25_PAD_A14__GPIO_2_0, /* WriteProtect */
+	MX25_PAD_A15__GPIO_2_1, /* CardDetect */
 
 	/* I2C1 */
 	MX25_PAD_I2C1_CLK__I2C1_CLK,
 	MX25_PAD_I2C1_DAT__I2C1_DAT,
+
+	/* CAN1 */
+	MX25_PAD_GPIO_A__CAN1_TX,
+	MX25_PAD_GPIO_B__CAN1_RX,
+	MX25_PAD_D14__GPIO_4_6,	/* CAN_PWDN */
 };
 
 static const struct fec_platform_data mx25_fec_pdata __initconst = {
@@ -208,8 +216,20 @@ static const struct imxi2c_platform_data mx25_3ds_i2c0_data __initconst = {
 	.bitrate = 100000,
 };
 
+#define SD1_GPIO_WP	IMX_GPIO_NR(2, 0)
+#define SD1_GPIO_CD	IMX_GPIO_NR(2, 1)
+
+static const struct esdhc_platform_data mx25pdk_esdhc_pdata __initconst = {
+	.wp_gpio = SD1_GPIO_WP,
+	.cd_gpio = SD1_GPIO_CD,
+	.wp_type = ESDHC_WP_GPIO,
+	.cd_type = ESDHC_CD_GPIO,
+};
+
 static void __init mx25pdk_init(void)
 {
+	imx25_soc_init();
+
 	mxc_iomux_v3_setup_multiple_pads(mx25pdk_pads,
 			ARRAY_SIZE(mx25pdk_pads));
 
@@ -225,8 +245,11 @@ static void __init mx25pdk_init(void)
 	imx25_add_fec(&mx25_fec_pdata);
 	imx25_add_imx_keypad(&mx25pdk_keymap_data);
 
-	imx25_add_sdhci_esdhc_imx(0, NULL);
+	imx25_add_sdhci_esdhc_imx(0, &mx25pdk_esdhc_pdata);
 	imx25_add_imx_i2c0(&mx25_3ds_i2c0_data);
+
+	gpio_request_one(MX25PDK_CAN_PWDN, GPIOF_OUT_INIT_LOW, "can-pwdn");
+	imx25_add_flexcan0(NULL);
 }
 
 static void __init mx25pdk_timer_init(void)
@@ -240,10 +263,12 @@ static struct sys_timer mx25pdk_timer = {
 
 MACHINE_START(MX25_3DS, "Freescale MX25PDK (3DS)")
 	/* Maintainer: Freescale Semiconductor, Inc. */
-	.boot_params = MX25_PHYS_OFFSET + 0x100,
+	.atag_offset = 0x100,
 	.map_io = mx25_map_io,
 	.init_early = imx25_init_early,
 	.init_irq = mx25_init_irq,
+	.handle_irq = imx25_handle_irq,
 	.timer = &mx25pdk_timer,
 	.init_machine = mx25pdk_init,
+	.restart	= mxc_restart,
 MACHINE_END

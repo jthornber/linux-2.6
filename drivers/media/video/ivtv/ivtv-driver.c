@@ -99,7 +99,7 @@ static int i2c_clock_period[IVTV_MAX_CARDS] = { -1, -1, -1, -1, -1, -1, -1, -1,
 
 static unsigned int cardtype_c = 1;
 static unsigned int tuner_c = 1;
-static unsigned int radio_c = 1;
+static bool radio_c = 1;
 static unsigned int i2c_clock_period_c = 1;
 static char pal[] = "---";
 static char secam[] = "--";
@@ -731,9 +731,6 @@ static int __devinit ivtv_init_struct1(struct ivtv *itv)
 
 	init_kthread_work(&itv->irq_work, ivtv_irq_work_handler);
 
-	/* start counting open_id at 1 */
-	itv->open_id = 1;
-
 	/* Initial settings */
 	itv->cxhdl.port = CX2341X_PORT_MEMORY;
 	itv->cxhdl.capabilities = CX2341X_CAP_HAS_SLICED_VBI;
@@ -810,7 +807,6 @@ static int ivtv_setup_pci(struct ivtv *itv, struct pci_dev *pdev,
 			  const struct pci_device_id *pci_id)
 {
 	u16 cmd;
-	u8 card_rev;
 	unsigned char pci_latency;
 
 	IVTV_DEBUG_INFO("Enabling pci device\n");
@@ -857,7 +853,6 @@ static int ivtv_setup_pci(struct ivtv *itv, struct pci_dev *pdev,
 	}
 	IVTV_DEBUG_INFO("Bus Mastering Enabled.\n");
 
-	pci_read_config_byte(pdev, PCI_CLASS_REVISION, &card_rev);
 	pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &pci_latency);
 
 	if (pci_latency < 64 && ivtv_pci_latency) {
@@ -874,7 +869,7 @@ static int ivtv_setup_pci(struct ivtv *itv, struct pci_dev *pdev,
 
 	IVTV_DEBUG_INFO("%d (rev %d) at %02x:%02x.%x, "
 		   "irq: %d, latency: %d, memory: 0x%lx\n",
-		   pdev->device, card_rev, pdev->bus->number,
+		   pdev->device, pdev->revision, pdev->bus->number,
 		   PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn),
 		   pdev->irq, pci_latency, (unsigned long)itv->base_addr);
 
@@ -1182,6 +1177,8 @@ static int __devinit ivtv_probe(struct pci_dev *pdev,
 		setup.addr = ADDR_UNSET;
 		setup.type = itv->options.tuner;
 		setup.mode_mask = T_ANALOG_TV;  /* matches TV tuners */
+		if (itv->options.radio > 0)
+			setup.mode_mask |= T_RADIO;
 		setup.tuner_callback = (setup.type == TUNER_XC2028) ?
 			ivtv_reset_tuner_gpio : NULL;
 		ivtv_call_all(itv, tuner, s_type_addr, &setup);
@@ -1330,6 +1327,8 @@ int ivtv_init_on_first_open(struct ivtv *itv)
 	if (!itv->has_cx23415)
 		write_reg_sync(0x03, IVTV_REG_DMACONTROL);
 
+	ivtv_s_std_enc(itv, &itv->tuner_std);
+
 	/* Default interrupts enabled. For the PVR350 this includes the
 	   decoder VSYNC interrupt, which is always on. It is not only used
 	   during decoding but also by the OSD.
@@ -1338,12 +1337,10 @@ int ivtv_init_on_first_open(struct ivtv *itv)
 	if (itv->v4l2_cap & V4L2_CAP_VIDEO_OUTPUT) {
 		ivtv_clear_irq_mask(itv, IVTV_IRQ_MASK_INIT | IVTV_IRQ_DEC_VSYNC);
 		ivtv_set_osd_alpha(itv);
-	}
-	else
+		ivtv_s_std_dec(itv, &itv->tuner_std);
+	} else {
 		ivtv_clear_irq_mask(itv, IVTV_IRQ_MASK_INIT);
-
-	/* For cards with video out, this call needs interrupts enabled */
-	ivtv_s_std(NULL, &fh, &itv->tuner_std);
+	}
 
 	/* Setup initial controls */
 	cx2341x_handler_setup(&itv->cxhdl);

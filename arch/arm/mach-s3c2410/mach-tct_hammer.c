@@ -49,12 +49,12 @@
 #include <plat/devs.h>
 #include <plat/cpu.h>
 
-#ifdef CONFIG_MTD_PARTITIONS
-
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/physmap.h>
+
+#include "common.h"
 
 static struct resource tct_hammer_nor_resource = {
 		.start = 0x00000000,
@@ -90,8 +90,6 @@ static struct platform_device tct_hammer_device_nor = {
 	.num_resources	= 1,
 	.resource	= &tct_hammer_nor_resource,
 };
-
-#endif
 
 static struct map_desc tct_hammer_iodesc[] __initdata = {
 };
@@ -133,9 +131,7 @@ static struct platform_device *tct_hammer_devices[] __initdata = {
 	&s3c_device_rtc,
 	&s3c_device_usbgadget,
 	&s3c_device_sdi,
-#ifdef CONFIG_MTD_PARTITIONS
 	&tct_hammer_device_nor,
-#endif
 };
 
 static void __init tct_hammer_map_io(void)
@@ -152,9 +148,10 @@ static void __init tct_hammer_init(void)
 }
 
 MACHINE_START(TCT_HAMMER, "TCT_HAMMER")
-	.boot_params	= S3C2410_SDRAM_PA + 0x100,
+	.atag_offset	= 0x100,
 	.map_io		= tct_hammer_map_io,
 	.init_irq	= s3c24xx_init_irq,
 	.init_machine	= tct_hammer_init,
 	.timer		= &s3c24xx_timer,
+	.restart	= s3c2410_restart,
 MACHINE_END

@@ -11,12 +11,14 @@
 #include <linux/string.h>
 #include <linux/bio.h>
 #include <linux/blkdev.h>
+#include <linux/dns_resolver.h>
 #include <net/tcp.h>
 
 #include <linux/ceph/libceph.h>
 #include <linux/ceph/messenger.h>
 #include <linux/ceph/decode.h>
 #include <linux/ceph/pagelist.h>
+#include <linux/export.h>
 
 /*
  * Ceph uses the messenger to exchange ceph_msg messages with other
@@ -76,7 +78,8 @@ const char *ceph_pr_addr(const struct sockaddr_storage *ss)
 		break;
 
 	default:
-		sprintf(s, "(unknown sockaddr family %d)", (int)ss->ss_family);
+		snprintf(s, MAX_ADDR_STR_LEN, "(unknown sockaddr family %d)",
+			 (int)ss->ss_family);
 	}
 
 	return s;
@@ -485,13 +488,10 @@ static void prepare_write_message(struct ceph_connection *con)
 	m = list_first_entry(&con->out_queue,
 		       struct ceph_msg, list_head);
 	con->out_msg = m;
-	if (test_bit(LOSSYTX, &con->state)) {
-		list_del_init(&m->list_head);
-	} else {
-		/* put message on sent list */
-		ceph_msg_get(m);
-		list_move_tail(&m->list_head, &con->out_sent);
-	}
+
+	/* put message on sent list */
+	ceph_msg_get(m);
+	list_move_tail(&m->list_head, &con->out_sent);
 
 	/*
 	 * only assign outgoing seq # if we haven't sent this message
@@ -598,7 +598,7 @@ static void prepare_write_keepalive(struct ceph_connection *con)
  * Connection negotiation.
  */
 
-static void prepare_connect_authorizer(struct ceph_connection *con)
+static int prepare_connect_authorizer(struct ceph_connection *con)
 {
 	void *auth_buf;
 	int auth_len = 0;
@@ -612,13 +612,20 @@ static void prepare_connect_authorizer(struct ceph_connection *con)
 					 con->auth_retry);
 	mutex_lock(&con->mutex);
 
+	if (test_bit(CLOSED, &con->state) ||
+	    test_bit(OPENING, &con->state))
+		return -EAGAIN;
+
 	con->out_connect.authorizer_protocol = cpu_to_le32(auth_protocol);
 	con->out_connect.authorizer_len = cpu_to_le32(auth_len);
 
-	con->out_kvec[con->out_kvec_left].iov_base = auth_buf;
-	con->out_kvec[con->out_kvec_left].iov_len = auth_len;
-	con->out_kvec_left++;
-	con->out_kvec_bytes += auth_len;
+	if (auth_len) {
+		con->out_kvec[con->out_kvec_left].iov_base = auth_buf;
+		con->out_kvec[con->out_kvec_left].iov_len = auth_len;
+		con->out_kvec_left++;
+		con->out_kvec_bytes += auth_len;
+	}
+	return 0;
 }
 
 /*
@@ -640,9 +647,9 @@ static void prepare_write_banner(struct ceph_messenger *msgr,
 	set_bit(WRITE_PENDING, &con->state);
 }
 
-static void prepare_write_connect(struct ceph_messenger *msgr,
-				  struct ceph_connection *con,
-				  int after_banner)
+static int prepare_write_connect(struct ceph_messenger *msgr,
+				 struct ceph_connection *con,
+				 int after_banner)
 {
 	unsigned global_seq = get_global_seq(con->msgr, 0);
 	int proto;
@@ -683,7 +690,7 @@ static void prepare_write_connect(struct ceph_messenger *msgr,
 	con->out_more = 0;
 	set_bit(WRITE_PENDING, &con->state);
 
-	prepare_connect_authorizer(con);
+	return prepare_connect_authorizer(con);
 }
 
 
@@ -1065,9 +1072,106 @@ static void addr_set_port(struct sockaddr_storage *ss, int p)
 	switch (ss->ss_family) {
 	case AF_INET:
 		((struct sockaddr_in *)ss)->sin_port = htons(p);
+		break;
 	case AF_INET6:
 		((struct sockaddr_in6 *)ss)->sin6_port = htons(p);
+		break;
 	}
+}
+
+/*
+ * Unlike other *_pton function semantics, zero indicates success.
+ */
+static int ceph_pton(const char *str, size_t len, struct sockaddr_storage *ss,
+		char delim, const char **ipend)
+{
+	struct sockaddr_in *in4 = (void *)ss;
+	struct sockaddr_in6 *in6 = (void *)ss;
+
+	memset(ss, 0, sizeof(*ss));
+
+	if (in4_pton(str, len, (u8 *)&in4->sin_addr.s_addr, delim, ipend)) {
+		ss->ss_family = AF_INET;
+		return 0;
+	}
+
+	if (in6_pton(str, len, (u8 *)&in6->sin6_addr.s6_addr, delim, ipend)) {
+		ss->ss_family = AF_INET6;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+/*
+ * Extract hostname string and resolve using kernel DNS facility.
+ */
+#ifdef CONFIG_CEPH_LIB_USE_DNS_RESOLVER
+static int ceph_dns_resolve_name(const char *name, size_t namelen,
+		struct sockaddr_storage *ss, char delim, const char **ipend)
+{
+	const char *end, *delim_p;
+	char *colon_p, *ip_addr = NULL;
+	int ip_len, ret;
+
+	/*
+	 * The end of the hostname occurs immediately preceding the delimiter or
+	 * the port marker (':') where the delimiter takes precedence.
+	 */
+	delim_p = memchr(name, delim, namelen);
+	colon_p = memchr(name, ':', namelen);
+
+	if (delim_p && colon_p)
+		end = delim_p < colon_p ? delim_p : colon_p;
+	else if (!delim_p && colon_p)
+		end = colon_p;
+	else {
+		end = delim_p;
+		if (!end) /* case: hostname:/ */
+			end = name + namelen;
+	}
+
+	if (end <= name)
+		return -EINVAL;
+
+	/* do dns_resolve upcall */
+	ip_len = dns_query(NULL, name, end - name, NULL, &ip_addr, NULL);
+	if (ip_len > 0)
+		ret = ceph_pton(ip_addr, ip_len, ss, -1, NULL);
+	else
+		ret = -ESRCH;
+
+	kfree(ip_addr);
+
+	*ipend = end;
+
+	pr_info("resolve '%.*s' (ret=%d): %s\n", (int)(end - name), name,
+			ret, ret ? "failed" : ceph_pr_addr(ss));
+
+	return ret;
+}
+#else
+static inline int ceph_dns_resolve_name(const char *name, size_t namelen,
+		struct sockaddr_storage *ss, char delim, const char **ipend)
+{
+	return -EINVAL;
+}
+#endif
+
+/*
+ * Parse a server name (IP or hostname). If a valid IP address is not found
+ * then try to extract a hostname to resolve using userspace DNS upcall.
+ */
+static int ceph_parse_server_name(const char *name, size_t namelen,
+			struct sockaddr_storage *ss, char delim, const char **ipend)
+{
+	int ret;
+
+	ret = ceph_pton(name, namelen, ss, delim, ipend);
+	if (ret)
+		ret = ceph_dns_resolve_name(name, namelen, ss, delim, ipend);
+
+	return ret;
 }
 
 /*
@@ -1078,15 +1182,13 @@ int ceph_parse_ips(const char *c, const char *end,
 		   struct ceph_entity_addr *addr,
 		   int max_count, int *count)
 {
-	int i;
+	int i, ret = -EINVAL;
 	const char *p = c;
 
 	dout("parse_ips on '%.*s'\n", (int)(end-c), c);
 	for (i = 0; i < max_count; i++) {
 		const char *ipend;
 		struct sockaddr_storage *ss = &addr[i].in_addr;
-		struct sockaddr_in *in4 = (void *)ss;
-		struct sockaddr_in6 *in6 = (void *)ss;
 		int port;
 		char delim = ',';
 
@@ -1095,15 +1197,11 @@ int ceph_parse_ips(const char *c, const char *end,
 			p++;
 		}
 
-		memset(ss, 0, sizeof(*ss));
-		if (in4_pton(p, end - p, (u8 *)&in4->sin_addr.s_addr,
-			     delim, &ipend))
-			ss->ss_family = AF_INET;
-		else if (in6_pton(p, end - p, (u8 *)&in6->sin6_addr.s6_addr,
-				  delim, &ipend))
-			ss->ss_family = AF_INET6;
-		else
+		ret = ceph_parse_server_name(p, end - p, ss, delim, &ipend);
+		if (ret)
 			goto bad;
+		ret = -EINVAL;
+
 		p = ipend;
 
 		if (delim == ']') {
@@ -1148,7 +1246,7 @@ int ceph_parse_ips(const char *c, const char *end,
 
 bad:
 	pr_err("parse_ips bad ip '%.*s'\n", (int)(end - c), c);
-	return -EINVAL;
+	return ret;
 }
 EXPORT_SYMBOL(ceph_parse_ips);
 
@@ -1216,6 +1314,7 @@ static int process_connect(struct ceph_connection *con)
 	u64 sup_feat = con->msgr->supported_features;
 	u64 req_feat = con->msgr->required_features;
 	u64 server_feat = le64_to_cpu(con->in_reply.features);
+	int ret;
 
 	dout("process_connect on %p tag %d\n", con, (int)con->in_tag);
 
@@ -1250,7 +1349,9 @@ static int process_connect(struct ceph_connection *con)
 			return -1;
 		}
 		con->auth_retry = 1;
-		prepare_write_connect(con->msgr, con, 0);
+		ret = prepare_write_connect(con->msgr, con, 0);
+		if (ret < 0)
+			return ret;
 		prepare_read_connect(con);
 		break;
 
@@ -1277,6 +1378,9 @@ static int process_connect(struct ceph_connection *con)
 		if (con->ops->peer_reset)
 			con->ops->peer_reset(con);
 		mutex_lock(&con->mutex);
+		if (test_bit(CLOSED, &con->state) ||
+		    test_bit(OPENING, &con->state))
+			return -EAGAIN;
 		break;
 
 	case CEPH_MSGR_TAG_RETRY_SESSION:
@@ -1341,7 +1445,9 @@ static int process_connect(struct ceph_connection *con)
 		 * to WAIT.  This shouldn't happen if we are the
 		 * client.
 		 */
-		pr_err("process_connect peer connecting WAIT\n");
+		pr_err("process_connect got WAIT as client\n");
+		con->error_msg = "protocol error, got WAIT as client";
+		return -1;
 
 	default:
 		pr_err("connect protocol error, will retry\n");
@@ -1381,6 +1487,7 @@ static void process_ack(struct ceph_connection *con)
 			break;
 		dout("got ack for seq %llu type %d at %p\n", seq,
 		     le16_to_cpu(m->hdr.type), m);
+		m->ack_stamp = jiffies;
 		ceph_msg_remove(m);
 	}
 	prepare_read_tag(con);
@@ -1810,6 +1917,17 @@ static int try_read(struct ceph_connection *con)
 more:
 	dout("try_read tag %d in_base_pos %d\n", (int)con->in_tag,
 	     con->in_base_pos);
+
+	/*
+	 * process_connect and process_message drop and re-take
+	 * con->mutex.  make sure we handle a racing close or reopen.
+	 */
+	if (test_bit(CLOSED, &con->state) ||
+	    test_bit(OPENING, &con->state)) {
+		ret = -EAGAIN;
+		goto out;
+	}
+
 	if (test_bit(CONNECTING, &con->state)) {
 		if (!test_bit(NEGOTIATING, &con->state)) {
 			dout("try_read connecting\n");
@@ -1938,8 +2056,10 @@ static void con_work(struct work_struct *work)
 {
 	struct ceph_connection *con = container_of(work, struct ceph_connection,
 						   work.work);
+	int ret;
 
 	mutex_lock(&con->mutex);
+restart:
 	if (test_and_clear_bit(BACKOFF, &con->state)) {
 		dout("con_work %p backing off\n", con);
 		if (queue_delayed_work(ceph_msgr_wq, &con->work,
@@ -1969,18 +2089,31 @@ static void con_work(struct work_struct *work)
 		con_close_socket(con);
 	}
 
-	if (test_and_clear_bit(SOCK_CLOSED, &con->state) ||
-	    try_read(con) < 0 ||
-	    try_write(con) < 0) {
-		mutex_unlock(&con->mutex);
-		ceph_fault(con);     /* error/fault path */
-		goto done_unlocked;
-	}
+	if (test_and_clear_bit(SOCK_CLOSED, &con->state))
+		goto fault;
+
+	ret = try_read(con);
+	if (ret == -EAGAIN)
+		goto restart;
+	if (ret < 0)
+		goto fault;
+
+	ret = try_write(con);
+	if (ret == -EAGAIN)
+		goto restart;
+	if (ret < 0)
+		goto fault;
 
 done:
 	mutex_unlock(&con->mutex);
 done_unlocked:
 	con->ops->put(con);
+	return;
+
+fault:
+	mutex_unlock(&con->mutex);
+	ceph_fault(con);     /* error/fault path */
+	goto done_unlocked;
 }
 
 
@@ -2239,7 +2372,8 @@ EXPORT_SYMBOL(ceph_con_keepalive);
  * construct a new message with given type, size
  * the new msg has a ref count of 1.
  */
-struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags)
+struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags,
+			      bool can_fail)
 {
 	struct ceph_msg *m;
 
@@ -2265,6 +2399,7 @@ struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags)
 	m->front_max = front_len;
 	m->front_is_vmalloc = false;
 	m->more_to_follow = false;
+	m->ack_stamp = 0;
 	m->pool = NULL;
 
 	/* middle */
@@ -2290,7 +2425,7 @@ struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags)
 			m->front.iov_base = kmalloc(front_len, flags);
 		}
 		if (m->front.iov_base == NULL) {
-			pr_err("msg_new can't allocate %d bytes\n",
+			dout("ceph_msg_new can't allocate %d bytes\n",
 			     front_len);
 			goto out2;
 		}
@@ -2305,7 +2440,14 @@ struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags)
 out2:
 	ceph_msg_put(m);
 out:
-	pr_err("msg_new can't create type %d front %d\n", type, front_len);
+	if (!can_fail) {
+		pr_err("msg_new can't create type %d front %d\n", type,
+		       front_len);
+		WARN_ON(1);
+	} else {
+		dout("msg_new can't create type %d front %d\n", type,
+		     front_len);
+	}
 	return NULL;
 }
 EXPORT_SYMBOL(ceph_msg_new);
@@ -2355,7 +2497,7 @@ static struct ceph_msg *ceph_alloc_msg(struct ceph_connection *con,
 	}
 	if (!msg) {
 		*skip = 0;
-		msg = ceph_msg_new(type, front_len, GFP_NOFS);
+		msg = ceph_msg_new(type, front_len, GFP_NOFS, false);
 		if (!msg) {
 			pr_err("unable to allocate msg type %d len %d\n",
 			       type, front_len);

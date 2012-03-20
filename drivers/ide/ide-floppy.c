@@ -35,7 +35,6 @@
 #include <scsi/scsi_ioctl.h>
 
 #include <asm/byteorder.h>
-#include <linux/irq.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
 #include <asm/unaligned.h>
@@ -73,7 +72,7 @@ static int ide_floppy_callback(ide_drive_t *drive, int dsc)
 		drive->failed_pc = NULL;
 
 	if (pc->c[0] == GPCMD_READ_10 || pc->c[0] == GPCMD_WRITE_10 ||
-	    (rq && rq->cmd_type == REQ_TYPE_BLOCK_PC))
+	    rq->cmd_type == REQ_TYPE_BLOCK_PC)
 		uptodate = 1; /* FIXME */
 	else if (pc->c[0] == GPCMD_REQUEST_SENSE) {
 

@@ -5,7 +5,7 @@
  *
  * Copyright © 2009 Bluewater Systems Ltd
  * Author: Andre Renaud <andre@bluewatersys.com>
- * Author: Ryan Mallon <ryan@bluewatersys.com>
+ * Author: Ryan Mallon
  *
  * Based on m25p80.c
  *
@@ -52,8 +52,6 @@ struct sst25l_flash {
 	struct spi_device	*spi;
 	struct mutex		lock;
 	struct mtd_info		mtd;
-
-	int 			partitioned;
 };
 
 struct flash_info {
@@ -66,7 +64,7 @@ struct flash_info {
 
 #define to_sst25l_flash(x) container_of(x, struct sst25l_flash, mtd)
 
-static struct flash_info __initdata sst25l_flash_info[] = {
+static struct flash_info __devinitdata sst25l_flash_info[] = {
 	{"sst25lf020a", 0xbf43, 256, 1024, 4096},
 	{"sst25lf040a",	0xbf44,	256, 2048, 4096},
 };
@@ -380,7 +378,7 @@ static int __devinit sst25l_probe(struct spi_device *spi)
 	struct flash_info *flash_info;
 	struct sst25l_flash *flash;
 	struct flash_platform_data *data;
-	int ret, i;
+	int ret;
 
 	flash_info = sst25l_match_device(spi);
 	if (!flash_info)
@@ -412,55 +410,18 @@ static int __devinit sst25l_probe(struct spi_device *spi)
 	dev_info(&spi->dev, "%s (%lld KiB)\n", flash_info->name,
 		 (long long)flash->mtd.size >> 10);
 
-	DEBUG(MTD_DEBUG_LEVEL2,
-	      "mtd .name = %s, .size = 0x%llx (%lldMiB) "
+	pr_debug("mtd .name = %s, .size = 0x%llx (%lldMiB) "
 	      ".erasesize = 0x%.8x (%uKiB) .numeraseregions = %d\n",
 	      flash->mtd.name,
 	      (long long)flash->mtd.size, (long long)(flash->mtd.size >> 20),
 	      flash->mtd.erasesize, flash->mtd.erasesize / 1024,
 	      flash->mtd.numeraseregions);
 
-	if (mtd_has_partitions()) {
-		struct mtd_partition *parts = NULL;
-		int nr_parts = 0;
 
-		if (mtd_has_cmdlinepart()) {
-			static const char *part_probes[] =
-				{"cmdlinepart", NULL};
-
-			nr_parts = parse_mtd_partitions(&flash->mtd,
-							part_probes,
-							&parts, 0);
-		}
-
-		if (nr_parts <= 0 && data && data->parts) {
-			parts = data->parts;
-			nr_parts = data->nr_parts;
-		}
-
-		if (nr_parts > 0) {
-			for (i = 0; i < nr_parts; i++) {
-				DEBUG(MTD_DEBUG_LEVEL2, "partitions[%d] = "
-				      "{.name = %s, .offset = 0x%llx, "
-				      ".size = 0x%llx (%lldKiB) }\n",
-				      i, parts[i].name,
-				      (long long)parts[i].offset,
-				      (long long)parts[i].size,
-				      (long long)(parts[i].size >> 10));
-			}
-
-			flash->partitioned = 1;
-			return add_mtd_partitions(&flash->mtd,
-						  parts, nr_parts);
-		}
-
-	} else if (data && data->nr_parts) {
-		dev_warn(&spi->dev, "ignoring %d default partitions on %s\n",
-			 data->nr_parts, data->name);
-	}
-
-	ret = add_mtd_device(&flash->mtd);
-	if (ret == 1) {
+	ret = mtd_device_parse_register(&flash->mtd, NULL, 0,
+			data ? data->parts : NULL,
+			data ? data->nr_parts : 0);
+	if (ret) {
 		kfree(flash);
 		dev_set_drvdata(&spi->dev, NULL);
 		return -ENODEV;
@@ -469,15 +430,12 @@ static int __devinit sst25l_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int __exit sst25l_remove(struct spi_device *spi)
+static int __devexit sst25l_remove(struct spi_device *spi)
 {
 	struct sst25l_flash *flash = dev_get_drvdata(&spi->dev);
 	int ret;
 
-	if (mtd_has_partitions() && flash->partitioned)
-		ret = del_mtd_partitions(&flash->mtd);
-	else
-		ret = del_mtd_device(&flash->mtd);
+	ret = mtd_device_unregister(&flash->mtd);
 	if (ret == 0)
 		kfree(flash);
 	return ret;
@@ -486,11 +444,10 @@ static int __exit sst25l_remove(struct spi_device *spi)
 static struct spi_driver sst25l_driver = {
 	.driver = {
 		.name	= "sst25l",
-		.bus	= &spi_bus_type,
 		.owner	= THIS_MODULE,
 	},
 	.probe		= sst25l_probe,
-	.remove		= __exit_p(sst25l_remove),
+	.remove		= __devexit_p(sst25l_remove),
 };
 
 static int __init sst25l_init(void)
@@ -508,5 +465,5 @@ module_exit(sst25l_exit);
 
 MODULE_DESCRIPTION("MTD SPI driver for SST25L Flash chips");
 MODULE_AUTHOR("Andre Renaud <andre@bluewatersys.com>, "
-	      "Ryan Mallon <ryan@bluewatersys.com>");
+	      "Ryan Mallon");
 MODULE_LICENSE("GPL");

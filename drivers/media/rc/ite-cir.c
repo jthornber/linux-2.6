@@ -42,7 +42,6 @@
 #include <linux/bitops.h>
 #include <media/rc-core.h>
 #include <linux/pci_ids.h>
-#include <linux/delay.h>
 
 #include "ite-cir.h"
 
@@ -383,7 +382,7 @@ static int ite_set_tx_duty_cycle(struct rc_dev *rcdev, u32 duty_cycle)
 /* transmit out IR pulses; what you get here is a batch of alternating
  * pulse/space/pulse/space lengths that we should write out completely through
  * the FIFO, blocking on a full FIFO */
-static int ite_tx_ir(struct rc_dev *rcdev, int *txbuf, u32 n)
+static int ite_tx_ir(struct rc_dev *rcdev, unsigned *txbuf, unsigned n)
 {
 	unsigned long flags;
 	struct ite_dev *dev = rcdev->priv;
@@ -398,9 +397,6 @@ static int ite_tx_ir(struct rc_dev *rcdev, int *txbuf, u32 n)
 
 	/* clear the array just in case */
 	memset(last_sent, 0, ARRAY_SIZE(last_sent));
-
-	/* n comes in bytes; convert to ints */
-	n /= sizeof(int);
 
 	spin_lock_irqsave(&dev->lock, flags);
 
@@ -1250,11 +1246,9 @@ static void it8709_disable(struct ite_dev *dev)
 	ite_dbg("%s called", __func__);
 
 	/* clear out all interrupt enable flags */
-	it8709_wr(dev,
-			    it8709_rr(dev,
-				      IT85_C0IER) & ~(IT85_IEC | IT85_RFOIE |
-						      IT85_RDAIE |
-						      IT85_TLDLIE), IT85_C0IER);
+	it8709_wr(dev, it8709_rr(dev, IT85_C0IER) &
+			~(IT85_IEC | IT85_RFOIE | IT85_RDAIE | IT85_TLDLIE),
+		  IT85_C0IER);
 
 	/* disable the receiver */
 	it8709_disable_rx(dev);
@@ -1270,11 +1264,9 @@ static void it8709_init_hardware(struct ite_dev *dev)
 	ite_dbg("%s called", __func__);
 
 	/* disable all the interrupts */
-	it8709_wr(dev,
-			    it8709_rr(dev,
-				      IT85_C0IER) & ~(IT85_IEC | IT85_RFOIE |
-						      IT85_RDAIE |
-						      IT85_TLDLIE), IT85_C0IER);
+	it8709_wr(dev, it8709_rr(dev, IT85_C0IER) &
+			~(IT85_IEC | IT85_RFOIE | IT85_RDAIE | IT85_TLDLIE),
+		  IT85_C0IER);
 
 	/* program the baud rate divisor */
 	it8709_wr(dev, ITE_BAUDRATE_DIVISOR & 0xff, IT85_C0BDLR);
@@ -1282,28 +1274,22 @@ static void it8709_init_hardware(struct ite_dev *dev)
 			IT85_C0BDHR);
 
 	/* program the C0MSTCR register defaults */
-	it8709_wr(dev, (it8709_rr(dev, IT85_C0MSTCR) & ~(IT85_ILSEL |
-								   IT85_ILE
-								   | IT85_FIFOTL
-								   |
-								   IT85_FIFOCLR
-								   |
-								   IT85_RESET))
-			    | IT85_FIFOTL_DEFAULT, IT85_C0MSTCR);
+	it8709_wr(dev, (it8709_rr(dev, IT85_C0MSTCR) &
+			~(IT85_ILSEL | IT85_ILE | IT85_FIFOTL
+			  | IT85_FIFOCLR | IT85_RESET)) | IT85_FIFOTL_DEFAULT,
+		  IT85_C0MSTCR);
 
 	/* program the C0RCR register defaults */
-	it8709_wr(dev,
-			    (it8709_rr(dev, IT85_C0RCR) &
-			     ~(IT85_RXEN | IT85_RDWOS | IT85_RXEND
-			       | IT85_RXACT | IT85_RXDCR)) |
-			    ITE_RXDCR_DEFAULT, IT85_C0RCR);
+	it8709_wr(dev, (it8709_rr(dev, IT85_C0RCR) &
+			~(IT85_RXEN | IT85_RDWOS | IT85_RXEND | IT85_RXACT
+			  | IT85_RXDCR)) | ITE_RXDCR_DEFAULT,
+		  IT85_C0RCR);
 
 	/* program the C0TCR register defaults */
-	it8709_wr(dev, (it8709_rr(dev, IT85_C0TCR)
-				  &~(IT85_TXMPM | IT85_TXMPW))
-			    |IT85_TXRLE | IT85_TXENDF |
-			    IT85_TXMPM_DEFAULT |
-			    IT85_TXMPW_DEFAULT, IT85_C0TCR);
+	it8709_wr(dev, (it8709_rr(dev, IT85_C0TCR) & ~(IT85_TXMPM | IT85_TXMPW))
+			| IT85_TXRLE | IT85_TXENDF | IT85_TXMPM_DEFAULT
+			| IT85_TXMPW_DEFAULT,
+		  IT85_C0TCR);
 
 	/* program the carrier parameters */
 	ite_set_carrier_params(dev);
@@ -1357,6 +1343,7 @@ static const struct ite_dev_params ite_dev_descs[] = {
 	{	/* 0: ITE8704 */
 	       .model = "ITE8704 CIR transceiver",
 	       .io_region_size = IT87_IOREG_LENGTH,
+	       .io_rsrc_no = 0,
 	       .hw_tx_capable = true,
 	       .sample_period = (u32) (1000000000ULL / 115200),
 	       .tx_carrier_freq = 38000,
@@ -1381,6 +1368,7 @@ static const struct ite_dev_params ite_dev_descs[] = {
 	{	/* 1: ITE8713 */
 	       .model = "ITE8713 CIR transceiver",
 	       .io_region_size = IT87_IOREG_LENGTH,
+	       .io_rsrc_no = 0,
 	       .hw_tx_capable = true,
 	       .sample_period = (u32) (1000000000ULL / 115200),
 	       .tx_carrier_freq = 38000,
@@ -1405,6 +1393,7 @@ static const struct ite_dev_params ite_dev_descs[] = {
 	{	/* 2: ITE8708 */
 	       .model = "ITE8708 CIR transceiver",
 	       .io_region_size = IT8708_IOREG_LENGTH,
+	       .io_rsrc_no = 0,
 	       .hw_tx_capable = true,
 	       .sample_period = (u32) (1000000000ULL / 115200),
 	       .tx_carrier_freq = 38000,
@@ -1430,6 +1419,7 @@ static const struct ite_dev_params ite_dev_descs[] = {
 	{	/* 3: ITE8709 */
 	       .model = "ITE8709 CIR transceiver",
 	       .io_region_size = IT8709_IOREG_LENGTH,
+	       .io_rsrc_no = 2,
 	       .hw_tx_capable = true,
 	       .sample_period = (u32) (1000000000ULL / 115200),
 	       .tx_carrier_freq = 38000,
@@ -1471,6 +1461,7 @@ static int ite_probe(struct pnp_dev *pdev, const struct pnp_device_id
 	struct rc_dev *rdev = NULL;
 	int ret = -ENOMEM;
 	int model_no;
+	int io_rsrc_no;
 
 	ite_dbg("%s called", __func__);
 
@@ -1500,10 +1491,11 @@ static int ite_probe(struct pnp_dev *pdev, const struct pnp_device_id
 
 	/* get the description for the device */
 	dev_desc = &ite_dev_descs[model_no];
+	io_rsrc_no = dev_desc->io_rsrc_no;
 
 	/* validate pnp resources */
-	if (!pnp_port_valid(pdev, 0) ||
-	    pnp_port_len(pdev, 0) != dev_desc->io_region_size) {
+	if (!pnp_port_valid(pdev, io_rsrc_no) ||
+	    pnp_port_len(pdev, io_rsrc_no) != dev_desc->io_region_size) {
 		dev_err(&pdev->dev, "IR PNP Port not valid!\n");
 		goto failure;
 	}
@@ -1514,7 +1506,7 @@ static int ite_probe(struct pnp_dev *pdev, const struct pnp_device_id
 	}
 
 	/* store resource values */
-	itdev->cir_addr = pnp_port_start(pdev, 0);
+	itdev->cir_addr = pnp_port_start(pdev, io_rsrc_no);
 	itdev->cir_irq = pnp_irq(pdev, 0);
 
 	/* initialize spinlocks */
@@ -1660,6 +1652,9 @@ static int ite_suspend(struct pnp_dev *pdev, pm_message_t state)
 
 	ite_dbg("%s called", __func__);
 
+	/* wait for any transmission to end */
+	wait_event_interruptible(dev->tx_ended, !dev->transmitting);
+
 	spin_lock_irqsave(&dev->lock, flags);
 
 	/* disable all interrupts */
@@ -1680,13 +1675,10 @@ static int ite_resume(struct pnp_dev *pdev)
 
 	spin_lock_irqsave(&dev->lock, flags);
 
-	if (dev->transmitting) {
-		/* wake up the transmitter */
-		wake_up_interruptible(&dev->tx_queue);
-	} else {
-		/* enable the receiver */
-		dev->params.enable_rx(dev);
-	}
+	/* reinitialize hardware config registers */
+	dev->params.init_hardware(dev);
+	/* enable the receiver */
+	dev->params.enable_rx(dev);
 
 	spin_unlock_irqrestore(&dev->lock, flags);
 

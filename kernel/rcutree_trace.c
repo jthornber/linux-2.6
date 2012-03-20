@@ -31,7 +31,7 @@
 #include <linux/rcupdate.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/module.h>
 #include <linux/completion.h>
@@ -46,10 +46,7 @@
 #define RCU_TREE_NONCORE
 #include "rcutree.h"
 
-DECLARE_PER_CPU(unsigned int, rcu_cpu_kthread_status);
-DECLARE_PER_CPU(unsigned int, rcu_cpu_kthread_cpu);
-DECLARE_PER_CPU(unsigned int, rcu_cpu_kthread_loops);
-DECLARE_PER_CPU(char, rcu_cpu_has_work);
+#ifdef CONFIG_RCU_BOOST
 
 static char convert_kthread_status(unsigned int kthread_status)
 {
@@ -58,25 +55,25 @@ static char convert_kthread_status(unsigned int kthread_status)
 	return "SRWOY"[kthread_status];
 }
 
+#endif /* #ifdef CONFIG_RCU_BOOST */
+
 static void print_one_rcu_data(struct seq_file *m, struct rcu_data *rdp)
 {
 	if (!rdp->beenonline)
 		return;
-	seq_printf(m, "%3d%cc=%lu g=%lu pq=%d pqc=%lu qp=%d",
+	seq_printf(m, "%3d%cc=%lu g=%lu pq=%d pgp=%lu qp=%d",
 		   rdp->cpu,
 		   cpu_is_offline(rdp->cpu) ? '!' : ' ',
 		   rdp->completed, rdp->gpnum,
-		   rdp->passed_quiesc, rdp->passed_quiesc_completed,
+		   rdp->passed_quiesce, rdp->passed_quiesce_gpnum,
 		   rdp->qs_pending);
-#ifdef CONFIG_NO_HZ
-	seq_printf(m, " dt=%d/%d dn=%d df=%lu",
-		   rdp->dynticks->dynticks,
+	seq_printf(m, " dt=%d/%llx/%d df=%lu",
+		   atomic_read(&rdp->dynticks->dynticks),
 		   rdp->dynticks->dynticks_nesting,
-		   rdp->dynticks->dynticks_nmi,
+		   rdp->dynticks->dynticks_nmi_nesting,
 		   rdp->dynticks_fqs);
-#endif /* #ifdef CONFIG_NO_HZ */
 	seq_printf(m, " of=%lu ri=%lu", rdp->offline_fqs, rdp->resched_ipi);
-	seq_printf(m, " ql=%ld qs=%c%c%c%c kt=%d/%c/%d ktl=%x b=%ld",
+	seq_printf(m, " ql=%ld qs=%c%c%c%c",
 		   rdp->qlen,
 		   ".N"[rdp->nxttail[RCU_NEXT_READY_TAIL] !=
 			rdp->nxttail[RCU_NEXT_TAIL]],
@@ -84,13 +81,16 @@ static void print_one_rcu_data(struct seq_file *m, struct rcu_data *rdp)
 			rdp->nxttail[RCU_NEXT_READY_TAIL]],
 		   ".W"[rdp->nxttail[RCU_DONE_TAIL] !=
 			rdp->nxttail[RCU_WAIT_TAIL]],
-		   ".D"[&rdp->nxtlist != rdp->nxttail[RCU_DONE_TAIL]],
+		   ".D"[&rdp->nxtlist != rdp->nxttail[RCU_DONE_TAIL]]);
+#ifdef CONFIG_RCU_BOOST
+	seq_printf(m, " kt=%d/%c/%d ktl=%x",
 		   per_cpu(rcu_cpu_has_work, rdp->cpu),
 		   convert_kthread_status(per_cpu(rcu_cpu_kthread_status,
 					  rdp->cpu)),
 		   per_cpu(rcu_cpu_kthread_cpu, rdp->cpu),
-		   per_cpu(rcu_cpu_kthread_loops, rdp->cpu) & 0xffff,
-		   rdp->blimit);
+		   per_cpu(rcu_cpu_kthread_loops, rdp->cpu) & 0xffff);
+#endif /* #ifdef CONFIG_RCU_BOOST */
+	seq_printf(m, " b=%ld", rdp->blimit);
 	seq_printf(m, " ci=%lu co=%lu ca=%lu\n",
 		   rdp->n_cbs_invoked, rdp->n_cbs_orphaned, rdp->n_cbs_adopted);
 }
@@ -137,39 +137,42 @@ static void print_one_rcu_data_csv(struct seq_file *m, struct rcu_data *rdp)
 		   rdp->cpu,
 		   cpu_is_offline(rdp->cpu) ? "\"N\"" : "\"Y\"",
 		   rdp->completed, rdp->gpnum,
-		   rdp->passed_quiesc, rdp->passed_quiesc_completed,
+		   rdp->passed_quiesce, rdp->passed_quiesce_gpnum,
 		   rdp->qs_pending);
-#ifdef CONFIG_NO_HZ
-	seq_printf(m, ",%d,%d,%d,%lu",
-		   rdp->dynticks->dynticks,
+	seq_printf(m, ",%d,%llx,%d,%lu",
+		   atomic_read(&rdp->dynticks->dynticks),
 		   rdp->dynticks->dynticks_nesting,
-		   rdp->dynticks->dynticks_nmi,
+		   rdp->dynticks->dynticks_nmi_nesting,
 		   rdp->dynticks_fqs);
-#endif /* #ifdef CONFIG_NO_HZ */
 	seq_printf(m, ",%lu,%lu", rdp->offline_fqs, rdp->resched_ipi);
-	seq_printf(m, ",%ld,\"%c%c%c%c\",%d,\"%c\",%ld", rdp->qlen,
+	seq_printf(m, ",%ld,\"%c%c%c%c\"", rdp->qlen,
 		   ".N"[rdp->nxttail[RCU_NEXT_READY_TAIL] !=
 			rdp->nxttail[RCU_NEXT_TAIL]],
 		   ".R"[rdp->nxttail[RCU_WAIT_TAIL] !=
 			rdp->nxttail[RCU_NEXT_READY_TAIL]],
 		   ".W"[rdp->nxttail[RCU_DONE_TAIL] !=
 			rdp->nxttail[RCU_WAIT_TAIL]],
-		   ".D"[&rdp->nxtlist != rdp->nxttail[RCU_DONE_TAIL]],
+		   ".D"[&rdp->nxtlist != rdp->nxttail[RCU_DONE_TAIL]]);
+#ifdef CONFIG_RCU_BOOST
+	seq_printf(m, ",%d,\"%c\"",
 		   per_cpu(rcu_cpu_has_work, rdp->cpu),
 		   convert_kthread_status(per_cpu(rcu_cpu_kthread_status,
-					  rdp->cpu)),
-		   rdp->blimit);
+					  rdp->cpu)));
+#endif /* #ifdef CONFIG_RCU_BOOST */
+	seq_printf(m, ",%ld", rdp->blimit);
 	seq_printf(m, ",%lu,%lu,%lu\n",
 		   rdp->n_cbs_invoked, rdp->n_cbs_orphaned, rdp->n_cbs_adopted);
 }
 
 static int show_rcudata_csv(struct seq_file *m, void *unused)
 {
-	seq_puts(m, "\"CPU\",\"Online?\",\"c\",\"g\",\"pq\",\"pqc\",\"pq\",");
-#ifdef CONFIG_NO_HZ
-	seq_puts(m, "\"dt\",\"dt nesting\",\"dn\",\"df\",");
-#endif /* #ifdef CONFIG_NO_HZ */
-	seq_puts(m, "\"of\",\"ri\",\"ql\",\"b\",\"ci\",\"co\",\"ca\"\n");
+	seq_puts(m, "\"CPU\",\"Online?\",\"c\",\"g\",\"pq\",\"pgp\",\"pq\",");
+	seq_puts(m, "\"dt\",\"dt nesting\",\"dt NMI nesting\",\"df\",");
+	seq_puts(m, "\"of\",\"ri\",\"ql\",\"qs\"");
+#ifdef CONFIG_RCU_BOOST
+	seq_puts(m, "\"kt\",\"ktl\"");
+#endif /* #ifdef CONFIG_RCU_BOOST */
+	seq_puts(m, ",\"b\",\"ci\",\"co\",\"ca\"\n");
 #ifdef CONFIG_TREE_PREEMPT_RCU
 	seq_puts(m, "\"rcu_preempt:\"\n");
 	PRINT_RCU_DATA(rcu_preempt_data, print_one_rcu_data_csv, m);
@@ -269,7 +272,7 @@ static void print_one_rcu_state(struct seq_file *m, struct rcu_state *rsp)
 	gpnum = rsp->gpnum;
 	seq_printf(m, "c=%lu g=%lu s=%d jfq=%ld j=%x "
 		      "nfqs=%lu/nfqsng=%lu(%lu) fqlh=%lu\n",
-		   rsp->completed, gpnum, rsp->signaled,
+		   rsp->completed, gpnum, rsp->fqs_state,
 		   (long)(rsp->jiffies_force_qs - jiffies),
 		   (int)(jiffies & 0xffff),
 		   rsp->n_force_qs, rsp->n_force_qs_ngp,

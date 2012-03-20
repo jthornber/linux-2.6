@@ -29,7 +29,7 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/ac97_codec.h>
@@ -68,7 +68,7 @@ module_param(ac97_clock, int, 0444);
 MODULE_PARM_DESC(ac97_clock, "AC'97 codec clock (0 = auto-detect).");
 
 /* just for backward compatibility */
-static int enable;
+static bool enable;
 module_param(enable, bool, 0444);
 
 /*
@@ -235,8 +235,8 @@ static DEFINE_PCI_DEVICE_TABLE(snd_intel8x0m_ids) = {
 	{ PCI_VDEVICE(NVIDIA, 0x0069), DEVICE_NFORCE }, /* NFORCE2 */
 	{ PCI_VDEVICE(NVIDIA, 0x0089), DEVICE_NFORCE }, /* NFORCE2s */
 	{ PCI_VDEVICE(NVIDIA, 0x00d9), DEVICE_NFORCE }, /* NFORCE3 */
+	{ PCI_VDEVICE(AMD, 0x746e), DEVICE_INTEL },	/* AMD8111 */
 #if 0
-	{ PCI_VDEVICE(AMD, 0x746d), DEVICE_INTEL },	/* AMD8111 */
 	{ PCI_VDEVICE(AL, 0x5455), DEVICE_ALI },   /* Ali5455 */
 #endif
 	{ 0, }
@@ -1047,7 +1047,7 @@ static int intel8x0m_resume(struct pci_dev *pci)
 	}
 	pci_set_master(pci);
 	if (request_irq(pci->irq, snd_intel8x0m_interrupt,
-			IRQF_SHARED, card->shortname, chip)) {
+			IRQF_SHARED, KBUILD_MODNAME, chip)) {
 		printk(KERN_ERR "intel8x0m: unable to grab IRQ %d, "
 		       "disabling device\n", pci->irq);
 		snd_card_disconnect(card);
@@ -1174,7 +1174,7 @@ static int __devinit snd_intel8x0m_create(struct snd_card *card,
 
  port_inited:
 	if (request_irq(pci->irq, snd_intel8x0m_interrupt, IRQF_SHARED,
-			card->shortname, chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_intel8x0m_free(chip);
 		return -EBUSY;
@@ -1261,9 +1261,9 @@ static struct shortname_table {
 	{ PCI_DEVICE_ID_NVIDIA_MCP2_MODEM, "NVidia nForce2" },
 	{ PCI_DEVICE_ID_NVIDIA_MCP2S_MODEM, "NVidia nForce2s" },
 	{ PCI_DEVICE_ID_NVIDIA_MCP3_MODEM, "NVidia nForce3" },
+	{ 0x746e, "AMD AMD8111" },
 #if 0
 	{ 0x5455, "ALi M5455" },
-	{ 0x746d, "AMD AMD8111" },
 #endif
 	{ 0 },
 };
@@ -1325,7 +1325,7 @@ static void __devexit snd_intel8x0m_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "Intel ICH Modem",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_intel8x0m_ids,
 	.probe = snd_intel8x0m_probe,
 	.remove = __devexit_p(snd_intel8x0m_remove),

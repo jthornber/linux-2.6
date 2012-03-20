@@ -69,7 +69,6 @@ SECTIONS
 	RODATA
 
 	/* writeable */
-	_sdata = .;				/* Start of data section */
 	.data : {	/* Data */
 		. = . + DATAOFFSET;		/* for CONFIG_MAPPED_KERNEL */
 
@@ -118,7 +117,7 @@ SECTIONS
 		EXIT_DATA
 	}
 
-	PERCPU(1 << CONFIG_MIPS_L1_CACHE_SHIFT, PAGE_SIZE)
+	PERCPU_SECTION(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
 	. = ALIGN(PAGE_SIZE);
 	__init_end = .;
 	/* freed after init ends here */

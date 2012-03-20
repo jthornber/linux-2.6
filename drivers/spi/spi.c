@@ -1,5 +1,5 @@
 /*
- * spi.c - SPI init/core code
+ * SPI init/core code
  *
  * Copyright (C) 2005 David Brownell
  *
@@ -29,6 +29,7 @@
 #include <linux/spi/spi.h>
 #include <linux/of_spi.h>
 #include <linux/pm_runtime.h>
+#include <linux/export.h>
 
 static void spidev_release(struct device *dev)
 {
@@ -318,7 +319,7 @@ struct spi_device *spi_alloc_device(struct spi_master *master)
 	}
 
 	spi->master = master;
-	spi->dev.parent = dev;
+	spi->dev.parent = &master->dev;
 	spi->dev.bus = &spi_bus_type;
 	spi->dev.release = spidev_release;
 	device_initialize(&spi->dev);
@@ -1047,8 +1048,8 @@ static u8	*buf;
  * spi_{async,sync}() calls with dma-safe buffers.
  */
 int spi_write_then_read(struct spi_device *spi,
-		const u8 *txbuf, unsigned n_tx,
-		u8 *rxbuf, unsigned n_rx)
+		const void *txbuf, unsigned n_tx,
+		void *rxbuf, unsigned n_rx)
 {
 	static DEFINE_MUTEX(lock);
 

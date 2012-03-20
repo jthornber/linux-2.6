@@ -10,19 +10,20 @@
 #include <linux/ata_platform.h>
 #include <linux/smsc911x.h>
 #include <linux/spinlock.h>
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/usb/isp1760.h>
 #include <linux/clkdev.h>
+#include <linux/mtd/physmap.h>
 
 #include <asm/mach-types.h>
 #include <asm/sizes.h>
 #include <asm/mach/arch.h>
-#include <asm/mach/flash.h>
 #include <asm/mach/map.h>
 #include <asm/mach/time.h>
 #include <asm/hardware/arm_timer.h>
 #include <asm/hardware/timer-sp.h>
 #include <asm/hardware/sp810.h>
+#include <asm/hardware/gic.h>
 
 #include <mach/ct-ca9x4.h>
 #include <mach/motherboard.h>
@@ -46,12 +47,6 @@ static struct map_desc v2m_io_desc[] __initdata = {
 	},
 };
 
-static void __init v2m_init_early(void)
-{
-	ct_desc->init_early();
-	versatile_sched_clock_init(MMIO_P2V(V2M_SYS_24MHZ), 24000000);
-}
-
 static void __init v2m_timer_init(void)
 {
 	u32 scctrl;
@@ -65,8 +60,9 @@ static void __init v2m_timer_init(void)
 	writel(0, MMIO_P2V(V2M_TIMER0) + TIMER_CTRL);
 	writel(0, MMIO_P2V(V2M_TIMER1) + TIMER_CTRL);
 
-	sp804_clocksource_init(MMIO_P2V(V2M_TIMER1));
-	sp804_clockevents_init(MMIO_P2V(V2M_TIMER0), IRQ_V2M_TIMER0);
+	sp804_clocksource_init(MMIO_P2V(V2M_TIMER1), "v2m-timer1");
+	sp804_clockevents_init(MMIO_P2V(V2M_TIMER0), IRQ_V2M_TIMER0,
+		"v2m-timer0");
 }
 
 static struct sys_timer v2m_timer = {
@@ -206,27 +202,13 @@ static struct platform_device v2m_usb_device = {
 	.dev.platform_data = &v2m_usb_config,
 };
 
-static int v2m_flash_init(void)
-{
-	writel(0, MMIO_P2V(V2M_SYS_FLASH));
-	return 0;
-}
-
-static void v2m_flash_exit(void)
-{
-	writel(0, MMIO_P2V(V2M_SYS_FLASH));
-}
-
-static void v2m_flash_set_vpp(int on)
+static void v2m_flash_set_vpp(struct platform_device *pdev, int on)
 {
 	writel(on != 0, MMIO_P2V(V2M_SYS_FLASH));
 }
 
-static struct flash_platform_data v2m_flash_data = {
-	.map_name	= "cfi_probe",
+static struct physmap_flash_data v2m_flash_data = {
 	.width		= 4,
-	.init		= v2m_flash_init,
-	.exit		= v2m_flash_exit,
 	.set_vpp	= v2m_flash_set_vpp,
 };
 
@@ -243,7 +225,7 @@ static struct resource v2m_flash_resources[] = {
 };
 
 static struct platform_device v2m_flash_device = {
-	.name		= "armflash",
+	.name		= "physmap-flash",
 	.id		= -1,
 	.resource	= v2m_flash_resources,
 	.num_resources	= ARRAY_SIZE(v2m_flash_resources),
@@ -333,6 +315,14 @@ static struct clk osc2_clk = {
 	.rate	= 24000000,
 };
 
+static struct clk v2m_sp804_clk = {
+	.rate	= 1000000,
+};
+
+static struct clk v2m_ref_clk = {
+	.rate   = 32768,
+};
+
 static struct clk dummy_apb_pclk;
 
 static struct clk_lookup v2m_lookups[] = {
@@ -363,8 +353,26 @@ static struct clk_lookup v2m_lookups[] = {
 	}, {	/* CLCD */
 		.dev_id		= "mb:clcd",
 		.clk		= &osc1_clk,
+	}, {	/* SP805 WDT */
+		.dev_id		= "mb:wdt",
+		.clk		= &v2m_ref_clk,
+	}, {	/* SP804 timers */
+		.dev_id		= "sp804",
+		.con_id		= "v2m-timer0",
+		.clk		= &v2m_sp804_clk,
+	}, {	/* SP804 timers */
+		.dev_id		= "sp804",
+		.con_id		= "v2m-timer1",
+		.clk		= &v2m_sp804_clk,
 	},
 };
+
+static void __init v2m_init_early(void)
+{
+	ct_desc->init_early();
+	clkdev_add_table(v2m_lookups, ARRAY_SIZE(v2m_lookups));
+	versatile_sched_clock_init(MMIO_P2V(V2M_SYS_24MHZ), 24000000);
+}
 
 static void v2m_power_off(void)
 {
@@ -419,8 +427,6 @@ static void __init v2m_init(void)
 {
 	int i;
 
-	clkdev_add_table(v2m_lookups, ARRAY_SIZE(v2m_lookups));
-
 	platform_device_register(&v2m_pcie_i2c_device);
 	platform_device_register(&v2m_ddc_i2c_device);
 	platform_device_register(&v2m_flash_device);
@@ -432,16 +438,17 @@ static void __init v2m_init(void)
 		amba_device_register(v2m_amba_devs[i], &iomem_resource);
 
 	pm_power_off = v2m_power_off;
-	arm_pm_restart = v2m_restart;
 
 	ct_desc->init_tile();
 }
 
 MACHINE_START(VEXPRESS, "ARM-Versatile Express")
-	.boot_params	= PLAT_PHYS_OFFSET + 0x00000100,
+	.atag_offset	= 0x100,
 	.map_io		= v2m_map_io,
 	.init_early	= v2m_init_early,
 	.init_irq	= v2m_init_irq,
 	.timer		= &v2m_timer,
+	.handle_irq	= gic_handle_irq,
 	.init_machine	= v2m_init,
+	.restart	= v2m_restart,
 MACHINE_END

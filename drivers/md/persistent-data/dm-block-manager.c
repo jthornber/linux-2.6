@@ -1,894 +1,620 @@
+/*
+ * Copyright (C) 2011 Red Hat, Inc.
+ *
+ * This file is released under the GPL.
+ */
 #include "dm-block-manager.h"
+#include "dm-persistent-data-internal.h"
+#include "../dm-bufio.h"
 
-#include <linux/dm-io.h>
+#include <linux/crc32c.h>
+#include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/device-mapper.h> /* For SECTOR_SHIFT */
+#include <linux/rwsem.h>
+#include <linux/device-mapper.h>
+#include <linux/stacktrace.h>
 
-#define DEBUG
+#define DM_MSG_PREFIX "block manager"
 
 /*----------------------------------------------------------------*/
 
-#define SECTOR_SIZE 512
+/*
+ * This is a read/write semaphore with a couple of differences.
+ *
+ * i) There is a restriction on the number of concurrent read locks that
+ * may be held at once.  This is just an implementation detail.
+ *
+ * ii) Recursive locking attempts are detected and return EINVAL.  A stack
+ * trace is also emitted for the previous lock aquisition.
+ *
+ * iii) Priority is given to write locks.
+ */
+#define MAX_HOLDERS 4
+#define MAX_STACK 10
 
-enum dm_block_state {
-	BS_EMPTY,
-	BS_CLEAN,
-	BS_READING,
-	BS_WRITING,
-	BS_READ_LOCKED,
-	BS_READ_LOCKED_DIRTY, 	/* block was dirty before it was read locked */
-	BS_WRITE_LOCKED,
-	BS_DIRTY,
-	BS_ERROR
-};
+typedef unsigned long stack_entries[MAX_STACK];
 
-struct dm_block {
-	struct list_head list;
-	struct hlist_node hlist;
-
-	dm_block_t where;
-	void *data_actual;
-	void *data;
-	wait_queue_head_t io_q;
-	unsigned read_lock_count;
-	unsigned write_lock_pending;
-	enum dm_block_state state;
-
-	/* Extra flags like REQ_FLUSH and REQ_FUA can be set here.  This is
-	 * mainly as to avoid a race condition in flush_and_unlock() where
-	 * the newly unlocked superblock may have been submitted for a
-	 * write before the write_all_dirty() call is made.
-	 */
-	int io_flags;
-
-	/*
-	 * Sadly we need an up pointer so we can get to the bm on io
-	 * completion.
-	 */
-	struct dm_block_manager *bm;
-};
-
-struct dm_block_manager {
-	struct block_device *bdev;
-	unsigned cache_size; /* in bytes */
-	unsigned block_size; /* in bytes */
-	dm_block_t nr_blocks;
-
-	/* this will trigger everytime an io completes */
-	wait_queue_head_t io_q;
-
-	struct dm_io_client *io;
-
-	/* |lock| protects all the lists and the hash table */
+struct block_lock {
 	spinlock_t lock;
-	struct list_head empty_list; /* no block assigned */
-	struct list_head clean_list; /* unlocked and clean */
-	struct list_head dirty_list; /* unlocked and dirty */
-	struct list_head error_list;
-	unsigned available_count;
-	unsigned reading_count;
-	unsigned writing_count;
+	__s32 count;
+	struct list_head waiters;
+	struct task_struct *holders[MAX_HOLDERS];
 
-#ifdef DEBUG
-	/* FIXME: debug only */
-	unsigned locks_held;
-	unsigned shared_read_count;
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	struct stack_trace traces[MAX_HOLDERS];
+	stack_entries entries[MAX_HOLDERS];
+#endif
+};
+
+struct waiter {
+	struct list_head list;
+	struct task_struct *task;
+	int wants_write;
+};
+
+static unsigned __find_holder(struct block_lock *lock,
+			      struct task_struct *task)
+{
+	unsigned i;
+
+	for (i = 0; i < MAX_HOLDERS; i++)
+		if (lock->holders[i] == task)
+			break;
+
+	BUG_ON(i == MAX_HOLDERS);
+	return i;
+}
+
+/* call this *after* you increment lock->count */
+static void __add_holder(struct block_lock *lock, struct task_struct *task)
+{
+	unsigned h = __find_holder(lock, NULL);
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	struct stack_trace *t;
 #endif
 
+	get_task_struct(task);
+	lock->holders[h] = task;
+
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	t = lock->traces + h;
+	t->nr_entries = 0;
+	t->max_entries = MAX_STACK;
+	t->entries = lock->entries[h];
+	t->skip = 2;
+	save_stack_trace(t);
+#endif
+}
+
+/* call this *before* you decrement lock->count */
+static void __del_holder(struct block_lock *lock, struct task_struct *task)
+{
+	unsigned h = __find_holder(lock, task);
+	lock->holders[h] = NULL;
+	put_task_struct(task);
+}
+
+static int __check_holder(struct block_lock *lock)
+{
+	unsigned i;
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	static struct stack_trace t;
+	static stack_entries entries;
+#endif
+
+	for (i = 0; i < MAX_HOLDERS; i++) {
+		if (lock->holders[i] == current) {
+			DMERR("recursive lock detected in pool metadata");
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+			DMERR("previously held here:");
+			print_stack_trace(lock->traces + i, 4);
+
+			DMERR("subsequent aquisition attempted here:");
+			t.nr_entries = 0;
+			t.max_entries = MAX_STACK;
+			t.entries = entries;
+			t.skip = 3;
+			save_stack_trace(&t);
+			print_stack_trace(&t, 4);
+#endif
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static void __wait(struct waiter *w)
+{
+	for (;;) {
+		set_task_state(current, TASK_UNINTERRUPTIBLE);
+
+		if (!w->task)
+			break;
+
+		schedule();
+	}
+
+	set_task_state(current, TASK_RUNNING);
+}
+
+static void __wake_waiter(struct waiter *w)
+{
+	struct task_struct *task;
+
+	list_del(&w->list);
+	task = w->task;
+	smp_mb();
+	w->task = NULL;
+	wake_up_process(task);
+}
+
+/*
+ * We either wake a few readers or a single writer.
+ */
+static void __wake_many(struct block_lock *lock)
+{
+	struct waiter *w, *tmp;
+
+	BUG_ON(lock->count < 0);
+	list_for_each_entry_safe(w, tmp, &lock->waiters, list) {
+		if (lock->count >= MAX_HOLDERS)
+			return;
+
+		if (w->wants_write) {
+			if (lock->count > 0)
+				return; /* still read locked */
+
+			lock->count = -1;
+			__add_holder(lock, w->task);
+			__wake_waiter(w);
+			return;
+		}
+
+		lock->count++;
+		__add_holder(lock, w->task);
+		__wake_waiter(w);
+	}
+}
+
+static void bl_init(struct block_lock *lock)
+{
+	int i;
+
+	spin_lock_init(&lock->lock);
+	lock->count = 0;
+	INIT_LIST_HEAD(&lock->waiters);
+	for (i = 0; i < MAX_HOLDERS; i++)
+		lock->holders[i] = NULL;
+}
+
+static int __available_for_read(struct block_lock *lock)
+{
+	return lock->count >= 0 &&
+		lock->count < MAX_HOLDERS &&
+		list_empty(&lock->waiters);
+}
+
+static int bl_down_read(struct block_lock *lock)
+{
+	int r;
+	struct waiter w;
+
+	spin_lock(&lock->lock);
+	r = __check_holder(lock);
+	if (r) {
+		spin_unlock(&lock->lock);
+		return r;
+	}
+
+	if (__available_for_read(lock)) {
+		lock->count++;
+		__add_holder(lock, current);
+		spin_unlock(&lock->lock);
+		return 0;
+	}
+
+	get_task_struct(current);
+
+	w.task = current;
+	w.wants_write = 0;
+	list_add_tail(&w.list, &lock->waiters);
+	spin_unlock(&lock->lock);
+
+	__wait(&w);
+	put_task_struct(current);
+	return 0;
+}
+
+static int bl_down_read_nonblock(struct block_lock *lock)
+{
+	int r;
+
+	spin_lock(&lock->lock);
+	r = __check_holder(lock);
+	if (r)
+		goto out;
+
+	if (__available_for_read(lock)) {
+		lock->count++;
+		__add_holder(lock, current);
+		r = 0;
+	} else
+		r = -EWOULDBLOCK;
+
+out:
+	spin_unlock(&lock->lock);
+	return r;
+}
+
+static void bl_up_read(struct block_lock *lock)
+{
+	spin_lock(&lock->lock);
+	BUG_ON(lock->count <= 0);
+	__del_holder(lock, current);
+	--lock->count;
+	if (!list_empty(&lock->waiters))
+		__wake_many(lock);
+	spin_unlock(&lock->lock);
+}
+
+static int bl_down_write(struct block_lock *lock)
+{
+	int r;
+	struct waiter w;
+
+	spin_lock(&lock->lock);
+	r = __check_holder(lock);
+	if (r) {
+		spin_unlock(&lock->lock);
+		return r;
+	}
+
+	if (lock->count == 0 && list_empty(&lock->waiters)) {
+		lock->count = -1;
+		__add_holder(lock, current);
+		spin_unlock(&lock->lock);
+		return 0;
+	}
+
+	get_task_struct(current);
+	w.task = current;
+	w.wants_write = 1;
+
 	/*
-	 * Hash table of cached blocks, holds everything that isn't in the
-	 * BS_EMPTY state.
+	 * Writers given priority. We know there's only one mutator in the
+	 * system, so ignoring the ordering reversal.
 	 */
-	unsigned hash_size;
-	unsigned hash_mask;
-	struct hlist_head buckets[0]; /* must be last member of struct */
-};
+	list_add(&w.list, &lock->waiters);
+	spin_unlock(&lock->lock);
+
+	__wait(&w);
+	put_task_struct(current);
+
+	return 0;
+}
+
+static void bl_up_write(struct block_lock *lock)
+{
+	spin_lock(&lock->lock);
+	__del_holder(lock, current);
+	lock->count = 0;
+	if (!list_empty(&lock->waiters))
+		__wake_many(lock);
+	spin_unlock(&lock->lock);
+}
+
+static void report_recursive_bug(dm_block_t b, int r)
+{
+	if (r == -EINVAL)
+		DMERR("recursive acquisition of block %llu requested.",
+		      (unsigned long long) b);
+}
+
+/*----------------------------------------------------------------*/
+
+/*
+ * Block manager is currently implemented using dm-bufio.  struct
+ * dm_block_manager and struct dm_block map directly onto a couple of
+ * structs in the bufio interface.  I want to retain the freedom to move
+ * away from bufio in the future.  So these structs are just cast within
+ * this .c file, rather than making it through to the public interface.
+ */
+static struct dm_buffer *to_buffer(struct dm_block *b)
+{
+	return (struct dm_buffer *) b;
+}
+
+static struct dm_bufio_client *to_bufio(struct dm_block_manager *bm)
+{
+	return (struct dm_bufio_client *) bm;
+}
 
 dm_block_t dm_block_location(struct dm_block *b)
 {
-	return b->where;
+	return dm_bufio_get_block_number(to_buffer(b));
 }
 EXPORT_SYMBOL_GPL(dm_block_location);
 
 void *dm_block_data(struct dm_block *b)
 {
-	return b->data;
+	return dm_bufio_get_block_data(to_buffer(b));
 }
 EXPORT_SYMBOL_GPL(dm_block_data);
 
-/*----------------------------------------------------------------
- * Hash table
- *--------------------------------------------------------------*/
-static unsigned hash_block(struct dm_block_manager *bm, dm_block_t b)
-{
-	const unsigned BIG_PRIME = 4294967291UL;
+struct buffer_aux {
+	struct dm_block_validator *validator;
+	struct block_lock lock;
+	int write_locked;
+};
 
-	return (((unsigned) b) * BIG_PRIME) & bm->hash_mask;
+static void dm_block_manager_alloc_callback(struct dm_buffer *buf)
+{
+	struct buffer_aux *aux = dm_bufio_get_aux_data(buf);
+	aux->validator = NULL;
+	bl_init(&aux->lock);
 }
 
-static struct dm_block *__find_block(struct dm_block_manager *bm, dm_block_t b)
+static void dm_block_manager_write_callback(struct dm_buffer *buf)
 {
-	unsigned bucket = hash_block(bm, b);
-	struct dm_block *blk;
-	struct hlist_node *n;
-
-	hlist_for_each_entry(blk, n, bm->buckets + bucket, hlist)
-		if (blk->where == b)
-			return blk;
-
-	return NULL;
-}
-
-static void __insert_block(struct dm_block_manager *bm, struct dm_block *b)
-{
-	unsigned bucket = hash_block(bm, b->where);
-
-	hlist_add_head(&b->hlist, bm->buckets + bucket);
-}
-
-/*----------------------------------------------------------------
- * Block state:
- * __transition() handles transition of a block between different states.
- * Study this to understand the state machine.
- *
- * Alternatively run:
- *     grep DOT block-manager.c |
- *       sed -e 's/.*DOT: //' -e 's/\*\///' |
- *       dot -Tps -o states.ps
- *
- * Assumes bm->lock is held.
- *--------------------------------------------------------------*/
-static void __transition(struct dm_block *b, enum dm_block_state new_state)
-{
-	/* DOT: digraph BlockStates { */
-	struct dm_block_manager *bm = b->bm;
-
-	switch (new_state) {
-	case BS_EMPTY:
-		/* DOT: error -> empty */
-		/* DOT: clean -> empty */
-		BUG_ON(!((b->state == BS_ERROR) ||
-			 (b->state == BS_CLEAN)));
-		hlist_del(&b->hlist);
-		list_move(&b->list, &bm->empty_list);
-		b->write_lock_pending = 0;
-		b->read_lock_count = 0;
-		b->io_flags = 0;
-
-		if (b->state == BS_ERROR)
-			bm->available_count++;
-		break;
-
-	case BS_CLEAN:
-		/* DOT: reading -> clean */
-		/* DOT: writing -> clean */
-		/* DOT: read_locked -> clean */
-		BUG_ON(!((b->state == BS_READING) ||
-			 (b->state == BS_WRITING) ||
-			 (b->state == BS_READ_LOCKED)));
-		switch (b->state) {
-		case BS_READING:
-			BUG_ON(bm->reading_count == 0);
-			bm->reading_count--;
-			break;
-
-		case BS_WRITING:
-			BUG_ON(bm->writing_count == 0);
-			bm->writing_count--;
-			b->io_flags = 0;
-			break;
-
-		default:
-			break;
-		}
-		list_add_tail(&b->list, &bm->clean_list);
-		bm->available_count++;
-		break;
-
-	case BS_READING:
-		/* DOT: empty -> reading */
-		BUG_ON(!(b->state == BS_EMPTY));
-		/* FIXME: insert into the hash */
-		__insert_block(bm, b);
-		list_del(&b->list);
-		bm->available_count--;
-		bm->reading_count++;
-		break;
-
-	case BS_WRITING:
-		/* DOT: dirty -> writing */
-		BUG_ON(!(b->state == BS_DIRTY));
-		list_del(&b->list);
-		bm->writing_count++;
-		break;
-
-	case BS_READ_LOCKED:
-		/* DOT: clean -> read_locked */
-		BUG_ON(!(b->state == BS_CLEAN));
-		list_del(&b->list);
-		bm->available_count--;
-		break;
-
-	case BS_READ_LOCKED_DIRTY:
-		/* DOT: dirty -> read_locked_dirty */
-		BUG_ON(!((b->state == BS_DIRTY)));
-		list_del(&b->list);
-		break;
-
-	case BS_WRITE_LOCKED:
-		/* DOT: dirty -> write_locked */
-		/* DOT: clean -> write_locked */
-		BUG_ON(!((b->state == BS_DIRTY) ||
-			 (b->state == BS_CLEAN)));
-		list_del(&b->list);
-
-		if (b->state == BS_CLEAN)
-			bm->available_count--;
-		break;
-
-	case BS_DIRTY:
-		/* DOT: write_locked -> dirty */
-		/* DOT: read_locked_dirty -> dirty */
-		BUG_ON(!((b->state == BS_WRITE_LOCKED) ||
-			 (b->state == BS_READ_LOCKED_DIRTY)));
-		list_add_tail(&b->list, &bm->dirty_list);
-		break;
-
-	case BS_ERROR:
-		/* DOT: writing -> error */
-		/* DOT: reading -> error */
-		BUG_ON(!((b->state == BS_WRITING) ||
-			 (b->state == BS_READING)));
-		list_add_tail(&b->list, &bm->error_list);
-		break;
+	struct buffer_aux *aux = dm_bufio_get_aux_data(buf);
+	if (aux->validator) {
+		aux->validator->prepare_for_write(aux->validator, (struct dm_block *) buf,
+			 dm_bufio_get_block_size(dm_bufio_get_client(buf)));
 	}
-
-	b->state = new_state;
-	/* DOT: } */
-}
-
-/*----------------------------------------------------------------
- * low level io
- *--------------------------------------------------------------*/
-typedef void (completion_fn)(unsigned long error, struct dm_block *b);
-
-static void submit_io(struct dm_block *b, int rw,
-		      completion_fn fn)
-{
-	struct dm_block_manager *bm = b->bm;
-	struct dm_io_request req;
-	struct dm_io_region region;
-	unsigned sectors_per_block = bm->block_size >> SECTOR_SHIFT;
-
-	region.bdev = bm->bdev;
-	region.sector = b->where * sectors_per_block;
-	region.count = sectors_per_block;
-
-	req.bi_rw = rw;
-	req.mem.type = DM_IO_KMEM;
-	req.mem.offset = 0;
-	req.mem.ptr.addr = b->data;
-	req.notify.fn = (void (*)(unsigned long, void *)) fn;
-	req.notify.context = b;
-	req.client = bm->io;
-
-	if (dm_io(&req, 1, &region, NULL) < 0)
-		fn(1, b);
-}
-
-/*----------------------------------------------------------------
- * High level io
- *--------------------------------------------------------------*/
-static void __complete_io(unsigned long error, struct dm_block *b)
-{
-	struct dm_block_manager *bm = b->bm;
-
-	if (error) {
-		printk(KERN_ALERT "io error %u", (unsigned) b->where);
-		__transition(b, BS_ERROR);
-	} else
-		__transition(b, BS_CLEAN);
-
-	wake_up(&b->io_q);
-	wake_up(&bm->io_q);
-}
-
-static void complete_io(unsigned long error, struct dm_block *b)
-{
-	struct dm_block_manager *bm = b->bm;
-	unsigned long flags;
-
-	spin_lock_irqsave(&bm->lock, flags);
-	__complete_io(error, b);
-	spin_unlock_irqrestore(&bm->lock, flags);
-}
-
-static void read_block(struct dm_block *b)
-{
-	submit_io(b, READ, complete_io);
-}
-
-static void write_block(struct dm_block *b)
-{
-	submit_io(b, WRITE | b->io_flags, complete_io);
-}
-
-static void write_dirty(struct dm_block_manager *bm, unsigned count)
-{
-	struct dm_block *b, *tmp;
-	struct list_head dirty;
-	unsigned long flags;
-
-	/* Grab the first |count| entries from the dirty list */
-	INIT_LIST_HEAD(&dirty);
-	spin_lock_irqsave(&bm->lock, flags);
-	list_for_each_entry_safe (b, tmp, &bm->dirty_list, list) {
-		if (count-- == 0)
-			break;
-		__transition(b, BS_WRITING);
-		list_add_tail(&b->list, &dirty);
-	}
-	spin_unlock_irqrestore(&bm->lock, flags);
-
-	list_for_each_entry_safe (b, tmp, &dirty, list) {
-		list_del(&b->list);
-		write_block(b);
-	}
-}
-
-static void write_all_dirty(struct dm_block_manager *bm)
-{
-	write_dirty(bm, bm->cache_size);
-}
-
-static void __clear_errors(struct dm_block_manager *bm)
-{
-	struct dm_block *b, *tmp;
-	list_for_each_entry_safe (b, tmp, &bm->error_list, list)
-		__transition(b, BS_EMPTY);
-}
-
-/*----------------------------------------------------------------
- * Waiting
- *--------------------------------------------------------------*/
-#ifdef __CHECKER__
-# define __retains(x)	__attribute__((context(x,1,1)))
-#else
-# define __retains(x)
-#endif
-
-#ifdef USE_PLUGGING
-static inline unplug(void)
-{
-	blk_flush_plug(current);
-}
-#else
-static inline void unplug(void) {}
-#endif
-
-#define __wait_block(wq, lock, flags, sched_fn, condition)	\
-do {   								\
-       	int ret = 0;  						\
-       	       	       	    					\
-	DEFINE_WAIT(wait);     	    				\
-       	add_wait_queue(wq, &wait);  				\
-       	       	      						\
-       	for (;;) {    						\
- 		prepare_to_wait(wq, &wait, TASK_INTERRUPTIBLE); \
- 		if (condition)  				\
- 		      	break;         	       	       		\
-       	       	       	       			      		\
-		spin_unlock_irqrestore(lock, flags);  		\
-		if (signal_pending(current)) {  		\
-		      	ret = -ERESTARTSYS;    	       	 	\
-		      	spin_lock_irqsave(lock, flags);  	\
-		       	break;  				\
-       	       	}     						\
-       	       	       	     					\
-		sched_fn();    	       	       	 		\
-	       	spin_lock_irqsave(lock, flags);  		\
-       	}  							\
-       	       	       	       	  				\
-	finish_wait(wq, &wait);        	       	       	       	\
-	return ret;   						\
-} while (0)
-
-static int __wait_io(struct dm_block *b, unsigned long *flags)
-	__retains(&b->bm->lock)
-{
-	unplug();
-	__wait_block(&b->io_q, &b->bm->lock, *flags, io_schedule,
-		     ((b->state != BS_READING) && (b->state != BS_WRITING)));
-}
-
-static int __wait_unlocked(struct dm_block *b, unsigned long *flags)
-	__retains(&b->bm->lock)
-{
-	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
-		     ((b->state == BS_CLEAN) || (b->state == BS_DIRTY)));
-}
-
-static int __wait_read_lockable(struct dm_block *b, unsigned long *flags)
-	__retains(&b->bm->lock)
-{
-	__wait_block(&b->io_q, &b->bm->lock, *flags, schedule,
-		     (!b->write_lock_pending && (b->state == BS_CLEAN ||
-						 b->state == BS_DIRTY ||
-						 b->state == BS_READ_LOCKED)));
-}
-
-static int __wait_all_writes(struct dm_block_manager *bm, unsigned long *flags)
-	__retains(&bm->lock)
-{
-	unplug();
-	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
-		     !bm->writing_count);
-}
-
-static int __wait_clean(struct dm_block_manager *bm, unsigned long *flags)
-	__retains(&bm->lock)
-{
-	unplug();
-	__wait_block(&bm->io_q, &bm->lock, *flags, io_schedule,
-		     (!list_empty(&bm->clean_list) ||
-		      (bm->writing_count == 0)));
-}
-
-/*----------------------------------------------------------------
- * Finding a free block to recycle
- *--------------------------------------------------------------*/
-static int recycle_block(struct dm_block_manager *bm, dm_block_t where,
-			 int need_read, struct dm_block **result)
-{
-	int ret = 0;
-	struct dm_block *b;
-	unsigned long flags, available;
-
-	/* wait for a block to appear on the empty or clean lists */
-	spin_lock_irqsave(&bm->lock, flags);
-	while (1) {
-		/*
-		 * Once we can lock and do io concurrently then we should
-		 * probably flush at bm->cache_size / 2 and write _all_
-		 * dirty blocks.
-		 */
-		available = bm->available_count + bm->writing_count;
-		if (available < bm->cache_size / 4) {
-			spin_unlock_irqrestore(&bm->lock, flags);
-			write_dirty(bm, bm->cache_size / 4);
-			spin_lock_irqsave(&bm->lock, flags);
-		}
-
-		if (!list_empty(&bm->empty_list)) {
-			b = list_first_entry(&bm->empty_list, struct dm_block, list);
-			break;
-
-		} else if (!list_empty(&bm->clean_list)) {
-			b = list_first_entry(&bm->clean_list, struct dm_block, list);
-			__transition(b, BS_EMPTY);
-			break;
-		}
-
-		__wait_clean(bm, &flags);
-	}
-
-	b->where = where;
-	__transition(b, BS_READING);
-
-	if (!need_read) {
-		memset(b->data, 0, bm->block_size);
-		__transition(b, BS_CLEAN);
-	} else {
-		spin_unlock_irqrestore(&bm->lock, flags);
-		read_block(b);
-		spin_lock_irqsave(&bm->lock, flags);
-		__wait_io(b, &flags);
-
-		/* FIXME: can |b| have been recycled between io completion and here ? */
-
-		/* did the io succeed ? */
-		if (b->state == BS_ERROR) {
-			/* Since this is a read that has failed we can
-			 * clear the error immediately.  Failed writes are
-			 * revealed during a commit.
-			 */
-			__transition(b, BS_EMPTY);
-			ret = -EIO;
-		}
-	}
-	spin_unlock_irqrestore(&bm->lock, flags);
-
-	if (ret == 0)
-		*result = b;
-	return ret;
-}
-
-#ifdef USE_PLUGGING
-static int recycle_block_with_plugging(struct dm_block_manager *bm, dm_block_t where,
-				       int need_read, struct dm_block **result)
-{
-	int r;
-	struct blk_plug plug;
-
-	blk_start_plug(&plug);
-	r = recycle_block(bm, where, need_read, result);
-	blk_finish_plug(&plug);
-
-	return r;
-}
-#endif
-
-/*----------------------------------------------------------------
- * Low level block management
- *--------------------------------------------------------------*/
-static void *align(void *ptr, size_t amount)
-{
-	size_t offset = (uint64_t) ptr & (amount - 1);
-	return ((unsigned char *) ptr) + (amount - offset);
-}
-
-static struct dm_block *alloc_block(struct dm_block_manager *bm)
-{
-	struct dm_block *b = kmalloc(sizeof(*b), GFP_KERNEL);
-	if (!b)
-		return NULL;
-
-	INIT_LIST_HEAD(&b->list);
-	INIT_HLIST_NODE(&b->hlist);
-
-	if (!(b->data_actual = kmalloc(bm->block_size + SECTOR_SIZE, GFP_KERNEL))) {
-		kfree(b);
-		return NULL;
-	}
-	b->data = align(b->data_actual, SECTOR_SIZE);
-	b->state = BS_EMPTY;
-	init_waitqueue_head(&b->io_q);
-	b->read_lock_count = 0;
-	b->write_lock_pending = 0;
-	b->io_flags = 0;
-	b->bm = bm;
-
-	return b;
-}
-
-static void free_block(struct dm_block *b)
-{
-	kfree(b->data_actual);
-	kfree(b);
-}
-
-static int populate_bm(struct dm_block_manager *bm, unsigned count)
-{
-	int i;
-	LIST_HEAD(bs);
-
-	for (i = 0; i < count; i++) {
-		struct dm_block *b = alloc_block(bm);
-		if (!b) {
-			struct dm_block *tmp;
-			list_for_each_entry_safe (b, tmp, &bs, list)
-				free_block(b);
-			return -ENOMEM;
-		}
-
-		list_add(&b->list, &bs);
-	}
-
-	list_replace(&bs, &bm->empty_list);
-	bm->available_count = count;
-
-	return 0;
 }
 
 /*----------------------------------------------------------------
  * Public interface
  *--------------------------------------------------------------*/
-static unsigned calc_hash_size(unsigned cache_size)
+struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
+						 unsigned block_size,
+						 unsigned cache_size,
+						 unsigned max_held_per_thread)
 {
-	unsigned r = 32;	/* minimum size is 16 */
-
-	while (r < cache_size)
-		r <<= 1;
-
-	return r >> 1;
-}
-
-struct dm_block_manager *
-dm_block_manager_create(struct block_device *bdev,
-			unsigned block_size, unsigned cache_size)
-{
-	unsigned i;
-	unsigned hash_size = calc_hash_size(cache_size);
-	size_t len = sizeof(struct dm_block_manager) +
-		sizeof(struct hlist_head) * hash_size;
-	struct dm_block_manager *bm;
-
-	bm = kmalloc(len, GFP_KERNEL);
-	if (!bm)
-		return NULL;
-	bm->bdev = bdev;
-	bm->cache_size = max(16u, cache_size);
-	bm->block_size = block_size;
-	bm->nr_blocks = i_size_read(bdev->bd_inode);
-	do_div(bm->nr_blocks, block_size);
-	init_waitqueue_head(&bm->io_q);
-	spin_lock_init(&bm->lock);
-
-	INIT_LIST_HEAD(&bm->empty_list);
-	INIT_LIST_HEAD(&bm->clean_list);
-	INIT_LIST_HEAD(&bm->dirty_list);
-	INIT_LIST_HEAD(&bm->error_list);
-	bm->available_count = 0;
-	bm->reading_count = 0;
-	bm->writing_count = 0;
-
-	bm->hash_size = hash_size;
-	bm->hash_mask = hash_size - 1;
-	for (i = 0; i < hash_size; i++)
-		INIT_HLIST_HEAD(bm->buckets + i);
-
-	if (!(bm->io = dm_io_client_create())) {
-		kfree(bm);
-		return NULL;
-	}
-
-	if (populate_bm(bm, cache_size) < 0) {
-		dm_io_client_destroy(bm->io);
-		kfree(bm);
-		return NULL;
-	}
-
-#ifdef DEBUG
-	bm->locks_held = 0;
-	bm->shared_read_count = 0;
-#endif
-	return bm;
+	return (struct dm_block_manager *)
+		dm_bufio_client_create(bdev, block_size, max_held_per_thread,
+				       sizeof(struct buffer_aux),
+				       dm_block_manager_alloc_callback,
+				       dm_block_manager_write_callback);
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
 void dm_block_manager_destroy(struct dm_block_manager *bm)
 {
-	int i;
-	struct dm_block *b, *btmp;
-	struct hlist_node *n, *tmp;
-
-	dm_io_client_destroy(bm->io);
-
-	for (i = 0; i < bm->hash_size; i++)
-		hlist_for_each_entry_safe (b, n, tmp, bm->buckets + i, hlist)
-			free_block(b);
-
-	list_for_each_entry_safe (b, btmp, &bm->empty_list, list)
-		free_block(b);
-
-	kfree(bm);
+	return dm_bufio_client_destroy(to_bufio(bm));
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
 
 unsigned dm_bm_block_size(struct dm_block_manager *bm)
 {
-	return bm->block_size;
+	return dm_bufio_get_block_size(to_bufio(bm));
 }
 EXPORT_SYMBOL_GPL(dm_bm_block_size);
 
 dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm)
 {
-	return bm->nr_blocks;
+	return dm_bufio_get_device_size(to_bufio(bm));
 }
-EXPORT_SYMBOL_GPL(dm_bm_nr_blocks);
 
-static int lock_internal(struct dm_block_manager *bm, dm_block_t block,
-			 int how, int need_read, int can_block,
-			 struct dm_block **result)
+static int dm_bm_validate_buffer(struct dm_block_manager *bm,
+				 struct dm_buffer *buf,
+				 struct buffer_aux *aux,
+				 struct dm_block_validator *v)
 {
-	int ret = 0;
-	struct dm_block *b;
-	unsigned long flags;
-
-	spin_lock_irqsave(&bm->lock, flags);
-retry:
-	b = __find_block(bm, block);
-	if (b) {
-		switch (how) {
-		case READ:
-			if (b->write_lock_pending || (b->state != BS_CLEAN &&
-						      b->state != BS_DIRTY &&
-						      b->state != BS_READ_LOCKED)) {
-				if (!can_block) {
-					spin_unlock_irqrestore(&bm->lock, flags);
-					return -EWOULDBLOCK;
-				}
-
-				__wait_read_lockable(b, &flags);
-
-				if (b->where != block)
-					goto retry;
-			}
-			break;
-
-		case WRITE:
-			while (b->state != BS_CLEAN && b->state != BS_DIRTY) {
-				if (!can_block) {
-					spin_unlock_irqrestore(&bm->lock, flags);
-					return -EWOULDBLOCK;
-				}
-
-				b->write_lock_pending++;
-				__wait_unlocked(b, &flags);
-				b->write_lock_pending--;
-				if (b->where != block)
-					goto retry;
-			}
-			break;
-		}
-
-	} else if (!can_block) {
-		ret = -EWOULDBLOCK;
-
+	if (unlikely(!aux->validator)) {
+		int r;
+		if (!v)
+			return 0;
+		r = v->check(v, (struct dm_block *) buf, dm_bufio_get_block_size(to_bufio(bm)));
+		if (unlikely(r))
+			return r;
+		aux->validator = v;
 	} else {
-		spin_unlock_irqrestore(&bm->lock, flags);
-#ifdef USE_PLUGGING
-		ret = recycle_block_with_plugging(bm, block, need_read, &b);
-#else
-		ret = recycle_block(bm, block, need_read, &b);
-#endif
-		spin_lock_irqsave(&bm->lock, flags);
-	}
-
-	if (ret == 0) {
-		switch (how) {
-		case READ:
-			b->read_lock_count++;
-#ifdef DEBUG
-			if (b->read_lock_count > 1)
-				bm->shared_read_count++;
-#endif
-			if (b->state == BS_DIRTY)
-				__transition(b, BS_READ_LOCKED_DIRTY);
-			else if (b->state == BS_CLEAN)
-				__transition(b, BS_READ_LOCKED);
-			break;
-
-		case WRITE:
-			__transition(b, BS_WRITE_LOCKED);
-			break;
+		if (unlikely(aux->validator != v)) {
+			DMERR("validator mismatch (old=%s vs new=%s) for block %llu",
+				aux->validator->name, v ? v->name : "NULL",
+				(unsigned long long)
+					dm_bufio_get_block_number(buf));
+			return -EINVAL;
 		}
-
-		*result = b;
 	}
 
-#ifdef DEBUG
-	if (ret == 0 && how == WRITE)
-		bm->locks_held++;
-#endif
-
-	spin_unlock_irqrestore(&bm->lock, flags);
-	return ret;
+	return 0;
 }
-
-int dm_bm_read_lock(struct dm_block_manager *bm,
-		    dm_block_t b, struct dm_block **result)
+int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
+		    struct dm_block_validator *v,
+		    struct dm_block **result)
 {
-	return lock_internal(bm, b, READ, 1, 1, result);
+	struct buffer_aux *aux;
+	void *p;
+	int r;
+
+	p = dm_bufio_read(to_bufio(bm), b, (struct dm_buffer **) result);
+	if (unlikely(IS_ERR(p)))
+		return PTR_ERR(p);
+
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
+	r = bl_down_read(&aux->lock);
+	if (unlikely(r)) {
+		dm_bufio_release(to_buffer(*result));
+		report_recursive_bug(b, r);
+		return r;
+	}
+
+	aux->write_locked = 0;
+
+	r = dm_bm_validate_buffer(bm, to_buffer(*result), aux, v);
+	if (unlikely(r)) {
+		bl_up_read(&aux->lock);
+		dm_bufio_release(to_buffer(*result));
+		return r;
+	}
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_read_lock);
 
 int dm_bm_write_lock(struct dm_block_manager *bm,
-		     dm_block_t b, struct dm_block **result)
+		     dm_block_t b, struct dm_block_validator *v,
+		     struct dm_block **result)
 {
-	return lock_internal(bm, b, WRITE, 1, 1, result);
+	struct buffer_aux *aux;
+	void *p;
+	int r;
+
+	p = dm_bufio_read(to_bufio(bm), b, (struct dm_buffer **) result);
+	if (unlikely(IS_ERR(p)))
+		return PTR_ERR(p);
+
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
+	r = bl_down_write(&aux->lock);
+	if (r) {
+		dm_bufio_release(to_buffer(*result));
+		report_recursive_bug(b, r);
+		return r;
+	}
+
+	aux->write_locked = 1;
+
+	r = dm_bm_validate_buffer(bm, to_buffer(*result), aux, v);
+	if (unlikely(r)) {
+		bl_up_write(&aux->lock);
+		dm_bufio_release(to_buffer(*result));
+		return r;
+	}
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_write_lock);
 
 int dm_bm_read_try_lock(struct dm_block_manager *bm,
-			dm_block_t b, struct dm_block **result)
+			dm_block_t b, struct dm_block_validator *v,
+			struct dm_block **result)
 {
-	return lock_internal(bm, b, READ, 1, 0, result);
+	struct buffer_aux *aux;
+	void *p;
+	int r;
+
+	p = dm_bufio_get(to_bufio(bm), b, (struct dm_buffer **) result);
+	if (unlikely(IS_ERR(p)))
+		return PTR_ERR(p);
+	if (unlikely(!p))
+		return -EWOULDBLOCK;
+
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
+	r = bl_down_read_nonblock(&aux->lock);
+	if (r < 0) {
+		dm_bufio_release(to_buffer(*result));
+		report_recursive_bug(b, r);
+		return r;
+	}
+	aux->write_locked = 0;
+
+	r = dm_bm_validate_buffer(bm, to_buffer(*result), aux, v);
+	if (unlikely(r)) {
+		bl_up_read(&aux->lock);
+		dm_bufio_release(to_buffer(*result));
+		return r;
+	}
+
+	return 0;
 }
-EXPORT_SYMBOL_GPL(dm_bm_read_try_lock);
 
 int dm_bm_write_lock_zero(struct dm_block_manager *bm,
-			  dm_block_t b, struct dm_block **result)
+			  dm_block_t b, struct dm_block_validator *v,
+			  struct dm_block **result)
 {
-	return lock_internal(bm, b, WRITE, 0, 1, result);
+	int r;
+	struct buffer_aux *aux;
+	void *p;
+
+	p = dm_bufio_new(to_bufio(bm), b, (struct dm_buffer **) result);
+	if (unlikely(IS_ERR(p)))
+		return PTR_ERR(p);
+
+	memset(p, 0, dm_bm_block_size(bm));
+
+	aux = dm_bufio_get_aux_data(to_buffer(*result));
+	r = bl_down_write(&aux->lock);
+	if (r) {
+		dm_bufio_release(to_buffer(*result));
+		return r;
+	}
+
+	aux->write_locked = 1;
+	aux->validator = v;
+
+	return 0;
 }
-EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
 int dm_bm_unlock(struct dm_block *b)
 {
-	int ret = 0;
-	unsigned long flags;
+	struct buffer_aux *aux;
+	aux = dm_bufio_get_aux_data(to_buffer(b));
 
-	spin_lock_irqsave(&b->bm->lock, flags);
+	if (aux->write_locked) {
+		dm_bufio_mark_buffer_dirty(to_buffer(b));
+		bl_up_write(&aux->lock);
+	} else
+		bl_up_read(&aux->lock);
 
-#ifdef DEBUG
-	if (ret == 0 && b->state == BS_WRITE_LOCKED)
-		b->bm->locks_held--;
-#endif
+	dm_bufio_release(to_buffer(b));
 
-	switch (b->state) {
-	case BS_WRITE_LOCKED:
-		__transition(b, BS_DIRTY);
-		wake_up(&b->io_q);
-		break;
-
-	case BS_READ_LOCKED:
-		if (!--b->read_lock_count) {
-			__transition(b, BS_CLEAN);
-			wake_up(&b->io_q);
-		}
-		break;
-
-	case BS_READ_LOCKED_DIRTY:
-		if (!--b->read_lock_count) {
-			__transition(b, BS_DIRTY);
-			wake_up(&b->io_q);
-		}
-		break;
-
-	default:
-		printk(KERN_ALERT "block not locked");
-		ret = -EINVAL;
-		break;
-	}
-	spin_unlock_irqrestore(&b->bm->lock, flags);
-
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_unlock);
 
-static int __wait_flush(struct dm_block_manager *bm)
+int dm_bm_unlock_move(struct dm_block *b, dm_block_t n)
 {
-	int ret = 0;
-	unsigned long flags;
+	struct buffer_aux *aux;
 
-	spin_lock_irqsave(&bm->lock, flags);
-	__wait_all_writes(bm, &flags);
+	aux = dm_bufio_get_aux_data(to_buffer(b));
 
-	if (!list_empty(&bm->error_list)) {
-		ret = -EIO;
-		__clear_errors(bm);
-	}
-	spin_unlock_irqrestore(&bm->lock, flags);
+	if (aux->write_locked) {
+		dm_bufio_mark_buffer_dirty(to_buffer(b));
+		bl_up_write(&aux->lock);
+	} else
+		bl_up_read(&aux->lock);
 
-	return ret;
+	dm_bufio_release_move(to_buffer(b), n);
+	return 0;
 }
 
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock)
 {
 	int r;
-	unsigned long flags;
 
-	write_all_dirty(bm);
-	r = __wait_flush(bm);
-	if (r)
+	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
+	if (unlikely(r))
+		return r;
+	r = dm_bufio_issue_flush(to_bufio(bm));
+	if (unlikely(r))
 		return r;
 
-	spin_lock_irqsave(&bm->lock, flags);
-	superblock->io_flags = REQ_FUA | REQ_FLUSH;
-	spin_unlock_irqrestore(&bm->lock, flags);
-
 	dm_bm_unlock(superblock);
-	write_all_dirty(bm);
 
-	return __wait_flush(bm);
+	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
+	if (unlikely(r))
+		return r;
+	r = dm_bufio_issue_flush(to_bufio(bm));
+	if (unlikely(r))
+		return r;
+
+	return 0;
 }
-EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
 
-#ifdef DEBUG
-unsigned dm_bm_locks_held(struct dm_block_manager *bm)
+u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor)
 {
-	unsigned r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&bm->lock, flags);
-	r = bm->locks_held;
-	spin_unlock_irqrestore(&bm->lock, flags);
-
-	return r;
+	return crc32c(~(u32) 0, data, len) ^ init_xor;
 }
-EXPORT_SYMBOL_GPL(dm_bm_locks_held);
-#endif
+EXPORT_SYMBOL_GPL(dm_bm_checksum);
+
+/*----------------------------------------------------------------*/
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
+MODULE_DESCRIPTION("Immutable metadata library for dm");
 
 /*----------------------------------------------------------------*/

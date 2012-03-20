@@ -58,12 +58,12 @@
 #include <plat/cpu.h>
 #include <plat/gpio-cfg.h>
 
-#ifdef CONFIG_MTD_PARTITIONS
-
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/physmap.h>
+
+#include "common.h"
 
 static struct resource amlm5900_nor_resource = {
 		.start = 0x00000000,
@@ -113,7 +113,6 @@ static struct platform_device amlm5900_device_nor = {
 	.num_resources	= 1,
 	.resource	= &amlm5900_nor_resource,
 };
-#endif
 
 static struct map_desc amlm5900_iodesc[] __initdata = {
 };
@@ -158,9 +157,7 @@ static struct platform_device *amlm5900_devices[] __initdata = {
  	&s3c_device_rtc,
 	&s3c_device_usbgadget,
         &s3c_device_sdi,
-#ifdef CONFIG_MTD_PARTITIONS
 	&amlm5900_device_nor,
-#endif
 };
 
 static void __init amlm5900_map_io(void)
@@ -241,9 +238,10 @@ static void __init amlm5900_init(void)
 }
 
 MACHINE_START(AML_M5900, "AML_M5900")
-	.boot_params	= S3C2410_SDRAM_PA + 0x100,
+	.atag_offset	= 0x100,
 	.map_io		= amlm5900_map_io,
 	.init_irq	= s3c24xx_init_irq,
 	.init_machine	= amlm5900_init,
 	.timer		= &s3c24xx_timer,
+	.restart	= s3c2410_restart,
 MACHINE_END

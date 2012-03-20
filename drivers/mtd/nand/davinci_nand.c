@@ -57,7 +57,6 @@ struct davinci_nand_info {
 
 	struct device		*dev;
 	struct clk		*clk;
-	bool			partitioned;
 
 	bool			is_readmode;
 
@@ -579,7 +578,9 @@ static int __init nand_davinci_probe(struct platform_device *pdev)
 	info->chip.chip_delay	= 0;
 	info->chip.select_chip	= nand_davinci_select_chip;
 
-	/* options such as NAND_USE_FLASH_BBT or 16-bit widths */
+	/* options such as NAND_BBT_USE_FLASH */
+	info->chip.bbt_options	= pdata->bbt_options;
+	/* options such as 16-bit widths */
 	info->chip.options	= pdata->options;
 	info->chip.bbt_td	= pdata->bbt_td;
 	info->chip.bbt_md	= pdata->bbt_md;
@@ -674,7 +675,9 @@ static int __init nand_davinci_probe(struct platform_device *pdev)
 
 	davinci_nand_writel(info, A1CR_OFFSET + info->core_chipsel * 4, val);
 
-	ret = davinci_aemif_setup_timing(info->timing, info->base,
+	ret = 0;
+	if (info->timing)
+		ret = davinci_aemif_setup_timing(info->timing, info->base,
 							info->core_chipsel);
 	if (ret < 0) {
 		dev_dbg(&pdev->dev, "NAND timing values setup fail\n");
@@ -749,41 +752,8 @@ syndrome_done:
 	if (ret < 0)
 		goto err_scan;
 
-	if (mtd_has_partitions()) {
-		struct mtd_partition	*mtd_parts = NULL;
-		int			mtd_parts_nb = 0;
-
-		if (mtd_has_cmdlinepart()) {
-			static const char *probes[] __initconst =
-				{ "cmdlinepart", NULL };
-
-			mtd_parts_nb = parse_mtd_partitions(&info->mtd, probes,
-							    &mtd_parts, 0);
-		}
-
-		if (mtd_parts_nb <= 0) {
-			mtd_parts = pdata->parts;
-			mtd_parts_nb = pdata->nr_parts;
-		}
-
-		/* Register any partitions */
-		if (mtd_parts_nb > 0) {
-			ret = add_mtd_partitions(&info->mtd,
-					mtd_parts, mtd_parts_nb);
-			if (ret == 0)
-				info->partitioned = true;
-		}
-
-	} else if (pdata->nr_parts) {
-		dev_warn(&pdev->dev, "ignoring %d default partitions on %s\n",
-				pdata->nr_parts, info->mtd.name);
-	}
-
-	/* If there's no partition info, just package the whole chip
-	 * as a single MTD device.
-	 */
-	if (!info->partitioned)
-		ret = add_mtd_device(&info->mtd) ? -ENODEV : 0;
+	ret = mtd_device_parse_register(&info->mtd, NULL, 0,
+			pdata->parts, pdata->nr_parts);
 
 	if (ret < 0)
 		goto err_scan;
@@ -822,12 +792,6 @@ err_nomem:
 static int __exit nand_davinci_remove(struct platform_device *pdev)
 {
 	struct davinci_nand_info *info = platform_get_drvdata(pdev);
-	int status;
-
-	if (mtd_has_partitions() && info->partitioned)
-		status = del_mtd_partitions(&info->mtd);
-	else
-		status = del_mtd_device(&info->mtd);
 
 	spin_lock_irq(&davinci_nand_lock);
 	if (info->chip.ecc.mode == NAND_ECC_HW_SYNDROME)

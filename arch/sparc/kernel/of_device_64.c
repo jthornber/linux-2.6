@@ -2,13 +2,14 @@
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/init.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/irq.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <asm/spitfire.h>
 
 #include "of_device_common.h"
 
@@ -622,8 +623,9 @@ static unsigned int __init build_one_device_irq(struct platform_device *op,
 out:
 	nid = of_node_to_nid(dp);
 	if (nid != -1) {
-		cpumask_t numa_mask = *cpumask_of_node(nid);
+		cpumask_t numa_mask;
 
+		cpumask_copy(&numa_mask, cpumask_of_node(nid));
 		irq_set_affinity(irq, &numa_mask);
 	}
 

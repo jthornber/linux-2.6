@@ -70,7 +70,7 @@ static int ehci_pci_setup(struct usb_hcd *hcd)
 
 	ehci->caps = hcd->regs;
 	ehci->regs = hcd->regs +
-		HC_LENGTH(ehci_readl(ehci, &ehci->caps->hc_capbase));
+		HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase));
 
 	dbg_hcs_params(ehci, "reset");
 	dbg_hcc_params(ehci, "reset");
@@ -224,6 +224,11 @@ static int ehci_pci_setup(struct usb_hcd *hcd)
 			pci_dev_put(p_smbus);
 		}
 		break;
+	case PCI_VENDOR_ID_NETMOS:
+		/* MosChip frame-index-register bug */
+		ehci_info(ehci, "applying MosChip frame-index workaround\n");
+		ehci->frame_index_bug = 1;
+		break;
 	}
 
 	/* optional debug port, normally in the first BAR */
@@ -271,6 +276,9 @@ static int ehci_pci_setup(struct usb_hcd *hcd)
 
 	/* Serial Bus Release Number is at PCI 0x60 offset */
 	pci_read_config_byte(pdev, 0x60, &ehci->sbrn);
+	if (pdev->vendor == PCI_VENDOR_ID_STMICRO
+	    && pdev->device == PCI_DEVICE_ID_STMICRO_USB_HOST)
+		ehci->sbrn = 0x20; /* ConneXT has no sbrn register */
 
 	/* Keep this around for a while just in case some EHCI
 	 * implementation uses legacy PCI PM support.  This test
@@ -348,10 +356,49 @@ static int ehci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
 	return rc;
 }
 
+static bool usb_is_intel_switchable_ehci(struct pci_dev *pdev)
+{
+	return pdev->class == PCI_CLASS_SERIAL_USB_EHCI &&
+		pdev->vendor == PCI_VENDOR_ID_INTEL &&
+		pdev->device == 0x1E26;
+}
+
+static void ehci_enable_xhci_companion(void)
+{
+	struct pci_dev		*companion = NULL;
+
+	/* The xHCI and EHCI controllers are not on the same PCI slot */
+	for_each_pci_dev(companion) {
+		if (!usb_is_intel_switchable_xhci(companion))
+			continue;
+		usb_enable_xhci_ports(companion);
+		return;
+	}
+}
+
 static int ehci_pci_resume(struct usb_hcd *hcd, bool hibernated)
 {
 	struct ehci_hcd		*ehci = hcd_to_ehci(hcd);
 	struct pci_dev		*pdev = to_pci_dev(hcd->self.controller);
+
+	/* The BIOS on systems with the Intel Panther Point chipset may or may
+	 * not support xHCI natively.  That means that during system resume, it
+	 * may switch the ports back to EHCI so that users can use their
+	 * keyboard to select a kernel from GRUB after resume from hibernate.
+	 *
+	 * The BIOS is supposed to remember whether the OS had xHCI ports
+	 * enabled before resume, and switch the ports back to xHCI when the
+	 * BIOS/OS semaphore is written, but we all know we can't trust BIOS
+	 * writers.
+	 *
+	 * Unconditionally switch the ports back to xHCI after a system resume.
+	 * We can't tell whether the EHCI or xHCI controller will be resumed
+	 * first, so we have to do the port switchover in both drivers.  Writing
+	 * a '1' to the port switchover registers should have no effect if the
+	 * port was already switched over.
+	 */
+	if (usb_is_intel_switchable_ehci(pdev))
+		ehci_enable_xhci_companion();
 
 	// maybe restore FLADJ
 
@@ -400,7 +447,7 @@ static int ehci_pci_resume(struct usb_hcd *hcd, bool hibernated)
 	/* here we "know" root ports should always stay powered */
 	ehci_port_power(ehci, 1);
 
-	hcd->state = HC_STATE_SUSPENDED;
+	ehci->rh_state = EHCI_RH_SUSPENDED;
 	return 0;
 }
 #endif
@@ -482,6 +529,9 @@ static const struct pci_device_id pci_ids [] = { {
 	/* handle any USB 2.0 EHCI controller */
 	PCI_DEVICE_CLASS(PCI_CLASS_SERIAL_USB_EHCI, ~0),
 	.driver_data =	(unsigned long) &ehci_pci_hc_driver,
+	}, {
+	PCI_VDEVICE(STMICRO, PCI_DEVICE_ID_STMICRO_USB_HOST),
+	.driver_data = (unsigned long) &ehci_pci_hc_driver,
 	},
 	{ /* end: all zeroes */ }
 };

@@ -83,6 +83,107 @@ static struct notifier_block libfcoe_notifier = {
 	.notifier_call = libfcoe_device_notification,
 };
 
+void __fcoe_get_lesb(struct fc_lport *lport,
+		     struct fc_els_lesb *fc_lesb,
+		     struct net_device *netdev)
+{
+	unsigned int cpu;
+	u32 lfc, vlfc, mdac;
+	struct fcoe_dev_stats *devst;
+	struct fcoe_fc_els_lesb *lesb;
+	struct rtnl_link_stats64 temp;
+
+	lfc = 0;
+	vlfc = 0;
+	mdac = 0;
+	lesb = (struct fcoe_fc_els_lesb *)fc_lesb;
+	memset(lesb, 0, sizeof(*lesb));
+	for_each_possible_cpu(cpu) {
+		devst = per_cpu_ptr(lport->dev_stats, cpu);
+		lfc += devst->LinkFailureCount;
+		vlfc += devst->VLinkFailureCount;
+		mdac += devst->MissDiscAdvCount;
+	}
+	lesb->lesb_link_fail = htonl(lfc);
+	lesb->lesb_vlink_fail = htonl(vlfc);
+	lesb->lesb_miss_fka = htonl(mdac);
+	lesb->lesb_fcs_error =
+			htonl(dev_get_stats(netdev, &temp)->rx_crc_errors);
+}
+EXPORT_SYMBOL_GPL(__fcoe_get_lesb);
+
+void fcoe_wwn_to_str(u64 wwn, char *buf, int len)
+{
+	u8 wwpn[8];
+
+	u64_to_wwn(wwn, wwpn);
+	snprintf(buf, len, "%02x%02x%02x%02x%02x%02x%02x%02x",
+		 wwpn[0], wwpn[1], wwpn[2], wwpn[3],
+		 wwpn[4], wwpn[5], wwpn[6], wwpn[7]);
+}
+EXPORT_SYMBOL_GPL(fcoe_wwn_to_str);
+
+/**
+ * fcoe_validate_vport_create() - Validate a vport before creating it
+ * @vport: NPIV port to be created
+ *
+ * This routine is meant to add validation for a vport before creating it
+ * via fcoe_vport_create().
+ * Current validations are:
+ *      - WWPN supplied is unique for given lport
+ */
+int fcoe_validate_vport_create(struct fc_vport *vport)
+{
+	struct Scsi_Host *shost = vport_to_shost(vport);
+	struct fc_lport *n_port = shost_priv(shost);
+	struct fc_lport *vn_port;
+	int rc = 0;
+	char buf[32];
+
+	mutex_lock(&n_port->lp_mutex);
+
+	fcoe_wwn_to_str(vport->port_name, buf, sizeof(buf));
+	/* Check if the wwpn is not same as that of the lport */
+	if (!memcmp(&n_port->wwpn, &vport->port_name, sizeof(u64))) {
+		LIBFCOE_TRANSPORT_DBG("vport WWPN 0x%s is same as that of the "
+				      "base port WWPN\n", buf);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	/* Check if there is any existing vport with same wwpn */
+	list_for_each_entry(vn_port, &n_port->vports, list) {
+		if (!memcmp(&vn_port->wwpn, &vport->port_name, sizeof(u64))) {
+			LIBFCOE_TRANSPORT_DBG("vport with given WWPN 0x%s "
+					      "already exists\n", buf);
+			rc = -EINVAL;
+			break;
+		}
+	}
+out:
+	mutex_unlock(&n_port->lp_mutex);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(fcoe_validate_vport_create);
+
+/**
+ * fcoe_get_wwn() - Get the world wide name from LLD if it supports it
+ * @netdev: the associated net device
+ * @wwn: the output WWN
+ * @type: the type of WWN (WWPN or WWNN)
+ *
+ * Returns: 0 for success
+ */
+int fcoe_get_wwn(struct net_device *netdev, u64 *wwn, int type)
+{
+	const struct net_device_ops *ops = netdev->netdev_ops;
+
+	if (ops->ndo_fcoe_get_wwn)
+		return ops->ndo_fcoe_get_wwn(netdev, wwn, type);
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(fcoe_get_wwn);
+
 /**
  * fcoe_fc_crc() - Calculates the CRC for a given frame
  * @fp: The frame to be checksumed
@@ -105,11 +206,12 @@ u32 fcoe_fc_crc(struct fc_frame *fp)
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		frag = &skb_shinfo(skb)->frags[i];
 		off = frag->page_offset;
-		len = frag->size;
+		len = skb_frag_size(frag);
 		while (len > 0) {
 			clen = min(len, PAGE_SIZE - (off & ~PAGE_MASK));
-			data = kmap_atomic(frag->page + (off >> PAGE_SHIFT),
-					   KM_SKB_DATA_SOFTIRQ);
+			data = kmap_atomic(
+				skb_frag_page(frag) + (off >> PAGE_SHIFT),
+				KM_SKB_DATA_SOFTIRQ);
 			crc = crc32(crc, data + (off & ~PAGE_MASK), clen);
 			kunmap_atomic(data, KM_SKB_DATA_SOFTIRQ);
 			off += clen;
@@ -544,16 +646,6 @@ static int fcoe_transport_create(const char *buffer, struct kernel_param *kp)
 	struct fcoe_transport *ft = NULL;
 	enum fip_state fip_mode = (enum fip_state)(long)kp->arg;
 
-#ifdef CONFIG_LIBFCOE_MODULE
-	/*
-	 * Make sure the module has been initialized, and is not about to be
-	 * removed.  Module parameter sysfs files are writable before the
-	 * module_init function is called and after module_exit.
-	 */
-	if (THIS_MODULE->state != MODULE_STATE_LIVE)
-		goto out_nodev;
-#endif
-
 	mutex_lock(&ft_mutex);
 
 	netdev = fcoe_if_to_netdev(buffer);
@@ -618,16 +710,6 @@ static int fcoe_transport_destroy(const char *buffer, struct kernel_param *kp)
 	struct net_device *netdev = NULL;
 	struct fcoe_transport *ft = NULL;
 
-#ifdef CONFIG_LIBFCOE_MODULE
-	/*
-	 * Make sure the module has been initialized, and is not about to be
-	 * removed.  Module parameter sysfs files are writable before the
-	 * module_init function is called and after module_exit.
-	 */
-	if (THIS_MODULE->state != MODULE_STATE_LIVE)
-		goto out_nodev;
-#endif
-
 	mutex_lock(&ft_mutex);
 
 	netdev = fcoe_if_to_netdev(buffer);
@@ -672,16 +754,6 @@ static int fcoe_transport_disable(const char *buffer, struct kernel_param *kp)
 	struct net_device *netdev = NULL;
 	struct fcoe_transport *ft = NULL;
 
-#ifdef CONFIG_LIBFCOE_MODULE
-	/*
-	 * Make sure the module has been initialized, and is not about to be
-	 * removed.  Module parameter sysfs files are writable before the
-	 * module_init function is called and after module_exit.
-	 */
-	if (THIS_MODULE->state != MODULE_STATE_LIVE)
-		goto out_nodev;
-#endif
-
 	mutex_lock(&ft_mutex);
 
 	netdev = fcoe_if_to_netdev(buffer);
@@ -719,16 +791,6 @@ static int fcoe_transport_enable(const char *buffer, struct kernel_param *kp)
 	int rc = -ENODEV;
 	struct net_device *netdev = NULL;
 	struct fcoe_transport *ft = NULL;
-
-#ifdef CONFIG_LIBFCOE_MODULE
-	/*
-	 * Make sure the module has been initialized, and is not about to be
-	 * removed.  Module parameter sysfs files are writable before the
-	 * module_init function is called and after module_exit.
-	 */
-	if (THIS_MODULE->state != MODULE_STATE_LIVE)
-		goto out_nodev;
-#endif
 
 	mutex_lock(&ft_mutex);
 

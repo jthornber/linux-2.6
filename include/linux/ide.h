@@ -18,13 +18,13 @@
 #include <linux/pci.h>
 #include <linux/completion.h>
 #include <linux/pm.h>
+#include <linux/mutex.h>
 #ifdef CONFIG_BLK_DEV_IDEACPI
 #include <acpi/acpi.h>
 #endif
 #include <asm/byteorder.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/mutex.h>
 
 /* for request_sense */
 #include <linux/cdrom.h>
@@ -920,7 +920,7 @@ __IDE_PROC_DEVSET(_name, _min, _max, NULL, NULL)
 
 typedef struct {
 	const char	*name;
-	mode_t		mode;
+	umode_t		mode;
 	const struct file_operations *proc_fops;
 } ide_proc_entry_t;
 

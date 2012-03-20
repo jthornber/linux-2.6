@@ -22,6 +22,7 @@
  *
  */
 
+#include <linux/dma-mapping.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -30,6 +31,7 @@
 #include <linux/mtd/nand.h>
 #include <linux/mtd/partitions.h>
 
+#include <linux/dmaengine.h>
 #include <linux/gpio.h>
 #include <linux/io.h>
 
@@ -111,7 +113,7 @@ static int cpu_has_dma(void)
  */
 static void atmel_nand_enable(struct atmel_nand_host *host)
 {
-	if (host->board->enable_pin)
+	if (gpio_is_valid(host->board->enable_pin))
 		gpio_set_value(host->board->enable_pin, 0);
 }
 
@@ -120,7 +122,7 @@ static void atmel_nand_enable(struct atmel_nand_host *host)
  */
 static void atmel_nand_disable(struct atmel_nand_host *host)
 {
-	if (host->board->enable_pin)
+	if (gpio_is_valid(host->board->enable_pin))
 		gpio_set_value(host->board->enable_pin, 1);
 }
 
@@ -479,10 +481,6 @@ static void atmel_nand_hwctl(struct mtd_info *mtd, int mode)
 	}
 }
 
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-static const char *part_probes[] = { "cmdlinepart", NULL };
-#endif
-
 /*
  * Probe for the NAND device.
  */
@@ -494,11 +492,6 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 	struct resource *regs;
 	struct resource *mem;
 	int res;
-
-#ifdef CONFIG_MTD_PARTITIONS
-	struct mtd_partition *partitions = NULL;
-	int num_partitions = 0;
-#endif
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!mem) {
@@ -515,7 +508,7 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 
 	host->io_phys = (dma_addr_t)mem->start;
 
-	host->io_base = ioremap(mem->start, mem->end - mem->start + 1);
+	host->io_base = ioremap(mem->start, resource_size(mem));
 	if (host->io_base == NULL) {
 		printk(KERN_ERR "atmel_nand: ioremap failed\n");
 		res = -EIO;
@@ -536,7 +529,7 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 	nand_chip->IO_ADDR_W = host->io_base;
 	nand_chip->cmd_ctrl = atmel_nand_cmd_ctrl;
 
-	if (host->board->rdy_pin)
+	if (gpio_is_valid(host->board->rdy_pin))
 		nand_chip->dev_ready = atmel_nand_device_ready;
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 1);
@@ -549,7 +542,7 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 	if (no_ecc)
 		nand_chip->ecc.mode = NAND_ECC_NONE;
 	if (hard_ecc && regs) {
-		host->ecc = ioremap(regs->start, regs->end - regs->start + 1);
+		host->ecc = ioremap(regs->start, resource_size(regs));
 		if (host->ecc == NULL) {
 			printk(KERN_ERR "atmel_nand: ioremap failed\n");
 			res = -EIO;
@@ -574,7 +567,7 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, host);
 	atmel_nand_enable(host);
 
-	if (host->board->det_pin) {
+	if (gpio_is_valid(host->board->det_pin)) {
 		if (gpio_get_value(host->board->det_pin)) {
 			printk(KERN_INFO "No SmartMedia card inserted.\n");
 			res = -ENXIO;
@@ -584,7 +577,7 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 
 	if (on_flash_bbt) {
 		printk(KERN_INFO "atmel_nand: Use On Flash BBT\n");
-		nand_chip->options |= NAND_USE_FLASH_BBT;
+		nand_chip->bbt_options |= NAND_BBT_USE_FLASH;
 	}
 
 	if (!cpu_has_dma())
@@ -595,7 +588,7 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 
 		dma_cap_zero(mask);
 		dma_cap_set(DMA_MEMCPY, mask);
-		host->dma_chan = dma_request_channel(mask, 0, NULL);
+		host->dma_chan = dma_request_channel(mask, NULL, NULL);
 		if (!host->dma_chan) {
 			dev_err(host->dev, "Failed to request DMA channel\n");
 			use_dma = 0;
@@ -656,34 +649,12 @@ static int __init atmel_nand_probe(struct platform_device *pdev)
 		goto err_scan_tail;
 	}
 
-#ifdef CONFIG_MTD_PARTITIONS
-#ifdef CONFIG_MTD_CMDLINE_PARTS
 	mtd->name = "atmel_nand";
-	num_partitions = parse_mtd_partitions(mtd, part_probes,
-					      &partitions, 0);
-#endif
-	if (num_partitions <= 0 && host->board->partition_info)
-		partitions = host->board->partition_info(mtd->size,
-							 &num_partitions);
-
-	if ((!partitions) || (num_partitions == 0)) {
-		printk(KERN_ERR "atmel_nand: No partitions defined, or unsupported device.\n");
-		res = -ENXIO;
-		goto err_no_partitions;
-	}
-
-	res = add_mtd_partitions(mtd, partitions, num_partitions);
-#else
-	res = add_mtd_device(mtd);
-#endif
-
+	res = mtd_device_parse_register(mtd, NULL, 0,
+			host->board->parts, host->board->num_parts);
 	if (!res)
 		return res;
 
-#ifdef CONFIG_MTD_PARTITIONS
-err_no_partitions:
-#endif
-	nand_release(mtd);
 err_scan_tail:
 err_scan_ident:
 err_no_card:

@@ -27,6 +27,12 @@ void __init arm_mm_memblock_reserve(void)
 	memblock_reserve(CONFIG_VECTORS_BASE, PAGE_SIZE);
 }
 
+void __init sanity_check_meminfo(void)
+{
+	phys_addr_t end = bank_phys_end(&meminfo.bank[meminfo.nr_banks - 1]);
+	high_memory = __va(end - 1) + 1;
+}
+
 /*
  * paging_init() sets up the page tables, initialises the zone memory
  * maps, and sets up the zero page, bad page and bad page tables.
@@ -39,7 +45,7 @@ void __init paging_init(struct machine_desc *mdesc)
 /*
  * We don't need to do anything here for nommu machines.
  */
-void setup_mm_for_reboot(char mode)
+void setup_mm_for_reboot(void)
 {
 }
 

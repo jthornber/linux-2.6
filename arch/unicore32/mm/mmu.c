@@ -25,12 +25,11 @@
 #include <asm/setup.h>
 #include <asm/sizes.h>
 #include <asm/tlb.h>
+#include <asm/memblock.h>
 
 #include <mach/map.h>
 
 #include "mm.h"
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 /*
  * empty_zero_page is a special page that is used for

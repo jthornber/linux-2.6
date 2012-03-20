@@ -161,10 +161,18 @@ static int aic26_hw_params(struct snd_pcm_substream *substream,
 		dev_dbg(&aic26->spi->dev, "bad format\n"); return -EINVAL;
 	}
 
-	/* Configure PLL */
+	/**
+	 * Configure PLL
+	 * fsref = (mclk * PLLM) / 2048
+	 * where PLLM = J.DDDD (DDDD register ranges from 0 to 9999, decimal)
+	 */
 	pval = 1;
-	jval = (fsref == 44100) ? 7 : 8;
-	dval = (fsref == 44100) ? 5264 : 1920;
+	/* compute J portion of multiplier */
+	jval = fsref / (aic26->mclk / 2048);
+	/* compute fractional DDDD component of multiplier */
+	dval = fsref - (jval * (aic26->mclk / 2048));
+	dval = (10000 * dval) / (aic26->mclk / 2048);
+	dev_dbg(&aic26->spi->dev, "Setting PLLM to %d.%04d\n", jval, dval);
 	qval = 0;
 	reg = 0x8000 | qval << 11 | pval << 8 | jval << 2;
 	aic26_reg_write(codec, AIC26_REG_PLL_PROG1, reg);
@@ -267,7 +275,7 @@ static int aic26_set_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 #define AIC26_FORMATS	(SNDRV_PCM_FMTBIT_S8     | SNDRV_PCM_FMTBIT_S16_BE |\
 			 SNDRV_PCM_FMTBIT_S24_BE | SNDRV_PCM_FMTBIT_S32_BE)
 
-static struct snd_soc_dai_ops aic26_dai_ops = {
+static const struct snd_soc_dai_ops aic26_dai_ops = {
 	.hw_params	= aic26_hw_params,
 	.digital_mute	= aic26_mute,
 	.set_sysclk	= aic26_set_sysclk,
@@ -408,7 +416,7 @@ static int aic26_spi_probe(struct spi_device *spi)
 	dev_dbg(&spi->dev, "probing tlv320aic26 spi device\n");
 
 	/* Allocate driver data */
-	aic26 = kzalloc(sizeof *aic26, GFP_KERNEL);
+	aic26 = devm_kzalloc(&spi->dev, sizeof *aic26, GFP_KERNEL);
 	if (!aic26)
 		return -ENOMEM;
 
@@ -419,18 +427,12 @@ static int aic26_spi_probe(struct spi_device *spi)
 
 	ret = snd_soc_register_codec(&spi->dev,
 			&aic26_soc_codec_dev, &aic26_dai, 1);
-	if (ret < 0)
-		kfree(aic26);
 	return ret;
-
-	dev_dbg(&spi->dev, "SPI device initialized\n");
-	return 0;
 }
 
 static int aic26_spi_remove(struct spi_device *spi)
 {
 	snd_soc_unregister_codec(&spi->dev);
-	kfree(spi_get_drvdata(spi));
 	return 0;
 }
 

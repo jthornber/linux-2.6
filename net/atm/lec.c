@@ -643,7 +643,7 @@ static const struct net_device_ops lec_netdev_ops = {
 	.ndo_start_xmit		= lec_start_xmit,
 	.ndo_change_mtu		= lec_change_mtu,
 	.ndo_tx_timeout		= lec_tx_timeout,
-	.ndo_set_multicast_list	= lec_set_multicast_list,
+	.ndo_set_rx_mode	= lec_set_multicast_list,
 };
 
 static const unsigned char lec_ctrl_magic[] = {
@@ -1171,7 +1171,7 @@ static int __init lane_module_init(void)
 #endif
 
 	register_atm_ioctl(&lane_ioctl_ops);
-	pr_info("lec.c: " __DATE__ " " __TIME__ " initialized\n");
+	pr_info("lec.c: initialized\n");
 	return 0;
 }
 
@@ -1335,7 +1335,7 @@ static void lane2_associate_ind(struct net_device *dev, const u8 *mac_addr,
 #include <linux/types.h>
 #include <linux/timer.h>
 #include <linux/param.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <linux/inetdevice.h>
 #include <net/route.h>
 

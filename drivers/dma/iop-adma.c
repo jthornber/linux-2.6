@@ -619,7 +619,7 @@ iop_adma_prep_dma_memcpy(struct dma_chan *chan, dma_addr_t dma_dest,
 
 	if (unlikely(!len))
 		return NULL;
-	BUG_ON(unlikely(len > IOP_ADMA_MAX_BYTE_COUNT));
+	BUG_ON(len > IOP_ADMA_MAX_BYTE_COUNT);
 
 	dev_dbg(iop_chan->device->common.dev, "%s len: %u\n",
 		__func__, len);
@@ -652,7 +652,7 @@ iop_adma_prep_dma_memset(struct dma_chan *chan, dma_addr_t dma_dest,
 
 	if (unlikely(!len))
 		return NULL;
-	BUG_ON(unlikely(len > IOP_ADMA_MAX_BYTE_COUNT));
+	BUG_ON(len > IOP_ADMA_MAX_BYTE_COUNT);
 
 	dev_dbg(iop_chan->device->common.dev, "%s len: %u\n",
 		__func__, len);
@@ -686,7 +686,7 @@ iop_adma_prep_dma_xor(struct dma_chan *chan, dma_addr_t dma_dest,
 
 	if (unlikely(!len))
 		return NULL;
-	BUG_ON(unlikely(len > IOP_ADMA_XOR_MAX_BYTE_COUNT));
+	BUG_ON(len > IOP_ADMA_XOR_MAX_BYTE_COUNT);
 
 	dev_dbg(iop_chan->device->common.dev,
 		"%s src_cnt: %d len: %u flags: %lx\n",
@@ -1735,8 +1735,6 @@ static void iop_chan_start_null_xor(struct iop_adma_chan *iop_chan)
 	spin_unlock_bh(&iop_chan->lock);
 }
 
-MODULE_ALIAS("platform:iop-adma");
-
 static struct platform_driver iop_adma_driver = {
 	.probe		= iop_adma_probe,
 	.remove		= __devexit_p(iop_adma_remove),
@@ -1746,19 +1744,9 @@ static struct platform_driver iop_adma_driver = {
 	},
 };
 
-static int __init iop_adma_init (void)
-{
-	return platform_driver_register(&iop_adma_driver);
-}
-
-static void __exit iop_adma_exit (void)
-{
-	platform_driver_unregister(&iop_adma_driver);
-	return;
-}
-module_exit(iop_adma_exit);
-module_init(iop_adma_init);
+module_platform_driver(iop_adma_driver);
 
 MODULE_AUTHOR("Intel Corporation");
 MODULE_DESCRIPTION("IOP ADMA Engine Driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:iop-adma");

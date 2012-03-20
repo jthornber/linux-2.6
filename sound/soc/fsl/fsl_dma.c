@@ -294,9 +294,10 @@ static irqreturn_t fsl_dma_isr(int irq, void *dev_id)
  * Regardless of where the memory is actually allocated, since the device can
  * technically DMA to any 36-bit address, we do need to set the DMA mask to 36.
  */
-static int fsl_dma_new(struct snd_card *card, struct snd_soc_dai *dai,
-	struct snd_pcm *pcm)
+static int fsl_dma_new(struct snd_soc_pcm_runtime *rtd)
 {
+	struct snd_card *card = rtd->card->snd_card;
+	struct snd_pcm *pcm = rtd->pcm;
 	static u64 fsl_dma_dmamask = DMA_BIT_MASK(36);
 	int ret;
 
@@ -310,7 +311,7 @@ static int fsl_dma_new(struct snd_card *card, struct snd_soc_dai *dai,
 	 * should allocate a DMA buffer only for the streams that are valid.
 	 */
 
-	if (dai->driver->playback.channels_min) {
+	if (pcm->streams[0].substream) {
 		ret = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, card->dev,
 			fsl_dma_hardware.buffer_bytes_max,
 			&pcm->streams[0].substream->dma_buffer);
@@ -320,13 +321,13 @@ static int fsl_dma_new(struct snd_card *card, struct snd_soc_dai *dai,
 		}
 	}
 
-	if (dai->driver->capture.channels_min) {
+	if (pcm->streams[1].substream) {
 		ret = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, card->dev,
 			fsl_dma_hardware.buffer_bytes_max,
 			&pcm->streams[1].substream->dma_buffer);
 		if (ret) {
-			snd_dma_free_pages(&pcm->streams[0].substream->dma_buffer);
 			dev_err(card->dev, "can't alloc capture dma buffer\n");
+			snd_dma_free_pages(&pcm->streams[0].substream->dma_buffer);
 			return ret;
 		}
 	}
@@ -449,7 +450,8 @@ static int fsl_dma_open(struct snd_pcm_substream *substream)
 	dma_private->ld_buf_phys = ld_buf_phys;
 	dma_private->dma_buf_phys = substream->dma_buffer.addr;
 
-	ret = request_irq(dma_private->irq, fsl_dma_isr, 0, "DMA", dma_private);
+	ret = request_irq(dma_private->irq, fsl_dma_isr, 0, "fsldma-audio",
+			  dma_private);
 	if (ret) {
 		dev_err(dev, "can't register ISR for IRQ %u (ret=%i)\n",
 			dma_private->irq, ret);
@@ -876,10 +878,12 @@ static struct device_node *find_ssi_node(struct device_node *dma_channel_np)
 		 * assume that device_node pointers are a valid comparison.
 		 */
 		np = of_parse_phandle(ssi_np, "fsl,playback-dma", 0);
+		of_node_put(np);
 		if (np == dma_channel_np)
 			return ssi_np;
 
 		np = of_parse_phandle(ssi_np, "fsl,capture-dma", 0);
+		of_node_put(np);
 		if (np == dma_channel_np)
 			return ssi_np;
 	}
@@ -938,7 +942,7 @@ static int __devinit fsl_soc_dma_probe(struct platform_device *pdev)
 
 	iprop = of_get_property(ssi_np, "fsl,fifo-depth", NULL);
 	if (iprop)
-		dma->ssi_fifo_depth = *iprop;
+		dma->ssi_fifo_depth = be32_to_cpup(iprop);
 	else
                 /* Older 8610 DTs didn't have the fifo-depth property */
 		dma->ssi_fifo_depth = 8;
@@ -988,20 +992,7 @@ static struct platform_driver fsl_soc_dma_driver = {
 	.remove = __devexit_p(fsl_soc_dma_remove),
 };
 
-static int __init fsl_soc_dma_init(void)
-{
-	pr_info("Freescale Elo DMA ASoC PCM Driver\n");
-
-	return platform_driver_register(&fsl_soc_dma_driver);
-}
-
-static void __exit fsl_soc_dma_exit(void)
-{
-	platform_driver_unregister(&fsl_soc_dma_driver);
-}
-
-module_init(fsl_soc_dma_init);
-module_exit(fsl_soc_dma_exit);
+module_platform_driver(fsl_soc_dma_driver);
 
 MODULE_AUTHOR("Timur Tabi <timur@freescale.com>");
 MODULE_DESCRIPTION("Freescale Elo DMA ASoC PCM Driver");

@@ -67,12 +67,12 @@ _FreeXid(unsigned int xid)
 	spin_unlock(&GlobalMid_Lock);
 }
 
-struct cifsSesInfo *
+struct cifs_ses *
 sesInfoAlloc(void)
 {
-	struct cifsSesInfo *ret_buf;
+	struct cifs_ses *ret_buf;
 
-	ret_buf = kzalloc(sizeof(struct cifsSesInfo), GFP_KERNEL);
+	ret_buf = kzalloc(sizeof(struct cifs_ses), GFP_KERNEL);
 	if (ret_buf) {
 		atomic_inc(&sesInfoAllocCount);
 		ret_buf->status = CifsNew;
@@ -85,7 +85,7 @@ sesInfoAlloc(void)
 }
 
 void
-sesInfoFree(struct cifsSesInfo *buf_to_free)
+sesInfoFree(struct cifs_ses *buf_to_free)
 {
 	if (buf_to_free == NULL) {
 		cFYI(1, "Null buffer passed to sesInfoFree");
@@ -105,11 +105,11 @@ sesInfoFree(struct cifsSesInfo *buf_to_free)
 	kfree(buf_to_free);
 }
 
-struct cifsTconInfo *
+struct cifs_tcon *
 tconInfoAlloc(void)
 {
-	struct cifsTconInfo *ret_buf;
-	ret_buf = kzalloc(sizeof(struct cifsTconInfo), GFP_KERNEL);
+	struct cifs_tcon *ret_buf;
+	ret_buf = kzalloc(sizeof(struct cifs_tcon), GFP_KERNEL);
 	if (ret_buf) {
 		atomic_inc(&tconInfoAllocCount);
 		ret_buf->tidStatus = CifsNew;
@@ -124,7 +124,7 @@ tconInfoAlloc(void)
 }
 
 void
-tconInfoFree(struct cifsTconInfo *buf_to_free)
+tconInfoFree(struct cifs_tcon *buf_to_free)
 {
 	if (buf_to_free == NULL) {
 		cFYI(1, "Null buffer passed to tconInfoFree");
@@ -295,11 +295,11 @@ __u16 GetNextMid(struct TCP_Server_Info *server)
    case it is responsbility of caller to set the mid */
 void
 header_assemble(struct smb_hdr *buffer, char smb_command /* command */ ,
-		const struct cifsTconInfo *treeCon, int word_count
+		const struct cifs_tcon *treeCon, int word_count
 		/* length of fixed section (word count) in two byte units  */)
 {
 	struct list_head *temp_item;
-	struct cifsSesInfo *ses;
+	struct cifs_ses *ses;
 	char *temp = (char *) buffer;
 
 	memset(temp, 0, 256); /* bigger than MAX_CIFS_HDR_SIZE */
@@ -359,7 +359,7 @@ header_assemble(struct smb_hdr *buffer, char smb_command /* command */ ,
 						 "did not match tcon uid");
 					spin_lock(&cifs_tcp_ses_lock);
 					list_for_each(temp_item, &treeCon->ses->server->smb_ses_list) {
-						ses = list_entry(temp_item, struct cifsSesInfo, smb_ses_list);
+						ses = list_entry(temp_item, struct cifs_ses, smb_ses_list);
 						if (ses->linux_uid == current_fsuid()) {
 							if (ses->server == treeCon->ses->server) {
 								cFYI(1, "found matching uid substitute right smb_uid");
@@ -380,7 +380,7 @@ header_assemble(struct smb_hdr *buffer, char smb_command /* command */ ,
 		if (treeCon->nocase)
 			buffer->Flags  |= SMBFLG_CASELESS;
 		if ((treeCon->ses) && (treeCon->ses->server))
-			if (treeCon->ses->server->secMode &
+			if (treeCon->ses->server->sec_mode &
 			  (SECMODE_SIGN_REQUIRED | SECMODE_SIGN_ENABLED))
 				buffer->Flags2 |= SMBFLG2_SECURITY_SIGNATURE;
 	}
@@ -420,19 +420,22 @@ check_smb_hdr(struct smb_hdr *smb, __u16 mid)
 }
 
 int
-checkSMB(struct smb_hdr *smb, __u16 mid, unsigned int length)
+checkSMB(struct smb_hdr *smb, __u16 mid, unsigned int total_read)
 {
-	__u32 len = be32_to_cpu(smb->smb_buf_length);
+	__u32 rfclen = be32_to_cpu(smb->smb_buf_length);
 	__u32 clc_len;  /* calculated length */
-	cFYI(0, "checkSMB Length: 0x%x, smb_buf_length: 0x%x", length, len);
+	cFYI(0, "checkSMB Length: 0x%x, smb_buf_length: 0x%x",
+		total_read, rfclen);
 
-	if (length < 2 + sizeof(struct smb_hdr)) {
-		if ((length >= sizeof(struct smb_hdr) - 1)
+	/* is this frame too small to even get to a BCC? */
+	if (total_read < 2 + sizeof(struct smb_hdr)) {
+		if ((total_read >= sizeof(struct smb_hdr) - 1)
 			    && (smb->Status.CifsError != 0)) {
+			/* it's an error return */
 			smb->WordCount = 0;
 			/* some error cases do not return wct and bcc */
 			return 0;
-		} else if ((length == sizeof(struct smb_hdr) + 1) &&
+		} else if ((total_read == sizeof(struct smb_hdr) + 1) &&
 				(smb->WordCount == 0)) {
 			char *tmp = (char *)smb;
 			/* Need to work around a bug in two servers here */
@@ -452,39 +455,35 @@ checkSMB(struct smb_hdr *smb, __u16 mid, unsigned int length)
 		} else {
 			cERROR(1, "Length less than smb header size");
 		}
-		return 1;
-	}
-	if (len > CIFSMaxBufSize + MAX_CIFS_HDR_SIZE - 4) {
-		cERROR(1, "smb length greater than MaxBufSize, mid=%d",
-				   smb->Mid);
-		return 1;
+		return -EIO;
 	}
 
+	/* otherwise, there is enough to get to the BCC */
 	if (check_smb_hdr(smb, mid))
-		return 1;
+		return -EIO;
 	clc_len = smbCalcSize(smb);
 
-	if (4 + len != length) {
+	if (4 + rfclen != total_read) {
 		cERROR(1, "Length read does not match RFC1001 length %d",
-			   len);
-		return 1;
+				rfclen);
+		return -EIO;
 	}
 
-	if (4 + len != clc_len) {
+	if (4 + rfclen != clc_len) {
 		/* check if bcc wrapped around for large read responses */
-		if ((len > 64 * 1024) && (len > clc_len)) {
+		if ((rfclen > 64 * 1024) && (rfclen > clc_len)) {
 			/* check if lengths match mod 64K */
-			if (((4 + len) & 0xFFFF) == (clc_len & 0xFFFF))
+			if (((4 + rfclen) & 0xFFFF) == (clc_len & 0xFFFF))
 				return 0; /* bcc wrapped */
 		}
 		cFYI(1, "Calculated size %u vs length %u mismatch for mid=%u",
-				clc_len, 4 + len, smb->Mid);
+				clc_len, 4 + rfclen, smb->Mid);
 
-		if (4 + len < clc_len) {
+		if (4 + rfclen < clc_len) {
 			cERROR(1, "RFC1001 size %u smaller than SMB for mid=%u",
-					len, smb->Mid);
-			return 1;
-		} else if (len > clc_len + 512) {
+					rfclen, smb->Mid);
+			return -EIO;
+		} else if (rfclen > clc_len + 512) {
 			/*
 			 * Some servers (Windows XP in particular) send more
 			 * data than the lengths in the SMB packet would
@@ -495,8 +494,8 @@ checkSMB(struct smb_hdr *smb, __u16 mid, unsigned int length)
 			 * data to 512 bytes.
 			 */
 			cERROR(1, "RFC1001 size %u more than 512 bytes larger "
-				  "than SMB for mid=%u", len, smb->Mid);
-			return 1;
+				  "than SMB for mid=%u", rfclen, smb->Mid);
+			return -EIO;
 		}
 	}
 	return 0;
@@ -507,8 +506,8 @@ is_valid_oplock_break(struct smb_hdr *buf, struct TCP_Server_Info *srv)
 {
 	struct smb_com_lock_req *pSMB = (struct smb_com_lock_req *)buf;
 	struct list_head *tmp, *tmp1, *tmp2;
-	struct cifsSesInfo *ses;
-	struct cifsTconInfo *tcon;
+	struct cifs_ses *ses;
+	struct cifs_tcon *tcon;
 	struct cifsInodeInfo *pCifsInode;
 	struct cifsFileInfo *netfile;
 
@@ -566,9 +565,9 @@ is_valid_oplock_break(struct smb_hdr *buf, struct TCP_Server_Info *srv)
 	/* look up tcon based on tid & uid */
 	spin_lock(&cifs_tcp_ses_lock);
 	list_for_each(tmp, &srv->smb_ses_list) {
-		ses = list_entry(tmp, struct cifsSesInfo, smb_ses_list);
+		ses = list_entry(tmp, struct cifs_ses, smb_ses_list);
 		list_for_each(tmp1, &ses->tcon_list) {
-			tcon = list_entry(tmp1, struct cifsTconInfo, tcon_list);
+			tcon = list_entry(tmp1, struct cifs_tcon, tcon_list);
 			if (tcon->tid != buf->Tid)
 				continue;
 
@@ -585,15 +584,8 @@ is_valid_oplock_break(struct smb_hdr *buf, struct TCP_Server_Info *srv)
 
 				cifs_set_oplock_level(pCifsInode,
 					pSMB->OplockLevel ? OPLOCK_READ : 0);
-				/*
-				 * cifs_oplock_break_put() can't be called
-				 * from here.  Get reference after queueing
-				 * succeeded.  cifs_oplock_break() will
-				 * synchronize using cifs_file_list_lock.
-				 */
-				if (queue_work(system_nrt_wq,
-					       &netfile->oplock_break))
-					cifs_oplock_break_get(netfile);
+				queue_work(system_nrt_wq,
+					   &netfile->oplock_break);
 				netfile->oplock_break_cancelled = false;
 
 				spin_unlock(&cifs_file_list_lock);
@@ -682,4 +674,19 @@ void cifs_set_oplock_level(struct cifsInodeInfo *cinode, __u32 oplock)
 		cinode->clientCanCacheAll = false;
 		cinode->clientCanCacheRead = false;
 	}
+}
+
+bool
+backup_cred(struct cifs_sb_info *cifs_sb)
+{
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_BACKUPUID) {
+		if (cifs_sb->mnt_backupuid == current_fsuid())
+			return true;
+	}
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_BACKUPGID) {
+		if (in_group_p(cifs_sb->mnt_backupgid))
+			return true;
+	}
+
+	return false;
 }

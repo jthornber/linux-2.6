@@ -18,11 +18,14 @@
 #include <linux/i2c.h>
 #include <linux/platform_device.h>
 #include <linux/gpio.h>
-
+#include <linux/io.h>
 #include <linux/regulator/machine.h>
 #include <linux/mfd/tps6586x.h>
 
+#include <mach/iomap.h>
 #include <mach/irqs.h>
+
+#include "board-harmony.h"
 
 #define PMC_CTRL		0x0
 #define PMC_CTRL_INTR_LOW	(1 << 17)
@@ -98,7 +101,7 @@ static struct tps6586x_platform_data tps_platform = {
 	.irq_base	= TEGRA_NR_IRQS,
 	.num_subdevs	= ARRAY_SIZE(tps_devs),
 	.subdevs	= tps_devs,
-	.gpio_base	= TEGRA_NR_GPIOS,
+	.gpio_base	= HARMONY_GPIO_TPS6586X(0),
 };
 
 static struct i2c_board_info __initdata harmony_regulators[] = {
@@ -111,6 +114,16 @@ static struct i2c_board_info __initdata harmony_regulators[] = {
 
 int __init harmony_regulator_init(void)
 {
+	void __iomem *pmc = IO_ADDRESS(TEGRA_PMC_BASE);
+	u32 pmc_ctrl;
+
+	/*
+	 * Configure the power management controller to trigger PMU
+	 * interrupts when low
+	 */
+	pmc_ctrl = readl(pmc + PMC_CTRL);
+	writel(pmc_ctrl | PMC_CTRL_INTR_LOW, pmc + PMC_CTRL);
+
 	i2c_register_board_info(3, harmony_regulators, 1);
 
 	return 0;

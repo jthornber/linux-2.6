@@ -40,6 +40,8 @@
 #include "mixer_quirks.h"
 #include "helper.h"
 
+extern struct snd_kcontrol_new *snd_usb_feature_unit_ctl;
+
 /*
  * Sound Blaster remote control configuration
  *
@@ -61,6 +63,7 @@ static const struct rc_config {
 	{ USB_ID(0x041e, 0x3020), 2, 1, 6, 6,  18, 0x0013 }, /* Audigy 2 NX  */
 	{ USB_ID(0x041e, 0x3040), 2, 2, 6, 6,  2,  0x6e91 }, /* Live! 24-bit */
 	{ USB_ID(0x041e, 0x3042), 0, 1, 1, 1,  1,  0x000d }, /* Usb X-Fi S51 */
+	{ USB_ID(0x041e, 0x30df), 0, 1, 1, 1,  1,  0x000d }, /* Usb X-Fi S51 Pro */
 	{ USB_ID(0x041e, 0x3048), 2, 2, 6, 6,  2,  0x6e91 }, /* Toshiba SB0500 */
 };
 
@@ -187,12 +190,18 @@ static int snd_audigy2nx_led_put(struct snd_kcontrol *kcontrol, struct snd_ctl_e
 		err = snd_usb_ctl_msg(mixer->chip->dev,
 			      usb_sndctrlpipe(mixer->chip->dev, 0), 0x24,
 			      USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_OTHER,
-			      !value, 0, NULL, 0, 100);
+			      !value, 0, NULL, 0);
+	/* USB X-Fi S51 Pro */
+	if (mixer->chip->usb_id == USB_ID(0x041e, 0x30df))
+		err = snd_usb_ctl_msg(mixer->chip->dev,
+			      usb_sndctrlpipe(mixer->chip->dev, 0), 0x24,
+			      USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_OTHER,
+			      !value, 0, NULL, 0);
 	else
 		err = snd_usb_ctl_msg(mixer->chip->dev,
 			      usb_sndctrlpipe(mixer->chip->dev, 0), 0x24,
 			      USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_OTHER,
-			      value, index + 2, NULL, 0, 100);
+			      value, index + 2, NULL, 0);
 	if (err < 0)
 		return err;
 	mixer->audigy2nx_leds[index] = value;
@@ -234,9 +243,13 @@ static int snd_audigy2nx_controls_create(struct usb_mixer_interface *mixer)
 		/* USB X-Fi S51 doesn't have a CMSS LED */
 		if ((mixer->chip->usb_id == USB_ID(0x041e, 0x3042)) && i == 0)
 			continue;
+		/* USB X-Fi S51 Pro doesn't have one either */
+		if ((mixer->chip->usb_id == USB_ID(0x041e, 0x30df)) && i == 0)
+			continue;
 		if (i > 1 && /* Live24ext has 2 LEDs only */
 			(mixer->chip->usb_id == USB_ID(0x041e, 0x3040) ||
 			 mixer->chip->usb_id == USB_ID(0x041e, 0x3042) ||
+			 mixer->chip->usb_id == USB_ID(0x041e, 0x30df) ||
 			 mixer->chip->usb_id == USB_ID(0x041e, 0x3048)))
 			break; 
 		err = snd_ctl_add(mixer->chip->card,
@@ -286,7 +299,7 @@ static void snd_audigy2nx_proc_read(struct snd_info_entry *entry,
 				      usb_rcvctrlpipe(mixer->chip->dev, 0),
 				      UAC_GET_MEM, USB_DIR_IN | USB_TYPE_CLASS |
 				      USB_RECIP_INTERFACE, 0,
-				      jacks[i].unitid << 8, buf, 3, 100);
+				      jacks[i].unitid << 8, buf, 3);
 		if (err == 3 && (buf[0] == 3 || buf[0] == 6))
 			snd_iprintf(buffer, "%02x %02x\n", buf[1], buf[2]);
 		else
@@ -319,7 +332,7 @@ static int snd_xonar_u1_switch_put(struct snd_kcontrol *kcontrol,
 	err = snd_usb_ctl_msg(mixer->chip->dev,
 			      usb_sndctrlpipe(mixer->chip->dev, 0), 0x08,
 			      USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_OTHER,
-			      50, 0, &new_status, 1, 100);
+			      50, 0, &new_status, 1);
 	if (err < 0)
 		return err;
 	mixer->xonar_u1_status = new_status;
@@ -481,6 +494,69 @@ static int snd_nativeinstruments_create_mixer(struct usb_mixer_interface *mixer,
 	return err;
 }
 
+/* M-Audio FastTrack Ultra quirks */
+
+/* private_free callback */
+static void usb_mixer_elem_free(struct snd_kcontrol *kctl)
+{
+	kfree(kctl->private_data);
+	kctl->private_data = NULL;
+}
+
+static int snd_maudio_ftu_create_ctl(struct usb_mixer_interface *mixer,
+				     int in, int out, const char *name)
+{
+	struct usb_mixer_elem_info *cval;
+	struct snd_kcontrol *kctl;
+
+	cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+	if (!cval)
+		return -ENOMEM;
+
+	cval->id = 5;
+	cval->mixer = mixer;
+	cval->val_type = USB_MIXER_S16;
+	cval->channels = 1;
+	cval->control = out + 1;
+	cval->cmask = 1 << in;
+
+	kctl = snd_ctl_new1(snd_usb_feature_unit_ctl, cval);
+	if (!kctl) {
+		kfree(cval);
+		return -ENOMEM;
+	}
+
+	snprintf(kctl->id.name, sizeof(kctl->id.name), name);
+	kctl->private_free = usb_mixer_elem_free;
+	return snd_usb_mixer_add_control(mixer, kctl);
+}
+
+static int snd_maudio_ftu_create_mixer(struct usb_mixer_interface *mixer)
+{
+	char name[64];
+	int in, out, err;
+
+	for (out = 0; out < 8; out++) {
+		for (in = 0; in < 8; in++) {
+			snprintf(name, sizeof(name),
+				 "AIn%d - Out%d Capture Volume", in  + 1, out + 1);
+			err = snd_maudio_ftu_create_ctl(mixer, in, out, name);
+			if (err < 0)
+				return err;
+		}
+
+		for (in = 8; in < 16; in++) {
+			snprintf(name, sizeof(name),
+				 "DIn%d - Out%d Playback Volume", in - 7, out + 1);
+			err = snd_maudio_ftu_create_ctl(mixer, in, out, name);
+			if (err < 0)
+				return err;
+		}
+	}
+
+	return 0;
+}
+
 void snd_emuusb_set_samplerate(struct snd_usb_audio *chip,
 			       unsigned char samplerate_id)
 {
@@ -512,6 +588,7 @@ int snd_usb_mixer_apply_create_quirk(struct usb_mixer_interface *mixer)
 	case USB_ID(0x041e, 0x3020):
 	case USB_ID(0x041e, 0x3040):
 	case USB_ID(0x041e, 0x3042):
+	case USB_ID(0x041e, 0x30df):
 	case USB_ID(0x041e, 0x3048):
 		err = snd_audigy2nx_controls_create(mixer);
 		if (err < 0)
@@ -519,6 +596,11 @@ int snd_usb_mixer_apply_create_quirk(struct usb_mixer_interface *mixer)
 		if (!snd_card_proc_new(mixer->chip->card, "audigy2nx", &entry))
 			snd_info_set_text_ops(entry, mixer,
 					      snd_audigy2nx_proc_read);
+		break;
+
+	case USB_ID(0x0763, 0x2080): /* M-Audio Fast Track Ultra */
+	case USB_ID(0x0763, 0x2081): /* M-Audio Fast Track Ultra 8R */
+		err = snd_maudio_ftu_create_mixer(mixer);
 		break;
 
 	case USB_ID(0x0b05, 0x1739):

@@ -9,7 +9,7 @@
 #include <linux/types.h>
 
 #ifdef __KERNEL__
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #endif
 
 /*
@@ -131,6 +131,10 @@ struct sock_fprog {	/* Required for SO_ATTACH_FILTER. */
 #define SKF_LL_OFF    (-0x200000)
 
 #ifdef __KERNEL__
+
+struct sk_buff;
+struct sock;
+
 struct sk_filter
 {
 	atomic_t		refcnt;
@@ -146,15 +150,12 @@ static inline unsigned int sk_filter_len(const struct sk_filter *fp)
 	return fp->len * sizeof(struct sock_filter) + sizeof(*fp);
 }
 
-struct sk_buff;
-struct sock;
-
 extern int sk_filter(struct sock *sk, struct sk_buff *skb);
 extern unsigned int sk_run_filter(const struct sk_buff *skb,
 				  const struct sock_filter *filter);
 extern int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk);
 extern int sk_detach_filter(struct sock *sk);
-extern int sk_chk_filter(struct sock_filter *filter, int flen);
+extern int sk_chk_filter(struct sock_filter *filter, unsigned int flen);
 
 #ifdef CONFIG_BPF_JIT
 extern void bpf_jit_compile(struct sk_filter *fp);

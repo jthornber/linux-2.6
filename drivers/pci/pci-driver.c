@@ -18,6 +18,7 @@
 #include <linux/sched.h>
 #include <linux/cpu.h>
 #include <linux/pm_runtime.h>
+#include <linux/suspend.h>
 #include "pci.h"
 
 struct pci_dynid {
@@ -603,7 +604,8 @@ static bool pci_has_legacy_pm_support(struct pci_dev *pci_dev)
 	 * supported as well.  Drivers are supposed to support either the
 	 * former, or the latter, but not both at the same time.
 	 */
-	WARN_ON(ret && drv->driver.pm);
+	WARN(ret && drv->driver.pm, "driver %s device %04x:%04x\n",
+		drv->name, pci_dev->vendor, pci_dev->device);
 
 	return ret;
 }
@@ -614,6 +616,21 @@ static int pci_pm_prepare(struct device *dev)
 {
 	struct device_driver *drv = dev->driver;
 	int error = 0;
+
+	/*
+	 * If a PCI device configured to wake up the system from sleep states
+	 * has been suspended at run time and there's a resume request pending
+	 * for it, this is equivalent to the device signaling wakeup, so the
+	 * system suspend operation should be aborted.
+	 */
+	pm_runtime_get_noresume(dev);
+	if (pm_runtime_barrier(dev) && device_may_wakeup(dev))
+		pm_wakeup_event(dev, 0);
+
+	if (pm_wakeup_pending()) {
+		pm_runtime_put_sync(dev);
+		return -EBUSY;
+	}
 
 	/*
 	 * PCI devices suspended at run time need to be resumed at this
@@ -638,6 +655,8 @@ static void pci_pm_complete(struct device *dev)
 
 	if (drv && drv->pm && drv->pm->complete)
 		drv->pm->complete(dev);
+
+	pm_runtime_put_sync(dev);
 }
 
 #else /* !CONFIG_PM_SLEEP */

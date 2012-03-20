@@ -15,6 +15,8 @@
 #include <linux/io.h>
 #include "edac_core.h"
 
+#include <asm-generic/io-64-nonatomic-lo-hi.h>
+
 #define I3200_REVISION        "1.1"
 
 #define EDAC_MOD_STR        "i3200_edac"

@@ -17,8 +17,8 @@
 #include <linux/leds.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
-#include <linux/mfd/core.h>
 #include <linux/mfd/88pm860x.h>
+#include <linux/module.h>
 
 #define LED_PWM_SHIFT		(3)
 #define LED_PWM_MASK		(0x1F)
@@ -171,7 +171,6 @@ static int pm860x_led_probe(struct platform_device *pdev)
 	struct pm860x_chip *chip = dev_get_drvdata(pdev->dev.parent);
 	struct pm860x_led_pdata *pdata;
 	struct pm860x_led *data;
-	struct mfd_cell *cell;
 	struct resource *res;
 	int ret;
 
@@ -181,10 +180,7 @@ static int pm860x_led_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	cell = pdev->dev.platform_data;
-	if (cell == NULL)
-		return -ENODEV;
-	pdata = cell->mfd_data;
+	pdata = pdev->dev.platform_data;
 	if (pdata == NULL) {
 		dev_err(&pdev->dev, "No platform data!\n");
 		return -EINVAL;
@@ -242,17 +238,7 @@ static struct platform_driver pm860x_led_driver = {
 	.remove	= pm860x_led_remove,
 };
 
-static int __devinit pm860x_led_init(void)
-{
-	return platform_driver_register(&pm860x_led_driver);
-}
-module_init(pm860x_led_init);
-
-static void __devexit pm860x_led_exit(void)
-{
-	platform_driver_unregister(&pm860x_led_driver);
-}
-module_exit(pm860x_led_exit);
+module_platform_driver(pm860x_led_driver);
 
 MODULE_DESCRIPTION("LED driver for Marvell PM860x");
 MODULE_AUTHOR("Haojian Zhuang <haojian.zhuang@marvell.com>");

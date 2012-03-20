@@ -56,6 +56,8 @@
 #include <linux/kprobes.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/oom.h>
+#include <linux/kmod.h>
+#include <linux/capability.h>
 
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -133,6 +135,7 @@ static int minolduid;
 static int min_percpu_pagelist_fract = 8;
 
 static int ngroups_max = NGROUPS_MAX;
+static const int cap_last_cap = CAP_LAST_CAP;
 
 #ifdef CONFIG_INOTIFY_USER
 #include <linux/inotify.h>
@@ -148,14 +151,6 @@ extern int sysctl_tsb_ratio;
 #ifdef __hppa__
 extern int pwrsw_enabled;
 extern int unaligned_enabled;
-#endif
-
-#ifdef CONFIG_S390
-#ifdef CONFIG_MATHEMU
-extern int sysctl_ieee_emulation_warnings;
-#endif
-extern int sysctl_userprocess_debug;
-extern int spin_retry;
 #endif
 
 #ifdef CONFIG_IA64
@@ -376,6 +371,16 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 		.extra2		= &one,
+	},
+#endif
+#ifdef CONFIG_CFS_BANDWIDTH
+	{
+		.procname	= "sched_cfs_bandwidth_slice_us",
+		.data		= &sysctl_sched_cfs_bandwidth_slice,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
 	},
 #endif
 #ifdef CONFIG_PROVE_LOCKING
@@ -616,6 +621,11 @@ static struct ctl_table kern_table[] = {
 		.child		= random_table,
 	},
 	{
+		.procname	= "usermodehelper",
+		.mode		= 0555,
+		.child		= usermodehelper_table,
+	},
+	{
 		.procname	= "overflowuid",
 		.data		= &overflowuid,
 		.maxlen		= sizeof(int),
@@ -724,20 +734,29 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0444,
 		.proc_handler	= proc_dointvec,
 	},
+	{
+		.procname	= "cap_last_cap",
+		.data		= (void *)&cap_last_cap,
+		.maxlen		= sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= proc_dointvec,
+	},
 #if defined(CONFIG_LOCKUP_DETECTOR)
 	{
 		.procname       = "watchdog",
 		.data           = &watchdog_enabled,
 		.maxlen         = sizeof (int),
 		.mode           = 0644,
-		.proc_handler   = proc_dowatchdog_enabled,
+		.proc_handler   = proc_dowatchdog,
+		.extra1		= &zero,
+		.extra2		= &one,
 	},
 	{
 		.procname	= "watchdog_thresh",
-		.data		= &softlockup_thresh,
+		.data		= &watchdog_thresh,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dowatchdog_thresh,
+		.proc_handler	= proc_dowatchdog,
 		.extra1		= &neg_one,
 		.extra2		= &sixty,
 	},
@@ -755,7 +774,9 @@ static struct ctl_table kern_table[] = {
 		.data           = &watchdog_enabled,
 		.maxlen         = sizeof (int),
 		.mode           = 0644,
-		.proc_handler   = proc_dowatchdog_enabled,
+		.proc_handler   = proc_dowatchdog,
+		.extra1		= &zero,
+		.extra2		= &one,
 	},
 #endif
 #if defined(CONFIG_X86_LOCAL_APIC) && defined(CONFIG_X86)
@@ -782,6 +803,15 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#ifdef CONFIG_DEBUG_STACKOVERFLOW
+	{
+		.procname	= "panic_on_stackoverflow",
+		.data		= &sysctl_panic_on_stackoverflow,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
 	{
 		.procname	= "bootloader_type",
 		.data		= &bootloader_type,
@@ -928,6 +958,12 @@ static struct ctl_table kern_table[] = {
 	},
 #endif
 #ifdef CONFIG_PERF_EVENTS
+	/*
+	 * User-space scripts rely on the existence of this file
+	 * as a feature check for perf_events being enabled.
+	 *
+	 * So it's an ABI, do not remove!
+	 */
 	{
 		.procname	= "perf_event_paranoid",
 		.data		= &sysctl_perf_event_paranoid,
@@ -1496,7 +1532,7 @@ static struct ctl_table fs_table[] = {
 
 static struct ctl_table debug_table[] = {
 #if defined(CONFIG_X86) || defined(CONFIG_PPC) || defined(CONFIG_SPARC) || \
-    defined(CONFIG_S390)
+    defined(CONFIG_S390) || defined(CONFIG_TILE)
 	{
 		.procname	= "exception-trace",
 		.data		= &show_unhandled_signals,
@@ -1574,16 +1610,11 @@ void sysctl_head_get(struct ctl_table_header *head)
 	spin_unlock(&sysctl_lock);
 }
 
-static void free_head(struct rcu_head *rcu)
-{
-	kfree(container_of(rcu, struct ctl_table_header, rcu));
-}
-
 void sysctl_head_put(struct ctl_table_header *head)
 {
 	spin_lock(&sysctl_lock);
 	if (!--head->count)
-		call_rcu(&head->rcu, free_head);
+		kfree_rcu(head, rcu);
 	spin_unlock(&sysctl_lock);
 }
 
@@ -1955,10 +1986,10 @@ void unregister_sysctl_table(struct ctl_table_header * header)
 	start_unregistering(header);
 	if (!--header->parent->count) {
 		WARN_ON(1);
-		call_rcu(&header->parent->rcu, free_head);
+		kfree_rcu(header->parent, rcu);
 	}
 	if (!--header->count)
-		call_rcu(&header->rcu, free_head);
+		kfree_rcu(header, rcu);
 	spin_unlock(&sysctl_lock);
 }
 

@@ -109,7 +109,7 @@ int usbnet_get_endpoints(struct usbnet *dev, struct usb_interface *intf)
 
 		/* take the first altsetting with in-bulk + out-bulk;
 		 * remember any status endpoint, just in case;
-		 * ignore other endpoints and altsetttings.
+		 * ignore other endpoints and altsettings.
 		 */
 		for (ep = 0; ep < alt->desc.bNumEndpoints; ep++) {
 			struct usb_host_endpoint	*e;
@@ -238,6 +238,10 @@ void usbnet_skb_return (struct usbnet *dev, struct sk_buff *skb)
 	netif_dbg(dev, rx_status, dev->net, "< rx, len %zu, type 0x%x\n",
 		  skb->len + sizeof (struct ethhdr), skb->protocol);
 	memset (skb->cb, 0, sizeof (struct skb_data));
+
+	if (skb_defer_rx_timestamp(skb))
+		return;
+
 	status = netif_rx (skb);
 	if (status != NET_RX_SUCCESS)
 		netif_dbg(dev, rx_err, dev->net,
@@ -585,6 +589,7 @@ static int unlink_urbs (struct usbnet *dev, struct sk_buff_head *q)
 		entry = (struct skb_data *) skb->cb;
 		urb = entry->urb;
 
+		spin_unlock_irqrestore(&q->lock, flags);
 		// during some PM-driven resume scenarios,
 		// these (async) unlinks complete immediately
 		retval = usb_unlink_urb (urb);
@@ -592,6 +597,7 @@ static int unlink_urbs (struct usbnet *dev, struct sk_buff_head *q)
 			netdev_dbg(dev->net, "unlink urb err, %d\n", retval);
 		else
 			count++;
+		spin_lock_irqsave(&q->lock, flags);
 	}
 	spin_unlock_irqrestore (&q->lock, flags);
 	return count;
@@ -1053,6 +1059,9 @@ netdev_tx_t usbnet_start_xmit (struct sk_buff *skb,
 	unsigned long		flags;
 	int retval;
 
+	if (skb)
+		skb_tx_timestamp(skb);
+
 	// some devices want funky USB-level framing, for
 	// win32 driver (usually) and/or hardware quirks
 	if (info->tx_fixup) {
@@ -1470,7 +1479,7 @@ int usbnet_suspend (struct usb_interface *intf, pm_message_t message)
 	if (!dev->suspend_count++) {
 		spin_lock_irq(&dev->txq.lock);
 		/* don't autosuspend while transmitting */
-		if (dev->txq.qlen && (message.event & PM_EVENT_AUTO)) {
+		if (dev->txq.qlen && PMSG_IS_AUTO(message)) {
 			spin_unlock_irq(&dev->txq.lock);
 			return -EBUSY;
 		} else {

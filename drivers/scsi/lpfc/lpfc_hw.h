@@ -64,6 +64,8 @@
 #define SLI3_IOCB_CMD_SIZE	128
 #define SLI3_IOCB_RSP_SIZE	64
 
+#define LPFC_UNREG_ALL_RPIS_VPORT	0xffff
+#define LPFC_UNREG_ALL_DFLT_RPIS	0xffffffff
 
 /* vendor ID used in SCSI netlink calls */
 #define LPFC_NL_VENDOR_ID (SCSI_NL_VID_TYPE_PCI | PCI_VENDOR_ID_EMULEX)
@@ -347,6 +349,12 @@ struct csp {
  * Word 1 Bit 31 in FLOGI response is clean address bit
  */
 #define clean_address_bit request_multiple_Nport /* Word 1, bit 31 */
+/*
+ * Word 1 Bit 30 in common service parameter is overloaded.
+ * Word 1 Bit 30 in FLOGI request is Virtual Fabrics
+ * Word 1 Bit 30 in PLOGI request is random offset
+ */
+#define virtual_fabric_support randomOffset /* Word 1, bit 30 */
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint16_t request_multiple_Nport:1;	/* FC Word 1, bit 31 */
 	uint16_t randomOffset:1;	/* FC Word 1, bit 30 */
@@ -903,6 +911,8 @@ struct RRQ {			/* Structure is in Big Endian format */
 #define rrq_rxid_WORD		rrq_exchg
 };
 
+#define LPFC_MAX_VFN_PER_PFN	255 /* Maximum VFs allowed per ARI */
+#define LPFC_DEF_VFN_PER_PFN	0   /* Default VFs due to platform limitation*/
 
 struct RTV_RSP {		/* Structure is in Big Endian format */
 	uint32_t ratov;
@@ -1002,7 +1012,7 @@ typedef struct _ELS_PKT {	/* Structure is in Big Endian format */
 #define  SLI_MGMT_GRPL     0x102	/* Get registered Port list */
 #define  SLI_MGMT_GPAT     0x110	/* Get Port attributes */
 #define  SLI_MGMT_RHBA     0x200	/* Register HBA */
-#define  SLI_MGMT_RHAT     0x201	/* Register HBA atttributes */
+#define  SLI_MGMT_RHAT     0x201	/* Register HBA attributes */
 #define  SLI_MGMT_RPRT     0x210	/* Register Port */
 #define  SLI_MGMT_RPA      0x211	/* Register Port attributes */
 #define  SLI_MGMT_DHBA     0x300	/* De-register HBA */
@@ -1199,7 +1209,9 @@ typedef struct {
 #define PCI_DEVICE_ID_BALIUS        0xe131
 #define PCI_DEVICE_ID_PROTEUS_PF    0xe180
 #define PCI_DEVICE_ID_LANCER_FC     0xe200
+#define PCI_DEVICE_ID_LANCER_FC_VF  0xe208
 #define PCI_DEVICE_ID_LANCER_FCOE   0xe260
+#define PCI_DEVICE_ID_LANCER_FCOE_VF 0xe268
 #define PCI_DEVICE_ID_SAT_SMB       0xf011
 #define PCI_DEVICE_ID_SAT_MID       0xf015
 #define PCI_DEVICE_ID_RFLY          0xf095
@@ -1846,8 +1858,8 @@ typedef struct {
 	uint8_t fabric_AL_PA;	/* If using a Fabric Assigned AL_PA */
 #endif
 
-#define FLAGS_LOCAL_LB               0x01 /* link_flags (=1) ENDEC loopback */
 #define FLAGS_TOPOLOGY_MODE_LOOP_PT  0x00 /* Attempt loop then pt-pt */
+#define FLAGS_LOCAL_LB               0x01 /* link_flags (=1) ENDEC loopback */
 #define FLAGS_TOPOLOGY_MODE_PT_PT    0x02 /* Attempt pt-pt only */
 #define FLAGS_TOPOLOGY_MODE_LOOP     0x04 /* Attempt loop only */
 #define FLAGS_TOPOLOGY_MODE_PT_LOOP  0x06 /* Attempt pt-pt then loop */
@@ -2813,7 +2825,8 @@ typedef struct {
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t rsvd1     : 19;  /* Reserved                             */
 	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
-	uint32_t rsvd2     :  3;  /* Reserved                             */
+	uint32_t casabt    :  1;  /* Configure async abts status notice   */
+	uint32_t rsvd2     :  2;  /* Reserved                             */
 	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
 	uint32_t cmv       :  1;  /* Configure Max VPIs                   */
 	uint32_t ccrp      :  1;  /* Config Command Ring Polling          */
@@ -2833,14 +2846,16 @@ typedef struct {
 	uint32_t ccrp      :  1;  /* Config Command Ring Polling          */
 	uint32_t cmv	   :  1;  /* Configure Max VPIs                   */
 	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
-	uint32_t rsvd2     :  3;  /* Reserved                             */
+	uint32_t rsvd2     :  2;  /* Reserved                             */
+	uint32_t casabt    :  1;  /* Configure async abts status notice   */
 	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
 	uint32_t rsvd1     : 19;  /* Reserved                             */
 #endif
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t rsvd3     : 19;  /* Reserved                             */
 	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
-	uint32_t rsvd4     :  3;  /* Reserved                             */
+	uint32_t gasabt    :  1;  /* Grant async abts status notice       */
+	uint32_t rsvd4     :  2;  /* Reserved                             */
 	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
 	uint32_t gmv	   :  1;  /* Grant Max VPIs                       */
 	uint32_t gcrp	   :  1;  /* Grant Command Ring Polling           */
@@ -2860,7 +2875,8 @@ typedef struct {
 	uint32_t gcrp	   :  1;  /* Grant Command Ring Polling           */
 	uint32_t gmv	   :  1;  /* Grant Max VPIs                       */
 	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
-	uint32_t rsvd4     :  3;  /* Reserved                             */
+	uint32_t rsvd4     :  2;  /* Reserved                             */
+	uint32_t gasabt    :  1;  /* Grant async abts status notice       */
 	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
 	uint32_t rsvd3     : 19;  /* Reserved                             */
 #endif
@@ -2949,18 +2965,18 @@ typedef struct _SLI2_RDSC {
 typedef struct _PCB {
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t type:8;
-#define TYPE_NATIVE_SLI2       0x01;
+#define TYPE_NATIVE_SLI2       0x01
 	uint32_t feature:8;
-#define FEATURE_INITIAL_SLI2   0x01;
+#define FEATURE_INITIAL_SLI2   0x01
 	uint32_t rsvd:12;
 	uint32_t maxRing:4;
 #else	/*  __LITTLE_ENDIAN_BITFIELD */
 	uint32_t maxRing:4;
 	uint32_t rsvd:12;
 	uint32_t feature:8;
-#define FEATURE_INITIAL_SLI2   0x01;
+#define FEATURE_INITIAL_SLI2   0x01
 	uint32_t type:8;
-#define TYPE_NATIVE_SLI2       0x01;
+#define TYPE_NATIVE_SLI2       0x01
 #endif
 
 	uint32_t mailBoxSize;
@@ -3021,7 +3037,7 @@ typedef struct {
 #define MAILBOX_EXT_SIZE	(MAILBOX_EXT_WSIZE * sizeof(uint32_t))
 #define MAILBOX_HBA_EXT_OFFSET  0x100
 /* max mbox xmit size is a page size for sysfs IO operations */
-#define MAILBOX_MAX_XMIT_SIZE   PAGE_SIZE
+#define MAILBOX_SYSFS_MAX	4096
 
 typedef union {
 	uint32_t varWords[MAILBOX_CMD_WSIZE - 1]; /* first word is type/
@@ -3459,16 +3475,22 @@ typedef struct {
 } ASYNCSTAT_FIELDS;
 #define ASYNC_TEMP_WARN		0x100
 #define ASYNC_TEMP_SAFE		0x101
+#define ASYNC_STATUS_CN		0x102
 
 /* IOCB Command template for CMD_IOCB_RCV_ELS64_CX (0xB7)
    or CMD_IOCB_RCV_SEQ64_CX (0xB5) */
 
 struct rcv_sli3 {
-	uint32_t word8Rsvd;
 #ifdef __BIG_ENDIAN_BITFIELD
+	uint16_t ox_id;
+	uint16_t seq_cnt;
+
 	uint16_t vpi;
 	uint16_t word9Rsvd;
 #else  /*  __LITTLE_ENDIAN */
+	uint16_t seq_cnt;
+	uint16_t ox_id;
+
 	uint16_t word9Rsvd;
 	uint16_t vpi;
 #endif

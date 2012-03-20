@@ -307,7 +307,7 @@ clusterip_tg(struct sk_buff *skb, const struct xt_action_param *par)
 	 * error messages (RELATED) and information requests (see below) */
 	if (ip_hdr(skb)->protocol == IPPROTO_ICMP &&
 	    (ctinfo == IP_CT_RELATED ||
-	     ctinfo == IP_CT_RELATED + IP_CT_IS_REPLY))
+	     ctinfo == IP_CT_RELATED_REPLY))
 		return XT_CONTINUE;
 
 	/* ip_conntrack_icmp guarantees us that we only have ICMP_ECHO,
@@ -317,19 +317,19 @@ clusterip_tg(struct sk_buff *skb, const struct xt_action_param *par)
 	hash = clusterip_hashfn(skb, cipinfo->config);
 
 	switch (ctinfo) {
-		case IP_CT_NEW:
-			ct->mark = hash;
-			break;
-		case IP_CT_RELATED:
-		case IP_CT_RELATED+IP_CT_IS_REPLY:
-			/* FIXME: we don't handle expectations at the
-			 * moment.  they can arrive on a different node than
-			 * the master connection (e.g. FTP passive mode) */
-		case IP_CT_ESTABLISHED:
-		case IP_CT_ESTABLISHED+IP_CT_IS_REPLY:
-			break;
-		default:
-			break;
+	case IP_CT_NEW:
+		ct->mark = hash;
+		break;
+	case IP_CT_RELATED:
+	case IP_CT_RELATED_REPLY:
+		/* FIXME: we don't handle expectations at the moment.
+		 * They can arrive on a different node than
+		 * the master connection (e.g. FTP passive mode) */
+	case IP_CT_ESTABLISHED:
+	case IP_CT_ESTABLISHED_REPLY:
+		break;
+	default:			/* Prevent gcc warnings */
+		break;
 	}
 
 #ifdef DEBUG
@@ -395,7 +395,6 @@ static int clusterip_tg_check(const struct xt_tgchk_param *par)
 			config = clusterip_config_init(cipinfo,
 							e->ip.dst.s_addr, dev);
 			if (!config) {
-				pr_info("cannot allocate config\n");
 				dev_put(dev);
 				return -ENOMEM;
 			}

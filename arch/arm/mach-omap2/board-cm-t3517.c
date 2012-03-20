@@ -39,7 +39,7 @@
 #include <asm/mach/map.h>
 
 #include <plat/board.h>
-#include <plat/common.h>
+#include "common.h"
 #include <plat/usb.h>
 #include <plat/nand.h>
 #include <plat/gpmc.h>
@@ -48,6 +48,7 @@
 
 #include "mux.h"
 #include "control.h"
+#include "common-board-devices.h"
 
 #if defined(CONFIG_LEDS_GPIO) || defined(CONFIG_LEDS_GPIO_MODULE)
 static struct gpio_led cm_t3517_leds[] = {
@@ -148,13 +149,12 @@ static void __init cm_t3517_init_rtc(void)
 {
 	int err;
 
-	err = gpio_request(RTC_CS_EN_GPIO, "rtc cs en");
+	err = gpio_request_one(RTC_CS_EN_GPIO, GPIOF_OUT_INIT_HIGH,
+			       "rtc cs en");
 	if (err) {
 		pr_err("CM-T3517: rtc cs en gpio request failed: %d\n", err);
 		return;
 	}
-
-	gpio_direction_output(RTC_CS_EN_GPIO, 1);
 
 	platform_device_register(&cm_t3517_rtc_device);
 }
@@ -178,15 +178,15 @@ static struct usbhs_omap_board_data cm_t3517_ehci_pdata __initdata = {
 	.reset_gpio_port[2]  = -EINVAL,
 };
 
-static int cm_t3517_init_usbh(void)
+static int __init cm_t3517_init_usbh(void)
 {
 	int err;
 
-	err = gpio_request(USB_HUB_RESET_GPIO, "usb hub rst");
+	err = gpio_request_one(USB_HUB_RESET_GPIO, GPIOF_OUT_INIT_LOW,
+			       "usb hub rst");
 	if (err) {
 		pr_err("CM-T3517: usb hub rst gpio request failed: %d\n", err);
 	} else {
-		gpio_direction_output(USB_HUB_RESET_GPIO, 0);
 		udelay(10);
 		gpio_set_value(USB_HUB_RESET_GPIO, 1);
 		msleep(1);
@@ -204,8 +204,6 @@ static inline int cm_t3517_init_usbh(void)
 #endif
 
 #if defined(CONFIG_MTD_NAND_OMAP2) || defined(CONFIG_MTD_NAND_OMAP2_MODULE)
-#define NAND_BLOCK_SIZE		SZ_128K
-
 static struct mtd_partition cm_t3517_nand_partitions[] = {
 	{
 		.name           = "xloader",
@@ -238,7 +236,6 @@ static struct mtd_partition cm_t3517_nand_partitions[] = {
 static struct omap_nand_platform_data cm_t3517_nand_data = {
 	.parts			= cm_t3517_nand_partitions,
 	.nr_parts		= ARRAY_SIZE(cm_t3517_nand_partitions),
-	.dma_channel		= -1,	/* disable DMA in OMAP NAND driver */
 	.cs			= 0,
 };
 
@@ -253,12 +250,6 @@ static inline void cm_t3517_init_nand(void) {}
 
 static struct omap_board_config_kernel cm_t3517_config[] __initdata = {
 };
-
-static void __init cm_t3517_init_early(void)
-{
-	omap2_init_common_infrastructure();
-	omap2_init_common_devices(NULL, NULL);
-}
 
 #ifdef CONFIG_OMAP_MUX
 static struct omap_board_mux board_mux[] __initdata = {
@@ -292,6 +283,7 @@ static void __init cm_t3517_init(void)
 {
 	omap3_mux_init(board_mux, OMAP_PACKAGE_CBB);
 	omap_serial_init();
+	omap_sdrc_init(NULL, NULL);
 	omap_board_config = cm_t3517_config;
 	omap_board_config_size = ARRAY_SIZE(cm_t3517_config);
 	cm_t3517_init_leds();
@@ -302,11 +294,13 @@ static void __init cm_t3517_init(void)
 }
 
 MACHINE_START(CM_T3517, "Compulab CM-T3517")
-	.boot_params	= 0x80000100,
+	.atag_offset	= 0x100,
 	.reserve        = omap_reserve,
 	.map_io		= omap3_map_io,
-	.init_early	= cm_t3517_init_early,
-	.init_irq	= omap_init_irq,
+	.init_early	= am35xx_init_early,
+	.init_irq	= omap3_init_irq,
+	.handle_irq	= omap3_intc_handle_irq,
 	.init_machine	= cm_t3517_init,
-	.timer		= &omap_timer,
+	.timer		= &omap3_timer,
+	.restart	= omap_prcm_restart,
 MACHINE_END

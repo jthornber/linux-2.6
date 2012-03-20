@@ -16,8 +16,8 @@
 #include <linux/fb.h>
 #include <linux/i2c.h>
 #include <linux/backlight.h>
-#include <linux/mfd/core.h>
 #include <linux/mfd/88pm860x.h>
+#include <linux/module.h>
 
 #define MAX_BRIGHTNESS		(0xFF)
 #define MIN_BRIGHTNESS		(0)
@@ -168,7 +168,6 @@ static int pm860x_backlight_probe(struct platform_device *pdev)
 	struct pm860x_backlight_pdata *pdata = NULL;
 	struct pm860x_backlight_data *data;
 	struct backlight_device *bl;
-	struct mfd_cell *cell;
 	struct resource *res;
 	struct backlight_properties props;
 	unsigned char value;
@@ -181,10 +180,7 @@ static int pm860x_backlight_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	cell = pdev->dev.platform_data;
-	if (cell == NULL)
-		return -ENODEV;
-	pdata = cell->mfd_data;
+	pdata = pdev->dev.platform_data;
 	if (pdata == NULL) {
 		dev_err(&pdev->dev, "platform data isn't assigned to "
 			"backlight\n");
@@ -274,17 +270,7 @@ static struct platform_driver pm860x_backlight_driver = {
 	.remove		= pm860x_backlight_remove,
 };
 
-static int __init pm860x_backlight_init(void)
-{
-	return platform_driver_register(&pm860x_backlight_driver);
-}
-module_init(pm860x_backlight_init);
-
-static void __exit pm860x_backlight_exit(void)
-{
-	platform_driver_unregister(&pm860x_backlight_driver);
-}
-module_exit(pm860x_backlight_exit);
+module_platform_driver(pm860x_backlight_driver);
 
 MODULE_DESCRIPTION("Backlight Driver for Marvell Semiconductor 88PM8606");
 MODULE_AUTHOR("Haojian Zhuang <haojian.zhuang@marvell.com>");

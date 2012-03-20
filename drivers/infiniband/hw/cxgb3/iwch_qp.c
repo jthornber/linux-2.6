@@ -738,7 +738,7 @@ static inline void build_term_codes(struct respQ_msg_t *rsp_msg,
 	}
 }
 
-int iwch_post_zb_read(struct iwch_qp *qhp)
+int iwch_post_zb_read(struct iwch_ep *ep)
 {
 	union t3_wr *wqe;
 	struct sk_buff *skb;
@@ -761,10 +761,10 @@ int iwch_post_zb_read(struct iwch_qp *qhp)
 	wqe->read.local_len = cpu_to_be32(0);
 	wqe->read.local_to = cpu_to_be64(1);
 	wqe->send.wrh.op_seop_flags = cpu_to_be32(V_FW_RIWR_OP(T3_WR_READ));
-	wqe->send.wrh.gen_tid_len = cpu_to_be32(V_FW_RIWR_TID(qhp->ep->hwtid)|
+	wqe->send.wrh.gen_tid_len = cpu_to_be32(V_FW_RIWR_TID(ep->hwtid)|
 						V_FW_RIWR_LEN(flit_cnt));
 	skb->priority = CPL_PRIORITY_DATA;
-	return iwch_cxgb3_ofld_send(qhp->rhp->rdev.t3cdev_p, skb);
+	return iwch_cxgb3_ofld_send(ep->com.qp->rhp->rdev.t3cdev_p, skb);
 }
 
 /*
@@ -822,8 +822,11 @@ static void __flush_qp(struct iwch_qp *qhp, struct iwch_cq *rchp,
 	flushed = cxio_flush_rq(&qhp->wq, &rchp->cq, count);
 	spin_unlock(&qhp->lock);
 	spin_unlock_irqrestore(&rchp->lock, *flag);
-	if (flushed)
+	if (flushed) {
+		spin_lock_irqsave(&rchp->comp_handler_lock, *flag);
 		(*rchp->ibcq.comp_handler)(&rchp->ibcq, rchp->ibcq.cq_context);
+		spin_unlock_irqrestore(&rchp->comp_handler_lock, *flag);
+	}
 
 	/* locking hierarchy: cq lock first, then qp lock. */
 	spin_lock_irqsave(&schp->lock, *flag);
@@ -833,8 +836,11 @@ static void __flush_qp(struct iwch_qp *qhp, struct iwch_cq *rchp,
 	flushed = cxio_flush_sq(&qhp->wq, &schp->cq, count);
 	spin_unlock(&qhp->lock);
 	spin_unlock_irqrestore(&schp->lock, *flag);
-	if (flushed)
+	if (flushed) {
+		spin_lock_irqsave(&schp->comp_handler_lock, *flag);
 		(*schp->ibcq.comp_handler)(&schp->ibcq, schp->ibcq.cq_context);
+		spin_unlock_irqrestore(&schp->comp_handler_lock, *flag);
+	}
 
 	/* deref */
 	if (atomic_dec_and_test(&qhp->refcnt))
@@ -853,11 +859,15 @@ static void flush_qp(struct iwch_qp *qhp, unsigned long *flag)
 	if (qhp->ibqp.uobject) {
 		cxio_set_wq_in_error(&qhp->wq);
 		cxio_set_cq_in_error(&rchp->cq);
+		spin_lock_irqsave(&rchp->comp_handler_lock, *flag);
 		(*rchp->ibcq.comp_handler)(&rchp->ibcq, rchp->ibcq.cq_context);
+		spin_unlock_irqrestore(&rchp->comp_handler_lock, *flag);
 		if (schp != rchp) {
 			cxio_set_cq_in_error(&schp->cq);
+			spin_lock_irqsave(&schp->comp_handler_lock, *flag);
 			(*schp->ibcq.comp_handler)(&schp->ibcq,
 						   schp->ibcq.cq_context);
+			spin_unlock_irqrestore(&schp->comp_handler_lock, *flag);
 		}
 		return;
 	}

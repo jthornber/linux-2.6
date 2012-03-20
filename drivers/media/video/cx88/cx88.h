@@ -39,9 +39,9 @@
 #include "cx88-reg.h"
 #include "tuner-xc2028.h"
 
-#include <linux/version.h>
 #include <linux/mutex.h>
-#define CX88_VERSION_CODE KERNEL_VERSION(0, 0, 8)
+
+#define CX88_VERSION "0.0.9"
 
 #define UNSET (-1U)
 
@@ -242,6 +242,10 @@ extern const struct sram_channel const cx88_sram_channels[];
 #define CX88_BOARD_SAMSUNG_SMT_7020        84
 #define CX88_BOARD_TWINHAN_VP1027_DVBS     85
 #define CX88_BOARD_TEVII_S464              86
+#define CX88_BOARD_WINFAST_DTV2000H_PLUS   87
+#define CX88_BOARD_WINFAST_DTV1800H_XC4000 88
+#define CX88_BOARD_WINFAST_TV2000_XP_GLOBAL_6F36 89
+#define CX88_BOARD_WINFAST_TV2000_XP_GLOBAL_6F43 90
 
 enum cx88_itype {
 	CX88_VMUX_COMPOSITE1 = 1,
@@ -375,6 +379,7 @@ struct cx88_core {
 	u32                        audiomode_manual;
 	u32                        audiomode_current;
 	u32                        input;
+	u32                        last_analog_input;
 	u32                        astat;
 	u32			   use_nicam;
 	unsigned long		   last_change;
@@ -389,8 +394,8 @@ struct cx88_core {
 	struct mutex               lock;
 	/* various v4l controls */
 	u32                        freq;
-	atomic_t		   users;
-	atomic_t                   mpeg_users;
+	int                        users;
+	int                        mpeg_users;
 
 	/* cx88-video needs to access cx8802 for hybrid tuner pll access. */
 	struct cx8802_dev          *dvbdev;
@@ -505,6 +510,8 @@ struct cx8802_driver {
 	int (*suspend)(struct pci_dev *pci_dev, pm_message_t state);
 	int (*resume)(struct pci_dev *pci_dev);
 
+	/* Callers to the following functions must hold core->lock */
+
 	/* MPEG 8802 -> mini driver - Driver probe and configuration */
 	int (*probe)(struct cx8802_driver *drv);
 	int (*remove)(struct cx8802_driver *drv);
@@ -561,8 +568,9 @@ struct cx8802_dev {
 	/* for switching modulation types */
 	unsigned char              ts_gen_cntrl;
 
-	/* List of attached drivers */
+	/* List of attached drivers; must hold core->lock to access */
 	struct list_head	   drvlist;
+
 	struct work_struct	   request_module_wk;
 };
 
@@ -685,6 +693,8 @@ int cx88_audio_thread(void *data);
 
 int cx8802_register_driver(struct cx8802_driver *drv);
 int cx8802_unregister_driver(struct cx8802_driver *drv);
+
+/* Caller must hold core->lock */
 struct cx8802_driver * cx8802_get_driver(struct cx8802_dev *dev, enum cx88_board_type btype);
 
 /* ----------------------------------------------------------- */
