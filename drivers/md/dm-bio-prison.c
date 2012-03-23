@@ -363,5 +363,3 @@ int ds_add_work(struct deferred_set *ds, struct list_head *work)
 }
 
 /*----------------------------------------------------------------*/
-
-

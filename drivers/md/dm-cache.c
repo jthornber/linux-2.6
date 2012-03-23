@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Red Hat GmbH. All rights reserved.
+ * Copyright (C) 2012 Red Hat GmbH. All rights reserved.
  *
  * This file is released under the GPL.
  *
@@ -23,12 +23,8 @@
  *
  */
 
-const char version[] = "1.0.69";
-
 #include "dm.h"
 #include "dm-bio-prison.h"
-#include "hsm-metadata.h"
-#include "persistent-data/dm-transaction-manager.h"
 
 #include <asm/div64.h>
 
@@ -40,44 +36,232 @@ const char version[] = "1.0.69";
 #include <linux/mempool.h>
 #include <linux/module.h>
 #include <linux/random.h>
+#include <linux/rbtree.h>
 #include <linux/slab.h>
 
+/* FIXME: describe, mechanism/policy/target split */
+
 /*----------------------------------------------------------------*/
+
+/*
+ * Simple, in-core metadata, just a quick hack for development.
+ */
+struct mapping {
+	struct list_head list;
+	struct rb_node node;
+	dm_block_t origin;
+	dm_block_t cache;
+};
+
+struct metadata {
+	spinlock_t lock;
+	struct list_head lru;	  /* in the rbtree */
+	struct list_head free;	  /* unallocated */
+	struct list_head pending; /* allocated, but not yet in the rbtree */
+	struct rb_root mappings;
+};
+
+static void free_list(struct list_head *head)
+{
+	struct mapping *m, *tmp;
+	list_for_each_entry_safe (m, tmp, head, list)
+		kfree(m);
+}
+
+static void metadata_destroy(struct metadata *md)
+{
+	free_list(&md->lru);
+	free_list(&md->free);
+	free_list(&md->pending);
+	kfree(md);
+}
+
+static struct metadata *metadata_create(unsigned nr_cache_blocks)
+{
+	dm_block_t b;
+	struct mapping *m;
+	struct metadata *md = kmalloc(sizeof(*md), GFP_KERNEL);
+	if (!md)
+		return NULL;
+
+	spin_lock_init(&md->lock);
+
+	INIT_LIST_HEAD(&md->lru);
+	INIT_LIST_HEAD(&md->free);
+	INIT_LIST_HEAD(&md->pending);
+	md->mappings = RB_ROOT;
+
+	for (b = 0; b < nr_cache_blocks; b++) {
+		/* FIXME: use a slab */
+		m = kmalloc(sizeof(*m), GFP_KERNEL);
+		if (!m) {
+			metadata_destroy(md);
+			return NULL;
+		}
+
+		INIT_LIST_HEAD(&m->list);
+		rb_init_node(&m->node);
+		m->origin = 0;
+		m->cache = b;
+		list_add_tail(&m->list, &md->free);
+	}
+
+	return md;
+}
+
+static struct mapping *__md_alloc_mapping(struct metadata *md)
+{
+	struct mapping *m;
+
+	if (list_empty(&md->free))
+		return NULL;
+
+	m = list_first_entry(&md->free, struct mapping, list);
+	list_move(&m->list, &md->pending);
+
+	return m;
+}
+
+static struct mapping *md_alloc_mapping(struct metadata *md)
+{
+	struct mapping *m;
+
+	spin_lock(&md->lock);
+	m = __md_alloc_mapping(md);
+	spin_unlock(&md->lock);
+
+	return m;
+}
+
+static struct mapping *__rb_lookup(struct rb_node *root,
+				   dm_block_t origin_block)
+{
+	struct rb_node *n = root;
+	struct mapping *m;
+
+	while (n) {
+		m = rb_entry(n, struct mapping, node);
+
+		if (origin_block < m->origin)
+			n = n->rb_left;
+		else if (origin_block > m->origin)
+			n = n->rb_right;
+		else
+			return m;
+	}
+
+	return NULL;
+}
+
+static struct mapping *md_lookup_mapping(struct metadata *md,
+					 dm_block_t origin_block)
+{
+	struct mapping *m;
+
+	spin_lock(&md->lock);
+	m = __rb_lookup(md->mappings.rb_node, origin_block);
+	spin_unlock(&md->lock);
+
+	return m;
+}
+
+static struct mapping *__rb_insert(struct rb_node **root,
+				   dm_block_t origin_block,
+				   struct rb_node *node)
+{
+	struct rb_node **p = root;
+	struct rb_node *parent = NULL;
+	struct mapping *m;
+
+	while (*p) {
+		parent = *p;
+		m = rb_entry(*p, struct mapping, node);
+
+		if (origin_block < m->origin)
+			p = &(*p)->rb_left;
+
+		else if (origin_block > m->origin)
+			p = &(*p)->rb_right;
+
+		else {
+			BUG();
+			return m;
+		}
+	}
+
+	rb_link_node(node, parent, p);
+	return NULL;
+}
+
+static int __md_insert_mapping(struct metadata *md,
+			       struct mapping *m)
+{
+	struct mapping *tmp;
+
+	tmp = __rb_insert(&md->mappings.rb_node, m->origin, &m->node);
+	rb_insert_color(&m->node, &md->mappings);
+	list_move_tail(&m->list, &md->lru);
+	return 0;
+}
+
+static int md_insert_mapping(struct metadata *md,
+			     struct mapping *m)
+{
+	int r;
+
+	spin_lock(&md->lock);
+	r = __md_insert_mapping(md, m);
+	spin_unlock(&md->lock);
+
+	return r;
+}
+
+static struct mapping *md_reclaim_mapping(struct metadata *md)
+{
+	struct mapping *m = NULL;
+
+	spin_lock(&md->lock);
+	if (!list_empty(&md->lru)) {
+		m = list_first_entry(&md->lru, struct mapping, list);
+		list_move_tail(&m->list, &md->pending);
+		rb_erase(&m->node, &md->mappings);
+		rb_init_node(&m->node);
+	}
+	spin_unlock(&md->lock);
+
+	return m;
+}
+
+/*
+ * m should be on the pending list, and not in the rbtree.  ie. acquired
+ * with md_reclaim_mapping().
+ */
+static void md_free_mapping(struct metadata *md, struct mapping *m)
+{
+	spin_lock(&md->lock);
+	list_move_tail(&m->list, &md->free);
+	spin_unlock(&md->lock);
+}
+
+/*----------------------------------------------------------------*/
+
+/* Mechanism */
 
 #define BLOCK_SIZE_MIN 64
 #define DM_MSG_PREFIX "cache"
 #define DAEMON "cached"
+#define PRISON_CELLS 1024
+#define ENDIO_HOOK_POOL_SIZE 10240
+#define MIGRATION_POOL_SIZE 128
 
 struct cache_c;
 
-struct migration {
-	struct list_head list;
-	int to_cache;
-	dm_block_t origin_block;
-	dm_block_t cache_block;
-	struct cell *cell;
-	int err;
-	struct cache_c *cache;
-};
-
-struct policy {
-	void (*destructor)(struct policy *p);
-	void (*notify)(struct policy *p, struct bio *bio);
-
-	/*
-	 * This should return -ENODATA if there is no currently suggested
-	 * migration.
-	 */
-	int (*suggest_migration)(struct policy *p, struct migration *result);
-};
-
+/* FIXME: split target from mech */
 struct cache_c {
 	struct dm_target *ti;
-	struct cache_metadata *hmd;
 
 	struct dm_dev *origin_dev;
 	struct dm_dev *cache_dev;
-	struct dm_dev *metadata_dev;
 
 	sector_t origin_size;
 	sector_t sectors_per_block;
@@ -86,255 +270,166 @@ struct cache_c {
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
-	struct list_head unquiesced_migrations;
+
 	struct list_head quiesced_migrations;
 	struct list_head copied_migrations;
 
 	struct dm_kcopyd_client *copier;
-	struct deferred_set deferred_set;
-	struct bio_prison prison;
-
-	mempool_t *migration_pool;
-
 	struct workqueue_struct *wq;
 	struct work_struct worker;
+
+	struct bio_prison *prison;
+	struct deferred_set *all_io_ds;
+
+	struct metadata *md;
+
+	mempool_t *endio_hook_pool;
+	mempool_t *migration_pool;
 };
 
-/*----------------------------------------------------------------
- * Stochastic policy.  The simplest, and worst performing policy I can
- * think of.  If you can't write a better one than this then you're not
- * trying.
- *--------------------------------------------------------------*/
-struct stochastic_policy {
-	struct policy policy;
-
-	/* every nth bio gets mapped into a random cache slot */
-	spinlock_t lock;
-	unsigned interval;
-	unsigned n;
-	int suggested_set;
-	dm_block_t suggested_block;
-};
-
-static void stochastic_dtr(struct policy *p)
-{
-	struct stochastic_policy *sp = container_of(p, struct stochastic_policy, policy);
-	kfree(sp);
-}
-
-static void stochastic_notify(struct policy *p, struct bio *bio)
-{
-	unsigned long flags;
-	struct stochastic_policy *sp = container_of(p, struct stochastic_policy, policy);
-
-	spin_lock_irqsave(&sp->lock, flags);
-	if (sp->n++ >= sp->interval) {
-		suggested_block = get_bio_block(cache, bio);
-		suggested_set = 1;
-		sp->n = 0;
-	}
-	spin_lock_irqrestore(&sp->lock, flags);
-}
-
-static int stochastic_migration(struct policy *p, struct migration *result)
-{
-	int r;
-	unsigned long flags;
-	struct stochastic_policy *sp = container_of(p, struct stochastic_policy, policy);
-
-	spin_lock_irqsave(&sp->lock, flags);
-	if (sp->suggested_block) {
-
-		if (there_are_unused_cache_blocks(cache)) {
-			result->to_cache = 1;
-			result->origin_block = sp->suggested_block;
-			result->cache_block = random_unused_block;
-
-		} else if (there_are_clean_cache_blocks(cache)) {
-
-			// demote a random cache entry
-
-			// promote a random cache entry
-
-		} else {
-
-		}
-
-		sp->suggested_set = 0;
-	}
-	spin_lock_irqrestore(&sp->lock, flags);
-
-	return r;
-}
-
-static stochastic_create(unsigned interval)
-{
-	struct stochastic_policy *sp = kmalloc(sizeof(*sp), GFP_MALLOC);
-	if (sp) {
-		sp->policy.destructor = stochastic_dtr;
-		sp->policy.notify = stochastic_notify;
-		sp->policy.suggest_migration = stochastic_migration;
-		sp->interval = interval;
-	}
-
-	return &sp->policy;
-}
-
-/*----------------------------------------------------------------
- * Tracking of in flight bios
- *--------------------------------------------------------------*/
-
-static void track_bio(struct cache_c *cache, union map_info *info, struct bio *bio)
-{
-	info->ptr = ds_inc(&cache->deferred_set);
-}
-
-static int untrack_bio(struct cache_c *cache, union map_info *info, struct bio *bio)
-{
-	unsigned long flags;
-	struct deferred_entry *de = info->ptr;
-	struct list_head work;
-
-	INIT_LIST_HEAD(&work);
-	ds_dec(de, &work);
-
-	if (!list_empty(&work)) {
-		spin_lock_irqsave(&cache->lock, flags);
-		list_splice(&work, &cache->quiesced_migrations);
-		spin_unlock_irqrestore(&cache->lock, flags);
-	}
-
-	return 0;
-}
-
-/*----------------------------------------------------------------
- * Migration processing
- *--------------------------------------------------------------*/
-
-static void process_unquiesced_migrations(struct cache_c *cache)
-{
-	unsigned long flags;
-	struct migration *m, *tmp;
-	struct list_head head;
-	struct cell_key key;
+struct endio_hook {
+	struct cache_c *cache;
+	struct deferred_entry *all_io_entry;
+	struct mapping *new_mapping;
 	struct cell *cell;
+};
 
-	INIT_LIST_HEAD(&head);
-	spin_lock_irqsave(&cache->lock, flags);
-	list_splice_init(&cache->unquiesced_migrations, &head);
-	spin_unlock_irqrestore(&cache->lock, flags);
+/*
+ * FIXME: add a bitmap, to allow us to specify subset migrations.
+ */
+struct migration {
+	struct list_head list;
+	int to_cache;
+	struct mapping *m;
+	struct cell *cell;
+	int err;
 
-	list_for_each_entry_safe (m, tmp, &head, list) {
-		list_del(&m->list);
-
-		/*
-		 * We must create a cell here to prevent further io
-		 * to this block.
-		 */
-		build_key(m->origin_block, &key);
-		bio_detain(&cache->prison, &key, NULL, &cell);
-		m->cell = cell;
-		if (!ds_add_work(&cache->deferred_set, &m->list))
-			list_add(&m->list, &cache->quiesced_migrations);
-	}
-}
-
-static void copy_complete(int read_err, unsigned long write_err, void *context)
-{
-	unsigned long flags;
-	struct migration *m = (struct migration *) context;
-
-	m->err = read_err || write_err ? -EIO : 0;
-
-	spin_lock_irqsave(&m->cache->lock, flags);
-	list_add(&m->list, &m->cache->copied_migrations);
-	spin_unlock_irqrestore(&m->cache->lock, flags);
-
-	queue_work(m->cache->wq, &m->cache->worker);
-}
-
-static void process_quiesced_migrations(struct cache_c *cache)
-{
-	int r;
-	unsigned long flags;
-	struct migration *m, *tmp;
-	struct list_head head;
-
-	INIT_LIST_HEAD(&head);
-	spin_lock_irqsave(&cache->lock, flags);
-	list_splice_init(&cache->quiesced_migrations, &head);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	list_for_each_entry_safe (m, tmp, &head, list) {
-		struct dm_io_region origin, cache;
-
-		origin.bdev = cache->origin_dev->bdev;
-		origin.sector = m->origin_block * cache->sectors_per_block;
-		origin.count = cache->sectors_per_block;
-
-		cache.bdev = cache->cache_dev->bdev;
-		cache.sector = m->cache_block * cache->sectors_per_block;
-		cache.sector = cache->sectors_per_block;
-
-		r = dm_kcopyd_copy(cache->copier,
-				   m->to_cache ? &origin : &cache,
-				   1,
-				   m->to_cache ? &cache : &origin,
-				   0, copy_complete, m);
-		if (r < 0) {
-			mempool_free(m, cache->migration_pool);
-			printk(KERN_ALERT "dm_kcopyd_copy() failed");
-		}
-	}
-}
-
-static void process_copied_migrations(struct cache_c *cache)
-{
-	int r;
-	unsigned long flags;
-	struct migration *m, *tmp;
-	struct list_head head;
-	struct bio_list bios;
-	struct bio *bio;
-
-	INIT_LIST_HEAD(&head);
-	spin_lock_irqsave(&cache->lock, flags);
-	list_splice_init(&cache->copied_migrations, &head);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	/* update the metadata */
-	list_for_each_entry_safe (m, tmp, &head, list) {
-		if (!m->err) {
-			if (m->to_cache) {
-				r = cache_metadata_insert(cache->hmd, m->origin_block, m->cache_block);
-			} else
-				r = cache_metadata_remove(cache->hmd, m->origin_block);
-		}
-
-		/*
-		 * Even if there was an error we can release the bios from
-		 * the cell and let them proceed using the old location.
-		 */
-		bio_list_init(&bios);
-		cell_release(m->cell, &bios);
-		spin_lock_irqsave(&cache->lock, flags);
-		while ((bio = bio_list_pop(&bios)))
-			bio_list_add(&cache->deferred_bios, bio);
-		spin_unlock_irqrestore(&cache->lock, flags);
-
-		mempool_free(m, cache->migration_pool);
-	}
-}
-
-/*----------------------------------------------------------------
- * bio processing
- *--------------------------------------------------------------*/
+	struct cache_c *cache;
+};
 
 static void build_key(dm_block_t block, struct cell_key *key)
 {
 	key->virtual = 0;
 	key->dev = 0;
 	key->block = block;
+}
+
+static void wake_worker(struct cache_c *cache)
+{
+	queue_work(cache->wq, &cache->worker);
+}
+
+/*----------------------------------------------------------------
+ * Migration processing
+ *--------------------------------------------------------------*/
+static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	(holder ? cell_release : cell_release_no_holder)(cell, &cache->deferred_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
+static void copy_complete(int read_err, unsigned long write_err, void *context)
+{
+	unsigned long flags;
+	struct migration *mg = (struct migration *) context;
+	struct cache_c *cache = mg->cache;
+
+	mg->err = read_err || write_err ? -EIO : 0;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	list_add(&mg->list, &cache->copied_migrations);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
+static void process_quiesced(struct cache_c *cache, struct migration *mg)
+{
+	int r;
+	struct dm_io_region o_region, c_region;
+
+	BUG_ON(!cache);
+	BUG_ON(!mg);
+	BUG_ON(!mg->m);
+	BUG_ON(!mg->cell);
+
+	o_region.bdev = cache->origin_dev->bdev;
+	o_region.sector = mg->m->origin * cache->sectors_per_block;
+	o_region.count = cache->sectors_per_block;
+
+	c_region.bdev = cache->cache_dev->bdev;
+	c_region.sector = mg->m->cache * cache->sectors_per_block;
+	c_region.count = cache->sectors_per_block;
+
+	r = dm_kcopyd_copy(cache->copier,
+			   mg->to_cache ? &o_region : &c_region,
+			   1,
+			   mg->to_cache ? &c_region : &o_region,
+			   0, copy_complete, mg);
+	if (r < 0) {
+		cell_defer(cache, mg->cell, 1);
+		mempool_free(mg, cache->migration_pool);
+	}
+}
+
+static void process_copied(struct cache_c *cache, struct migration *mg)
+{
+	/* the migration failed, we reinsert the old mapping. */
+	if (mg->err)
+		md_insert_mapping(cache->md, mg->m);
+
+	/*
+	 * Even if there was an error we can release the bios from
+	 * the cell and let them proceed using the old location.
+	 */
+	if (mg->cell)
+		cell_defer(cache, mg->cell, 1);
+
+	mempool_free(mg, cache->migration_pool);
+}
+
+static void process_migrations(struct cache_c *cache, struct list_head *head,
+			       void (*fn)(struct cache_c *, struct migration *))
+{
+	unsigned long flags;
+	struct list_head list;
+	struct migration *mg, *tmp;
+
+	INIT_LIST_HEAD(&list);
+	spin_lock_irqsave(&cache->lock, flags);
+	list_splice_init(head, &list);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	list_for_each_entry_safe(mg, tmp, &list, list)
+		fn(cache, mg);
+}
+
+static void migrate(struct cache_c *cache, struct mapping *m, int to_cache, struct cell *cell)
+{
+	struct migration *mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
+	mg->to_cache = to_cache;
+	mg->m = m;
+	mg->cell = cell;
+	mg->err = 0;
+	mg->cache = cache;
+	if (!ds_add_work(cache->all_io_ds, &mg->list))
+		list_add_tail(&mg->list, &cache->quiesced_migrations);
+
+}
+
+/*----------------------------------------------------------------
+ * bio processing
+ *--------------------------------------------------------------*/
+static int io_overlaps_block(struct cache_c *cache, struct bio *bio)
+{
+	return !(bio->bi_sector & cache->offset_mask) &&
+		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
+
 }
 
 static void defer_bio(struct cache_c *cache, struct bio *bio)
@@ -344,6 +439,8 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 	spin_lock_irqsave(&cache->lock, flags);
 	bio_list_add(&cache->deferred_bios, bio);
 	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
 }
 
 static void remap_to_origin(struct cache_c *cache, struct bio *bio)
@@ -366,12 +463,13 @@ static dm_block_t get_bio_block(struct cache_c *cache, struct bio *bio)
 static void issue(struct cache_c *cache, struct bio *bio)
 {
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+#if 0
 		int r = cache_metadata_commit(cache->hmd);
 		if (r) {
-			printk(KERN_ALERT "cache metadata commit failed");
 			bio_io_error(bio);
 			return;
 		}
+#endif
 	}
 
 	generic_make_request(bio);
@@ -380,60 +478,71 @@ static void issue(struct cache_c *cache, struct bio *bio)
 static int map_bio(struct cache_c *cache, struct bio *bio)
 {
 	int r;
-	dm_block_t block = get_bio_block(cache, bio), cache_block;
+	dm_block_t block = get_bio_block(cache, bio);
 	struct cell_key key;
 	struct cell *cell;
+	struct mapping *m;
+	int is_write = bio_data_dir(bio) == WRITE;
+	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	int release_cell = 1;
 
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
 	build_key(block, &key);
-	r = bio_detain_if_occupied(&cache->prison, &key, bio, &cell);
+	r = bio_detain(cache->prison, &key, bio, &cell);
 	if (r > 0)
-		r = DM_MAPIO_SUBMITTED;
+		return DM_MAPIO_SUBMITTED;
 
-	else if (r == 0) {
-		r = cache_metadata_lookup(cache->hmd, block, 0, &cache_block);
-		switch (r) {
-		case 0:
-			if (bio_data_dir(bio) == WRITE) {
-				r = cache_metadata_mark_dirty(cache->hmd, block);
-				if (r) {
-					printk(KERN_ALERT "cache_metadata_mark_dirty() failed");
-				} else {
-					remap_to_cache(cache, bio, cache_block);
-					r = DM_MAPIO_REMAPPED;
-				}
+	r = DM_MAPIO_REMAPPED;
+	m = md_lookup_mapping(cache->md, block);
+	if (m)
+		remap_to_cache(cache, bio, m->cache);
+
+	else {
+		if (is_write && io_overlaps_block(cache, bio)) {
+			/*
+			 * Put it in the cache.
+			 */
+			m = md_alloc_mapping(cache->md);
+			if (m) {
+				m->origin = block;
+				h->new_mapping = m;
+				h->cell = cell;
+				release_cell = 0;
+				remap_to_cache(cache, bio, m->cache);
+
 			} else {
-				remap_to_cache(cache, bio, cache_block);
-				r = DM_MAPIO_REMAPPED;
+				/* FIXME: take cleaning blocks out of the main io path */
+				m = md_reclaim_mapping(cache->md);
+				if (!m)
+					remap_to_origin(cache, bio);
+
+				else {
+					/* writeback this cache block so we can use it */
+					migrate(cache, m, 0, cell);
+					r = DM_MAPIO_SUBMITTED;
+				}
 			}
-			break;
 
-		case -ENODATA:
+		} else
 			remap_to_origin(cache, bio);
-			r = DM_MAPIO_REMAPPED;
-			break;
-
-		default:
-			break;
-		}
 	}
+
+	if (release_cell)
+		cell_release_singleton(cell, bio);
 
 	return r;
 }
 
-static void process_discard(struct cache_c *cache, struct bio *bio)
-{
-	/* FIXME: finish */
-	bio_endio(bio, 0);
-}
-
 static void process_bio(struct cache_c *cache, struct bio *bio)
 {
-	int r = map_bio(cache, bio);
-	switch (r) {
+	struct endio_hook *h;
+
+	switch (map_bio(cache, bio)) {
 	case DM_MAPIO_REMAPPED:
+		h = dm_get_mapinfo(bio)->ptr;
+		h->all_io_entry = ds_inc(cache->all_io_ds);
 		issue(cache, bio);
 		break;
 
@@ -446,7 +555,7 @@ static void process_bio(struct cache_c *cache, struct bio *bio)
 	}
 }
 
-static void process_bios(struct cache_c *cache)
+static void process_deferred_bios(struct cache_c *cache)
 {
 	unsigned long flags;
 	struct bio_list bios;
@@ -459,12 +568,8 @@ static void process_bios(struct cache_c *cache)
 	bio_list_init(&cache->deferred_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	while ((bio = bio_list_pop(&bios))) {
-		if (bio->bi_rw & REQ_DISCARD)
-			process_discard(cache, bio);
-		else
-			process_bio(cache, bio);
-	}
+	while ((bio = bio_list_pop(&bios)))
+		process_bio(cache, bio);
 }
 
 /*----------------------------------------------------------------
@@ -473,7 +578,6 @@ static void process_bios(struct cache_c *cache)
 static int more_work(struct cache_c *cache)
 {
 	return !bio_list_empty(&cache->deferred_bios) ||
-		!list_empty(&cache->unquiesced_migrations) ||
 		!list_empty(&cache->quiesced_migrations) ||
 		!list_empty(&cache->copied_migrations);
 }
@@ -483,10 +587,9 @@ static void do_work(struct work_struct *ws)
 	struct cache_c *cache = container_of(ws, struct cache_c, worker);
 
 	do {
-		process_bios(cache);
-		process_unquiesced_migrations(cache);
-		process_quiesced_migrations(cache);
-		process_copied_migrations(cache);
+		process_deferred_bios(cache);
+		process_migrations(cache, &cache->quiesced_migrations, process_quiesced);
+		process_migrations(cache, &cache->copied_migrations, process_copied);
 
 	} while (more_work(cache));
 }
@@ -504,8 +607,7 @@ static int congested(void *congested_data, int bdi_bits)
 	struct cache_c *cache = congested_data;
 
 	return is_congested(cache->origin_dev, bdi_bits) ||
-		is_congested(cache->cache_dev, bdi_bits) ||
-		is_congested(cache->metadata_dev, bdi_bits); /* FIXME: we don't know that there is a metadata dev */
+		is_congested(cache->cache_dev, bdi_bits);
 }
 
 static void set_congestion_fn(struct cache_c *cache)
@@ -526,13 +628,15 @@ static void cache_dtr(struct dm_target *ti)
 {
 	struct cache_c *cache = ti->private;
 
-	prison_destroy(&cache->prison);
+	mempool_destroy(cache->migration_pool);
+	mempool_destroy(cache->endio_hook_pool);
+	metadata_destroy(cache->md);
+	ds_destroy(cache->all_io_ds);
+	prison_destroy(cache->prison);
+	destroy_workqueue(cache->wq);
 	dm_kcopyd_client_destroy(cache->copier);
 	dm_put_device(ti, cache->origin_dev);
 	dm_put_device(ti, cache->cache_dev);
-	dm_put_device(ti, cache->metadata_dev);
-	cache_metadata_close(cache->hmd);
-	destroy_workqueue(cache->wq);
 
 	kfree(cache);
 }
@@ -555,28 +659,25 @@ static sector_t get_dev_size(struct dm_dev *dev)
 /*
  * Construct a hierarchical storage device mapping:
  *
- * hsm <origin dev>
- *     <data dev>
- *     <meta dev>
- *     <data block size>
+ * cache <origin dev> <cache dev> <block size>
  *
  * origin dev	   : slow device holding original data blocks
- * data dev	   : fast device holding cached data blocks
- * meta dev	   : fast device keeping track of provisioned cached blocks
+ * cache dev	   : fast device holding cached data blocks
  * data block size : cache unit size in sectors
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
+	dm_block_t nr_cache_blocks;
 	sector_t block_size;
 	struct cache_c *cache;
 	char *end;
 
-	if (argc != 4) {
+	if (argc != 3) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
 
-	block_size = simple_strtoul(argv[3], &end, 10);
+	block_size = simple_strtoul(argv[2], &end, 10);
 	if (block_size < BLOCK_SIZE_MIN ||
 	    !is_power_of_2(block_size) || *end) {
 		ti->error = "Invalid data block size argument";
@@ -588,64 +689,103 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error allocating cache context";
 		return -ENOMEM;
 	}
-
 	cache->ti = ti;
+
+	if (get_device_(cache->ti, argv[0], &cache->origin_dev,
+			"Error opening origin device"))
+		goto bad1;
+
+	if (get_device_(cache->ti, argv[1], &cache->cache_dev,
+			"Error opening cache device"))
+		goto bad2;
+
+	cache->origin_size = get_dev_size(cache->origin_dev);
+	if (ti->len > cache->origin_size) {
+		ti->error = "Device size larger than cached device";
+		goto bad3;
+	}
+
 	cache->sectors_per_block = block_size;
+	cache->offset_mask = block_size - 1;
 	cache->block_shift = ffs(block_size) - 1;
 
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 
-	if (get_device_(cache->ti, argv[0], &cache->origin_dev,
-			"Error opening origin device"))
-		goto bad5;
-
-	if (get_device_(cache->ti, argv[1], &cache->cache_dev,
-			"Error opening data device"))
-		goto bad4;
-
-	if (get_device_(cache->ti, argv[2], &cache->metadata_dev,
-			"Error opening metadata device"))
-		goto bad3;
+	INIT_LIST_HEAD(&cache->quiesced_migrations);
+	INIT_LIST_HEAD(&cache->copied_migrations);
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
 		ti->error = "Couldn't create kcopyd client";
-		goto bad2;
-	}
-
-	cache->origin_size = get_dev_size(cache->origin_dev);
-	if (ti->len > cache->origin_size) {
-		ti->error = "Device size larger than cached device";
-		goto bad1;
+		goto bad3;
 	}
 
 	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
 	if (!cache->wq) {
-		printk(KERN_ALERT "couldn't create workqueue for metadata object");
-		goto bad1;
+		ti->error = "couldn't create workqueue for metadata object";
+		goto bad4;
+	}
+	INIT_WORK(&cache->worker, do_work);
+
+	cache->prison = prison_create(PRISON_CELLS);
+	if (!cache->prison) {
+		ti->error = "couldn't create bio prison";
+		goto bad5;
 	}
 
-	INIT_WORK(&cache->worker, do_work);
+	cache->all_io_ds = ds_create();
+	if (!cache->all_io_ds) {
+		ti->error = "couldn't create all_io deferred set";
+		goto bad6;
+	}
+
+	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
+	cache->md = metadata_create(nr_cache_blocks);
+	if (!cache->md) {
+		ti->error = "couldn't create metadata";
+		goto bad7;
+	}
+
+	cache->endio_hook_pool =
+		mempool_create_kmalloc_pool(ENDIO_HOOK_POOL_SIZE, sizeof(struct endio_hook));
+	if (!cache->endio_hook_pool) {
+		ti->error = "Error creating cache's endio_hook mempool";
+		goto bad8;
+	}
+
+	cache->migration_pool =
+		mempool_create_kmalloc_pool(MIGRATION_POOL_SIZE, sizeof(struct migration));
+	if (!cache->migration_pool) {
+		ti->error = "Error creating cache's endio_hook mempool";
+		goto bad9;
+	}
+
+
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
+	ti->num_discard_requests = 0;
 	set_congestion_fn(cache);
-
-	/* Set masks/shift for fast bio -> block mapping. */
-	cache->offset_mask = ti->split_io - 1;
 	smp_wmb();
 	return 0;
 
-bad1:
+bad9:
+	mempool_destroy(cache->migration_pool);
+bad8:
+	metadata_destroy(cache->md);
+bad7:
+	ds_destroy(cache->all_io_ds);
+bad6:
+	prison_destroy(cache->prison);
+bad5:
+	destroy_workqueue(cache->wq);
+bad4:
 	dm_kcopyd_client_destroy(cache->copier);
-bad2:
-	dm_put_device(ti, cache->metadata_dev);
 bad3:
 	dm_put_device(ti, cache->cache_dev);
-bad4:
+bad2:
 	dm_put_device(ti, cache->origin_dev);
-bad5:
+bad1:
 	kfree(cache);
 	return -EINVAL;
 }
@@ -653,42 +793,49 @@ bad5:
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
-	int r;
 	struct cache_c *cache = ti->private;
+	struct endio_hook *h = mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
 
-	track_bio(cache, map_context, bio);
+	h->cache = cache;
+	h->all_io_entry = NULL;
+	h->new_mapping = NULL;
+	h->cell = NULL;
+	map_context->ptr = h;
 
-	/* These may block, so we defer */
-	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
-		defer_bio(cache, bio);
-		return DM_MAPIO_SUBMITTED;
-	}
-
-	r = map_bio(cache, bio);
-	switch (r) {
-	case DM_MAPIO_SUBMITTED:
-	case DM_MAPIO_REMAPPED:
-		break;
-
-	case -EWOULDBLOCK:
-		defer_bio(cache, bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
-
-	default:
-		bio_io_error(bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
-	}
-
-	return r;
+	/*
+	 * Let's keep it simple to start with and defer everything.
+	 */
+	defer_bio(cache, bio);
+	return DM_MAPIO_SUBMITTED;
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio,
-		      int error, union map_info *map_context)
+		      int error, union map_info *info)
 {
+	int r = 0;
+	unsigned long flags;
 	struct cache_c *cache = ti->private;
-	return untrack_bio(cache, map_context, bio);
+	struct list_head work;
+	struct endio_hook *h = info->ptr;
+
+	INIT_LIST_HEAD(&work);
+	ds_dec(h->all_io_entry, &work);
+
+	if (!list_empty(&work)) {
+		spin_lock_irqsave(&cache->lock, flags);
+		list_splice(&work, &cache->quiesced_migrations);
+		spin_unlock_irqrestore(&cache->lock, flags);
+		wake_worker(cache);
+	}
+
+	/* FIXME: this'll need to be done by the work to allow the insert to block */
+	if (h->new_mapping)
+		r = md_insert_mapping(cache->md, h->new_mapping);
+
+	if (h->cell)
+		cell_defer(cache, h->cell, 0);
+
+	return r;
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
@@ -709,20 +856,22 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, cache->metadata_dev->bdev->bd_dev);
-		DMEMIT("%s %llu", buf, (long long unsigned) cache->sectors_per_block);
 	}
 
 	return 0;
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
-			       iterate_devices_callout_fn fn, void *data)
+				 iterate_devices_callout_fn fn, void *data)
 {
 	struct cache_c *cache = ti->private;
 
-	return fn(ti, cache->origin_dev, 0, ti->len, data) ||
-		fn(ti, cache->cache_dev, 0, cache->origin_size, data);
+	/*
+	 * We don't include the cache device in the iteration since
+	 * device_area_is_invalid checks that all iteratees are at least
+	 * the size of the target.
+	 */
+	return fn(ti, cache->origin_dev, 0, ti->len, data);
 }
 
 static int cache_bvec_merge(struct dm_target *ti,
@@ -763,20 +912,20 @@ static struct target_type cache_target = {
 	.io_hints = cache_io_hints,
 };
 
-int __init dm_cache_init(void)
+static int __init dm_cache_init(void)
 {
 	int r;
 
 	r = dm_register_target(&cache_target);
 	if (r) {
-		DMERR("Failed to register %s %s", DM_MSG_PREFIX, version);
+		DMERR("Failed to register %s", DM_MSG_PREFIX);
 	} else
-		DMINFO("Registered %s %s", DM_MSG_PREFIX, version);
+		DMINFO("Registered %s", DM_MSG_PREFIX);
 
 	return r;
 }
 
-void dm_cache_exit(void)
+static void dm_cache_exit(void)
 {
 	dm_unregister_target(&cache_target);
 }
