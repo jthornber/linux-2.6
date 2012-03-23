@@ -408,6 +408,7 @@ struct cache_c {
 	atomic_t total;
 	atomic_t read_hit;
 	atomic_t read_miss;
+	atomic_t read_union;
 	atomic_t write_hit;
 	atomic_t write_miss;
 	atomic_t write_miss_partial;
@@ -426,7 +427,10 @@ struct endio_hook {
  */
 struct migration {
 	struct list_head list;
-	int to_cache;
+
+	unsigned to_cache:1;
+	unsigned free_mapping:1;
+
 	struct mapping *m;
 	uint64_t gen;
 	struct cell *cell;
@@ -562,6 +566,9 @@ static void process_copied(struct cache_c *cache, struct migration *mg)
 	if (!mg->err && !mg->to_cache)
 		md_set_origin_gen(mg->m, mg->gen);
 
+	if (!mg->err && mg->free_mapping)
+		md_remove_mapping(cache->md, mg->m);
+
 	/*
 	 * Even if there was an error we can release the bios from
 	 * the cell and let them proceed using the old location.
@@ -588,13 +595,14 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 		fn(cache, mg);
 }
 
-static void migrate(struct cache_c *cache, struct mapping *m, int to_cache, struct cell *cell)
+static void migrate(struct cache_c *cache, struct mapping *m, int to_cache, int free_mapping, struct cell *cell)
 {
 	struct migration *mg;
 
 	md_set_migrating(cache->md, m, 1);
 	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
 	mg->to_cache = to_cache;
+	mg->free_mapping = free_mapping;
 	mg->m = m;
 	mg->gen = md_get_cache_gen(m);
 	mg->cell = cell;
@@ -790,19 +798,12 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			BUG_ON(!m);
 			debug("REMAP_NEW_CACHE\n");
 			atomic_inc(&cache->write_hit_new);
-			debug("RNC 1\n");
 			md_remove_mapping(cache->md, m);
-			debug("RNC 2\n");
 			m->origin = block;
-			debug("RNC 3\n");
 			md_insert_mapping(cache->md, m);
-			debug("RNC 4\n");
 			md_clear_valid_sectors(cache->md, m);
-			debug("RNC 5\n");
 			h->cell = cell;
-			debug("RNC 6\n");
 			remap_to_cache(cache, bio, m);
-			debug("RNC 7\n");
 			release_cell = 0;
 			break;
 
@@ -810,7 +811,17 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			BUG_ON(!m);
 			debug("REMAP_WRITEBACK\n");
 			atomic_inc(&cache->writeback);
-			migrate(cache, m, 0, NULL);
+			migrate(cache, m, 0, 0, NULL);
+			break;
+
+		case REMAP_UNION:
+			BUG_ON(!m);
+			debug("REMAP_UNION\n");
+			atomic_inc(&cache->read_union);
+
+			/* slow, but simple ... we writeback, drop the cache entry, then retry */
+			migrate(cache, m, 0, 1, cell);
+			release_cell = 0;
 			break;
 
 		default:
@@ -922,6 +933,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("total ios:\t%u\n", (unsigned) atomic_read(&cache->total));
 	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
 	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->read_miss));
+	pr_alert("read union:\t%u\n", (unsigned) atomic_read(&cache->read_union));
 	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->write_hit));
 	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->write_miss));
 	pr_alert("write misses due to partial block:\t%u\n", (unsigned) atomic_read(&cache->write_miss_partial));
@@ -1064,6 +1076,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->total, 0);
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
+	atomic_set(&cache->read_union, 0);
 	atomic_set(&cache->write_hit, 0);
 	atomic_set(&cache->write_miss, 0);
 	atomic_set(&cache->write_miss_partial, 0);
