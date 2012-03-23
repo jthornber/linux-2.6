@@ -41,24 +41,42 @@
 
 /* FIXME: describe, mechanism/policy/target split */
 
+/* FIXME: I think all the md_ functions will eventually be able to block,
+ * once we allow for this we can drop the irq spin locking.
+ */
+
 /*----------------------------------------------------------------*/
 
 /*
  * Simple, in-core metadata, just a quick hack for development.
  */
 struct mapping {
+	/*
+	 * These two fields are protected by the spin lock in the struct
+	 * metadata.
+	 */
 	struct list_head list;
 	struct rb_node node;
+
+	/* FIXME: is the lock needed if they're only every changed from the worker thread? */
+	spinlock_t lock;	/* protects subsequent fields */
 	dm_block_t origin;
 	dm_block_t cache;
+
+	/* used to determine if the cache is dirty wrt the origin */
+	/* FIXME: uses too much space, but nice way to define semantics */
+	atomic64_t origin_gen;
+	atomic64_t cache_gen;
 };
 
 struct metadata {
 	spinlock_t lock;
 	struct list_head lru;	  /* in the rbtree */
 	struct list_head free;	  /* unallocated */
-	struct list_head pending; /* allocated, but not yet in the rbtree */
+	struct list_head migrating;
 	struct rb_root mappings;
+
+	atomic_t nr_migrating;
 };
 
 static void free_list(struct list_head *head)
@@ -72,7 +90,6 @@ static void metadata_destroy(struct metadata *md)
 {
 	free_list(&md->lru);
 	free_list(&md->free);
-	free_list(&md->pending);
 	kfree(md);
 }
 
@@ -88,8 +105,9 @@ static struct metadata *metadata_create(unsigned nr_cache_blocks)
 
 	INIT_LIST_HEAD(&md->lru);
 	INIT_LIST_HEAD(&md->free);
-	INIT_LIST_HEAD(&md->pending);
+	INIT_LIST_HEAD(&md->migrating);
 	md->mappings = RB_ROOT;
+	atomic_set(&md->nr_migrating, 0);
 
 	for (b = 0; b < nr_cache_blocks; b++) {
 		/* FIXME: use a slab */
@@ -99,10 +117,12 @@ static struct metadata *metadata_create(unsigned nr_cache_blocks)
 			return NULL;
 		}
 
+		spin_lock_init(&m->lock);
 		INIT_LIST_HEAD(&m->list);
 		rb_init_node(&m->node);
 		m->origin = 0;
 		m->cache = b;
+
 		list_add_tail(&m->list, &md->free);
 	}
 
@@ -111,24 +131,20 @@ static struct metadata *metadata_create(unsigned nr_cache_blocks)
 
 static struct mapping *__md_alloc_mapping(struct metadata *md)
 {
-	struct mapping *m;
-
 	if (list_empty(&md->free))
 		return NULL;
 
-	m = list_first_entry(&md->free, struct mapping, list);
-	list_move(&m->list, &md->pending);
-
-	return m;
+	return list_first_entry(&md->free, struct mapping, list);
 }
 
 static struct mapping *md_alloc_mapping(struct metadata *md)
 {
 	struct mapping *m;
+	unsigned long flags;
 
-	spin_lock(&md->lock);
+	spin_lock_irqsave(&md->lock, flags);
 	m = __md_alloc_mapping(md);
-	spin_unlock(&md->lock);
+	spin_unlock_irqrestore(&md->lock, flags);
 
 	return m;
 }
@@ -136,8 +152,8 @@ static struct mapping *md_alloc_mapping(struct metadata *md)
 static struct mapping *__rb_lookup(struct rb_node *root,
 				   dm_block_t origin_block)
 {
-	struct rb_node *n = root;
 	struct mapping *m;
+	struct rb_node *n = root;
 
 	while (n) {
 		m = rb_entry(n, struct mapping, node);
@@ -157,10 +173,13 @@ static struct mapping *md_lookup_mapping(struct metadata *md,
 					 dm_block_t origin_block)
 {
 	struct mapping *m;
+	unsigned long flags;
 
-	spin_lock(&md->lock);
+	spin_lock_irqsave(&md->lock, flags);
 	m = __rb_lookup(md->mappings.rb_node, origin_block);
-	spin_unlock(&md->lock);
+	if (m)
+		list_move_tail(&m->list, &md->lru);
+	spin_unlock_irqrestore(&md->lock, flags);
 
 	return m;
 }
@@ -201,6 +220,9 @@ static int __md_insert_mapping(struct metadata *md,
 	tmp = __rb_insert(&md->mappings.rb_node, m->origin, &m->node);
 	rb_insert_color(&m->node, &md->mappings);
 	list_move_tail(&m->list, &md->lru);
+	atomic64_set(&m->origin_gen, 0);
+	atomic64_set(&m->cache_gen, 0);
+
 	return 0;
 }
 
@@ -208,39 +230,84 @@ static int md_insert_mapping(struct metadata *md,
 			     struct mapping *m)
 {
 	int r;
+	unsigned long flags;
 
-	spin_lock(&md->lock);
+	spin_lock_irqsave(&md->lock, flags);
 	r = __md_insert_mapping(md, m);
-	spin_unlock(&md->lock);
+	spin_unlock_irqrestore(&md->lock, flags);
 
 	return r;
-}
-
-static struct mapping *md_reclaim_mapping(struct metadata *md)
-{
-	struct mapping *m = NULL;
-
-	spin_lock(&md->lock);
-	if (!list_empty(&md->lru)) {
-		m = list_first_entry(&md->lru, struct mapping, list);
-		list_move_tail(&m->list, &md->pending);
-		rb_erase(&m->node, &md->mappings);
-		rb_init_node(&m->node);
-	}
-	spin_unlock(&md->lock);
-
-	return m;
 }
 
 /*
  * m should be on the pending list, and not in the rbtree.  ie. acquired
  * with md_reclaim_mapping().
  */
-static void md_free_mapping(struct metadata *md, struct mapping *m)
+static void md_remove_mapping(struct metadata *md, struct mapping *m)
 {
-	spin_lock(&md->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&md->lock, flags);
+	rb_erase(&m->node, &md->mappings);
+	rb_init_node(&m->node);
 	list_move_tail(&m->list, &md->free);
-	spin_unlock(&md->lock);
+	spin_unlock_irqrestore(&md->lock, flags);
+}
+
+/* FIXME: clean blocks should be chosen in preference? */
+static struct mapping *md_idle_mapping(struct metadata *md)
+{
+	struct mapping *m = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&md->lock, flags);
+	if (!list_empty(&md->lru))
+		m = list_first_entry(&md->lru, struct mapping, list);
+	spin_unlock_irqrestore(&md->lock, flags);
+
+	return m;
+}
+
+/*
+ * FIXME: be careful of races here, assumes calling from single thread.
+ */
+static int md_is_clean(struct mapping *m)
+{
+	return atomic64_read(&m->origin_gen) == atomic64_read(&m->cache_gen);
+}
+
+static void md_inc_origin_gen(struct mapping *m)
+{
+	atomic64_add(1, &m->origin_gen);
+}
+
+static void md_inc_cache_gen(struct mapping *m)
+{
+	atomic64_add(1, &m->cache_gen);
+}
+
+static uint64_t md_get_cache_gen(struct mapping *m)
+{
+	return atomic64_read(&m->cache_gen);
+}
+
+static void md_set_origin_gen(struct mapping *m, uint64_t gen)
+{
+	atomic64_set(&m->origin_gen, gen);
+}
+
+static void md_set_migrating(struct metadata *md, struct mapping *m, unsigned n)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	list_move(&m->list, n ? &md->migrating : &md->lru);
+	spin_unlock_irqrestore(&m->lock, flags);
+
+	if (n)
+		atomic_sub(1, &md->nr_migrating);
+	else
+		atomic_add(1, &md->nr_migrating);
 }
 
 /*----------------------------------------------------------------*/
@@ -290,7 +357,6 @@ struct cache_c {
 struct endio_hook {
 	struct cache_c *cache;
 	struct deferred_entry *all_io_entry;
-	struct mapping *new_mapping;
 	struct cell *cell;
 };
 
@@ -301,6 +367,7 @@ struct migration {
 	struct list_head list;
 	int to_cache;
 	struct mapping *m;
+	uint64_t gen;
 	struct cell *cell;
 	int err;
 
@@ -356,7 +423,6 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 	BUG_ON(!cache);
 	BUG_ON(!mg);
 	BUG_ON(!mg->m);
-	BUG_ON(!mg->cell);
 
 	o_region.bdev = cache->origin_dev->bdev;
 	o_region.sector = mg->m->origin * cache->sectors_per_block;
@@ -372,16 +438,19 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 			   mg->to_cache ? &c_region : &o_region,
 			   0, copy_complete, mg);
 	if (r < 0) {
-		cell_defer(cache, mg->cell, 1);
+		if (mg->cell)
+			cell_defer(cache, mg->cell, 1);
 		mempool_free(mg, cache->migration_pool);
 	}
 }
 
 static void process_copied(struct cache_c *cache, struct migration *mg)
 {
+	md_set_migrating(cache->md, mg->m, 0);
+
 	/* the migration failed, we reinsert the old mapping. */
-	if (mg->err)
-		md_insert_mapping(cache->md, mg->m);
+	if (!mg->err && !mg->to_cache)
+		md_set_origin_gen(mg->m, mg->gen);
 
 	/*
 	 * Even if there was an error we can release the bios from
@@ -411,15 +480,18 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 
 static void migrate(struct cache_c *cache, struct mapping *m, int to_cache, struct cell *cell)
 {
-	struct migration *mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
+	struct migration *mg;
+
+	md_set_migrating(cache->md, m, 1);
+	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
 	mg->to_cache = to_cache;
 	mg->m = m;
+	mg->gen = md_get_cache_gen(m);
 	mg->cell = cell;
 	mg->err = 0;
 	mg->cache = cache;
 	if (!ds_add_work(cache->all_io_ds, &mg->list))
 		list_add_tail(&mg->list, &cache->quiesced_migrations);
-
 }
 
 /*----------------------------------------------------------------
@@ -448,10 +520,12 @@ static void remap_to_origin(struct cache_c *cache, struct bio *bio)
 	bio->bi_bdev = cache->origin_dev->bdev;
 }
 
-static void remap_to_cache(struct cache_c *cache, struct bio *bio, dm_block_t cache_block)
+static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
 {
+	md_inc_cache_gen(m);
+
 	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (cache_block << cache->block_shift) +
+	bio->bi_sector = (m->cache << cache->block_shift) +
 		(bio->bi_sector & cache->offset_mask);
 }
 
@@ -475,16 +549,93 @@ static void issue(struct cache_c *cache, struct bio *bio)
 	generic_make_request(bio);
 }
 
+/*----------------------------------------------------------------*/
+
+#define MAX_ACTIONS 4
+
+enum action_cmd {
+	REMAP_ORIGIN,
+	REMAP_CACHE,
+	REMAP_NEW_CACHE,
+
+	WRITEBACK,
+};
+
+struct action {
+	enum action_cmd cmd;
+	struct mapping *m;
+};
+
+static void __push_action(enum action_cmd cmd, struct mapping *m,
+			  struct action *actions, unsigned *count)
+{
+	actions[*count].cmd = cmd;
+	actions[*count].m = m;
+	(*count)++;
+}
+
+#define push_action(cmd, m) __push_action(cmd, m, actions, count)
+
+/* FIXME: get rid of the cache arg */
+static void get_actions(struct cache_c *cache,
+			struct metadata *md,
+			dm_block_t block,
+			struct bio *bio,
+			struct action *actions,
+			unsigned *count)
+{
+	struct mapping *m;
+	int is_write = bio_data_dir(bio) == WRITE;
+
+	*count = 0;
+
+	m = md_lookup_mapping(md, block);
+	if (m)
+		push_action(REMAP_CACHE, m);
+
+	else {
+		/* FIXME: too nested, too opaque */
+		if (is_write && io_overlaps_block(cache, bio)) {
+			m = md_alloc_mapping(md);
+			if (m)
+				push_action(REMAP_NEW_CACHE, m);
+
+			else {
+				m = md_idle_mapping(md);
+				if (!m)
+					push_action(REMAP_ORIGIN, NULL);
+				else {
+					if (md_is_clean(m))
+						push_action(REMAP_NEW_CACHE, m);
+
+					else {
+						/* writeback this cache block so we can use it later */
+						/* FIXME: how do we avoid multiple migrations? */
+						push_action(WRITEBACK, m);
+						push_action(REMAP_ORIGIN, NULL);
+					}
+				}
+			}
+
+		} else
+			push_action(REMAP_ORIGIN, NULL);
+	}
+}
+
 static int map_bio(struct cache_c *cache, struct bio *bio)
 {
-	int r;
+	int r, i;
 	dm_block_t block = get_bio_block(cache, bio);
 	struct cell_key key;
 	struct cell *cell;
 	struct mapping *m;
-	int is_write = bio_data_dir(bio) == WRITE;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	int release_cell = 1;
+	struct action actions[MAX_ACTIONS];
+	unsigned count = 0;
+
+	/* FIXME: paranoia */
+	memset(actions, 0, sizeof(actions));
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -494,39 +645,41 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
+	get_actions(cache, cache->md, block, bio, actions, &count);
+
 	r = DM_MAPIO_REMAPPED;
-	m = md_lookup_mapping(cache->md, block);
-	if (m)
-		remap_to_cache(cache, bio, m->cache);
+	for (i = 0; i < count; i++) {
+		m = actions[i].m;
 
-	else {
-		if (is_write && io_overlaps_block(cache, bio)) {
-			/*
-			 * Put it in the cache.
-			 */
-			m = md_alloc_mapping(cache->md);
-			if (m) {
-				m->origin = block;
-				h->new_mapping = m;
-				h->cell = cell;
-				release_cell = 0;
-				remap_to_cache(cache, bio, m->cache);
-
-			} else {
-				/* FIXME: take cleaning blocks out of the main io path */
-				m = md_reclaim_mapping(cache->md);
-				if (!m)
-					remap_to_origin(cache, bio);
-
-				else {
-					/* writeback this cache block so we can use it */
-					migrate(cache, m, 0, cell);
-					r = DM_MAPIO_SUBMITTED;
-				}
-			}
-
-		} else
+		switch (actions[i].cmd) {
+		case REMAP_ORIGIN:
+			BUG_ON(m);
 			remap_to_origin(cache, bio);
+			break;
+
+		case REMAP_CACHE:
+			BUG_ON(!m);
+			remap_to_cache(cache, bio, m);
+			break;
+
+		case REMAP_NEW_CACHE:
+			BUG_ON(!m);
+			md_remove_mapping(cache->md, m);
+			m->origin = block;
+			md_insert_mapping(cache->md, m);
+			h->cell = cell;
+			remap_to_cache(cache, bio, m);
+			release_cell = 0;
+			break;
+
+		case WRITEBACK:
+			BUG_ON(!m);
+			migrate(cache, m, 0, NULL);
+			break;
+
+		default:
+			BUG();
+		}
 	}
 
 	if (release_cell)
@@ -798,7 +951,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 
 	h->cache = cache;
 	h->all_io_entry = NULL;
-	h->new_mapping = NULL;
 	h->cell = NULL;
 	map_context->ptr = h;
 
@@ -827,10 +979,6 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 		spin_unlock_irqrestore(&cache->lock, flags);
 		wake_worker(cache);
 	}
-
-	/* FIXME: this'll need to be done by the work to allow the insert to block */
-	if (h->new_mapping)
-		r = md_insert_mapping(cache->md, h->new_mapping);
 
 	if (h->cell)
 		cell_defer(cache, h->cell, 0);
