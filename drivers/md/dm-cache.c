@@ -321,8 +321,6 @@ static void md_set_migrating(struct metadata *md, struct mapping *m, unsigned n)
 #define ENDIO_HOOK_POOL_SIZE 10240
 #define MIGRATION_POOL_SIZE 128
 
-struct cache_c;
-
 /* FIXME: split target from mech */
 struct cache_c {
 	struct dm_target *ti;
@@ -352,6 +350,15 @@ struct cache_c {
 
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
+
+	atomic_t total;
+	atomic_t read_hit;
+	atomic_t read_miss;
+	atomic_t write_hit;
+	atomic_t write_miss;
+	atomic_t write_miss_partial;
+	atomic_t writeback;
+	atomic_t write_hit_new;
 };
 
 struct endio_hook {
@@ -617,8 +624,11 @@ static void get_actions(struct cache_c *cache,
 				}
 			}
 
-		} else
+		} else {
+			if (is_write)
+				atomic_inc(&cache->write_miss_partial);
 			push_action(REMAP_ORIGIN, NULL);
+		}
 	}
 }
 
@@ -633,6 +643,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 	int release_cell = 1;
 	struct action actions[MAX_ACTIONS];
 	unsigned count = 0;
+	int is_write = bio_data_dir(bio) == WRITE;
 
 	/* FIXME: paranoia */
 	memset(actions, 0, sizeof(actions));
@@ -646,6 +657,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 
 	get_actions(cache, cache->md, block, bio, actions, &count);
+	atomic_inc(&cache->total);
 
 	r = DM_MAPIO_REMAPPED;
 	for (i = 0; i < count; i++) {
@@ -654,16 +666,19 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 		switch (actions[i].cmd) {
 		case REMAP_ORIGIN:
 			BUG_ON(m);
+			atomic_inc(is_write ? &cache->write_miss : &cache->read_miss);
 			remap_to_origin(cache, bio);
 			break;
 
 		case REMAP_CACHE:
 			BUG_ON(!m);
+			atomic_inc(is_write ? &cache->write_hit : &cache->write_miss);
 			remap_to_cache(cache, bio, m);
 			break;
 
 		case REMAP_NEW_CACHE:
 			BUG_ON(!m);
+			atomic_inc(&cache->write_hit_new);
 			md_remove_mapping(cache->md, m);
 			m->origin = block;
 			md_insert_mapping(cache->md, m);
@@ -674,6 +689,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 
 		case WRITEBACK:
 			BUG_ON(!m);
+			atomic_inc(&cache->writeback);
 			migrate(cache, m, 0, NULL);
 			break;
 
@@ -780,6 +796,16 @@ static void set_congestion_fn(struct cache_c *cache)
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache_c *cache = ti->private;
+
+	pr_alert("dm-cache statistics:\n");
+	pr_alert("total ios:\t%u\n", (unsigned) atomic_read(&cache->total));
+	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
+	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->read_miss));
+	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->write_hit));
+	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->write_miss));
+	pr_alert("write misses due to partial block:\t%u\n", (unsigned) atomic_read(&cache->write_miss_partial));
+	pr_alert("writebacks:\t%u\n", (unsigned) atomic_read(&cache->writeback));
+	pr_alert("write hit new:\t%u\n", (unsigned) atomic_read(&cache->write_hit_new));
 
 	mempool_destroy(cache->migration_pool);
 	mempool_destroy(cache->endio_hook_pool);
@@ -914,6 +940,14 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad9;
 	}
 
+	atomic_set(&cache->total, 0);
+	atomic_set(&cache->read_hit, 0);
+	atomic_set(&cache->read_miss, 0);
+	atomic_set(&cache->write_hit, 0);
+	atomic_set(&cache->write_miss, 0);
+	atomic_set(&cache->write_miss_partial, 0);
+	atomic_set(&cache->writeback, 0);
+	atomic_set(&cache->write_hit_new, 0);
 
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
