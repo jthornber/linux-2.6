@@ -39,7 +39,7 @@
 #include <linux/rbtree.h>
 #include <linux/slab.h>
 
-/* FIXME: describe, mechanism/policy/target split */
+/* FIXME: describe, mechanism/controller/metadata split */
 
 /* FIXME: I think all the md_ functions will eventually be able to block,
  * once we allow for this we can drop the irq spin locking.
@@ -77,6 +77,7 @@ struct mapping {
 
 struct metadata {
 	sector_t block_size;
+	dm_block_t nr_cache_blocks;
 
 	spinlock_t lock;
 	struct list_head lru;	  /* in the rbtree */
@@ -85,6 +86,8 @@ struct metadata {
 	struct rb_root mappings;
 
 	atomic_t nr_migrating;
+	wait_queue_head_t migrating_wq; /* FIXME: not sure this should be here */
+
 	unsigned valid_array_size; /* how many ulongs are in the mapping->valid_sectors arrays */
 };
 
@@ -120,6 +123,7 @@ static struct metadata *metadata_create(sector_t block_size, unsigned nr_cache_b
 	mapping_size = sizeof(struct mapping) + md->valid_array_size * sizeof(unsigned long);
 
 	md->block_size = block_size;
+	md->nr_cache_blocks = nr_cache_blocks;
 	spin_lock_init(&md->lock);
 
 	INIT_LIST_HEAD(&md->lru);
@@ -127,6 +131,7 @@ static struct metadata *metadata_create(sector_t block_size, unsigned nr_cache_b
 	INIT_LIST_HEAD(&md->migrating);
 	md->mappings = RB_ROOT;
 	atomic_set(&md->nr_migrating, 0);
+	init_waitqueue_head(&md->migrating_wq);
 
 	for (b = 0; b < nr_cache_blocks; b++) {
 		/* FIXME: use a slab */
@@ -328,6 +333,8 @@ static void md_set_migrating(struct metadata *md, struct mapping *m, unsigned n)
 		atomic_sub(1, &md->nr_migrating);
 	else
 		atomic_add(1, &md->nr_migrating);
+
+	wake_up(&md->migrating_wq);
 }
 
 static void md_clear_valid_sectors(struct metadata *md, struct mapping *m)
@@ -404,6 +411,8 @@ struct cache_c {
 
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
+
+	unsigned suspending:1;
 
 	atomic_t total;
 	atomic_t read_hit;
@@ -672,6 +681,9 @@ static void issue(struct cache_c *cache, struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * Controller.
+ */
 #define MAX_ACTIONS 4
 
 enum action_cmd {
@@ -699,8 +711,7 @@ static void __push_action(enum action_cmd cmd, struct mapping *m,
 #define push_action(cmd, m) __push_action(cmd, m, actions, count)
 
 /* FIXME: get rid of the cache arg */
-static void get_actions(struct cache_c *cache,
-			struct metadata *md,
+static void get_actions(struct metadata *md,
 			dm_block_t block,
 			struct bio *bio,
 			struct action *actions,
@@ -748,6 +759,26 @@ static void get_actions(struct cache_c *cache,
 	}
 }
 
+static void get_background_action(struct metadata *md,
+				  struct action *actions,
+				  unsigned *count)
+{
+	struct mapping *m;
+	dm_block_t migrating_target = md->nr_cache_blocks / 16;
+
+	*count = 0;
+	if (atomic_read(&md->nr_migrating) < migrating_target) {
+		list_for_each_entry(m, &md->lru, list) {
+			if (!md_is_clean(m)) {
+				push_action(WRITEBACK, m);
+				return;
+			}
+		}
+	}
+}
+
+/*----------------------------------------------------------------*/
+
 static int map_bio(struct cache_c *cache, struct bio *bio)
 {
 	int r, i;
@@ -772,7 +803,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
-	get_actions(cache, cache->md, block, bio, actions, &count);
+	get_actions(cache->md, block, bio, actions, &count);
 	atomic_inc(&cache->total);
 
 	r = DM_MAPIO_REMAPPED;
@@ -874,6 +905,39 @@ static void process_deferred_bios(struct cache_c *cache)
 		process_bio(cache, bio);
 }
 
+static void process_background_work(struct cache_c *cache)
+{
+	int i;
+	struct mapping *m;
+	struct action actions[MAX_ACTIONS];
+	unsigned count = 0;
+
+	/* FIXME: paranoia */
+	memset(actions, 0, sizeof(actions));
+
+	do {
+		get_background_action(cache->md, actions, &count);
+
+		/* FIXME: duplicate code */
+		for (i = 0; i < count; i++) {
+			m = actions[i].m;
+
+			switch (actions[i].cmd) {
+			case WRITEBACK:
+				BUG_ON(!m);
+				debug("REMAP_WRITEBACK\n");
+				atomic_inc(&cache->writeback);
+				migrate(cache, m, 0, 0, NULL);
+				break;
+
+			default:
+				BUG();
+			}
+		}
+
+	} while (count);
+}
+
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -886,12 +950,21 @@ static int more_work(struct cache_c *cache)
 
 static void do_work(struct work_struct *ws)
 {
+	unsigned sus;
+	unsigned long flags;
 	struct cache_c *cache = container_of(ws, struct cache_c, worker);
 
 	do {
 		process_deferred_bios(cache);
 		process_migrations(cache, &cache->quiesced_migrations, process_quiesced);
 		process_migrations(cache, &cache->copied_migrations, process_copied);
+
+		spin_lock_irqsave(&cache->lock, flags);
+		sus = cache->suspending;
+		spin_unlock_irqrestore(&cache->lock, flags);
+
+		if (!sus)
+			process_background_work(cache);
 
 	} while (more_work(cache));
 }
@@ -1074,6 +1147,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad9;
 	}
 
+	cache->suspending = 0;
 	atomic_set(&cache->total, 0);
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
@@ -1155,6 +1229,36 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 	return r;
 }
 
+static void cache_postsuspend(struct dm_target *ti)
+{
+	struct cache_c *cache = ti->private;
+	struct metadata *md = cache->md;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->suspending = 1;
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	flush_workqueue(cache->wq);
+
+	/*
+	 * Wait for any background migrations to finish.
+	 */
+	wait_event(md->migrating_wq, !atomic_read(&md->nr_migrating));
+}
+
+static void cache_resume(struct dm_target *ti)
+{
+	struct cache_c *cache = ti->private;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->suspending = 0;
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
 static int cache_status(struct dm_target *ti, status_type_t type,
 		      char *result, unsigned maxlen)
 {
@@ -1223,6 +1327,8 @@ static struct target_type cache_target = {
 	.dtr = cache_dtr,
 	.map = cache_map,
 	.end_io = cache_end_io,
+	.postsuspend = cache_postsuspend,
+	.resume = cache_resume,
 	.status = cache_status,
 	.iterate_devices = cache_iterate_devices,
 	.merge = cache_bvec_merge,
