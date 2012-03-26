@@ -1646,10 +1646,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_blocks = low_water_blocks;
 	pt->pf = pf;
 	ti->num_flush_requests = 1;
-	if (pf.discard_enabled && pf.discard_passdown) {
-		ti->discards_supported = 1;
+	if (pf.discard_enabled && pf.discard_passdown)
 		ti->num_discard_requests = 1;
-	}
 	ti->private = pt;
 
 	pt->callbacks.congested_fn = pool_is_congested;
