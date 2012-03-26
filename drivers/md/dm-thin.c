@@ -1445,10 +1445,12 @@ static void __pool_dec(struct pool *pool)
 
 static struct pool *__pool_find(struct mapped_device *pool_md,
 				struct block_device *metadata_dev,
-				unsigned long block_size, char **error)
+				unsigned long block_size, char **error,
+				int *created)
 {
 	struct pool *pool = __pool_table_lookup_metadata_dev(metadata_dev);
 
+	*created = 0;
 	if (pool) {
 		if (pool->pool_md != pool_md)
 			return ERR_PTR(-EBUSY);
@@ -1461,8 +1463,10 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 				return ERR_PTR(-EINVAL);
 			__pool_inc(pool);
 
-		} else
+		} else {
 			pool = pool_create(pool_md, metadata_dev, block_size, error);
+			*created = 1;
+		}
 	}
 
 	return pool;
@@ -1542,7 +1546,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r;
+	int r, pool_created;
 	struct pool_c *pt;
 	struct pool *pool;
 	struct pool_features pf;
@@ -1617,10 +1621,22 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	pool = __pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
-			   block_size, &ti->error);
+			   block_size, &ti->error, &pool_created);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
 		goto out_free_pt;
+	}
+
+	/*
+	 * 'pool_created' reflects whether this is the first table load.
+	 * Top level discard support is not allowed to be changed after
+	 * initial load.  This would require a pool reload to trigger thin
+	 * device changes.
+	 */
+	if (!pool_created && pf.discard_enabled != pool->pf.discard_enabled) {
+		ti->error = "Discard support cannot be changed once enabled";
+		r = -EINVAL;
+		goto out_flags_changed;
 	}
 
 	pt->pool = pool;
@@ -1643,6 +1659,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	return 0;
 
+out_flags_changed:
+	__pool_dec(pool);
 out_free_pt:
 	kfree(pt);
 out:
