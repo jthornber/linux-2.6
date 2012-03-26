@@ -822,6 +822,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			/* slow, but simple ... we writeback, drop the cache entry, then retry */
 			migrate(cache, m, 0, 1, cell);
 			release_cell = 0;
+			r = DM_MAPIO_SUBMITTED;
 			break;
 
 		default:
