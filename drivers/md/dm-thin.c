@@ -33,16 +33,6 @@
 #define DATA_DEV_BLOCK_SIZE_MAX_SECTORS (1024 * 1024 * 1024 >> SECTOR_SHIFT)
 
 /*
- * The metadata device is currently limited in size.  The limitation is
- * checked lower down in dm-space-map-metadata, but we also check it here
- * so we can fail early.
- *
- * We have one block of index, which can hold 255 index entries.  Each
- * index entry contains allocation info about 16k metadata blocks.
- */
-#define METADATA_DEV_MAX_SECTORS (255 * (1 << 14) * (THIN_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
-
-/*
  * Device id is restricted to 24 bits.
  */
 #define MAX_DEV_ID ((1 << 24) - 1)
@@ -226,52 +216,53 @@ static struct cell *__search_bucket(struct hlist_head *bucket,
 static int bio_detain(struct bio_prison *prison, struct cell_key *key,
 		      struct bio *inmate, struct cell **ref)
 {
-	int r;
+	int r = 1;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
-	struct cell *uninitialized_var(cell), *cell2 = NULL;
+	struct cell *cell, *cell2;
 
 	BUG_ON(hash > prison->nr_buckets);
 
 	spin_lock_irqsave(&prison->lock, flags);
+
 	cell = __search_bucket(prison->cells + hash, key);
-
-	if (!cell) {
-		/*
-		 * Allocate a new cell
-		 */
-		spin_unlock_irqrestore(&prison->lock, flags);
-		cell2 = mempool_alloc(prison->cell_pool, GFP_NOIO);
-		spin_lock_irqsave(&prison->lock, flags);
-
-		/*
-		 * We've been unlocked, so we have to double check that
-		 * nobody else has inserted this cell in the meantime.
-		 */
-		cell = __search_bucket(prison->cells + hash, key);
-
-		if (!cell) {
-			cell = cell2;
-			cell2 = NULL;
-
-			cell->prison = prison;
-			memcpy(&cell->key, key, sizeof(cell->key));
-			cell->holder = inmate;
-			bio_list_init(&cell->bios);
-			hlist_add_head(&cell->list, prison->cells + hash);
-			r = 0;
-
-		} else {
-			mempool_free(cell2, prison->cell_pool);
-			cell2 = NULL;
-			r = 1;
-			bio_list_add(&cell->bios, inmate);
-		}
-
-	} else {
-		r = 1;
+	if (cell) {
 		bio_list_add(&cell->bios, inmate);
+		goto out;
 	}
+
+	/*
+	 * Allocate a new cell
+	 */
+	spin_unlock_irqrestore(&prison->lock, flags);
+	cell2 = mempool_alloc(prison->cell_pool, GFP_NOIO);
+	spin_lock_irqsave(&prison->lock, flags);
+
+	/*
+	 * We've been unlocked, so we have to double check that
+	 * nobody else has inserted this cell in the meantime.
+	 */
+	cell = __search_bucket(prison->cells + hash, key);
+	if (cell) {
+		mempool_free(cell2, prison->cell_pool);
+		bio_list_add(&cell->bios, inmate);
+		goto out;
+	}
+
+	/*
+	 * Use new cell.
+	 */
+	cell = cell2;
+
+	cell->prison = prison;
+	memcpy(&cell->key, key, sizeof(cell->key));
+	cell->holder = inmate;
+	bio_list_init(&cell->bios);
+	hlist_add_head(&cell->list, prison->cells + hash);
+
+	r = 0;
+
+out:
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	*ref = cell;
@@ -287,10 +278,8 @@ static void __cell_release(struct cell *cell, struct bio_list *inmates)
 
 	hlist_del(&cell->list);
 
-	if (inmates) {
-		bio_list_add(inmates, cell->holder);
-		bio_list_merge(inmates, &cell->bios);
-	}
+	bio_list_add(inmates, cell->holder);
+	bio_list_merge(inmates, &cell->bios);
 
 	mempool_free(cell, prison->cell_pool);
 }
@@ -336,8 +325,7 @@ static void __cell_release_no_holder(struct cell *cell, struct bio_list *inmates
 	struct bio_prison *prison = cell->prison;
 
 	hlist_del(&cell->list);
-	if (inmates)
-		bio_list_merge(inmates, &cell->bios);
+	bio_list_merge(inmates, &cell->bios);
 
 	mempool_free(cell, prison->cell_pool);
 }
@@ -1218,7 +1206,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			 */
 			m = get_next_mapping(pool);
 			m->tc = tc;
-			m->pass_discard = !lookup_result.shared;
+			m->pass_discard = (!lookup_result.shared) && pool->pf.discard_passdown;
 			m->virt_block = block;
 			m->data_block = lookup_result.block;
 			m->cell = cell;
@@ -1256,7 +1244,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		break;
 
 	default:
-		DMERR("discard: find block unexpectedly returned %d\n", r);
+		DMERR("discard: find block unexpectedly returned %d", r);
 		cell_release_singleton(cell, bio);
 		bio_io_error(bio);
 		break;
@@ -1799,7 +1787,8 @@ static void __pool_dec(struct pool *pool)
 
 static struct pool *__pool_find(struct mapped_device *pool_md,
 				struct block_device *metadata_dev,
-				unsigned long block_size, char **error)
+				unsigned long block_size, char **error,
+				int *created)
 {
 	struct pool *pool = __pool_table_lookup_metadata_dev(metadata_dev);
 
@@ -1815,8 +1804,10 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 				return ERR_PTR(-EINVAL);
 			__pool_inc(pool);
 
-		} else
+		} else {
 			pool = pool_create(pool_md, metadata_dev, block_size, error);
+			*created = 1;
+		}
 	}
 
 	return pool;
@@ -1891,12 +1882,12 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
  *
  * Optional feature arguments are:
  *	     skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
- *           ignore_discard: disable discard
- *           no_discard_passdown: don't pass discards down to the data device
+ *	     ignore_discard: disable discard
+ *	     no_discard_passdown: don't pass discards down to the data device
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r;
+	int r, pool_created = 0;
 	struct pool_c *pt;
 	struct pool *pool;
 	struct pool_features pf;
@@ -1906,6 +1897,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	dm_block_t low_water_blocks;
 	struct dm_dev *metadata_dev;
 	sector_t metadata_dev_size;
+	char b[BDEVNAME_SIZE];
 
 	/*
 	 * FIXME Remove validation from scope of lock.
@@ -1927,11 +1919,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	metadata_dev_size = i_size_read(metadata_dev->bdev->bd_inode) >> SECTOR_SHIFT;
-	if (metadata_dev_size > METADATA_DEV_MAX_SECTORS) {
-		ti->error = "Metadata device is too large";
-		r = -EINVAL;
-		goto out_metadata;
-	}
+	if (metadata_dev_size > THIN_METADATA_MAX_SECTORS_WARNING)
+		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
+		       bdevname(metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -1971,10 +1961,35 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	pool = __pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
-			   block_size, &ti->error);
+			   block_size, &ti->error, &pool_created);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
 		goto out_free_pt;
+	}
+
+	/*
+	 * 'pool_created' reflects whether this is the first table load.
+	 * Top level discard support is not allowed to be changed after
+	 * initial load.  This would require a pool reload to trigger thin
+	 * device changes.
+	 */
+	if (!pool_created && pf.discard_enabled != pool->pf.discard_enabled) {
+		ti->error = "Discard support cannot be disabled once enabled";
+		r = -EINVAL;
+		goto out_flags_changed;
+	}
+
+	/*
+	 * If discard_passdown was enabled verify that the data device
+	 * supports discards.  Disable discard_passdown if not; otherwise
+	 * -EOPNOTSUPP will be returned.
+	 */
+	if (pf.discard_passdown) {
+		struct request_queue *q = bdev_get_queue(data_dev->bdev);
+		if (!q || !blk_queue_discard(q)) {
+			DMWARN("Discard unsupported by data device: Disabling discard passdown.");
+			pf.discard_passdown = 0;
+		}
 	}
 
 	pt->pool = pool;
@@ -1984,9 +1999,20 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_blocks = low_water_blocks;
 	pt->pf = pf;
 	ti->num_flush_requests = 1;
+
+	/*
+	 * Only need to enable discards if the pool should pass
+	 * them down to the data device.  The thin device's discard
+	 * processing will cause mappings to be removed from the btree.
+	 */
 	if (pf.discard_enabled && pf.discard_passdown) {
-		ti->discards_supported = 1;
 		ti->num_discard_requests = 1;
+		/*
+		 * Setting 'discards_supported' circumvents the normal
+		 * stacking of discard limits (this keeps the pool and
+		 * thin devices' discard limits consistent).
+		 */
+		ti->discards_supported = 1;
 	}
 	ti->private = pt;
 
@@ -1997,6 +2023,8 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	return 0;
 
+out_flags_changed:
+	__pool_dec(pool);
 out_free_pt:
 	kfree(pt);
 out:
@@ -2395,17 +2423,18 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long)pool->sectors_per_block,
 		       (unsigned long long)pt->low_water_blocks);
 
-		count = !pool->pf.zero_new_blocks + !pool->pf.discard_enabled + !pool->pf.discard_passdown;
+		count = !pool->pf.zero_new_blocks + !pool->pf.discard_enabled +
+			!pool->pf.discard_passdown;
 		DMEMIT("%u ", count);
 
 		if (!pool->pf.zero_new_blocks)
 			DMEMIT("skip_block_zeroing ");
 
 		if (!pool->pf.discard_enabled)
-			DMEMIT("skip_discard ");
+			DMEMIT("ignore_discard ");
 
 		if (!pool->pf.discard_passdown)
-			DMEMIT("skip_discard_passdown");
+			DMEMIT("no_discard_passdown ");
 
 		break;
 	}
@@ -2437,6 +2466,9 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 
 static void set_discard_limits(struct pool *pool, struct queue_limits *limits)
 {
+	/*
+	 * FIXME: these limits may be incompatible with the pool's data device
+	 */
 	limits->max_discard_sectors = pool->sectors_per_block;
 
 	/*
@@ -2462,7 +2494,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -2505,7 +2537,8 @@ static void thin_dtr(struct dm_target *ti)
  * dev_id: the internal device identifier
  * origin_dev: a device external to the pool that should act as the origin
  *
- * If the pool has discards disabled, they get disabled for the thin as well.
+ * If the pool device has discards disabled, they get disabled for the thin
+ * device as well.
  */
 static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2607,7 +2640,7 @@ out_unlock:
 static int thin_map(struct dm_target *ti, struct bio *bio,
 		    union map_info *map_context)
 {
-	bio->bi_sector -= ti->begin;
+	bio->bi_sector = dm_target_offset(ti, bio->bi_sector);
 
 	return thin_bio_map(ti, bio, map_context);
 }
@@ -2643,6 +2676,7 @@ static int thin_endio(struct dm_target *ti,
 	}
 
 	mempool_free(h, pool->endio_hook_pool);
+
 	return 0;
 }
 
@@ -2662,7 +2696,6 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	ssize_t sz = 0;
 	dm_block_t mapped, highest;
 	char buf[BDEVNAME_SIZE];
-	char buf2[BDEVNAME_SIZE];
 	struct thin_c *tc = ti->private;
 
 	if (!tc->td)
@@ -2691,7 +2724,7 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 			       format_dev_t(buf, tc->pool_dev->bdev->bd_dev),
 			       (unsigned long) tc->dev_id);
 			if (tc->origin_dev)
-				DMEMIT(" %s", format_dev_t(buf2, tc->origin_dev->bdev->bd_dev));
+				DMEMIT(" %s", format_dev_t(buf, tc->origin_dev->bdev->bd_dev));
 			break;
 		}
 	}
@@ -2731,7 +2764,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
