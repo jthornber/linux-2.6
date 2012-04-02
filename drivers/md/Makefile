@@ -43,7 +43,8 @@ obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
-obj-$(CONFIG_DM_CACHE) += dm-cache.o
+obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
+obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o

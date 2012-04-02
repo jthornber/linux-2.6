@@ -113,52 +113,53 @@ static struct cell *__search_bucket(struct hlist_head *bucket,
 int bio_detain(struct bio_prison *prison, struct cell_key *key,
 	       struct bio *inmate, struct cell **ref)
 {
-	int r;
+	int r = 1;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
-	struct cell *uninitialized_var(cell), *cell2 = NULL;
+	struct cell *cell, *cell2;
 
 	BUG_ON(hash > prison->nr_buckets);
 
 	spin_lock_irqsave(&prison->lock, flags);
+
 	cell = __search_bucket(prison->cells + hash, key);
-
-	if (!cell) {
-		/*
-		 * Allocate a new cell
-		 */
-		spin_unlock_irqrestore(&prison->lock, flags);
-		cell2 = mempool_alloc(prison->cell_pool, GFP_NOIO);
-		spin_lock_irqsave(&prison->lock, flags);
-
-		/*
-		 * We've been unlocked, so we have to double check that
-		 * nobody else has inserted this cell in the meantime.
-		 */
-		cell = __search_bucket(prison->cells + hash, key);
-
-		if (!cell) {
-			cell = cell2;
-			cell2 = NULL;
-
-			cell->prison = prison;
-			memcpy(&cell->key, key, sizeof(cell->key));
-			cell->holder = inmate;
-			bio_list_init(&cell->bios);
-			hlist_add_head(&cell->list, prison->cells + hash);
-			r = 0;
-
-		} else {
-			mempool_free(cell2, prison->cell_pool);
-			cell2 = NULL;
-			r = 1;
-			bio_list_add(&cell->bios, inmate);
-		}
-
-	} else {
-		r = 1;
+	if (cell) {
 		bio_list_add(&cell->bios, inmate);
+		goto out;
 	}
+
+	/*
+	 * Allocate a new cell
+	 */
+	spin_unlock_irqrestore(&prison->lock, flags);
+	cell2 = mempool_alloc(prison->cell_pool, GFP_NOIO);
+	spin_lock_irqsave(&prison->lock, flags);
+
+	/*
+	 * We've been unlocked, so we have to double check that
+	 * nobody else has inserted this cell in the meantime.
+	 */
+	cell = __search_bucket(prison->cells + hash, key);
+	if (cell) {
+		mempool_free(cell2, prison->cell_pool);
+		bio_list_add(&cell->bios, inmate);
+		goto out;
+	}
+
+	/*
+	 * Use new cell.
+	 */
+	cell = cell2;
+
+	cell->prison = prison;
+	memcpy(&cell->key, key, sizeof(cell->key));
+	cell->holder = inmate;
+	bio_list_init(&cell->bios);
+	hlist_add_head(&cell->list, prison->cells + hash);
+
+	r = 0;
+
+out:
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	*ref = cell;
@@ -174,10 +175,8 @@ static void __cell_release(struct cell *cell, struct bio_list *inmates)
 
 	hlist_del(&cell->list);
 
-	if (inmates) {
-		bio_list_add(inmates, cell->holder);
-		bio_list_merge(inmates, &cell->bios);
-	}
+	bio_list_add(inmates, cell->holder);
+	bio_list_merge(inmates, &cell->bios);
 
 	mempool_free(cell, prison->cell_pool);
 }
@@ -223,8 +222,7 @@ static void __cell_release_no_holder(struct cell *cell, struct bio_list *inmates
 	struct bio_prison *prison = cell->prison;
 
 	hlist_del(&cell->list);
-	if (inmates)
-		bio_list_merge(inmates, &cell->bios);
+	bio_list_merge(inmates, &cell->bios);
 
 	mempool_free(cell, prison->cell_pool);
 }
