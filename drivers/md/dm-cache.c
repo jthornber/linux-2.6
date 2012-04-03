@@ -1024,6 +1024,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			break;
 
 		case PROMOTE:
+#if 0
 			BUG_ON(!m);
 			debug("PROMOTE\n");
 			md_remove_mapping(cache->md, m);
@@ -1033,6 +1034,10 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			promote(cache, m, bio, cell);
 			release_cell = 0;
 			r = DM_MAPIO_SUBMITTED;
+#else
+			remap_to_origin(cache, bio);
+#endif
+
 			break;
 
 		case REMAP_UNION:
