@@ -237,6 +237,11 @@ void cell_release_no_holder(struct cell *cell, struct bio_list *inmates)
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
 
+struct bio *cell_holder(struct cell *cell)
+{
+	return cell->holder;
+}
+
 void cell_error(struct cell *cell)
 {
 	struct bio_prison *prison = cell->prison;

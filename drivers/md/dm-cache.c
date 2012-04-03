@@ -45,6 +45,7 @@
  * once we allow for this we can drop the irq spin locking.
  */
 
+// #define debug(x...) pr_alert(x)
 #define debug(x...) ;
 
 /*----------------------------------------------------------------*/
@@ -345,6 +346,14 @@ static void md_clear_valid_sectors(struct metadata *md, struct mapping *m)
 		m->valid_sectors[i] = 0;
 }
 
+static void md_set_valid_sectors(struct metadata *md, struct mapping *m)
+{
+	unsigned i;
+
+	for (i = 0; i < md->valid_array_size; i++)
+		m->valid_sectors[i] = -1;
+}
+
 // FIXME: slow, slow, slow
 static void md_mark_valid_sectors(struct metadata *md, struct mapping *m, struct bio *bio)
 {
@@ -397,6 +406,13 @@ struct cache_c {
 	spinlock_t lock;
 	struct bio_list deferred_bios;
 
+	/*
+	 * We have a need to chain several ios, (eg, a read from the origin
+	 * followed by a write to the cache).  An endio fn cannot call
+	 * generic_make_request(), so we use the daemon to submit these.
+	 */
+	struct bio_list submit_bios;
+
 	struct list_head quiesced_migrations;
 	struct list_head copied_migrations;
 
@@ -425,10 +441,19 @@ struct cache_c {
 	atomic_t write_hit_new;
 };
 
+// FIXME: this is getting far too big
 struct endio_hook {
+	struct list_head list;
 	struct cache_c *cache;
 	struct deferred_entry *all_io_entry;
 	struct cell *cell;
+	struct bio *dup;
+
+	unsigned write_to_cache:1;
+	struct mapping *m;
+
+	bio_end_io_t *saved_end_io;
+	void *saved_private;
 };
 
 /*
@@ -462,6 +487,63 @@ static void wake_worker(struct cache_c *cache)
 }
 
 /*----------------------------------------------------------------
+ * Remapping
+ *--------------------------------------------------------------*/
+
+static void remap_to_origin(struct cache_c *cache, struct bio *bio)
+{
+	bio->bi_bdev = cache->origin_dev->bdev;
+}
+
+static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
+{
+	if (bio_data_dir(bio) == WRITE) {
+		md_inc_cache_gen(m);
+		md_mark_valid_sectors(cache->md, m, bio);
+	}
+
+	bio->bi_bdev = cache->cache_dev->bdev;
+	bio->bi_sector = (m->cache << cache->block_shift) +
+		(bio->bi_sector & cache->offset_mask);
+}
+
+static dm_block_t get_bio_block(struct cache_c *cache, struct bio *bio)
+{
+	return bio->bi_sector >> cache->block_shift;
+}
+
+/*----------------------------------------------------------------
+ * Submitted bios
+ *--------------------------------------------------------------*/
+static void process_submit_bios(struct cache_c *cache)
+{
+	unsigned long flags;
+	struct bio *bio;
+	struct bio_list bios;
+
+	bio_list_init(&bios);
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->submit_bios);
+	bio_list_init(&cache->submit_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	while ((bio = bio_list_pop(&bios)))
+		generic_make_request(bio);
+}
+
+static void __submit_bio(struct cache_c *cache, struct bio *bio)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_add(&cache->submit_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
+/*----------------------------------------------------------------
  * Migration processing
  *--------------------------------------------------------------*/
 static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
@@ -481,6 +563,8 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	struct migration *mg = (struct migration *) context;
 	struct cache_c *cache = mg->cache;
 
+	debug("in copy complete");
+
 	if (!mg->err)
 		mg->err = read_err || write_err ? -EIO : 0;
 
@@ -498,6 +582,7 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 	int r;
 	struct dm_io_region o_region, c_region;
 
+	debug("in process_quiesced\n");
 	BUG_ON(!cache);
 	BUG_ON(!mg);
 	BUG_ON(!mg->m);
@@ -508,6 +593,7 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 
 	// FIXME: refactor
 	if (mg->to_cache) {
+		debug("copying to cache\n");
 		/*
 		 * Copy the whole block.
 		 */
@@ -527,8 +613,11 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 		/*
 		 * copy all the valid regions in the cache.
 		 */
+		int submitted_something = 0;
 		unsigned b = 0, e = 0;
 
+		debug("copying to origin\n");
+		debug("cache->md->block_size = %u\n", (unsigned) cache->md->block_size);
 		while (e != cache->md->block_size) {
 			b = e;
 
@@ -550,14 +639,26 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 			c_region.count = e - b;
 
 			atomic_inc(&mg->kcopyd_jobs);
+
+			debug("o_region.sector = %u, o_region.count = %u\n",
+			      (unsigned) o_region.sector, (unsigned) o_region.count);
+			debug("c_region.sector = %u, c_region.count = %u\n",
+			      (unsigned) c_region.sector, (unsigned) c_region.count);
+
 			r = dm_kcopyd_copy(cache->copier,
 					   mg->to_cache ? &o_region : &c_region,
 					   1,
 					   mg->to_cache ? &c_region : &o_region,
 					   0, copy_complete, mg);
-			if (r)
+			if (r) {
+				debug("kcopyd call failed\n");
 				break;
+			}
+
+			submitted_something = 1;
 		}
+
+		BUG_ON(!submitted_something);
 	}
 
 	if (r < 0) {
@@ -569,14 +670,21 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 
 static void process_copied(struct cache_c *cache, struct migration *mg)
 {
+	debug("in process_copied");
 	md_set_migrating(cache->md, mg->m, 0);
 
-	/* the migration failed, we reinsert the old mapping. */
+	/* if the migration failed, we reinsert the old mapping. */
 	if (!mg->err && !mg->to_cache)
 		md_set_origin_gen(mg->m, mg->gen);
 
+	/* FIXME: what's happening here? */
 	if (!mg->err && mg->free_mapping)
 		md_remove_mapping(cache->md, mg->m);
+
+#if 1
+	if (!mg->err && mg->to_cache)
+		md_set_valid_sectors(cache->md, mg->m);
+#endif
 
 	/*
 	 * Even if there was an error we can release the bios from
@@ -604,21 +712,93 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 		fn(cache, mg);
 }
 
-static void migrate(struct cache_c *cache, struct mapping *m, int to_cache, int free_mapping, struct cell *cell)
+static struct bio *dup_bio(struct bio *bio)
+{
+	int i;
+	struct bio *dup;
+	struct bio_vec *bvec;
+
+	dup = bio_clone(bio, GFP_NOIO);
+	bio_for_each_segment(bvec, bio, i)
+		get_page(bvec->bv_page);
+
+	return dup;
+}
+
+static void promote_read_endio(struct bio *bio, int err)
+{
+	struct endio_hook *h = bio->bi_private;
+
+	debug("in promote_read_endio\n");
+	bio->bi_end_io = h->saved_end_io;
+	bio->bi_private = h->saved_private;
+	__submit_bio(h->cache, h->dup);
+}
+
+static void promote_write_endio(struct bio *bio, int err)
+{
+	int i;
+	struct bio_vec *bvec;
+	struct endio_hook *h = bio->bi_private;
+
+	debug("in promote_write_endio\n");
+
+	bio_for_each_segment(bvec, bio, i)
+		put_page(bvec->bv_page);
+
+	bio_put(bio);
+
+	md_set_migrating(h->cache->md, h->m, 0);
+	md_mark_valid_sectors(h->cache->md, h->m, bio);
+	bio_endio(cell_holder(h->cell), 0);
+}
+
+static void promote(struct cache_c *cache, struct mapping *m, struct bio *bio, struct cell *cell)
+{
+	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct bio *dup = dup_bio(bio);
+
+	debug("in promote\n");
+	BUG_ON(!dup);
+	remap_to_cache(cache, dup, m);
+	dup->bi_rw = WRITE;
+
+	dup->bi_end_io = promote_write_endio;
+	dup->bi_private = h;
+
+	h->cache = cache;
+	h->cell = cell;
+	h->m = m;
+	h->dup = dup;
+
+	h->saved_end_io = bio->bi_end_io;
+	h->saved_private = bio->bi_private;
+
+	bio->bi_end_io = promote_read_endio;
+	bio->bi_private = h;
+
+	debug("about to submit original request");
+	remap_to_origin(cache, bio);
+	generic_make_request(bio);
+}
+
+static void writeback(struct cache_c *cache, struct mapping *m, int free_mapping, struct cell *cell)
 {
 	struct migration *mg;
 
 	md_set_migrating(cache->md, m, 1);
 	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
-	mg->to_cache = to_cache;
+	mg->to_cache = 0;
 	mg->free_mapping = free_mapping;
 	mg->m = m;
 	mg->gen = md_get_cache_gen(m);
 	mg->cell = cell;
 	mg->err = 0;
 	mg->cache = cache;
-	if (!ds_add_work(cache->all_io_ds, &mg->list))
+	if (!ds_add_work(cache->all_io_ds, &mg->list)) {
 		list_add_tail(&mg->list, &cache->quiesced_migrations);
+		wake_worker(cache);
+	}
 }
 
 /*----------------------------------------------------------------
@@ -640,28 +820,6 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	wake_worker(cache);
-}
-
-static void remap_to_origin(struct cache_c *cache, struct bio *bio)
-{
-	bio->bi_bdev = cache->origin_dev->bdev;
-}
-
-static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
-{
-	if (bio_data_dir(bio) == WRITE) {
-		md_inc_cache_gen(m);
-		md_mark_valid_sectors(cache->md, m, bio);
-	}
-
-	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (m->cache << cache->block_shift) +
-		(bio->bi_sector & cache->offset_mask);
-}
-
-static dm_block_t get_bio_block(struct cache_c *cache, struct bio *bio)
-{
-	return bio->bi_sector >> cache->block_shift;
 }
 
 static void issue(struct cache_c *cache, struct bio *bio)
@@ -693,6 +851,7 @@ enum action_cmd {
 	REMAP_UNION,		/* some of the data is on the origin, some in the cache (eek!) */
 
 	WRITEBACK,
+	PROMOTE,
 };
 
 struct action {
@@ -724,10 +883,10 @@ static void get_actions(struct metadata *md,
 
 	m = md_lookup_mapping(md, block);
 	if (m) {
-		if (!is_write && !md_all_valid_sectors(md, m, bio))
-			push_action(REMAP_UNION, m);
-		else
+		if (is_write || md_all_valid_sectors(md, m, bio))
 			push_action(REMAP_CACHE, m);
+		else
+			push_action(REMAP_UNION, m);
 
 	} else {
 		/* FIXME: too nested, too opaque */
@@ -754,8 +913,27 @@ static void get_actions(struct metadata *md,
 				}
 			}
 
-		} else
-			push_action(REMAP_ORIGIN, NULL);
+		} else {
+			// FIXME: duplicate code
+			m = md_alloc_mapping(md);
+			if (m)
+				push_action(PROMOTE, m);
+			else {
+				m = md_idle_mapping(md);
+				if (!m)
+					push_action(REMAP_ORIGIN, NULL);
+				else {
+					if (md_is_clean(m))
+						// FIXME: need to quiesce
+						push_action(PROMOTE, m);
+
+					else {
+						push_action(WRITEBACK, m);
+						push_action(REMAP_ORIGIN, NULL);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -821,7 +999,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 		case REMAP_CACHE:
 			BUG_ON(!m);
 			debug("REMAP_CACHE\n");
-			atomic_inc(is_write ? &cache->write_hit : &cache->write_miss);
+			atomic_inc(is_write ? &cache->write_hit : &cache->read_hit);
 			remap_to_cache(cache, bio, m);
 			break;
 
@@ -842,7 +1020,19 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			BUG_ON(!m);
 			debug("REMAP_WRITEBACK\n");
 			atomic_inc(&cache->writeback);
-			migrate(cache, m, 0, 0, NULL);
+			writeback(cache, m, 0, NULL);
+			break;
+
+		case PROMOTE:
+			BUG_ON(!m);
+			debug("PROMOTE\n");
+			md_remove_mapping(cache->md, m);
+			m->origin = block;
+			md_set_migrating(cache->md, m, 1);
+			md_insert_mapping(cache->md, m);
+			promote(cache, m, bio, cell);
+			release_cell = 0;
+			r = DM_MAPIO_SUBMITTED;
 			break;
 
 		case REMAP_UNION:
@@ -851,7 +1041,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			atomic_inc(&cache->read_union);
 
 			/* slow, but simple ... we writeback, drop the cache entry, then retry */
-			migrate(cache, m, 0, 1, cell);
+			writeback(cache, m, 1, cell);
 			release_cell = 0;
 			r = DM_MAPIO_SUBMITTED;
 			break;
@@ -880,6 +1070,7 @@ static void process_bio(struct cache_c *cache, struct bio *bio)
 		break;
 
 	case DM_MAPIO_SUBMITTED:
+		// FIXME: all_io_entry not used?
 		break;
 
 	default:
@@ -927,7 +1118,7 @@ static void process_background_work(struct cache_c *cache)
 				BUG_ON(!m);
 				debug("REMAP_WRITEBACK\n");
 				atomic_inc(&cache->writeback);
-				migrate(cache, m, 0, 0, NULL);
+				writeback(cache, m, 0, NULL);
 				break;
 
 			default:
@@ -944,6 +1135,7 @@ static void process_background_work(struct cache_c *cache)
 static int more_work(struct cache_c *cache)
 {
 	return !bio_list_empty(&cache->deferred_bios) ||
+		!bio_list_empty(&cache->submit_bios) ||
 		!list_empty(&cache->quiesced_migrations) ||
 		!list_empty(&cache->copied_migrations);
 }
@@ -958,6 +1150,7 @@ static void do_work(struct work_struct *ws)
 		process_deferred_bios(cache);
 		process_migrations(cache, &cache->quiesced_migrations, process_quiesced);
 		process_migrations(cache, &cache->copied_migrations, process_copied);
+		process_submit_bios(cache);
 
 		spin_lock_irqsave(&cache->lock, flags);
 		sus = cache->suspending;
@@ -1097,6 +1290,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
+	bio_list_init(&cache->submit_bios);
 
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	INIT_LIST_HEAD(&cache->copied_migrations);
@@ -1161,8 +1355,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 0;
-	set_congestion_fn(cache);
-	smp_wmb();
 	return 0;
 
 bad9:
@@ -1205,16 +1397,16 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio,
-		      int error, union map_info *info)
+			int error, union map_info *info)
 {
-	int r = 0;
 	unsigned long flags;
 	struct cache_c *cache = ti->private;
 	struct list_head work;
 	struct endio_hook *h = info->ptr;
 
 	INIT_LIST_HEAD(&work);
-	ds_dec(h->all_io_entry, &work);
+	if (h->all_io_entry)
+		ds_dec(h->all_io_entry, &work);
 
 	if (!list_empty(&work)) {
 		spin_lock_irqsave(&cache->lock, flags);
@@ -1226,7 +1418,8 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 	if (h->cell)
 		cell_defer(cache, h->cell, 0);
 
-	return r;
+	mempool_free(h, cache->endio_hook_pool);
+	return 0;
 }
 
 static void cache_postsuspend(struct dm_target *ti)

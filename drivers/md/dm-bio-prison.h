@@ -49,6 +49,7 @@ int bio_detain(struct bio_prison *prison, struct cell_key *key,
 void cell_release(struct cell *cell, struct bio_list *bios);
 void cell_release_singleton(struct cell *cell, struct bio *bio); // FIXME: bio arg not needed
 void cell_release_no_holder(struct cell *cell, struct bio_list *inmates);
+struct bio *cell_holder(struct cell *cell);
 void cell_error(struct cell *cell);
 
 /*----------------------------------------------------------------*/
