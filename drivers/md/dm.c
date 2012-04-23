@@ -34,6 +34,120 @@ DEFINE_RATELIMIT_STATE(dm_ratelimit_state,
 EXPORT_SYMBOL(dm_ratelimit_state);
 #endif
 
+#ifndef CONFIG_SMP
+
+#define declare_percpu_rw_lock(name, struc, ini, dn_rd, up_rd, dn_wr, up_wr)\
+									\
+struct percpu_##name {							\
+	struc sem;							\
+};									\
+									\
+static void free_percpu_##name(struct percpu_##name *sem)		\
+{									\
+}									\
+									\
+static int init_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	ini(&sem->sem);							\
+	return 0;							\
+}									\
+									\
+static int down_read_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	dn_rd(&sem->sem);						\
+	return 0;							\
+}									\
+									\
+static void up_read_percpu_##name(struct percpu_##name *sem, int lock_cpu)\
+{									\
+	up_rd(&sem->sem);						\
+}									\
+									\
+static void down_write_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	dn_wr(&sem->sem, 0);						\
+}									\
+									\
+static void up_write_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	up_wr(&sem->sem);						\
+}									\
+
+#else
+
+#define declare_percpu_rw_lock(name, struc, ini, dn_rd, up_rd, dn_wr, up_wr)\
+									\
+struct percpu_##name {							\
+	struc **sem;							\
+};									\
+									\
+static void free_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	int i;								\
+	for (i = 0; i < nr_cpu_ids; i++)				\
+		if (sem->sem[i])					\
+			kfree(sem->sem[i]);				\
+	kfree(sem->sem);						\
+}									\
+									\
+static int init_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	size_t size = max(sizeof(struc), (size_t)L1_CACHE_BYTES);	\
+	int i;								\
+	sem->sem = kzalloc(nr_cpu_ids * sizeof(struc *), GFP_KERNEL);	\
+	if (!sem->sem)							\
+		return -ENOMEM;						\
+	for (i = 0; i < nr_cpu_ids; i++)				\
+		if (cpu_possible(i)) {					\
+			sem->sem[i] = kmalloc_node(size, GFP_KERNEL, cpu_to_node(i));\
+			if (!sem->sem[i]) {				\
+				free_percpu_##name(sem);		\
+				return -ENOMEM;				\
+			}						\
+			ini(sem->sem[i]);				\
+		}							\
+	return 0;							\
+}									\
+									\
+static int down_read_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	/*								\
+	 * Use raw_smp_processor_id() instead of smp_processor_id() to	\
+	 * suppress warning message about using it with preempt enabled.\
+	 * Preempt doesn't really matter here, locking the lock on	\
+	 * a different CPU will cause a small performance impact but	\
+	 * no race condition.						\
+	 */								\
+	int i = raw_smp_processor_id();					\
+	dn_rd(sem->sem[i]);						\
+	return i;							\
+}									\
+									\
+static void up_read_percpu_##name(struct percpu_##name *sem, int lock_cpu)\
+{									\
+	up_rd(sem->sem[lock_cpu]);					\
+}									\
+									\
+static void down_write_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	int i;								\
+	for (i = 0; i < nr_cpu_ids; i++)				\
+		if (sem->sem[i])					\
+			dn_wr(sem->sem[i], i);				\
+}									\
+									\
+static void up_write_percpu_##name(struct percpu_##name *sem)		\
+{									\
+	int i;								\
+	for (i = 0; i < nr_cpu_ids; i++)				\
+		if (sem->sem[i])					\
+			up_wr(sem->sem[i]);				\
+}									\
+
+#endif
+
+declare_percpu_rw_lock(rw_semaphore, struct rw_semaphore, init_rwsem, down_read, up_read, down_write_nested, up_write)
+
 /*
  * Cookies are numeric values sent with CHANGE and REMOVE
  * uevents while resuming, removing or renaming the device.
@@ -123,10 +237,18 @@ EXPORT_SYMBOL_GPL(dm_get_rq_mapinfo);
 #define DMF_MERGE_IS_OPTIONAL 6
 
 /*
+ * A dummy definition to make RCU happy.
+ * struct dm_table should never be dereferenced in this file.
+ */
+struct dm_table {
+	int undefined__;
+};
+
+/*
  * Work processed by per-device workqueue.
  */
 struct mapped_device {
-	struct rw_semaphore io_lock;
+	struct percpu_rw_semaphore io_lock;
 	struct mutex suspend_lock;
 	rwlock_t map_lock;
 	atomic_t holders;
@@ -545,15 +667,34 @@ static void queue_io(struct mapped_device *md, struct bio *bio)
 struct dm_table *dm_get_live_table(struct mapped_device *md)
 {
 	struct dm_table *t;
-	unsigned long flags;
 
-	read_lock_irqsave(&md->map_lock, flags);
-	t = md->map;
+	rcu_read_lock();
+	t = rcu_dereference(md->map);
 	if (t)
 		dm_table_get(t);
-	read_unlock_irqrestore(&md->map_lock, flags);
+	rcu_read_unlock();
 
 	return t;
+}
+
+/*
+ * A fast alternative to dm_get_live_table.
+ *
+ * Use dm_put_live_table_fast to release the table. dm_put_live_table_fast must
+ * be called in all cases, regardless if this function returns NULL or not.
+ *
+ * This function doesn't increase table reference count, but holds rcu instead.
+ * The caller must not sleep untill dm_put_live_table_fast is called.
+ */
+struct dm_table *dm_get_live_table_fast(struct mapped_device *md)
+{
+	rcu_read_lock();
+	return rcu_dereference(md->map);
+}
+
+void dm_put_live_table_fast(struct mapped_device *md)
+{
+	rcu_read_unlock();
 }
 
 /*
@@ -1302,7 +1443,12 @@ static void __split_and_process_bio(struct mapped_device *md, struct bio *bio)
 	struct clone_info ci;
 	int error = 0;
 
-	ci.map = dm_get_live_table(md);
+	/*
+	 * Note. We hold io_lock for read here, so we can access md->map
+	 * without using dm_get_live_table. When we drop io_lock, this pointer
+	 * becomes invalid.
+	 */
+	ci.map = md->map;
 	if (unlikely(!ci.map)) {
 		bio_io_error(bio);
 		return;
@@ -1333,7 +1479,6 @@ static void __split_and_process_bio(struct mapped_device *md, struct bio *bio)
 
 	/* drop the extra reference count */
 	dec_pending(ci.io, error);
-	dm_table_put(ci.map);
 }
 /*-----------------------------------------------------------------
  * CRUD END
@@ -1344,7 +1489,7 @@ static int dm_merge_bvec(struct request_queue *q,
 			 struct bio_vec *biovec)
 {
 	struct mapped_device *md = q->queuedata;
-	struct dm_table *map = dm_get_live_table(md);
+	struct dm_table *map = dm_get_live_table_fast(md);
 	struct dm_target *ti;
 	sector_t max_sectors;
 	int max_size = 0;
@@ -1354,7 +1499,7 @@ static int dm_merge_bvec(struct request_queue *q,
 
 	ti = dm_table_find_target(map, bvm->bi_sector);
 	if (!dm_target_is_valid(ti))
-		goto out_table;
+		goto out;
 
 	/*
 	 * Find maximum amount of I/O that won't need splitting
@@ -1383,10 +1528,10 @@ static int dm_merge_bvec(struct request_queue *q,
 
 		max_size = 0;
 
-out_table:
-	dm_table_put(map);
 
 out:
+	dm_put_live_table_fast(md);
+
 	/*
 	 * Always allow an entire first page
 	 */
@@ -1405,8 +1550,9 @@ static void _dm_request(struct request_queue *q, struct bio *bio)
 	int rw = bio_data_dir(bio);
 	struct mapped_device *md = q->queuedata;
 	int cpu;
+	int lock_cpu;
 
-	down_read(&md->io_lock);
+	lock_cpu = down_read_percpu_rw_semaphore(&md->io_lock);
 
 	cpu = part_stat_lock();
 	part_stat_inc(cpu, &dm_disk(md)->part0, ios[rw]);
@@ -1415,7 +1561,7 @@ static void _dm_request(struct request_queue *q, struct bio *bio)
 
 	/* if we're suspended, we have to queue this io for later */
 	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags))) {
-		up_read(&md->io_lock);
+		up_read_percpu_rw_semaphore(&md->io_lock, lock_cpu);
 
 		if (bio_rw(bio) != READA)
 			queue_io(md, bio);
@@ -1425,7 +1571,7 @@ static void _dm_request(struct request_queue *q, struct bio *bio)
 	}
 
 	__split_and_process_bio(md, bio);
-	up_read(&md->io_lock);
+	up_read_percpu_rw_semaphore(&md->io_lock, lock_cpu);
 	return;
 }
 
@@ -1676,14 +1822,14 @@ static int dm_lld_busy(struct request_queue *q)
 {
 	int r;
 	struct mapped_device *md = q->queuedata;
-	struct dm_table *map = dm_get_live_table(md);
+	struct dm_table *map = dm_get_live_table_fast(md);
 
 	if (!map || test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags))
 		r = 1;
 	else
 		r = dm_table_any_busy_target(map);
 
-	dm_table_put(map);
+	dm_put_live_table_fast(md);
 
 	return r;
 }
@@ -1695,7 +1841,7 @@ static int dm_any_congested(void *congested_data, int bdi_bits)
 	struct dm_table *map;
 
 	if (!test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags)) {
-		map = dm_get_live_table(md);
+		map = dm_get_live_table_fast(md);
 		if (map) {
 			/*
 			 * Request-based dm cares about only own queue for
@@ -1707,8 +1853,8 @@ static int dm_any_congested(void *congested_data, int bdi_bits)
 			else
 				r = dm_table_any_congested(map, bdi_bits);
 
-			dm_table_put(map);
 		}
+		dm_put_live_table_fast(md);
 	}
 
 	return r;
@@ -1837,12 +1983,14 @@ static struct mapped_device *alloc_dev(int minor)
 	if (r < 0)
 		goto bad_minor;
 
+	r = init_percpu_rw_semaphore(&md->io_lock);
+	if (r < 0)
+		goto bad_semaphore;
+
 	md->type = DM_TYPE_NONE;
-	init_rwsem(&md->io_lock);
 	mutex_init(&md->suspend_lock);
 	mutex_init(&md->type_lock);
 	spin_lock_init(&md->deferred_lock);
-	rwlock_init(&md->map_lock);
 	atomic_set(&md->holders, 1);
 	atomic_set(&md->open_count, 0);
 	atomic_set(&md->event_nr, 0);
@@ -1905,6 +2053,8 @@ bad_thread:
 bad_disk:
 	blk_cleanup_queue(md->queue);
 bad_queue:
+	free_percpu_rw_semaphore(&md->io_lock);
+bad_semaphore:
 	free_minor(minor);
 bad_minor:
 	module_put(THIS_MODULE);
@@ -1930,6 +2080,7 @@ static void free_dev(struct mapped_device *md)
 		bioset_free(md->bs);
 	blk_integrity_unregister(md->disk);
 	del_gendisk(md->disk);
+	free_percpu_rw_semaphore(&md->io_lock);
 	free_minor(minor);
 
 	spin_lock(&_minor_lock);
@@ -2056,7 +2207,6 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 	struct dm_table *old_map;
 	struct request_queue *q = md->queue;
 	sector_t size;
-	unsigned long flags;
 	int merge_is_optional;
 
 	size = dm_table_get_size(t);
@@ -2085,9 +2235,10 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 
 	merge_is_optional = dm_table_merge_is_optional(t);
 
-	write_lock_irqsave(&md->map_lock, flags);
+	down_write_percpu_rw_semaphore(&md->io_lock);
+
 	old_map = md->map;
-	md->map = t;
+	rcu_assign_pointer(md->map, t);
 	md->immutable_target_type = dm_table_get_immutable_target_type(t);
 
 	dm_table_set_restrictions(t, q, limits);
@@ -2095,7 +2246,9 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 		set_bit(DMF_MERGE_IS_OPTIONAL, &md->flags);
 	else
 		clear_bit(DMF_MERGE_IS_OPTIONAL, &md->flags);
-	write_unlock_irqrestore(&md->map_lock, flags);
+
+	up_write_percpu_rw_semaphore(&md->io_lock);
+	synchronize_rcu_expedited();
 
 	return old_map;
 }
@@ -2106,15 +2259,18 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 static struct dm_table *__unbind(struct mapped_device *md)
 {
 	struct dm_table *map = md->map;
-	unsigned long flags;
 
 	if (!map)
 		return NULL;
 
+	down_write_percpu_rw_semaphore(&md->io_lock);
+
 	dm_table_event_callback(map, NULL, NULL);
-	write_lock_irqsave(&md->map_lock, flags);
-	md->map = NULL;
-	write_unlock_irqrestore(&md->map_lock, flags);
+	rcu_assign_pointer(md->map, NULL);
+
+	synchronize_rcu_expedited();
+
+	up_write_percpu_rw_semaphore(&md->io_lock);
 
 	return map;
 }
@@ -2351,8 +2507,9 @@ static void dm_wq_work(struct work_struct *work)
 	struct mapped_device *md = container_of(work, struct mapped_device,
 						work);
 	struct bio *c;
+	int lock_cpu;
 
-	down_read(&md->io_lock);
+	lock_cpu = down_read_percpu_rw_semaphore(&md->io_lock);
 
 	while (!test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags)) {
 		spin_lock_irq(&md->deferred_lock);
@@ -2362,17 +2519,15 @@ static void dm_wq_work(struct work_struct *work)
 		if (!c)
 			break;
 
-		up_read(&md->io_lock);
-
-		if (dm_request_based(md))
+		if (dm_request_based(md)) {
+			up_read_percpu_rw_semaphore(&md->io_lock, lock_cpu);
 			generic_make_request(c);
-		else
+			lock_cpu = down_read_percpu_rw_semaphore(&md->io_lock);
+		} else
 			__split_and_process_bio(md, c);
-
-		down_read(&md->io_lock);
 	}
 
-	up_read(&md->io_lock);
+	up_read_percpu_rw_semaphore(&md->io_lock, lock_cpu);
 }
 
 static void dm_queue_flush(struct mapped_device *md)
@@ -2508,9 +2663,9 @@ int dm_suspend(struct mapped_device *md, unsigned suspend_flags)
 	 * (dm_wq_work), we set BMF_BLOCK_IO_FOR_SUSPEND and call
 	 * flush_workqueue(md->wq).
 	 */
-	down_write(&md->io_lock);
+	down_write_percpu_rw_semaphore(&md->io_lock);
 	set_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags);
-	up_write(&md->io_lock);
+	up_write_percpu_rw_semaphore(&md->io_lock);
 
 	/*
 	 * Stop md->queue before flushing md->wq in case request-based
@@ -2528,10 +2683,10 @@ int dm_suspend(struct mapped_device *md, unsigned suspend_flags)
 	 */
 	r = dm_wait_for_completion(md, TASK_INTERRUPTIBLE);
 
-	down_write(&md->io_lock);
+	down_write_percpu_rw_semaphore(&md->io_lock);
 	if (noflush)
 		clear_bit(DMF_NOFLUSH_SUSPENDING, &md->flags);
-	up_write(&md->io_lock);
+	up_write_percpu_rw_semaphore(&md->io_lock);
 
 	/* were we interrupted ? */
 	if (r < 0) {
