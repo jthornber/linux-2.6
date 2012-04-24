@@ -22,6 +22,8 @@ struct cell {
 
 struct bio_prison {
 	spinlock_t lock;
+
+	struct kmem_cache *cell_cache;
 	mempool_t *cell_pool;
 
 	unsigned nr_buckets;
@@ -55,14 +57,24 @@ struct bio_prison *prison_create(unsigned nr_cells)
 	size_t len = sizeof(struct bio_prison) +
 		(sizeof(struct hlist_head) * nr_buckets);
 	struct bio_prison *prison = kmalloc(len, GFP_KERNEL);
+	char buffer[32];
 
 	if (!prison)
 		return NULL;
 
 	spin_lock_init(&prison->lock);
-	prison->cell_pool = mempool_create_kmalloc_pool(nr_cells,
-							sizeof(struct cell));
+	snprintf(buffer, sizeof(buffer), "dm_prison_cache_%p", prison);
+	prison->cell_cache = kmem_cache_create(buffer,
+					       sizeof(struct cell),
+					       __alignof__(struct cell), 0, NULL);
+	if (!prison->cell_cache) {
+		kfree(prison);
+		return NULL;
+	}
+
+	prison->cell_pool = mempool_create_slab_pool(nr_cells, prison->cell_cache);
 	if (!prison->cell_pool) {
+		kmem_cache_destroy(prison->cell_cache);
 		kfree(prison);
 		return NULL;
 	}
@@ -79,6 +91,7 @@ struct bio_prison *prison_create(unsigned nr_cells)
 void prison_destroy(struct bio_prison *prison)
 {
 	mempool_destroy(prison->cell_pool);
+	kmem_cache_destroy(prison->cell_cache);
 	kfree(prison);
 }
 
@@ -175,8 +188,10 @@ static void __cell_release(struct cell *cell, struct bio_list *inmates)
 
 	hlist_del(&cell->list);
 
-	bio_list_add(inmates, cell->holder);
-	bio_list_merge(inmates, &cell->bios);
+	if (inmates) {
+		bio_list_add(inmates, cell->holder);
+		bio_list_merge(inmates, &cell->bios);
+	}
 
 	mempool_free(cell, prison->cell_pool);
 }
@@ -199,9 +214,10 @@ void cell_release(struct cell *cell, struct bio_list *bios)
  */
 static void __cell_release_singleton(struct cell *cell, struct bio *bio)
 {
-	hlist_del(&cell->list);
 	BUG_ON(cell->holder != bio);
 	BUG_ON(!bio_list_empty(&cell->bios));
+
+	__cell_release(cell, NULL);
 }
 
 void cell_release_singleton(struct cell *cell, struct bio *bio)

@@ -810,6 +810,7 @@ static void no_space(struct cell *cell)
 static void process_discard(struct thin_c *tc, struct bio *bio)
 {
 	int r;
+	unsigned long flags;
 	struct pool *pool = tc->pool;
 	struct cell *cell, *cell2;
 	struct cell_key key, key2;
@@ -850,8 +851,10 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			m->err = 0;
 			m->bio = bio;
 
-			if (!ds_add_work(pool->all_io_ds, &m->list)) {
+			if (!ds_add_work(&pool->all_io_ds, &m->list)) {
+				spin_lock_irqsave(&pool->lock, flags);
 				list_add(&m->list, &pool->prepared_discards);
+				spin_unlock_irqrestore(&pool->lock, flags);
 				wake_worker(pool);
 			}
 		} else {
@@ -1279,6 +1282,9 @@ static void pool_features_init(struct pool_features *pf)
 	pf->discard_passdown = 1;
 }
 
+static struct kmem_cache *dm_new_mapping_cache;
+static struct kmem_cache *dm_endio_hook_cache;
+
 static void __pool_destroy(struct pool *pool)
 {
 	__pool_table_remove(pool);
@@ -1376,7 +1382,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 
 	pool->next_mapping = NULL;
 	pool->mapping_pool =
-		mempool_create_kmalloc_pool(MAPPING_POOL_SIZE, sizeof(struct new_mapping));
+		mempool_create_slab_pool(MAPPING_POOL_SIZE, dm_new_mapping_cache);
 	if (!pool->mapping_pool) {
 		*error = "Error creating pool's mapping mempool";
 		err_p = ERR_PTR(-ENOMEM);
@@ -1384,7 +1390,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 
 	pool->endio_hook_pool =
-		mempool_create_kmalloc_pool(ENDIO_HOOK_POOL_SIZE, sizeof(struct endio_hook));
+		mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE, dm_endio_hook_cache);
 	if (!pool->endio_hook_pool) {
 		*error = "Error creating pool's endio_hook mempool";
 		err_p = ERR_PTR(-ENOMEM);
@@ -2320,8 +2326,10 @@ static int thin_endio(struct dm_target *ti,
 	if (h->all_io_entry) {
 		INIT_LIST_HEAD(&work);
 		ds_dec(h->all_io_entry, &work);
+		spin_lock_irqsave(&pool->lock, flags);
 		list_for_each_entry_safe(m, tmp, &work, list)
 			list_add(&m->list, &pool->prepared_discards);
+		spin_unlock_irqrestore(&pool->lock, flags);
 	}
 
 	mempool_free(h, pool->endio_hook_pool);
@@ -2439,7 +2447,32 @@ static int __init dm_thin_init(void)
 
 	r = dm_register_target(&pool_target);
 	if (r)
-		dm_unregister_target(&thin_target);
+		goto bad_pool_target;
+
+	dm_new_mapping_cache = kmem_cache_create("dm_thin_new_mapping",
+						 sizeof(struct new_mapping),
+						 __alignof__(struct new_mapping), 0, NULL);
+	if (!dm_new_mapping_cache) {
+		r = -ENOMEM;
+		goto bad_new_mapping_cache;
+	}
+
+	dm_endio_hook_cache = kmem_cache_create("dm_thin_endio_hook",
+						sizeof(struct endio_hook),
+						__alignof__(struct endio_hook), 0, NULL);
+	if (!dm_endio_hook_cache) {
+		r = -ENOMEM;
+		goto bad_endio_hook_cache;
+	}
+
+	return 0;
+
+bad_endio_hook_cache:
+	kmem_cache_destroy(dm_new_mapping_cache);
+bad_new_mapping_cache:
+	dm_unregister_target(&pool_target);
+bad_pool_target:
+	dm_unregister_target(&thin_target);
 
 	return r;
 }
@@ -2448,6 +2481,8 @@ static void dm_thin_exit(void)
 {
 	dm_unregister_target(&thin_target);
 	dm_unregister_target(&pool_target);
+	kmem_cache_destroy(dm_new_mapping_cache);
+	kmem_cache_destroy(dm_endio_hook_cache);
 }
 
 module_init(dm_thin_init);
