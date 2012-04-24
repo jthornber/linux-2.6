@@ -686,13 +686,13 @@ struct dm_table *dm_get_live_table(struct mapped_device *md)
  * This function doesn't increase table reference count, but holds rcu instead.
  * The caller must not sleep untill dm_put_live_table_fast is called.
  */
-struct dm_table *dm_get_live_table_fast(struct mapped_device *md)
+static struct dm_table *dm_get_live_table_fast(struct mapped_device *md)
 {
 	rcu_read_lock();
 	return rcu_dereference(md->map);
 }
 
-void dm_put_live_table_fast(struct mapped_device *md)
+static void dm_put_live_table_fast(struct mapped_device *md)
 {
 	rcu_read_unlock();
 }
