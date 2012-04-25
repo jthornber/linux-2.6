@@ -108,6 +108,16 @@ struct cache_c {
 	atomic_t write_miss_partial;
 	atomic_t writeback;
 	atomic_t write_hit_new;
+
+	/*
+	 * Here are the fields I'm pulling out of the metadata object.
+	 * They should probably go into the policy object eventually.
+	 */
+	struct list_head lru;
+	wait_queue_head_t migrating_wq;
+	atomic_t nr_migrating;
+	struct list_head migrating;
+
 };
 
 // FIXME: this is getting far too big
@@ -227,6 +237,20 @@ static void __submit_bio(struct cache_c *cache, struct bio *bio)
 /*----------------------------------------------------------------
  * Migration processing
  *--------------------------------------------------------------*/
+static void set_migrating(struct cache_c *cache, struct mapping *m, unsigned n)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	list_move(&m->list, n ? &cache->migrating : &cache->lru);
+	spin_unlock_irqrestore(&m->lock, flags);
+
+	if (n)
+		atomic_sub(1, &cache->nr_migrating);
+	else
+		atomic_add(1, &cache->nr_migrating);
+}
+
 static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
 {
 	unsigned long flags;
@@ -258,7 +282,10 @@ static void promote_write_endio(struct bio *bio, int err)
 	debug("in promote_write_endio\n");
 	bio_put(bio);
 
-	cache->md->set_migrating(cache->md, mg->m, 0);
+	// FIXME: I don't think the migrating flag should be in the metadata
+	set_migrating(cache, mg->m, 0);
+	wake_up(&cache->migrating_wq);
+
 	cache->md->mark_valid_sectors(cache->md, mg->m, bio);
 	bio_endio(mg->bio, 0);
 	cell_defer(cache, mg->cell, 0);
@@ -406,7 +433,7 @@ static void process_quiesced(struct cache_c *cache, struct migration *mg)
 static void process_copied(struct cache_c *cache, struct migration *mg)
 {
 	debug("in process_copied");
-	cache->md->set_migrating(cache->md, mg->m, 0);
+	set_migrating(cache, mg->m, 0);
 
 	/* if the migration failed, we reinsert the old mapping. */
 	if (!mg->err && !mg->to_cache)
@@ -469,7 +496,7 @@ static void writeback(struct cache_c *cache, struct mapping *m, int free_mapping
 {
 	struct migration *mg;
 
-	cache->md->set_migrating(cache->md, m, 1);
+	set_migrating(cache, m, 1);
 	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
 	mg->to_cache = 0;
 	mg->free_mapping = free_mapping;
@@ -487,13 +514,14 @@ static void writeback(struct cache_c *cache, struct mapping *m, int free_mapping
 /*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
+#if 0
 static int io_overlaps_block(struct cache_c *cache, struct bio *bio)
 {
 	return !(bio->bi_sector & cache->offset_mask) &&
 		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
 
 }
-
+#endif
 static void defer_bio(struct cache_c *cache, struct bio *bio)
 {
 	unsigned long flags;
@@ -552,8 +580,23 @@ static void __push_action(enum action_cmd cmd, struct mapping *m,
 
 #define push_action(cmd, m) __push_action(cmd, m, actions, count)
 
+/* FIXME: clean blocks should be chosen in preference? */
+static struct mapping *idle_mapping(struct cache_c *cache)
+{
+	struct mapping *m = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	if (!list_empty(&cache->lru))
+		m = list_first_entry(&cache->lru, struct mapping, list);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	return m;
+}
+
 /* FIXME: get rid of the cache arg */
-static void get_actions(struct dm_cache_metadata *md,
+static void get_actions(struct cache_c *cache,
+			struct dm_cache_metadata *md,
 			dm_block_t block,
 			struct bio *bio,
 			struct action *actions,
@@ -566,6 +609,7 @@ static void get_actions(struct dm_cache_metadata *md,
 
 	m = md->lookup_mapping(md, block);
 	if (m) {
+		list_move(&m->list, &cache->lru);
 		if (is_write || md->all_valid_sectors(md, m, bio))
 			push_action(REMAP_CACHE, m);
 		else
@@ -574,12 +618,12 @@ static void get_actions(struct dm_cache_metadata *md,
 	} else {
 		/* FIXME: too nested, too opaque */
 		if (is_write) {
-			m = md->alloc_mapping(md);
+			m = md->new_mapping(md);
 			if (m)
 				push_action(REMAP_NEW_CACHE, m);
 
 			else {
-				m = md->idle_mapping(md);
+				m = idle_mapping(cache);
 				if (!m)
 					push_action(REMAP_ORIGIN, NULL);
 
@@ -598,11 +642,11 @@ static void get_actions(struct dm_cache_metadata *md,
 
 		} else {
 			// FIXME: duplicate code
-			m = md->alloc_mapping(md);
+			m = md->new_mapping(md);
 			if (m)
 				push_action(PROMOTE, m);
 			else {
-				m = md->idle_mapping(md);
+				m = idle_mapping(cache);
 				if (!m)
 					push_action(REMAP_ORIGIN, NULL);
 				else {
@@ -619,7 +663,8 @@ static void get_actions(struct dm_cache_metadata *md,
 	}
 }
 
-static void get_background_action(struct cache_metadata *md,
+static void get_background_action(struct cache_c *cache,
+				  struct dm_cache_metadata *md,
 				  struct action *actions,
 				  unsigned *count)
 {
@@ -627,10 +672,9 @@ static void get_background_action(struct cache_metadata *md,
 	dm_block_t migrating_target = md->get_nr_cache_blocks(md) / 16;
 
 	*count = 0;
-	if (md->get_nr_migrating(md) < migrating_target) {
-		// FIXME: the lru list needs to move to the policy
-		list_for_each_entry(m, &md->lru, list) {
-			if (!md->is_clean(m)) {
+	if (atomic_read(&cache->nr_migrating) < migrating_target) {
+		list_for_each_entry(m, &cache->lru, list) {
+			if (!md->is_clean(md, m)) {
 				push_action(WRITEBACK, m);
 				return;
 			}
@@ -664,7 +708,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
-	get_actions(cache->md, block, bio, actions, &count);
+	get_actions(cache, cache->md, block, bio, actions, &count);
 	atomic_inc(&cache->total);
 
 	r = DM_MAPIO_REMAPPED;
@@ -693,6 +737,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			cache->md->remove_mapping(cache->md, m);
 			m->origin = block;
 			cache->md->insert_mapping(cache->md, m);
+			list_move(&m->list, &cache->lru);
 			cache->md->clear_valid_sectors(cache->md, m);
 			h->cell = cell;
 			remap_to_cache(cache, bio, m);
@@ -712,8 +757,9 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			debug("PROMOTE\n");
 			cache->md->remove_mapping(cache->md, m);
 			m->origin = block;
-			cache->md->set_migrating(cache->md, m, 1);
+			set_migrating(cache, m, 1);
 			cache->md->insert_mapping(cache->md, m);
+			list_move(&m->list, &cache->lru);
 			promote(cache, m, bio, cell);
 			release_cell = 0;
 			r = DM_MAPIO_SUBMITTED;
@@ -795,7 +841,7 @@ static void process_background_work(struct cache_c *cache)
 	memset(actions, 0, sizeof(actions));
 
 	do {
-		get_background_action(cache->md, actions, &count);
+		get_background_action(cache, cache->md, actions, &count);
 
 		/* FIXME: duplicate code */
 		for (i = 0; i < count; i++) {
@@ -851,7 +897,7 @@ static void do_work(struct work_struct *ws)
 }
 
 /*----------------------------------------------------------------*/
-
+#if 0
 static int is_congested(struct dm_dev *dev, int bdi_bits)
 {
 	struct request_queue *q = bdev_get_queue(dev->bdev);
@@ -875,7 +921,7 @@ static void set_congestion_fn(struct cache_c *cache)
 	bdi->congested_fn = congested;
 	bdi->congested_data = cache;
 }
-
+#endif
 /*----------------------------------------------------------------
  * Target methods
  *--------------------------------------------------------------*/
@@ -1040,6 +1086,11 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->writeback, 0);
 	atomic_set(&cache->write_hit_new, 0);
 
+	INIT_LIST_HEAD(&cache->lru);
+	INIT_LIST_HEAD(&cache->migrating);
+	init_waitqueue_head(&cache->migrating_wq);
+	atomic_set(&cache->nr_migrating, 0);
+
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 0;
@@ -1093,7 +1144,7 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 	struct endio_hook *h = info->ptr;
 
 	if (h->m && bio_data_dir(bio) == WRITE)
-		md_mark_valid_sectors(cache->md, h->m, bio);
+		cache->md->mark_valid_sectors(cache->md, h->m, bio);
 
 	INIT_LIST_HEAD(&work);
 	if (h->all_io_entry)
@@ -1116,7 +1167,6 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 static void cache_postsuspend(struct dm_target *ti)
 {
 	struct cache_c *cache = ti->private;
-	struct metadata *md = cache->md;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
@@ -1128,7 +1178,7 @@ static void cache_postsuspend(struct dm_target *ti)
 	/*
 	 * Wait for any background migrations to finish.
 	 */
-	wait_event(md->migrating_wq, !atomic_read(&md->nr_migrating));
+	wait_event(cache->migrating_wq, !atomic_read(&cache->nr_migrating));
 }
 
 static void cache_resume(struct dm_target *ti)

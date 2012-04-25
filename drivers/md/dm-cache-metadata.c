@@ -22,13 +22,8 @@ struct metadata {
 	dm_block_t nr_cache_blocks;
 
 	spinlock_t lock;
-	struct list_head lru;	  /* in the rbtree */
 	struct list_head free;	  /* unallocated */
-	struct list_head migrating;
 	struct rb_root mappings;
-
-	atomic_t nr_migrating;
-	wait_queue_head_t migrating_wq; /* FIXME: not sure this should be here */
 
 	unsigned valid_array_size; /* how many ulongs are in the mapping->valid_sectors arrays */
 };
@@ -47,14 +42,17 @@ static void free_list(struct list_head *head)
 		kfree(m);
 }
 
-static void destroy(struct metadata *md)
+static void md_destroy(struct dm_cache_metadata *cmd)
 {
-	free_list(&md->lru);
+	DECLARE_MD;
+
+	/* FIXME: memleak */
+	// free_list(&md->lru);
 	free_list(&md->free);
 	kfree(md);
 }
 
-static struct mapping *__md_alloc_mapping(struct metadata *md)
+static struct mapping *__md_new_mapping(struct metadata *md)
 {
 	if (list_empty(&md->free))
 		return NULL;
@@ -62,13 +60,14 @@ static struct mapping *__md_alloc_mapping(struct metadata *md)
 	return list_first_entry(&md->free, struct mapping, list);
 }
 
-static struct mapping *md_alloc_mapping(struct metadata *md)
+static struct mapping *md_new_mapping(struct dm_cache_metadata *cmd)
 {
+	DECLARE_MD;
 	struct mapping *m;
 	unsigned long flags;
 
 	spin_lock_irqsave(&md->lock, flags);
-	m = __md_alloc_mapping(md);
+	m = __md_new_mapping(md);
 	spin_unlock_irqrestore(&md->lock, flags);
 
 	return m;
@@ -103,8 +102,6 @@ static struct mapping *md_lookup_mapping(struct dm_cache_metadata *cmd,
 
 	spin_lock_irqsave(&md->lock, flags);
 	m = __rb_lookup(md->mappings.rb_node, origin_block);
-	if (m)
-		list_move_tail(&m->list, &md->lru);
 	spin_unlock_irqrestore(&md->lock, flags);
 
 	return m;
@@ -145,7 +142,6 @@ static int __md_insert_mapping(struct metadata *md,
 
 	tmp = __rb_insert(&md->mappings.rb_node, m->origin, &m->node);
 	rb_insert_color(&m->node, &md->mappings);
-	list_move_tail(&m->list, &md->lru);
 	atomic64_set(&m->origin_gen, 0);
 	atomic64_set(&m->cache_gen, 0);
 	memset(&m->valid_sectors, 0, sizeof(long) * md->valid_array_size);
@@ -183,21 +179,6 @@ static void md_remove_mapping(struct dm_cache_metadata *cmd, struct mapping *m)
 	spin_unlock_irqrestore(&md->lock, flags);
 }
 
-/* FIXME: clean blocks should be chosen in preference? */
-static struct mapping *md_idle_mapping(struct dm_cache_metadata *cmd)
-{
-	DECLARE_MD;
-	struct mapping *m = NULL;
-	unsigned long flags;
-
-	spin_lock_irqsave(&md->lock, flags);
-	if (!list_empty(&md->lru))
-		m = list_first_entry(&md->lru, struct mapping, list);
-	spin_unlock_irqrestore(&md->lock, flags);
-
-	return m;
-}
-
 /*
  * FIXME: be careful of races here, assumes calling from single thread.
  */
@@ -220,23 +201,6 @@ static void md_set_origin_gen(struct dm_cache_metadata *cmd, struct mapping *m, 
 {
 	// FIXME: check the atomicity guarantees of this
 	atomic64_set(&m->origin_gen, gen);
-}
-
-static void md_set_migrating(struct dm_cache_metadata *cmd, struct mapping *m, unsigned n)
-{
-	DECLARE_MD;
-	unsigned long flags;
-
-	spin_lock_irqsave(&m->lock, flags);
-	list_move(&m->list, n ? &md->migrating : &md->lru);
-	spin_unlock_irqrestore(&m->lock, flags);
-
-	if (n)
-		atomic_sub(1, &md->nr_migrating);
-	else
-		atomic_add(1, &md->nr_migrating);
-
-	wake_up(&md->migrating_wq);
 }
 
 static void md_clear_valid_sectors(struct dm_cache_metadata *cmd, struct mapping *m)
@@ -285,12 +249,7 @@ static int md_all_valid_sectors(struct dm_cache_metadata *cmd, struct mapping *m
 	return 1;
 }
 
-static void md_destroy(struct dm_cache_metadata *cmd)
-{
-	// FIXME: finish
-}
-
-static struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, unsigned nr_cache_blocks)
+struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, unsigned nr_cache_blocks)
 {
 	dm_block_t b;
 	size_t mapping_size;
@@ -300,15 +259,17 @@ static struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, u
 		return NULL;
 
 	md->md.destroy = md_destroy;
+	md->md.new_mapping = md_new_mapping;
+
 	md->md.lookup_mapping = md_lookup_mapping;
 	md->md.insert_mapping = md_insert_mapping;
 	md->md.remove_mapping = md_remove_mapping;
-	md->md.idle_mapping = md_idle_mapping;
+	//md->md.idle_mapping = md_idle_mapping;
 	md->md.is_clean = md_is_clean;
 	md->md.set_origin_gen = md_set_origin_gen;
 	md->md.inc_cache_gen = md_inc_cache_gen;
 	md->md.get_cache_gen = md_get_cache_gen;
-	md->md.set_migrating = md_set_migrating;
+	//md->md.set_migrating = md_set_migrating;
 	md->md.clear_valid_sectors = md_clear_valid_sectors;
 	md->md.set_valid_sectors = md_set_valid_sectors;
 	md->md.mark_valid_sectors = md_mark_valid_sectors;
@@ -321,18 +282,14 @@ static struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, u
 	md->nr_cache_blocks = nr_cache_blocks;
 	spin_lock_init(&md->lock);
 
-	INIT_LIST_HEAD(&md->lru);
 	INIT_LIST_HEAD(&md->free);
-	INIT_LIST_HEAD(&md->migrating);
 	md->mappings = RB_ROOT;
-	atomic_set(&md->nr_migrating, 0);
-	init_waitqueue_head(&md->migrating_wq);
 
 	for (b = 0; b < nr_cache_blocks; b++) {
 		/* FIXME: use a slab */
 		m = kmalloc(mapping_size, GFP_KERNEL);
 		if (!m) {
-			metadata_destroy(md);
+			//md_destroy(md);
 			return NULL;
 		}
 
@@ -345,7 +302,7 @@ static struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, u
 		list_add_tail(&m->list, &md->free);
 	}
 
-	return md;
+	return &md->md;
 }
 
 /*----------------------------------------------------------------*/

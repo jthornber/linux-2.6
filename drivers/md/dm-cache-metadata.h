@@ -18,10 +18,10 @@ struct mapping {
 	 * These two fields are protected by the spin lock in the struct
 	 * metadata.
 	 */
-	struct list_head list;
+	struct list_head list;	// This can be used by the mech or policy
 	struct rb_node node;
 
-	sector_t block_size;
+	sector_t block_size;	// FIXME: what's this for?
 
 	/* FIXME: is the lock needed if they're only every changed from the worker thread? */
 	spinlock_t lock;	/* protects subsequent fields */
@@ -39,20 +39,22 @@ struct mapping {
 struct dm_cache_metadata {
 	void (*destroy)(struct dm_cache_metadata *md);
 
-	struct mapping *(*alloc_mapping)(struct dm_cache_metadata *md); // FIXME: not sure this should be here
+	/*
+	 * Returns NULL if no free mappings are available (a common case).
+	 */
+	struct mapping *(*new_mapping)(struct dm_cache_metadata *md);
 
 	uint64_t (*get_nr_cache_blocks)(struct dm_cache_metadata *md);
-	uint64_t (*get_nr_migrating)(struct dm_cache_metadata *md);
 
 	struct mapping *(*lookup_mapping)(struct dm_cache_metadata *md, dm_block_t origin_block);
 	int (*insert_mapping)(struct dm_cache_metadata *md, struct mapping *m);
 	void (*remove_mapping)(struct dm_cache_metadata *md, struct mapping *m);
-	struct mapping *(*idle_mapping)(struct dm_cache_metadata *md);
+
 	int (*is_clean)(struct dm_cache_metadata *md, struct mapping *m);
 	void (*set_origin_gen)(struct dm_cache_metadata *md, struct mapping *m, uint64_t gen);
 	void (*inc_cache_gen)(struct dm_cache_metadata *md, struct mapping *m);
 	uint64_t (*get_cache_gen)(struct dm_cache_metadata *md, struct mapping *m);
-	void (*set_migrating)(struct dm_cache_metadata *md, struct mapping *m, int flag);
+
 	void (*clear_valid_sectors)(struct dm_cache_metadata *md, struct mapping *m);
 	void (*set_valid_sectors)(struct dm_cache_metadata *md, struct mapping *m);
 	void (*mark_valid_sectors)(struct dm_cache_metadata *md, struct mapping *m, struct bio *bio);
