@@ -610,7 +610,7 @@ static void get_actions(struct cache_c *cache,
 	m = md->lookup_mapping(md, block);
 	if (m) {
 		list_move(&m->list, &cache->lru);
-		if (is_write || md->all_valid_sectors(md, m, bio))
+		if (is_write || md->check_valid_sectors(md, m, bio))
 			push_action(REMAP_CACHE, m);
 		else
 			push_action(REMAP_UNION, m);

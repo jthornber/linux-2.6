@@ -45,19 +45,36 @@ static void free_list(struct list_head *head)
 static void md_destroy(struct dm_cache_metadata *cmd)
 {
 	DECLARE_MD;
+	struct mapping *m;
 
-	/* FIXME: memleak */
-	// free_list(&md->lru);
+	/* Slow, but in-core isn't for production anyway. */
+	while (!RB_EMPTY_ROOT(&md->mappings)) {
+		m = rb_entry(rb_first(&md->mappings), struct mapping, node);
+		rb_erase(&m->node, &md->mappings);
+	}
+
 	free_list(&md->free);
 	kfree(md);
 }
 
+static uint64_t md_get_nr_cache_blocks(struct dm_cache_metadata *cmd)
+{
+	DECLARE_MD;
+	return md->nr_cache_blocks;
+}
+
 static struct mapping *__md_new_mapping(struct metadata *md)
 {
+	struct mapping *m;
+
 	if (list_empty(&md->free))
 		return NULL;
 
-	return list_first_entry(&md->free, struct mapping, list);
+	m = list_first_entry(&md->free, struct mapping, list);
+	if (m)
+		list_del(&m->list);
+
+	return m;
 }
 
 static struct mapping *md_new_mapping(struct dm_cache_metadata *cmd)
@@ -84,8 +101,10 @@ static struct mapping *__rb_lookup(struct rb_node *root,
 
 		if (origin_block < m->origin)
 			n = n->rb_left;
+
 		else if (origin_block > m->origin)
 			n = n->rb_right;
+
 		else
 			return m;
 	}
@@ -206,19 +225,13 @@ static void md_set_origin_gen(struct dm_cache_metadata *cmd, struct mapping *m, 
 static void md_clear_valid_sectors(struct dm_cache_metadata *cmd, struct mapping *m)
 {
 	DECLARE_MD;
-	unsigned i;
-
-	for (i = 0; i < md->valid_array_size; i++)
-		m->valid_sectors[i] = 0;
+	memset(&m->valid_sectors, 0, sizeof(long) * md->valid_array_size);
 }
 
 static void md_set_valid_sectors(struct dm_cache_metadata *cmd, struct mapping *m)
 {
 	DECLARE_MD;
-	unsigned i;
-
-	for (i = 0; i < md->valid_array_size; i++)
-		m->valid_sectors[i] = -1;
+	memset(&m->valid_sectors, -1, sizeof(long) * md->valid_array_size);
 }
 
 // FIXME: slow, slow, slow
@@ -234,7 +247,7 @@ static void md_mark_valid_sectors(struct dm_cache_metadata *cmd, struct mapping 
 	}
 }
 
-static int md_all_valid_sectors(struct dm_cache_metadata *cmd, struct mapping *m, struct bio *bio)
+static int md_check_valid_sectors(struct dm_cache_metadata *cmd, struct mapping *m, struct bio *bio)
 {
 	DECLARE_MD;
 	unsigned b = bio->bi_sector & (md->block_size - 1);
@@ -259,21 +272,22 @@ struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, unsigned
 		return NULL;
 
 	md->md.destroy = md_destroy;
+	md->md.get_nr_cache_blocks = md_get_nr_cache_blocks;
 	md->md.new_mapping = md_new_mapping;
 
 	md->md.lookup_mapping = md_lookup_mapping;
 	md->md.insert_mapping = md_insert_mapping;
 	md->md.remove_mapping = md_remove_mapping;
-	//md->md.idle_mapping = md_idle_mapping;
+
 	md->md.is_clean = md_is_clean;
 	md->md.set_origin_gen = md_set_origin_gen;
 	md->md.inc_cache_gen = md_inc_cache_gen;
 	md->md.get_cache_gen = md_get_cache_gen;
-	//md->md.set_migrating = md_set_migrating;
+
 	md->md.clear_valid_sectors = md_clear_valid_sectors;
 	md->md.set_valid_sectors = md_set_valid_sectors;
 	md->md.mark_valid_sectors = md_mark_valid_sectors;
-	md->md.all_valid_sectors = md_all_valid_sectors;
+	md->md.check_valid_sectors = md_check_valid_sectors;
 
 	md->valid_array_size = div_up(block_size, BITS_PER_LONG);
 	mapping_size = sizeof(struct mapping) + md->valid_array_size * sizeof(unsigned long);
@@ -289,7 +303,7 @@ struct dm_cache_metadata *dm_cache_metadata_create(sector_t block_size, unsigned
 		/* FIXME: use a slab */
 		m = kmalloc(mapping_size, GFP_KERNEL);
 		if (!m) {
-			//md_destroy(md);
+			md_destroy(&md->md);
 			return NULL;
 		}
 
