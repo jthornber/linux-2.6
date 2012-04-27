@@ -132,9 +132,6 @@ struct endio_hook {
 	struct mapping *m;
 };
 
-/*
- * FIXME: add a bitmap, to allow us to specify subset migrations.
- */
 struct migration {
 	struct list_head list;
 
@@ -175,6 +172,8 @@ static void remap_to_origin(struct cache_c *cache, struct bio *bio)
 	bio->bi_bdev = cache->origin_dev->bdev;
 }
 
+/* FIXME: the name doesn't really indicate there's a side effect */
+/* FIXME: refactor these two fns */
 static void __remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
 {
 	if (bio_data_dir(bio) == WRITE)
@@ -242,13 +241,15 @@ static void set_migrating(struct cache_c *cache, struct mapping *m, unsigned n)
 	unsigned long flags;
 
 	spin_lock_irqsave(&m->lock, flags);
-	list_move(&m->list, n ? &cache->migrating : &cache->lru);
+	list_move_tail(&m->list, n ? &cache->migrating : &cache->lru);
 	spin_unlock_irqrestore(&m->lock, flags);
 
 	if (n)
 		atomic_sub(1, &cache->nr_migrating);
 	else
 		atomic_add(1, &cache->nr_migrating);
+
+	wake_up(&cache->migrating_wq);
 }
 
 static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
@@ -282,9 +283,7 @@ static void promote_write_endio(struct bio *bio, int err)
 	debug("in promote_write_endio\n");
 	bio_put(bio);
 
-	// FIXME: I don't think the migrating flag should be in the metadata
 	set_migrating(cache, mg->m, 0);
-	wake_up(&cache->migrating_wq);
 
 	cache->md->mark_valid_sectors(cache->md, mg->m, bio);
 	bio_endio(mg->bio, 0);
@@ -609,7 +608,7 @@ static void get_actions(struct cache_c *cache,
 
 	m = md->lookup_mapping(md, block);
 	if (m) {
-		list_move(&m->list, &cache->lru);
+		list_move_tail(&m->list, &cache->lru);
 		if (is_write || md->check_valid_sectors(md, m, bio))
 			push_action(REMAP_CACHE, m);
 		else
@@ -641,6 +640,9 @@ static void get_actions(struct cache_c *cache,
 			}
 
 		} else {
+#if 1
+			push_action(REMAP_ORIGIN, NULL);
+#else
 			// FIXME: duplicate code
 			m = md->new_mapping(md);
 			if (m)
@@ -659,6 +661,7 @@ static void get_actions(struct cache_c *cache,
 					}
 				}
 			}
+#endif
 		}
 	}
 }
@@ -668,10 +671,13 @@ static void get_background_action(struct cache_c *cache,
 				  struct action *actions,
 				  unsigned *count)
 {
+#if 0
 	struct mapping *m;
 	dm_block_t migrating_target = md->get_nr_cache_blocks(md) / 16;
+#endif
 
 	*count = 0;
+#if 0
 	if (atomic_read(&cache->nr_migrating) < migrating_target) {
 		list_for_each_entry(m, &cache->lru, list) {
 			if (!md->is_clean(md, m)) {
@@ -680,6 +686,7 @@ static void get_background_action(struct cache_c *cache,
 			}
 		}
 	}
+#endif
 }
 
 /*----------------------------------------------------------------*/
@@ -736,8 +743,11 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			atomic_inc(&cache->write_hit_new);
 			cache->md->remove_mapping(cache->md, m);
 			m->origin = block;
+			pr_alert("remapping cache(%u) -> origin(%u)\n",
+				 (unsigned) m->cache,
+				 (unsigned) m->origin);
 			cache->md->insert_mapping(cache->md, m);
-			list_move(&m->list, &cache->lru);
+			list_move_tail(&m->list, &cache->lru);
 			cache->md->clear_valid_sectors(cache->md, m);
 			h->cell = cell;
 			remap_to_cache(cache, bio, m);
@@ -759,7 +769,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			m->origin = block;
 			set_migrating(cache, m, 1);
 			cache->md->insert_mapping(cache->md, m);
-			list_move(&m->list, &cache->lru);
+			list_move_tail(&m->list, &cache->lru);
 			promote(cache, m, bio, cell);
 			release_cell = 0;
 			r = DM_MAPIO_SUBMITTED;

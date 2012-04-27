@@ -72,7 +72,7 @@ static struct mapping *__md_new_mapping(struct metadata *md)
 
 	m = list_first_entry(&md->free, struct mapping, list);
 	if (m)
-		list_del(&m->list);
+		list_del_init(&m->list);
 
 	return m;
 }
