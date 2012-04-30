@@ -1114,10 +1114,10 @@ static sector_t max_io_len(sector_t sector, struct dm_target *ti)
 	 * Does the target need to split even further ?
 	 */
 	if (ti->split_io) {
-		sector_t boundary;
 		sector_t offset = dm_target_offset(ti, sector);
-		boundary = ((offset + ti->split_io) & ~(ti->split_io - 1))
-			   - offset;
+		sector_t boundary, tmp = offset + ti->split_io;
+
+		boundary = ti->split_io - do_div(tmp, ti->split_io);
 		if (len > boundary)
 			len = boundary;
 	}
