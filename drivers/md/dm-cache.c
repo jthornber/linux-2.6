@@ -46,8 +46,8 @@
  * once we allow for this we can drop the irq spin locking.
  */
 
-#define debug(x...) pr_alert(x)
-//#define debug(x...) ;
+//#define debug(x...) pr_alert(x)
+#define debug(x...) ;
 
 /*----------------------------------------------------------------*/
 
@@ -129,7 +129,6 @@ struct endio_hook {
 	struct bio *dup;	/* FIXME: rename to bio */
 
 	unsigned write_to_cache:1;
-	struct mapping *m;
 };
 
 struct migration {
@@ -174,27 +173,18 @@ static void remap_to_origin(struct cache_c *cache, struct bio *bio)
 
 /* FIXME: the name doesn't really indicate there's a side effect */
 /* FIXME: refactor these two fns */
-static void __remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
-{
-	if (bio_data_dir(bio) == WRITE)
-		cache->md->inc_cache_gen(cache->md, m);
-
-	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (m->cache << cache->block_shift) +
-		(bio->bi_sector & cache->offset_mask);
-}
-
 static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
 {
-	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-	h->m = m;
-
 	if (bio_data_dir(bio) == WRITE)
 		cache->md->inc_cache_gen(cache->md, m);
 
 	bio->bi_bdev = cache->cache_dev->bdev;
 	bio->bi_sector = (m->cache << cache->block_shift) +
 		(bio->bi_sector & cache->offset_mask);
+
+	// FIXME: should we mark before the data is actually written?
+	if (bio_data_dir(bio) == WRITE)
+		cache->md->mark_valid_sectors(cache->md, m, bio);
 }
 
 static dm_block_t get_bio_block(struct cache_c *cache, struct bio *bio)
@@ -244,12 +234,11 @@ static void set_migrating(struct cache_c *cache, struct mapping *m, unsigned n)
 	list_move_tail(&m->list, n ? &cache->migrating : &cache->lru);
 	spin_unlock_irqrestore(&m->lock, flags);
 
-	if (n)
+	if (!n) {
 		atomic_sub(1, &cache->nr_migrating);
-	else
+		wake_up(&cache->migrating_wq);
+	} else
 		atomic_add(1, &cache->nr_migrating);
-
-	wake_up(&cache->migrating_wq);
 }
 
 static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
@@ -305,7 +294,8 @@ static void copy_via_clone(struct cache_c *cache, struct migration *mg)
 	bio->bi_end_io = promote_read_endio;
 	bio->bi_private = mg;
 
-	__remap_to_cache(cache, dup, mg->m);
+	remap_to_cache(cache, dup, mg->m);
+
 	dup->bi_rw = WRITE;
 	dup->bi_end_io = promote_write_endio;
 	dup->bi_private = mg;
@@ -698,7 +688,6 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 	struct cell_key key;
 	struct cell *cell;
 	struct mapping *m;
-	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	int release_cell = 1;
 	struct action actions[MAX_ACTIONS];
 	unsigned count = 0;
@@ -743,26 +732,23 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			atomic_inc(&cache->write_hit_new);
 			cache->md->remove_mapping(cache->md, m);
 			m->origin = block;
-			pr_alert("remapping cache(%u) -> origin(%u)\n",
-				 (unsigned) m->cache,
-				 (unsigned) m->origin);
 			cache->md->insert_mapping(cache->md, m);
 			list_move_tail(&m->list, &cache->lru);
 			cache->md->clear_valid_sectors(cache->md, m);
-			h->cell = cell;
 			remap_to_cache(cache, bio, m);
-			release_cell = 0;
 			break;
 
 		case WRITEBACK:
 			BUG_ON(!m);
 			debug("REMAP_WRITEBACK\n");
 			atomic_inc(&cache->writeback);
+#if 0
 			writeback(cache, m, 0, NULL);
+#endif
 			break;
 
 		case PROMOTE:
-#if 1
+#if 0
 			BUG_ON(!m);
 			debug("PROMOTE\n");
 			cache->md->remove_mapping(cache->md, m);
@@ -1152,9 +1138,6 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 	struct cache_c *cache = ti->private;
 	struct list_head work;
 	struct endio_hook *h = info->ptr;
-
-	if (h->m && bio_data_dir(bio) == WRITE)
-		cache->md->mark_valid_sectors(cache->md, h->m, bio);
 
 	INIT_LIST_HEAD(&work);
 	if (h->all_io_entry)

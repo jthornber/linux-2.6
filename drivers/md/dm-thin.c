@@ -862,7 +862,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			m->err = 0;
 			m->bio = bio;
 
-			if (!ds_add_work(&pool->all_io_ds, &m->list)) {
+			if (!ds_add_work(pool->all_io_ds, &m->list)) {
 				spin_lock_irqsave(&pool->lock, flags);
 				list_add(&m->list, &pool->prepared_discards);
 				spin_unlock_irqrestore(&pool->lock, flags);
