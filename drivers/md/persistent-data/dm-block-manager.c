@@ -589,16 +589,10 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
 	if (unlikely(r))
 		return r;
-	r = dm_bufio_issue_flush(to_bufio(bm));
-	if (unlikely(r))
-		return r;
 
 	dm_bm_unlock(superblock);
 
 	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
-	if (unlikely(r))
-		return r;
-	r = dm_bufio_issue_flush(to_bufio(bm));
 	if (unlikely(r))
 		return r;
 
