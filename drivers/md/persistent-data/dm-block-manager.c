@@ -382,6 +382,7 @@ EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
 void dm_block_manager_destroy(struct dm_block_manager *bm)
 {
+	BUG_ON(dm_bufio_has_dirty_buffers(to_bufio(bm)));
 	return dm_bufio_client_destroy(to_bufio(bm));
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
