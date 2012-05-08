@@ -346,8 +346,8 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 			goto bad2;
 
 	} else {
-		r = dm_bm_write_lock(dm_tm_get_bm(*tm), sb_location,
-				     sb_validator, sblock);
+		r = dm_bm_read_lock(dm_tm_get_bm(*tm), sb_location,
+				    sb_validator, sblock);
 		if (r < 0) {
 			DMERR("couldn't lock superblock");
 			goto bad1;
