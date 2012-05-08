@@ -1324,6 +1324,30 @@ struct dm_bufio_client *dm_bufio_get_client(struct dm_buffer *b)
 }
 EXPORT_SYMBOL_GPL(dm_bufio_get_client);
 
+static int __has_dirty_buffers(struct dm_bufio_client *c)
+{
+	struct dm_buffer *b;
+
+	list_for_each_entry(b, &c->lru[LIST_DIRTY], lru_list) {
+		if (test_bit(B_DIRTY, &b->state))
+			return 1;
+	}
+
+	return 0;
+}
+
+int dm_bufio_has_dirty_buffers(struct dm_bufio_client *c)
+{
+	int r;
+
+	dm_bufio_lock(c);
+	r = __has_dirty_buffers(c);
+	dm_bufio_unlock(c);
+
+	return r;
+}
+EXPORT_SYMBOL_GPL(dm_bufio_has_dirty_buffers);
+
 static void drop_buffers(struct dm_bufio_client *c)
 {
 	struct dm_buffer *b;

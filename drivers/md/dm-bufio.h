@@ -114,6 +114,7 @@ sector_t dm_bufio_get_block_number(struct dm_buffer *b);
 void *dm_bufio_get_block_data(struct dm_buffer *b);
 void *dm_bufio_get_aux_data(struct dm_buffer *b);
 struct dm_bufio_client *dm_bufio_get_client(struct dm_buffer *b);
+int dm_bufio_has_dirty_buffers(struct dm_bufio_client *c);
 
 /*----------------------------------------------------------------*/
 
