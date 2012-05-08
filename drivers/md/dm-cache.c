@@ -117,20 +117,15 @@ struct cache_c {
 	wait_queue_head_t migrating_wq;
 	atomic_t nr_migrating;
 	struct list_head migrating;
-
 };
 
-// FIXME: this is getting far too big
 struct endio_hook {
 	struct list_head list;
-	struct cache_c *cache;
 	struct deferred_entry *all_io_entry;
 	struct cell *cell;
-	struct bio *dup;	/* FIXME: rename to bio */
-
-	unsigned write_to_cache:1;
 };
 
+/* FIXME: way too big */
 struct migration {
 	struct list_head list;
 
@@ -165,7 +160,6 @@ static void wake_worker(struct cache_c *cache)
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
-
 static void remap_to_origin(struct cache_c *cache, struct bio *bio)
 {
 	bio->bi_bdev = cache->origin_dev->bdev;
@@ -182,7 +176,9 @@ static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct mappin
 	bio->bi_sector = (m->cache << cache->block_shift) +
 		(bio->bi_sector & cache->offset_mask);
 
-	// FIXME: should we mark before the data is actually written?
+	// FIXME: should we mark before the data is actually written?  No.
+	// Do we need to mark pending writes?  After a crash we must only
+	// either return what was on the origin, or the new data.
 	if (bio_data_dir(bio) == WRITE)
 		cache->md->mark_valid_sectors(cache->md, m, bio);
 }
@@ -234,11 +230,13 @@ static void set_migrating(struct cache_c *cache, struct mapping *m, unsigned n)
 	list_move_tail(&m->list, n ? &cache->migrating : &cache->lru);
 	spin_unlock_irqrestore(&m->lock, flags);
 
-	if (!n) {
-		atomic_sub(1, &cache->nr_migrating);
-		wake_up(&cache->migrating_wq);
-	} else
+	if (n)
 		atomic_add(1, &cache->nr_migrating);
+	else
+		if (atomic_dec_and_test(&cache->nr_migrating)) {
+			BUG_ON(!list_empty(&cache->migrating));
+			wake_up(&cache->migrating_wq);
+		}
 }
 
 static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
@@ -416,7 +414,8 @@ static void copy_via_kcopyd(struct cache_c *cache, struct migration *mg)
 
 static void process_quiesced(struct cache_c *cache, struct migration *mg)
 {
-	(mg->to_cache ? copy_via_clone : copy_via_kcopyd)(cache, mg);
+	// (mg->to_cache ? copy_via_clone : copy_via_kcopyd)(cache, mg);
+	copy_via_kcopyd(cache, mg);
 }
 
 static void process_copied(struct cache_c *cache, struct migration *mg)
@@ -428,13 +427,19 @@ static void process_copied(struct cache_c *cache, struct migration *mg)
 	if (!mg->err && !mg->to_cache)
 		cache->md->set_origin_gen(cache->md, mg->m, mg->gen);
 
-	/* FIXME: what's happening here? */
 	if (!mg->err && mg->free_mapping)
 		cache->md->remove_mapping(cache->md, mg->m);
 
 	if (!mg->err && mg->to_cache)
 		cache->md->set_valid_sectors(cache->md, mg->m);
-
+#if 0
+	if (mg->bio) {
+		spin_lock_irqsave(&cache->lock, flags);
+		bio_list_add(&cache->deferred_bios, mg->bio);
+		spin_unlock_irqrestore(&cache->lock, flags);
+		wake_worker(cache);
+	}
+#endif
 	/*
 	 * Even if there was an error we can release the bios from
 	 * the cell and let them proceed using the old location.
@@ -461,43 +466,37 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 		fn(cache, mg);
 }
 
-// FIXME: these two are very similar
-static void promote(struct cache_c *cache, struct mapping *m, struct bio *bio, struct cell *cell)
+static void new_migration(struct cache_c *cache, int to_cache, int free_mapping,
+			  struct mapping *m, struct bio *bio, struct cell *cell)
 {
 	struct migration *mg;
 
 	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
-	mg->to_cache = 1;
-	mg->free_mapping = 0;
+	mg->to_cache = to_cache;
+	mg->free_mapping = free_mapping;
 	mg->bio = bio;
 	mg->m = m;
 	mg->gen = cache->md->get_cache_gen(cache->md, m);
 	mg->cell = cell;
 	mg->err = 0;
 	mg->cache = cache;
+
+	set_migrating(cache, m, 1);
 	if (!ds_add_work(cache->all_io_ds, &mg->list)) {
 		list_add_tail(&mg->list, &cache->quiesced_migrations);
 		wake_worker(cache);
 	}
+
+}
+
+static void promote(struct cache_c *cache, struct mapping *m, struct bio *bio, struct cell *cell)
+{
+	new_migration(cache, 1, 0, m, bio, cell);
 }
 
 static void writeback(struct cache_c *cache, struct mapping *m, int free_mapping, struct cell *cell)
 {
-	struct migration *mg;
-
-	set_migrating(cache, m, 1);
-	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
-	mg->to_cache = 0;
-	mg->free_mapping = free_mapping;
-	mg->m = m;
-	mg->gen = cache->md->get_cache_gen(cache->md, m);
-	mg->cell = cell;
-	mg->err = 0;
-	mg->cache = cache;
-	if (!ds_add_work(cache->all_io_ds, &mg->list)) {
-		list_add_tail(&mg->list, &cache->quiesced_migrations);
-		wake_worker(cache);
-	}
+	new_migration(cache, 0, free_mapping, m, NULL, cell);
 }
 
 /*----------------------------------------------------------------
@@ -569,18 +568,39 @@ static void __push_action(enum action_cmd cmd, struct mapping *m,
 
 #define push_action(cmd, m) __push_action(cmd, m, actions, count)
 
-/* FIXME: clean blocks should be chosen in preference? */
-static struct mapping *idle_mapping(struct cache_c *cache)
+/* FIXME: slow impl */
+static struct mapping *find_clean_mapping(struct cache_c *cache)
 {
-	struct mapping *m = NULL;
+	struct mapping *m, *r = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	if (!list_empty(&cache->lru))
-		m = list_first_entry(&cache->lru, struct mapping, list);
+	list_for_each_entry(m, &cache->lru, list) {
+		if (cache->md->is_clean(cache->md, m)) {
+			r = m;
+			break;
+		}
+	}
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	return m;
+	return r;
+}
+
+static struct mapping *find_dirty_mapping(struct cache_c *cache)
+{
+	struct mapping *m, *r = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	list_for_each_entry(m, &cache->lru, list) {
+		if (!cache->md->is_clean(cache->md, m)) {
+			r = m;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	return r;
 }
 
 /* FIXME: get rid of the cache arg */
@@ -612,46 +632,14 @@ static void get_actions(struct cache_c *cache,
 				push_action(REMAP_NEW_CACHE, m);
 
 			else {
-				m = idle_mapping(cache);
-				if (!m)
+				m = find_clean_mapping(cache);
+				if (m)
+					push_action(REMAP_NEW_CACHE, m);
+				else
 					push_action(REMAP_ORIGIN, NULL);
-
-				else {
-					if (md->is_clean(md, m))
-						push_action(REMAP_NEW_CACHE, m);
-
-					else {
-						/* writeback this cache block so we can use it later */
-						/* FIXME: how do we avoid multiple migrations? */
-						push_action(WRITEBACK, m);
-						push_action(REMAP_ORIGIN, NULL);
-					}
-				}
 			}
-
 		} else {
-#if 1
 			push_action(REMAP_ORIGIN, NULL);
-#else
-			// FIXME: duplicate code
-			m = md->new_mapping(md);
-			if (m)
-				push_action(PROMOTE, m);
-			else {
-				m = idle_mapping(cache);
-				if (!m)
-					push_action(REMAP_ORIGIN, NULL);
-				else {
-					if (md->is_clean(md, m))
-						push_action(PROMOTE, m);
-
-					else {
-						push_action(WRITEBACK, m);
-						push_action(REMAP_ORIGIN, NULL);
-					}
-				}
-			}
-#endif
 		}
 	}
 }
@@ -661,21 +649,18 @@ static void get_background_action(struct cache_c *cache,
 				  struct action *actions,
 				  unsigned *count)
 {
-#if 0
+#if 1
 	struct mapping *m;
-	dm_block_t migrating_target = md->get_nr_cache_blocks(md) / 16;
-#endif
+	dm_block_t migrating_target = 1; // md->get_nr_cache_blocks(md) / 128;
 
 	*count = 0;
-#if 0
 	if (atomic_read(&cache->nr_migrating) < migrating_target) {
-		list_for_each_entry(m, &cache->lru, list) {
-			if (!md->is_clean(md, m)) {
-				push_action(WRITEBACK, m);
-				return;
-			}
-		}
+		m = find_dirty_mapping(cache);
+		if (m)
+			push_action(WRITEBACK, m);
 	}
+#else
+	*count = 0;
 #endif
 }
 
@@ -742,9 +727,14 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			BUG_ON(!m);
 			debug("REMAP_WRITEBACK\n");
 			atomic_inc(&cache->writeback);
-#if 0
-			writeback(cache, m, 0, NULL);
-#endif
+
+			/*
+			 * Even though we're writing back an old mapping,
+			 * we don't let the bio proceed.
+			 */
+			writeback(cache, m, 0, cell);
+			release_cell = 0;
+			r = DM_MAPIO_SUBMITTED;
 			break;
 
 		case PROMOTE:
@@ -753,7 +743,6 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			debug("PROMOTE\n");
 			cache->md->remove_mapping(cache->md, m);
 			m->origin = block;
-			set_migrating(cache, m, 1);
 			cache->md->insert_mapping(cache->md, m);
 			list_move_tail(&m->list, &cache->lru);
 			promote(cache, m, bio, cell);
@@ -1119,7 +1108,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	struct cache_c *cache = ti->private;
 	struct endio_hook *h = mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
 
-	h->cache = cache;
 	h->all_io_entry = NULL;
 	h->cell = NULL;
 	map_context->ptr = h;

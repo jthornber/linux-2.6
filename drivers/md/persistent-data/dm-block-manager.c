@@ -587,6 +587,7 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 {
 	int r;
 
+	pr_alert("committing pool metadata");
 	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
 	if (unlikely(r))
 		return r;

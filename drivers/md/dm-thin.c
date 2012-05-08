@@ -1105,7 +1105,7 @@ static void process_deferred_bios(struct pool *pool)
 	bio_list_init(&pool->deferred_flush_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
+	if (bio_list_empty(&bios)) // && !need_commit_due_to_time(pool))
 		return;
 
 	r = dm_pool_commit_metadata(pool->pmd);
