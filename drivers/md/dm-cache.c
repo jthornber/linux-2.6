@@ -108,6 +108,9 @@ struct cache_c {
 	atomic_t write_miss_partial;
 	atomic_t writeback;
 	atomic_t write_hit_new;
+	atomic_t useless_writebacks;
+
+	atomic_t writeback_threshold;
 
 	/*
 	 * Here are the fields I'm pulling out of the metadata object.
@@ -424,8 +427,11 @@ static void process_copied(struct cache_c *cache, struct migration *mg)
 	set_migrating(cache, mg->m, 0);
 
 	/* if the migration failed, we reinsert the old mapping. */
-	if (!mg->err && !mg->to_cache)
+	if (!mg->err && !mg->to_cache) {
 		cache->md->set_origin_gen(cache->md, mg->m, mg->gen);
+		if (mg->gen != cache->md->get_cache_gen(cache->md, mg->m))
+			atomic_inc(&cache->useless_writebacks);
+	}
 
 	if (!mg->err && mg->free_mapping)
 		cache->md->remove_mapping(cache->md, mg->m);
@@ -651,13 +657,15 @@ static void get_background_action(struct cache_c *cache,
 {
 #if 1
 	struct mapping *m;
-	dm_block_t migrating_target = 1; // md->get_nr_cache_blocks(md) / 128;
+	const dm_block_t threshold = 100;
 
 	*count = 0;
-	if (atomic_read(&cache->nr_migrating) < migrating_target) {
+	if (atomic_read(&cache->writeback_threshold) >= threshold) {
 		m = find_dirty_mapping(cache);
-		if (m)
+		if (m) {
+			atomic_sub(threshold, &cache->writeback_threshold);
 			push_action(WRITEBACK, m);
+		}
 	}
 #else
 	*count = 0;
@@ -700,7 +708,13 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 		case REMAP_ORIGIN:
 			BUG_ON(m);
 			debug("REMAP_ORIGIN\n");
-			atomic_inc(is_write ? &cache->write_miss : &cache->read_miss);
+
+			if (is_write) {
+				atomic_inc(&cache->write_miss);
+				atomic_inc(&cache->writeback_threshold);
+			} else
+				atomic_inc(&cache->read_miss);
+
 			remap_to_origin(cache, bio);
 			break;
 
@@ -760,6 +774,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			atomic_inc(&cache->read_union);
 
 			/* slow, but simple ... we writeback, drop the cache entry, then retry */
+			atomic_inc(&cache->writeback);
 			writeback(cache, m, 1, cell);
 			release_cell = 0;
 			r = DM_MAPIO_SUBMITTED;
@@ -925,6 +940,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("write misses due to partial block:\t%u\n", (unsigned) atomic_read(&cache->write_miss_partial));
 	pr_alert("writebacks:\t%u\n", (unsigned) atomic_read(&cache->writeback));
 	pr_alert("write hit new:\t%u\n", (unsigned) atomic_read(&cache->write_hit_new));
+	pr_alert("useless writebacks:\t%u\n", (unsigned) atomic_read(&cache->useless_writebacks));
 
 	mempool_destroy(cache->migration_pool);
 	mempool_destroy(cache->endio_hook_pool);
@@ -1040,6 +1056,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
+	pr_alert("%u cache blocks\n", (unsigned) nr_cache_blocks);
 	cache->md = dm_cache_metadata_create(block_size, nr_cache_blocks);
 	if (!cache->md) {
 		ti->error = "couldn't create metadata";
@@ -1070,6 +1087,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->write_miss_partial, 0);
 	atomic_set(&cache->writeback, 0);
 	atomic_set(&cache->write_hit_new, 0);
+	atomic_set(&cache->useless_writebacks, 0);
+	atomic_set(&cache->writeback_threshold, 0);
 
 	INIT_LIST_HEAD(&cache->lru);
 	INIT_LIST_HEAD(&cache->migrating);
