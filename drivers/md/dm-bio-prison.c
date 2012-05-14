@@ -179,6 +179,27 @@ out:
 	return r;
 }
 
+int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
+			   struct bio *inmate, struct cell **cell)
+{
+	int r = 0;
+	unsigned long flags;
+	uint32_t hash = hash_key(prison, key);
+
+	BUG_ON(hash > prison->nr_buckets);
+
+	spin_lock_irqsave(&prison->lock, flags);
+
+	*cell = __search_bucket(prison->cells + hash, key);
+	if (*cell) {
+		bio_list_add(&(*cell)->bios, inmate);
+		r = 1;
+	}
+
+	spin_unlock_irqrestore(&prison->lock, flags);
+	return r;
+}
+
 /*
  * @inmates must have been initialised prior to this call
  */

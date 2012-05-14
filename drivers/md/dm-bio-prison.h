@@ -45,6 +45,8 @@ void prison_destroy(struct bio_prison *prison);
  */
 int bio_detain(struct bio_prison *prison, struct cell_key *key,
 	       struct bio *inmate, struct cell **ref);
+int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
+			   struct bio *inmate, struct cell **ref);
 
 void cell_release(struct cell *cell, struct bio_list *bios);
 void cell_release_singleton(struct cell *cell, struct bio *bio); // FIXME: bio arg not needed

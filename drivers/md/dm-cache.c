@@ -107,6 +107,7 @@ struct cache_c {
 	atomic_t write_miss;
 	atomic_t write_miss_partial;
 	atomic_t writeback;
+	atomic_t promotion;
 	atomic_t write_hit_new;
 	atomic_t useless_writebacks;
 
@@ -417,12 +418,14 @@ static void copy_via_kcopyd(struct cache_c *cache, struct migration *mg)
 
 static void process_quiesced(struct cache_c *cache, struct migration *mg)
 {
+	pr_alert("quiesced migration %p\n", mg);
 	// (mg->to_cache ? copy_via_clone : copy_via_kcopyd)(cache, mg);
 	copy_via_kcopyd(cache, mg);
 }
 
 static void process_copied(struct cache_c *cache, struct migration *mg)
 {
+	pr_alert("copied migration %p\n", mg);
 	debug("in process_copied");
 	set_migrating(cache, mg->m, 0);
 
@@ -490,9 +493,11 @@ static void new_migration(struct cache_c *cache, int to_cache, int free_mapping,
 	set_migrating(cache, m, 1);
 	if (!ds_add_work(cache->all_io_ds, &mg->list)) {
 		list_add_tail(&mg->list, &cache->quiesced_migrations);
+
+		// FIXME: this is the worker, so do we really need this?
 		wake_worker(cache);
 	}
-
+	pr_alert("queued migration %p\n", mg);
 }
 
 static void promote(struct cache_c *cache, struct mapping *m, struct bio *bio, struct cell *cell)
@@ -609,6 +614,15 @@ static struct mapping *find_dirty_mapping(struct cache_c *cache)
 	return r;
 }
 
+static struct mapping *new_or_clean_mapping(struct cache_c *cache)
+{
+	struct mapping *m = cache->md->new_mapping(cache->md);
+	if (m)
+		return m;
+
+	return find_clean_mapping(cache);
+}
+
 /* FIXME: get rid of the cache arg */
 static void get_actions(struct cache_c *cache,
 			struct dm_cache_metadata *md,
@@ -631,22 +645,18 @@ static void get_actions(struct cache_c *cache,
 			push_action(REMAP_UNION, m);
 
 	} else {
-		/* FIXME: too nested, too opaque */
-		if (is_write) {
-			m = md->new_mapping(md);
-			if (m)
-				push_action(REMAP_NEW_CACHE, m);
-
-			else {
-				m = find_clean_mapping(cache);
-				if (m)
+		// FIXME: magic number, we want promitions to occur v. slowly
+		if (!(atomic_read(&cache->read_miss) & 1023)) {
+			m = new_or_clean_mapping(cache);
+			if (m) {
+				if (is_write)
 					push_action(REMAP_NEW_CACHE, m);
 				else
-					push_action(REMAP_ORIGIN, NULL);
-			}
-		} else {
+					push_action(PROMOTE, m);
+			} else
+				push_action(REMAP_ORIGIN, NULL);
+		} else
 			push_action(REMAP_ORIGIN, NULL);
-		}
 	}
 }
 
@@ -655,7 +665,6 @@ static void get_background_action(struct cache_c *cache,
 				  struct action *actions,
 				  unsigned *count)
 {
-#if 1
 	struct mapping *m;
 	const dm_block_t threshold = 100;
 
@@ -664,12 +673,11 @@ static void get_background_action(struct cache_c *cache,
 		m = find_dirty_mapping(cache);
 		if (m) {
 			atomic_sub(threshold, &cache->writeback_threshold);
+#if 1
 			push_action(WRITEBACK, m);
+#endif
 		}
 	}
-#else
-	*count = 0;
-#endif
 }
 
 /*----------------------------------------------------------------*/
@@ -752,9 +760,10 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 			break;
 
 		case PROMOTE:
-#if 0
+#if 1
 			BUG_ON(!m);
 			debug("PROMOTE\n");
+			atomic_inc(&cache->promotion);
 			cache->md->remove_mapping(cache->md, m);
 			m->origin = block;
 			cache->md->insert_mapping(cache->md, m);
@@ -787,7 +796,7 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 	}
 
 	if (release_cell)
-		cell_release_singleton(cell, bio);
+		cell_defer(cache, cell, 0);
 
 	return r;
 }
@@ -939,6 +948,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->write_miss));
 	pr_alert("write misses due to partial block:\t%u\n", (unsigned) atomic_read(&cache->write_miss_partial));
 	pr_alert("writebacks:\t%u\n", (unsigned) atomic_read(&cache->writeback));
+	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&cache->promotion));
 	pr_alert("write hit new:\t%u\n", (unsigned) atomic_read(&cache->write_hit_new));
 	pr_alert("useless writebacks:\t%u\n", (unsigned) atomic_read(&cache->useless_writebacks));
 
@@ -1125,15 +1135,55 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
 	struct cache_c *cache = ti->private;
+	dm_block_t block = get_bio_block(cache, bio);
+	struct cell_key key;
+	struct cell *cell;
 	struct endio_hook *h = mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
+	struct mapping *m;
+	int is_write = bio_data_dir(bio) == WRITE;
+	int r;
+	unsigned long flags;
 
 	h->all_io_entry = NULL;
 	h->cell = NULL;
 	map_context->ptr = h;
 
-	/*
-	 * Let's keep it simple to start with and defer everything.
-	 */
+	build_key(block, &key);
+	r = bio_detain_if_occupied(cache->prison, &key, bio, &cell);
+	if (r > 0)
+		return DM_MAPIO_SUBMITTED;
+
+	m = cache->md->lookup_mapping(cache->md, block);
+	if (m) {
+		if (is_write) {
+			spin_lock_irqsave(&cache->lock, flags);
+			list_move_tail(&m->list, &cache->lru);
+			spin_unlock_irqrestore(&cache->lock, flags);
+
+			atomic_inc(&cache->total);
+			atomic_inc(&cache->write_hit);
+			h->all_io_entry = ds_inc(cache->all_io_ds);
+			remap_to_cache(cache, bio, m);
+			return DM_MAPIO_REMAPPED;
+
+		} else if (cache->md->check_valid_sectors(cache->md, m, bio)) {
+
+			spin_lock_irqsave(&cache->lock, flags);
+			list_move_tail(&m->list, &cache->lru);
+			spin_unlock_irqrestore(&cache->lock, flags);
+
+			atomic_inc(&cache->total);
+			atomic_inc(&cache->read_hit);
+			h->all_io_entry = ds_inc(cache->all_io_ds);
+			remap_to_cache(cache, bio, m);
+			return DM_MAPIO_REMAPPED;
+
+		} else {
+			defer_bio(cache, bio);
+			return DM_MAPIO_SUBMITTED;
+		}
+	}
+
 	defer_bio(cache, bio);
 	return DM_MAPIO_SUBMITTED;
 }
