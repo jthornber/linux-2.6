@@ -1104,6 +1104,7 @@ static int __reserve_metadata_snap(struct dm_pool_metadata *pmd)
 		DMWARN("pool already has a metadata snapshot");
 		dm_tm_dec(pmd->tm, held_root);
 		dm_tm_unlock(pmd->tm, copy);
+		pmd->need_commit = 1;
 		return -EBUSY;
 	}
 
@@ -1128,6 +1129,7 @@ static int __reserve_metadata_snap(struct dm_pool_metadata *pmd)
 			     &sb_validator, &sblock);
 	if (r) {
 		dm_tm_dec(pmd->tm, held_root);
+		pmd->need_commit = 1;
 		return r;
 	}
 
