@@ -1082,48 +1082,80 @@ int dm_pool_get_metadata_transaction_id(struct dm_pool_metadata *pmd,
 	return 0;
 }
 
-static int __hold_metadata_root(struct dm_pool_metadata *pmd)
+static int __reserve_metadata_snap(struct dm_pool_metadata *pmd)
 {
-	int r, r2;
+	int r, inc;
 	struct thin_disk_superblock *disk_super;
-	struct dm_block *sblock;
+	struct dm_block *copy, *sblock;
+	dm_block_t held_root;
 
-	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
-			     &sb_validator, &sblock);
+	/*
+	 * Copy the superblock.
+	 */
+	dm_sm_inc_block(pmd->metadata_sm, THIN_SUPERBLOCK_LOCATION);
+	r = dm_tm_shadow_block(pmd->tm, THIN_SUPERBLOCK_LOCATION, &sb_validator, &copy, &inc);
 	if (r)
 		return r;
+	BUG_ON(!inc);
 
-	disk_super = dm_block_data(sblock);
+	held_root = dm_block_location(copy);
+	disk_super = dm_block_data(copy);
 	if (le64_to_cpu(disk_super->held_root)) {
-		DMWARN("pool already has a held root");
-		r = -EBUSY;
-	} else {
-		__le64 root = disk_super->data_mapping_root;
-		dm_sm_inc_block(pmd->metadata_sm, le64_to_cpu(root));
-		disk_super->held_root = root;
-		pmd->need_commit = 1;
+		DMWARN("pool already has a metadata snapshot");
+		dm_tm_dec(pmd->tm, held_root);
+		dm_tm_unlock(pmd->tm, copy);
+		return -EBUSY;
 	}
 
-	r2 = dm_bm_unlock(sblock);
-	return r ? r : r2;
+	/*
+	 * Wipe the spacemap since we're not publishing this.
+	 */
+	memset(&disk_super->data_space_map_root, 0, sizeof(disk_super->data_space_map_root));
+	memset(&disk_super->metadata_space_map_root, 0,
+	       sizeof(disk_super->metadata_space_map_root));
+
+	/*
+	 * Increment the data structures that need to be preserved.
+	 */
+	dm_tm_inc(pmd->tm, le64_to_cpu(disk_super->data_mapping_root));
+	dm_tm_inc(pmd->tm, le64_to_cpu(disk_super->device_details_root));
+	dm_tm_unlock(pmd->tm, copy);
+
+	/*
+	 * Write the held root into the superblock.
+	 */
+	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+			     &sb_validator, &sblock);
+	if (r) {
+		dm_tm_dec(pmd->tm, held_root);
+		return r;
+	}
+
+	disk_super = dm_block_data(sblock);
+	disk_super->held_root = cpu_to_le64(held_root);
+	dm_tm_unlock(pmd->tm, sblock);
+
+	pmd->need_commit = 1;
+	return 0;
 }
 
-int dm_pool_hold_metadata_root(struct dm_pool_metadata *pmd)
+int dm_pool_reserve_metadata_snap(struct dm_pool_metadata *pmd)
 {
 	int r;
 
 	down_write(&pmd->root_lock);
-	r = __hold_metadata_root(pmd);
+	r = __reserve_metadata_snap(pmd);
 	up_write(&pmd->root_lock);
 
 	return r;
 }
 
-static int __release_metadata_root(struct dm_pool_metadata *pmd)
+static int __release_metadata_snap(struct dm_pool_metadata *pmd)
 {
-	int r, r2;
+	int r;
 	struct thin_disk_superblock *disk_super;
-	struct dm_block *sblock;
+	struct dm_block *sblock, *copy;
+	dm_block_t held_root;
 
 	r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION,
 			     &sb_validator, &sblock);
@@ -1131,33 +1163,41 @@ static int __release_metadata_root(struct dm_pool_metadata *pmd)
 		return r;
 
 	disk_super = dm_block_data(sblock);
-	if (!le64_to_cpu(disk_super->held_root)) {
-		DMWARN("pool has no held root");
-		r = -EINVAL;
-	} else {
-		__le64 root = disk_super->held_root;
-		dm_sm_dec_block(pmd->metadata_sm, le64_to_cpu(root));
-		disk_super->held_root = cpu_to_le64(0ULL);
-		pmd->need_commit = 1;
+	held_root = le64_to_cpu(disk_super->held_root);
+	disk_super->held_root = cpu_to_le64(0);
+	pmd->need_commit = 1;
+
+	dm_tm_unlock(pmd->tm, sblock);
+
+	if (!held_root) {
+		DMWARN("pool has no metadata snap");
+		return -EINVAL;
 	}
 
-	r2 = dm_bm_unlock(sblock);
-	return r ? r : r2;
+	r = dm_tm_read_lock(pmd->tm, held_root, &sb_validator, &copy);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(copy);
+	dm_sm_dec_block(pmd->metadata_sm, le64_to_cpu(disk_super->data_mapping_root));
+	dm_sm_dec_block(pmd->metadata_sm, le64_to_cpu(disk_super->device_details_root));
+	dm_sm_dec_block(pmd->metadata_sm, held_root);
+	return dm_tm_unlock(pmd->tm, copy);
 }
 
-int dm_pool_release_metadata_root(struct dm_pool_metadata *pmd)
+int dm_pool_release_metadata_snap(struct dm_pool_metadata *pmd)
 {
 	int r;
 
 	down_write(&pmd->root_lock);
-	r = __release_metadata_root(pmd);
+	r = __release_metadata_snap(pmd);
 	up_write(&pmd->root_lock);
 
 	return r;
 }
 
-static int __get_held_metadata_root(struct dm_pool_metadata *pmd,
-				    dm_block_t *result)
+static int __get_metadata_snap(struct dm_pool_metadata *pmd,
+			       dm_block_t *result)
 {
 	int r;
 	struct thin_disk_superblock *disk_super;
@@ -1174,13 +1214,13 @@ static int __get_held_metadata_root(struct dm_pool_metadata *pmd,
 	return dm_bm_unlock(sblock);
 }
 
-int dm_pool_get_held_metadata_root(struct dm_pool_metadata *pmd,
-				   dm_block_t *result)
+int dm_pool_get_metadata_snap(struct dm_pool_metadata *pmd,
+			      dm_block_t *result)
 {
 	int r;
 
 	down_read(&pmd->root_lock);
-	r = __get_held_metadata_root(pmd, result);
+	r = __get_metadata_snap(pmd, result);
 	up_read(&pmd->root_lock);
 
 	return r;
