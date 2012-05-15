@@ -25,7 +25,6 @@
 
 #include "dm.h"
 #include "dm-bio-prison.h"
-#include "dm-cache-metadata.h"
 
 #include <asm/div64.h>
 
@@ -48,6 +47,401 @@
 
 //#define debug(x...) pr_alert(x)
 #define debug(x...) ;
+
+/*----------------------------------------------------------------*/
+
+struct lru_queue {
+	unsigned size;
+	struct list_head elts;
+};
+
+static void lru_init(struct lru_queue *ll)
+{
+	ll->size = 0;
+	INIT_LIST_HEAD(&ll->elts);
+}
+
+static unsigned lru_size(struct lru_queue *ll)
+{
+	return ll->size;
+}
+
+static struct list_head *lru_pop(struct lru_queue *ll)
+{
+	struct list_head *r;
+
+	BUG_ON(list_empty(&ll->elts));
+	r = ll->elts.next;
+	list_del(r);
+	ll->size--;
+
+	return r;
+}
+
+static void lru_push(struct lru_queue *ll, struct list_head *elt)
+{
+	list_add_tail(elt, &ll->elts);
+	ll->size++;
+}
+
+/*----------------------------------------------------------------*/
+
+enum arc_state {
+	ARC_B1,
+	ARC_T1,
+	ARC_B2,
+	ARC_T2
+};
+
+enum arc_outcome {
+	ARC_HIT,
+	ARC_MISS,
+	ARC_NEW,
+	ARC_REPLACE
+};
+
+struct arc_entry {
+	enum arc_state state;
+	struct hlist_node hlist;
+	struct list_head list;
+	dm_block_t origin;
+	dm_block_t cache;
+
+	/* fields that aren't strictly part of the arc alg. */
+	unsigned dirty:1;
+};
+
+struct arc_policy {
+	dm_block_t cache_size;
+
+	spinlock_t lock;
+
+	dm_block_t p;		/* the magic factor that balances lru vs lfu */
+	struct lru_queue b1, t1, b2, t2;
+
+	/*
+	 * We know exactly how many entries will be needed, so we can
+	 * allocate them up front.
+	 */
+	struct arc_entry *entries;
+	dm_block_t nr_allocated;
+
+	unsigned nr_buckets;
+	dm_block_t hash_mask;
+	struct hlist_head *table;
+
+	dm_block_t *interesting_blocks;
+};
+
+static struct arc_policy *arc_create(dm_block_t cache_size)
+{
+	dm_block_t nr_buckets;
+	struct arc_policy *a = kmalloc(sizeof(*a), GFP_KERNEL);
+	if (!a)
+		return NULL;
+
+	a->cache_size = cache_size;
+	spin_lock_init(&a->lock);
+	a->p = 0;
+
+	lru_init(&a->b1);
+	lru_init(&a->t1);
+	lru_init(&a->b2);
+	lru_init(&a->t2);
+
+	/* FIXME: use vmalloc ? */
+	a->entries = kmalloc(sizeof(*a->entries) * 2 * cache_size, GFP_KERNEL);
+	if (!a->entries) {
+		kfree(a);
+		return NULL;
+	}
+
+	a->nr_allocated = 0;
+
+	a->nr_buckets = cache_size / 8;
+	nr_buckets = 16;
+	while (nr_buckets < a->nr_buckets)
+		nr_buckets <<= 1;
+	a->nr_buckets = nr_buckets;
+
+	a->hash_mask = a->nr_buckets - 1;
+	a->table = kmalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
+	if (!a->table) {
+		vfree(a->entries);
+		kfree(a);
+		return NULL;
+	}
+
+	a->interesting_blocks = kmalloc(sizeof(*a->interesting_blocks) * cache_size, GFP_KERNEL);
+	if (!a->interesting_blocks) {
+		kfree(a->table);
+		kfree(a->entries);
+		kfree(a);
+	}
+
+	return a;
+}
+
+static void arc_destroy(struct arc_policy *a)
+{
+	kfree(a->interesting_blocks);
+	kfree(a->table);
+	vfree(a->entries);
+	kfree(a);
+}
+
+static unsigned hash(struct arc_policy *a, dm_block_t b)
+{
+	const dm_block_t BIG_PRIME = 4294967291UL;
+	dm_block_t h = b * BIG_PRIME;
+
+	return (uint32_t) (h & a->hash_mask);
+}
+
+static void __arc_insert(struct arc_policy *a, struct arc_entry *e)
+{
+	unsigned h = hash(a, e->origin);
+	hlist_add_head(&e->hlist, a->table + h);
+}
+
+static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
+{
+	unsigned h = hash(a, origin);
+	struct hlist_head *bucket = a->table + h;
+	struct hlist_node *tmp;
+	struct arc_entry *e;
+
+	hlist_for_each_entry(e, tmp, bucket, hlist)
+		if (e->origin == origin)
+			return e;
+
+	return NULL;
+}
+
+static void __arc_remove(struct arc_policy *a, struct arc_entry *e)
+{
+	hlist_del(&e->hlist);
+}
+
+/*
+ * This sets up the e->cache field.
+ */
+static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
+{
+	struct arc_entry *e;
+
+	BUG_ON(a->nr_allocated >= 2 * a->cache_size);
+	e = a->entries + a->nr_allocated;
+	e->cache = a->nr_allocated++;
+	return e;
+}
+
+static void __arc_push(struct arc_policy *a,
+		     enum arc_state s, struct arc_entry *e)
+{
+	e->state = s;
+
+	switch (s) {
+	case ARC_T1:
+		lru_push(&a->t1, &e->list);
+		__arc_insert(a, e);
+		break;
+
+	case ARC_T2:
+		lru_push(&a->t2, &e->list);
+		__arc_insert(a, e);
+		break;
+
+	case ARC_B1:
+		lru_push(&a->b1, &e->list);
+		break;
+
+	case ARC_B2:
+		lru_push(&a->b2, &e->list);
+		break;
+	}
+}
+
+static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
+{
+	struct arc_entry *e;
+
+#define POP(x) container_of(lru_pop(x), struct arc_entry, list)
+
+	switch (s) {
+	case ARC_T1:
+		e = POP(&a->t1);
+		__arc_remove(a, e);
+		break;
+
+	case ARC_T2:
+		e = POP(&a->t2);
+		__arc_remove(a, e);
+		break;
+
+	case ARC_B1:
+		e = POP(&a->b1);
+		break;
+
+	case ARC_B2:
+		e = POP(&a->b2);
+		break;
+	}
+
+#undef POP
+
+	return e;
+}
+
+/*
+ * fe may be NULL.
+ */
+static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe)
+{
+	struct arc_entry *e;
+	dm_block_t t1_size = lru_size(&a->t1);
+
+	if (t1_size &&
+	    ((t1_size > a->p) || (fe && (fe->state == ARC_B2) && (t1_size == a->p)))) {
+		e = __arc_pop(a, ARC_T1);
+		/* FIXME: writeback */
+		__arc_push(a, ARC_B1, e);
+	} else {
+		e = __arc_pop(a, ARC_T2);
+		/* FIXME: writeback */
+		__arc_push(a, ARC_B2, e);
+	}
+
+	return e->cache;
+}
+
+/*
+ * FIXME: the size of the interesting blocks hash table seems to be
+ * directly related to the eviction rate.  So maybe we should resize on the
+ * fly to get to a target eviction rate?
+ */
+static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin)
+{
+	const dm_block_t BIG_PRIME = 4294967291UL;
+	dm_block_t h = origin * BIG_PRIME;
+	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->cache_size;
+
+	if (a->interesting_blocks[h] == origin)
+		return 1;
+
+	a->interesting_blocks[h] = origin;
+	return 0;
+}
+
+static enum arc_outcome __arc_map(struct arc_policy *a,
+				  dm_block_t origin_block, struct arc_entry **result)
+{
+	enum arc_outcome r;
+	dm_block_t new_cache;
+	dm_block_t delta;
+	dm_block_t b1_size = lru_size(&a->b1);
+	dm_block_t b2_size = lru_size(&a->b2);
+	dm_block_t l1_size, l2_size;
+
+	struct arc_entry *e = __arc_lookup(a, origin_block);
+	if (e) {
+		switch (e->state) {
+		case ARC_T1:
+		case ARC_T2:
+			list_del(&e->list);
+			break;
+
+		case ARC_B1:
+			delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
+			a->p = min(a->p + delta, a->cache_size);
+			new_cache = __arc_demote(a, e);
+
+			list_del(&e->list);
+
+			e->origin = origin_block;
+			e->cache = new_cache;
+			break;
+
+		case ARC_B2:
+			delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
+			a->p = max(a->p - delta, 0ULL);
+			new_cache = __arc_demote(a, e);
+
+			list_del(&e->list);
+
+			e->origin = origin_block;
+			e->cache = new_cache;
+			break;
+		}
+
+		__arc_push(a, ARC_T2, e);
+		*result = e;
+		return ARC_HIT;
+	}
+
+	if (!__arc_interesting_block(a, origin_block))
+		return ARC_MISS;
+
+	l1_size = lru_size(&a->t1) + b1_size;
+	l2_size = lru_size(&a->t2) + b2_size;
+	r = ARC_REPLACE;
+	if (l1_size == a->cache_size) {
+		if (lru_size(&a->t1) < a->cache_size) {
+			e = __arc_pop(a, ARC_B1);
+
+			new_cache = __arc_demote(a, NULL);
+			e->origin = origin_block;
+			e->cache = new_cache;
+
+		} else {
+			e = __arc_pop(a, ARC_T1);
+			/* FIXME: writeback? */
+			e->origin = origin_block;
+		}
+
+	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
+		if (l1_size + l2_size == 2 * a->cache_size) {
+			e = __arc_pop(a, ARC_B2);
+			e->origin = origin_block;
+			e->cache = __arc_demote(a, NULL);
+
+		} else {
+			e = __arc_alloc_entry(a);
+			e->origin = origin_block;
+			e->cache = __arc_demote(a, NULL);
+		}
+
+	} else {
+		e = __arc_alloc_entry(a);
+		e->origin = origin_block;
+		r = ARC_NEW;
+	}
+
+	__arc_push(a, ARC_T1, e);
+	*result = e;
+	return r;
+}
+
+static enum arc_outcome arc_map(struct arc_policy *a, dm_block_t origin_block, struct arc_entry **result)
+{
+	unsigned long flags;
+	enum arc_outcome r;
+
+	spin_lock_irqsave(&a->lock, flags);
+	r = __arc_map(a, origin_block, result);
+	spin_unlock_irqrestore(&a->lock, flags);
+
+	return r;
+}
+
+static void arc_mark_dirty(struct arc_policy *a, struct arc_entry *e)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&a->lock, flags);
+	e->dirty = 1;
+	spin_unlock_irqrestore(&a->lock, flags);
+}
 
 /*----------------------------------------------------------------*/
 
@@ -91,8 +485,6 @@ struct cache_c {
 
 	struct bio_prison *prison;
 	struct deferred_set *all_io_ds;
-
-	struct dm_cache_metadata *md;
 
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
@@ -171,20 +563,14 @@ static void remap_to_origin(struct cache_c *cache, struct bio *bio)
 
 /* FIXME: the name doesn't really indicate there's a side effect */
 /* FIXME: refactor these two fns */
-static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct mapping *m)
+static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct arc_entry *e)
 {
 	if (bio_data_dir(bio) == WRITE)
-		cache->md->inc_cache_gen(cache->md, m);
+		arc_mark_dirty(a, e);
 
 	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (m->cache << cache->block_shift) +
+	bio->bi_sector = (e->cache << cache->block_shift) +
 		(bio->bi_sector & cache->offset_mask);
-
-	// FIXME: should we mark before the data is actually written?  No.
-	// Do we need to mark pending writes?  After a crash we must only
-	// either return what was on the origin, or the new data.
-	if (bio_data_dir(bio) == WRITE)
-		cache->md->mark_valid_sectors(cache->md, m, bio);
 }
 
 static dm_block_t get_bio_block(struct cache_c *cache, struct bio *bio)
@@ -549,139 +935,6 @@ static void issue(struct cache_c *cache, struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
-/*
- * Controller.
- */
-#define MAX_ACTIONS 4
-
-enum action_cmd {
-	REMAP_ORIGIN,
-	REMAP_CACHE,
-	REMAP_NEW_CACHE,
-	REMAP_UNION,		/* some of the data is on the origin, some in the cache (eek!) */
-
-	WRITEBACK,
-	PROMOTE,
-};
-
-struct action {
-	enum action_cmd cmd;
-	struct mapping *m;
-};
-
-static void __push_action(enum action_cmd cmd, struct mapping *m,
-			  struct action *actions, unsigned *count)
-{
-	actions[*count].cmd = cmd;
-	actions[*count].m = m;
-	(*count)++;
-}
-
-#define push_action(cmd, m) __push_action(cmd, m, actions, count)
-
-/* FIXME: slow impl */
-static struct mapping *find_clean_mapping(struct cache_c *cache)
-{
-	struct mapping *m, *r = NULL;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	list_for_each_entry(m, &cache->lru, list) {
-		if (cache->md->is_clean(cache->md, m)) {
-			r = m;
-			break;
-		}
-	}
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	return r;
-}
-
-static struct mapping *find_dirty_mapping(struct cache_c *cache)
-{
-	struct mapping *m, *r = NULL;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	list_for_each_entry(m, &cache->lru, list) {
-		if (!cache->md->is_clean(cache->md, m)) {
-			r = m;
-			break;
-		}
-	}
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	return r;
-}
-
-static struct mapping *new_or_clean_mapping(struct cache_c *cache)
-{
-	struct mapping *m = cache->md->new_mapping(cache->md);
-	if (m)
-		return m;
-
-	return find_clean_mapping(cache);
-}
-
-/* FIXME: get rid of the cache arg */
-static void get_actions(struct cache_c *cache,
-			struct dm_cache_metadata *md,
-			dm_block_t block,
-			struct bio *bio,
-			struct action *actions,
-			unsigned *count)
-{
-	struct mapping *m;
-	int is_write = bio_data_dir(bio) == WRITE;
-
-	*count = 0;
-
-	m = md->lookup_mapping(md, block);
-	if (m) {
-		list_move_tail(&m->list, &cache->lru);
-		if (is_write || md->check_valid_sectors(md, m, bio))
-			push_action(REMAP_CACHE, m);
-		else
-			push_action(REMAP_UNION, m);
-
-	} else {
-		// FIXME: magic number, we want promitions to occur v. slowly
-		if (!(atomic_read(&cache->read_miss) & 1023)) {
-			m = new_or_clean_mapping(cache);
-			if (m) {
-				if (is_write)
-					push_action(REMAP_NEW_CACHE, m);
-				else
-					push_action(PROMOTE, m);
-			} else
-				push_action(REMAP_ORIGIN, NULL);
-		} else
-			push_action(REMAP_ORIGIN, NULL);
-	}
-}
-
-static void get_background_action(struct cache_c *cache,
-				  struct dm_cache_metadata *md,
-				  struct action *actions,
-				  unsigned *count)
-{
-	struct mapping *m;
-	const dm_block_t threshold = 100;
-
-	*count = 0;
-	if (atomic_read(&cache->writeback_threshold) >= threshold) {
-		m = find_dirty_mapping(cache);
-		if (m) {
-			atomic_sub(threshold, &cache->writeback_threshold);
-#if 1
-			push_action(WRITEBACK, m);
-#endif
-		}
-	}
-}
-
-/*----------------------------------------------------------------*/
-
 static int map_bio(struct cache_c *cache, struct bio *bio)
 {
 	int r, i;
@@ -707,6 +960,35 @@ static int map_bio(struct cache_c *cache, struct bio *bio)
 
 	get_actions(cache, cache->md, block, bio, actions, &count);
 	atomic_inc(&cache->total);
+
+#if 0
+	struct arc_entry *entry;
+	enum arc_outcome outcome = arc_map(cache->md, block, &entry);
+
+	*count = 0;
+	switch (outcome) {
+	case ARC_HIT:
+		m = md->lookup_mapping(md, block); /* FIXME: duplicate lookup, the policy has already done this */
+		push_action(REMAP_CACHE, m);
+		break;
+
+	case ARC_MISS:
+		push_action(REMAP_ORIGIN, NULL);
+		break;
+
+	case ARC_NEW:
+		m = md->lookup_by_cache(md, entry->cache);
+		if (!m) {
+
+		}
+		push_action(PROMOTE, entry->cache);
+		break;
+
+	case ARC_REPLACE:
+
+		break;
+	}
+#endif
 
 	r = DM_MAPIO_REMAPPED;
 	for (i = 0; i < count; i++) {
@@ -839,39 +1121,6 @@ static void process_deferred_bios(struct cache_c *cache)
 		process_bio(cache, bio);
 }
 
-static void process_background_work(struct cache_c *cache)
-{
-	int i;
-	struct mapping *m;
-	struct action actions[MAX_ACTIONS];
-	unsigned count = 0;
-
-	/* FIXME: paranoia */
-	memset(actions, 0, sizeof(actions));
-
-	do {
-		get_background_action(cache, cache->md, actions, &count);
-
-		/* FIXME: duplicate code */
-		for (i = 0; i < count; i++) {
-			m = actions[i].m;
-
-			switch (actions[i].cmd) {
-			case WRITEBACK:
-				BUG_ON(!m);
-				debug("REMAP_WRITEBACK\n");
-				atomic_inc(&cache->writeback);
-				writeback(cache, m, 0, NULL);
-				break;
-
-			default:
-				BUG();
-			}
-		}
-
-	} while (count);
-}
-
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -898,9 +1147,6 @@ static void do_work(struct work_struct *ws)
 		spin_lock_irqsave(&cache->lock, flags);
 		sus = cache->suspending;
 		spin_unlock_irqrestore(&cache->lock, flags);
-
-		if (!sus)
-			process_background_work(cache);
 
 	} while (more_work(cache));
 }
