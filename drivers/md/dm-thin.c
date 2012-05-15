@@ -2238,7 +2238,7 @@ static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct po
 	return 0;
 }
 
-static int process_hold_root_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_reserve_metadata_snap_mesg(unsigned argc, char **argv, struct pool *pool)
 {
 	int r;
 
@@ -2246,14 +2246,14 @@ static int process_hold_root_mesg(unsigned argc, char **argv, struct pool *pool)
 	if (r)
 		return r;
 
-	r = dm_pool_hold_metadata_root(pool->pmd);
+	r = dm_pool_reserve_metadata_snap(pool->pmd);
 	if (r)
-		DMWARN("hold root request failed");
+		DMWARN("metadata snap request failed");
 
 	return r;
 }
 
-static int process_release_root_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct pool *pool)
 {
 	int r;
 
@@ -2261,9 +2261,9 @@ static int process_release_root_mesg(unsigned argc, char **argv, struct pool *po
 	if (r)
 		return r;
 
-	r = dm_pool_release_metadata_root(pool->pmd);
+	r = dm_pool_release_metadata_snap(pool->pmd);
 	if (r)
-		DMWARN("release root request failed");
+		DMWARN("release metadata snap request failed");
 
 	return r;
 }
@@ -2296,11 +2296,11 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	else if (!strcasecmp(argv[0], "set_transaction_id"))
 		r = process_set_transaction_id_mesg(argc, argv, pool);
 
-	else if (!strcasecmp(argv[0], "hold_root"))
-		r = process_hold_root_mesg(argc, argv, pool);
+	else if (!strcasecmp(argv[0], "reserve_metadata_snap"))
+		r = process_reserve_metadata_snap_mesg(argc, argv, pool);
 
-	else if (!strcasecmp(argv[0], "release_root"))
-		r = process_release_root_mesg(argc, argv, pool);
+	else if (!strcasecmp(argv[0], "release_metadata_snap"))
+		r = process_release_metadata_snap_mesg(argc, argv, pool);
 
 	else
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
@@ -2370,7 +2370,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (r)
 			return r;
 
-		r = dm_pool_get_held_metadata_root(pool->pmd, &held_root);
+		r = dm_pool_get_metadata_snap(pool->pmd, &held_root);
 		if (r)
 			return r;
 
