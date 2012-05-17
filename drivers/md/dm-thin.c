@@ -2322,8 +2322,8 @@ static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct
  *   delete		<dev_id>
  *   trim		<dev_id> <new_size_in_sectors>
  *   set_transaction_id <current_trans_id> <new_trans_id>
- *   hold_root
- *   release_root
+ *   reserve_metadata_snap
+ *   release_metadata_snap
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
