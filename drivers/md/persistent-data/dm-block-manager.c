@@ -587,10 +587,8 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 {
 	int r;
 
+	pr_alert("in dm_bm_flush_and_unlock\n");
 	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
-	if (unlikely(r))
-		return r;
-	r = dm_bufio_issue_flush(to_bufio(bm));
 	if (unlikely(r))
 		return r;
 
@@ -599,9 +597,8 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	r = dm_bufio_write_dirty_buffers(to_bufio(bm));
 	if (unlikely(r))
 		return r;
-	r = dm_bufio_issue_flush(to_bufio(bm));
-	if (unlikely(r))
-		return r;
+
+	BUG_ON(dm_bufio_has_dirty_buffers(to_bufio(bm)));
 
 	return 0;
 }
