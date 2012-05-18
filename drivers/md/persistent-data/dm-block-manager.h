@@ -116,6 +116,19 @@ int dm_bm_unlock_move(struct dm_block *b, dm_block_t n);
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock);
 
+/*
+ * Switches the bm to a read only mode.  Once read-only mode
+ * has been entered the following functions will return -EPERM.
+ *
+ *   dm_bm_write_lock
+ *   dm_bm_write_lock_zero
+ *   dm_bm_flush_and_unlock
+ *
+ * Additionally you should not use dm_bm_unlock_move, however no error will
+ * be returned if you do.
+ */
+void dm_bm_read_only(struct dm_block_manager *bm);
+
 u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor);
 
 /*----------------------------------------------------------------*/
