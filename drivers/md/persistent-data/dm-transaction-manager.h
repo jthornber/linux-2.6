@@ -36,6 +36,12 @@ void dm_tm_destroy(struct dm_transaction_manager *tm);
 struct dm_transaction_manager *dm_tm_create_non_blocking_clone(struct dm_transaction_manager *real);
 
 /*
+ * Indicates whether any new_block, shadow, inc or dec operations have
+ * occurred.
+ */
+int dm_tm_needs_commit(struct dm_transaction_manager *tm);
+
+/*
  * We use a 2-phase commit here.
  *
  * i) In the first phase the block manager is told to start flushing, and

@@ -38,6 +38,7 @@ struct dm_transaction_manager {
 
 	spinlock_t lock;
 	struct hlist_head buckets[HASH_SIZE];
+	int need_commit;
 };
 
 /*----------------------------------------------------------------*/
@@ -118,6 +119,7 @@ static struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
 	spin_lock_init(&tm->lock);
 	for (i = 0; i < HASH_SIZE; i++)
 		INIT_HLIST_HEAD(tm->buckets + i);
+	tm->need_commit = 0;
 
 	return tm;
 }
@@ -130,11 +132,18 @@ struct dm_transaction_manager *dm_tm_create_non_blocking_clone(struct dm_transac
 	if (tm) {
 		tm->is_clone = 1;
 		tm->real = real;
+		tm->need_commit = 0;
 	}
 
 	return tm;
 }
 EXPORT_SYMBOL_GPL(dm_tm_create_non_blocking_clone);
+
+int dm_tm_needs_commit(struct dm_transaction_manager *tm)
+{
+	return tm->is_clone ? tm->real->need_commit : tm->need_commit;
+}
+EXPORT_SYMBOL_GPL(dm_tm_needs_commit);
 
 void dm_tm_destroy(struct dm_transaction_manager *tm)
 {
@@ -149,6 +158,15 @@ int dm_tm_pre_commit(struct dm_transaction_manager *tm)
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
+	/*
+	 * If tm->need_commit hasn't been set then there's no way the space
+	 * map can have been updated.  Note, we can't have a similar
+	 * shortcut in the final commit function, since people could be
+	 * locking blocks directly with the block manager.
+	 */
+	if (!tm->need_commit)
+		return 0;
+
 	r = dm_sm_commit(tm->sm);
 	if (r < 0)
 		return r;
@@ -159,12 +177,18 @@ EXPORT_SYMBOL_GPL(dm_tm_pre_commit);
 
 int dm_tm_commit(struct dm_transaction_manager *tm, struct dm_block *root)
 {
+	int r;
+
 	if (tm->is_clone)
 		return -EWOULDBLOCK;
 
 	wipe_shadow_table(tm);
 
-	return dm_bm_flush_and_unlock(tm->bm, root);
+	r = dm_bm_flush_and_unlock(tm->bm, root);
+	if (!r)
+		tm->need_commit = 0;
+
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_tm_commit);
 
@@ -182,6 +206,7 @@ int dm_tm_new_block(struct dm_transaction_manager *tm,
 	if (r < 0)
 		return r;
 
+	tm->need_commit = 1;
 	r = dm_bm_write_lock_zero(tm->bm, new_block, v, result);
 	if (r < 0) {
 		dm_sm_dec_block(tm->sm, new_block);
@@ -239,6 +264,7 @@ int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 	if (r < 0)
 		return r;
 
+	tm->need_commit = 1;
 	if (is_shadow(tm, orig) && !*inc_children)
 		return dm_bm_write_lock(tm->bm, orig, v, result);
 
@@ -274,6 +300,7 @@ void dm_tm_inc(struct dm_transaction_manager *tm, dm_block_t b)
 	BUG_ON(tm->is_clone);
 
 	dm_sm_inc_block(tm->sm, b);
+	tm->need_commit = 1;
 }
 EXPORT_SYMBOL_GPL(dm_tm_inc);
 
@@ -285,6 +312,7 @@ void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 	BUG_ON(tm->is_clone);
 
 	dm_sm_dec_block(tm->sm, b);
+	tm->need_commit = 1;
 }
 EXPORT_SYMBOL_GPL(dm_tm_dec);
 
