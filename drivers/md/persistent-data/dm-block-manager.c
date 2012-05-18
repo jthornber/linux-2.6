@@ -382,7 +382,13 @@ EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
 void dm_block_manager_destroy(struct dm_block_manager *bm)
 {
-	BUG_ON(dm_bufio_has_dirty_buffers(to_bufio(bm)));
+	/*
+	 * This should only happen if there's an error while we're creating
+	 * a new pool metadata.  At which point work has been done that
+	 * incurs changes on disk, but we've not got enough pieces together
+	 * to do a tm commit.
+	 */
+	WARN_ON(dm_bufio_has_dirty_buffers(to_bufio(bm)));
 	return dm_bufio_client_destroy(to_bufio(bm));
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
