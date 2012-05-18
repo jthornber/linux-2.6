@@ -143,6 +143,7 @@ int dm_tm_needs_commit(struct dm_transaction_manager *tm)
 {
 	return tm->is_clone ? tm->real->need_commit : tm->need_commit;
 }
+EXPORT_SYMBOL_GPL(dm_tm_needs_commit);
 
 void dm_tm_destroy(struct dm_transaction_manager *tm)
 {
