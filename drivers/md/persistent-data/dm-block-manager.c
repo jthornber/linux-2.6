@@ -364,6 +364,7 @@ static void dm_block_manager_write_callback(struct dm_buffer *buf)
  *--------------------------------------------------------------*/
 struct dm_block_manager {
 	struct dm_bufio_client *bufio;
+	int read_only;
 };
 
 struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
@@ -385,6 +386,7 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 		return NULL;
 	}
 
+	bm->read_only = 0;
 	return bm;
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
@@ -480,6 +482,9 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 	void *p;
 	int r;
 
+	if (bm->read_only)
+		return -EPERM;
+
 	p = dm_bufio_read(bm->bufio, b, (struct dm_buffer **) result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
@@ -546,6 +551,9 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 	struct buffer_aux *aux;
 	void *p;
 
+	if (bm->read_only)
+		return -EPERM;
+
 	p = dm_bufio_new(bm->bufio, b, (struct dm_buffer **) result);
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
@@ -603,6 +611,9 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 {
 	int r;
 
+	if (bm->read_only)
+		return -EPERM;
+
 	r = dm_bufio_write_dirty_buffers(bm->bufio);
 	if (unlikely(r))
 		return r;
@@ -621,6 +632,12 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 
 	return 0;
 }
+
+void dm_bm_read_only(struct dm_block_manager *bm)
+{
+	bm->read_only = 1;
+}
+EXPORT_SYMBOL_GPL(dm_bm_read_only);
 
 u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor)
 {
