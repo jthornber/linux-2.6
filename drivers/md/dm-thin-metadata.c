@@ -644,7 +644,8 @@ out_locked:
 }
 
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
-					       sector_t data_block_size)
+					       sector_t data_block_size,
+					       int may_create)
 {
 	int r;
 	struct thin_disk_superblock *disk_super;
@@ -680,6 +681,11 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 		return ERR_PTR(r);
 	}
 
+	if (create && !may_create) {
+		dm_block_manager_destroy(bm);
+		kfree(pmd);
+		return ERR_PTR(-EPERM);
+	}
 
 	r = init_pmd(pmd, bm, 0, create);
 	if (r) {
