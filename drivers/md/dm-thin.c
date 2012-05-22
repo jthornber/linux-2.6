@@ -1641,6 +1641,21 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->low_water_blocks = pt->low_water_blocks;
 	pool->pf = pt->pf;
 
+	/*
+	 * If discard_passdown was enabled verify that the data device
+	 * supports discards.  Disable discard_passdown if not; otherwise
+	 * -EOPNOTSUPP will be returned.
+	 */
+	if (pt->pf.discard_passdown) {
+		struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
+		if (!q || !blk_queue_discard(q)) {
+			char buf[BDEVNAME_SIZE];
+			DMWARN("Discard unsupported by data device (%s): Disabling discard passdown.",
+			       bdevname(pt->data_dev->bdev, buf));
+			pool->pf.discard_passdown = 0;
+		}
+	}
+
 	return 0;
 }
 
@@ -1998,19 +2013,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_flags_changed;
 	}
 
-	/*
-	 * If discard_passdown was enabled verify that the data device
-	 * supports discards.  Disable discard_passdown if not; otherwise
-	 * -EOPNOTSUPP will be returned.
-	 */
-	if (pf.discard_passdown) {
-		struct request_queue *q = bdev_get_queue(data_dev->bdev);
-		if (!q || !blk_queue_discard(q)) {
-			DMWARN("Discard unsupported by data device: Disabling discard passdown.");
-			pf.discard_passdown = 0;
-		}
-	}
-
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->metadata_dev = metadata_dev;
@@ -2322,8 +2324,8 @@ static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct
  *   delete		<dev_id>
  *   trim		<dev_id> <new_size_in_sectors>
  *   set_transaction_id <current_trans_id> <new_trans_id>
- *   hold_root
- *   release_root
+ *   reserve_metadata_snap
+ *   release_metadata_snap
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2443,7 +2445,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long)pt->low_water_blocks);
 
 		count = !pool->pf.zero_new_blocks + !pool->pf.discard_enabled +
-			!pool->pf.discard_passdown;
+			!pt->pf.discard_passdown;
 		DMEMIT("%u ", count);
 
 		if (!pool->pf.zero_new_blocks)
@@ -2452,7 +2454,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (!pool->pf.discard_enabled)
 			DMEMIT("ignore_discard ");
 
-		if (!pool->pf.discard_passdown)
+		if (!pt->pf.discard_passdown)
 			DMEMIT("no_discard_passdown ");
 
 		break;
@@ -2864,6 +2866,6 @@ static void dm_thin_exit(void)
 module_init(dm_thin_init);
 module_exit(dm_thin_exit);
 
-MODULE_DESCRIPTION(DM_NAME "device-mapper thin provisioning target");
+MODULE_DESCRIPTION(DM_NAME " thin provisioning target");
 MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");

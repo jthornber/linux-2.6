@@ -572,6 +572,7 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
 int dm_bm_unlock(struct dm_block *b)
 {
@@ -617,16 +618,10 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	r = dm_bufio_write_dirty_buffers(bm->bufio);
 	if (unlikely(r))
 		return r;
-	r = dm_bufio_issue_flush(bm->bufio);
-	if (unlikely(r))
-		return r;
 
 	dm_bm_unlock(superblock);
 
 	r = dm_bufio_write_dirty_buffers(bm->bufio);
-	if (unlikely(r))
-		return r;
-	r = dm_bufio_issue_flush(bm->bufio);
 	if (unlikely(r))
 		return r;
 
