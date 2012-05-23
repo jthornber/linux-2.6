@@ -1518,3 +1518,10 @@ int dm_pool_resize_data_dev(struct dm_pool_metadata *pmd, dm_block_t new_count)
 
 	return r;
 }
+
+void dm_pool_metadata_read_only(struct dm_pool_metadata *pmd)
+{
+	down_write(&pmd->root_lock);
+	dm_bm_read_only(pmd->bm);
+	up_write(&pmd->root_lock);
+}

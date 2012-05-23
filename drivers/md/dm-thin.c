@@ -494,6 +494,7 @@ static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
 struct new_mapping;
 
 struct pool_features {
+	unsigned read_only:1;
 	unsigned zero_new_blocks:1;
 	unsigned discard_enabled:1;
 	unsigned discard_passdown:1;
@@ -1420,6 +1421,40 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	}
 }
 
+static void process_read_only_bio(struct thin_c *tc, struct bio *bio)
+{
+	int r, dir = bio_data_dir(bio);
+	dm_block_t block = get_bio_block(tc, bio);
+	struct dm_thin_lookup_result lookup_result;
+
+	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
+	switch (r) {
+	case 0:
+		if (lookup_result.shared && (dir == WRITE))
+			bio_io_error(bio);
+		else
+			remap_and_issue(tc, bio, lookup_result.block);
+		break;
+
+	case -ENODATA:
+		if (dir == READ && tc->origin_dev)
+			remap_to_origin_and_issue(tc, bio);
+
+		else if (dir == READ) {
+			zero_fill_bio(bio);
+			bio_endio(bio, 0);
+
+		} else
+			bio_io_error(bio);
+		break;
+
+	default:
+		DMERR("dm_thin_find_block() failed, error = %d", r);
+		bio_io_error(bio);
+		break;
+	}
+}
+
 static int need_commit_due_to_time(struct pool *pool)
 {
 	return jiffies < pool->last_commit_jiffies ||
@@ -1431,6 +1466,8 @@ static void process_deferred_bios(struct pool *pool)
 	unsigned long flags;
 	struct bio *bio;
 	struct bio_list bios;
+	void (*process_fn)(struct thin_c *, struct bio *) =
+		pool->pf.read_only ? process_read_only_bio : process_bio;
 	int r;
 
 	bio_list_init(&bios);
@@ -1458,9 +1495,12 @@ static void process_deferred_bios(struct pool *pool)
 		}
 
 		if (bio->bi_rw & REQ_DISCARD)
-			process_discard(tc, bio);
+			if (pool->pf.read_only)
+				bio_endio(bio, 0);
+			else
+				process_discard(tc, bio);
 		else
-			process_bio(tc, bio);
+			process_fn(tc, bio);
 	}
 
 	/*
@@ -1476,15 +1516,17 @@ static void process_deferred_bios(struct pool *pool)
 	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
 		return;
 
-	r = dm_pool_commit_metadata(pool->pmd);
-	if (r) {
-		DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-		      __func__, r);
-		while ((bio = bio_list_pop(&bios)))
-			bio_io_error(bio);
-		return;
+	if (!pool->pf.read_only) {
+		r = dm_pool_commit_metadata(pool->pmd);
+		if (r) {
+			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
+			      __func__, r);
+			while ((bio = bio_list_pop(&bios)))
+				bio_io_error(bio);
+			return;
+		}
+		pool->last_commit_jiffies = jiffies;
 	}
-	pool->last_commit_jiffies = jiffies;
 
 	while ((bio = bio_list_pop(&bios)))
 		generic_make_request(bio);
@@ -1593,11 +1635,22 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	case -ENODATA:
+		if (tc->pool->pf.read_only) {
+			/*
+			 * This block isn't provisioned, and we have no way
+			 * of doing so.  Just error it.
+			 */
+			bio_io_error(bio);
+			r = DM_MAPIO_SUBMITTED;
+			break;
+		}
+		/* fall through */
+
+	case -EWOULDBLOCK:
 		/*
 		 * In future, the failed dm_thin_find_block above could
 		 * provide the hint to load the metadata into cache.
 		 */
-	case -EWOULDBLOCK:
 		thin_defer_bio(tc, bio);
 		r = DM_MAPIO_SUBMITTED;
 		break;
@@ -1636,10 +1689,19 @@ static void __requeue_bios(struct pool *pool)
 static int bind_control_target(struct pool *pool, struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
+	int ro = pool->pf.read_only;
 
 	pool->ti = ti;
 	pool->low_water_blocks = pt->low_water_blocks;
+
+	if (!ro && pt->pf.read_only)
+		dm_pool_metadata_read_only(pool->pmd);
+
 	pool->pf = pt->pf;
+
+	/* FIXME: ugly */
+	if (ro)
+		pool->pf.read_only = ro;
 
 	/*
 	 * If discard_passdown was enabled verify that the data device
@@ -1671,6 +1733,7 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
 /* Initialize pool features. */
 static void pool_features_init(struct pool_features *pf)
 {
+	pf->read_only = 0;
 	pf->zero_new_blocks = 1;
 	pf->discard_enabled = 1;
 	pf->discard_passdown = 1;
@@ -1701,14 +1764,15 @@ static void __pool_destroy(struct pool *pool)
 
 static struct pool *pool_create(struct mapped_device *pool_md,
 				struct block_device *metadata_dev,
-				unsigned long block_size, char **error)
+				unsigned long block_size,
+				int read_only, char **error)
 {
 	int r;
 	void *err_p;
 	struct pool *pool;
 	struct dm_pool_metadata *pmd;
 
-	pmd = dm_pool_metadata_open(metadata_dev, block_size);
+	pmd = dm_pool_metadata_open(metadata_dev, block_size, !read_only);
 	if (IS_ERR(pmd)) {
 		*error = "Error creating metadata object";
 		return (struct pool *)pmd;
@@ -1821,8 +1885,8 @@ static void __pool_dec(struct pool *pool)
 
 static struct pool *__pool_find(struct mapped_device *pool_md,
 				struct block_device *metadata_dev,
-				unsigned long block_size, char **error,
-				int *created)
+				unsigned long block_size, int read_only,
+				char **error, int *created)
 {
 	struct pool *pool = __pool_table_lookup_metadata_dev(metadata_dev);
 
@@ -1839,7 +1903,7 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 			__pool_inc(pool);
 
 		} else {
-			pool = pool_create(pool_md, metadata_dev, block_size, error);
+			pool = pool_create(pool_md, metadata_dev, block_size, read_only, error);
 			*created = 1;
 		}
 	}
@@ -1890,19 +1954,23 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 		arg_name = dm_shift_arg(as);
 		argc--;
 
-		if (!strcasecmp(arg_name, "skip_block_zeroing")) {
+		if (!strcasecmp(arg_name, "skip_block_zeroing"))
 			pf->zero_new_blocks = 0;
-			continue;
-		} else if (!strcasecmp(arg_name, "ignore_discard")) {
-			pf->discard_enabled = 0;
-			continue;
-		} else if (!strcasecmp(arg_name, "no_discard_passdown")) {
-			pf->discard_passdown = 0;
-			continue;
-		}
 
-		ti->error = "Unrecognised pool feature requested";
-		r = -EINVAL;
+		else if (!strcasecmp(arg_name, "ignore_discard"))
+			pf->discard_enabled = 0;
+
+		else if (!strcasecmp(arg_name, "no_discard_passdown"))
+			pf->discard_passdown = 0;
+
+		else if (!strcasecmp(arg_name, "read_only"))
+			pf->read_only = 1;
+
+		else {
+			ti->error = "Unrecognised pool feature requested";
+			r = -EINVAL;
+			break;
+		}
 	}
 
 	return r;
@@ -1995,7 +2063,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	pool = __pool_find(dm_table_get_md(ti->table), metadata_dev->bdev,
-			   block_size, &ti->error, &pool_created);
+			   block_size, pf.read_only, &ti->error, &pool_created);
 	if (IS_ERR(pool)) {
 		r = PTR_ERR(pool);
 		goto out_free_pt;
@@ -2147,6 +2215,12 @@ static void pool_resume(struct dm_target *ti)
 	do_waker(&pool->waker.work);
 }
 
+static void read_only_mode(struct pool *pool)
+{
+	pool->pf.read_only = 1;
+	dm_pool_metadata_read_only(pool->pmd);
+}
+
 static void pool_postsuspend(struct dm_target *ti)
 {
 	int r;
@@ -2158,9 +2232,9 @@ static void pool_postsuspend(struct dm_target *ti)
 
 	r = dm_pool_commit_metadata(pool->pmd);
 	if (r < 0) {
-		DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
+		DMERR("%s: dm_pool_commit_metadata() failed, error = %d (switching to read-only mode)",
 		      __func__, r);
-		/* FIXME: invalidate device? error the next FUA or FLUSH bio ?*/
+		read_only_mode(pool);
 	}
 }
 
