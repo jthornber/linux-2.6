@@ -1098,6 +1098,18 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	}
 }
 
+static int commit(struct pool *pool)
+{
+	int r = dm_pool_commit_metadata(pool->pmd);
+	if (r) {
+		DMERR("commit failed, switching pool to read-only mode, error = %d", r);
+		pool->pf.read_only = 1;
+		dm_pool_metadata_read_only(pool->pmd);
+	}
+
+	return r;
+}
+
 static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 {
 	int r;
@@ -1126,12 +1138,9 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 			 * Try to commit to see if that will free up some
 			 * more space.
 			 */
-			r = dm_pool_commit_metadata(pool->pmd);
-			if (r) {
-				DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-				      __func__, r);
+			r = commit(pool);
+			if (r)
 				return r;
-			}
 
 			r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
 			if (r)
@@ -1517,10 +1526,8 @@ static void process_deferred_bios(struct pool *pool)
 		return;
 
 	if (!pool->pf.read_only) {
-		r = dm_pool_commit_metadata(pool->pmd);
+		r = commit(pool);
 		if (r) {
-			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-			      __func__, r);
 			while ((bio = bio_list_pop(&bios)))
 				bio_io_error(bio);
 			return;
@@ -2189,12 +2196,9 @@ static int pool_preresume(struct dm_target *ti)
 			return r;
 		}
 
-		r = dm_pool_commit_metadata(pool->pmd);
-		if (r) {
-			DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-			      __func__, r);
+		r = commit(pool);
+		if (r)
 			return r;
-		}
 	}
 
 	return 0;
@@ -2215,12 +2219,6 @@ static void pool_resume(struct dm_target *ti)
 	do_waker(&pool->waker.work);
 }
 
-static void read_only_mode(struct pool *pool)
-{
-	pool->pf.read_only = 1;
-	dm_pool_metadata_read_only(pool->pmd);
-}
-
 static void pool_postsuspend(struct dm_target *ti)
 {
 	int r;
@@ -2229,13 +2227,7 @@ static void pool_postsuspend(struct dm_target *ti)
 
 	cancel_delayed_work(&pool->waker);
 	flush_workqueue(pool->wq);
-
-	r = dm_pool_commit_metadata(pool->pmd);
-	if (r < 0) {
-		DMERR("%s: dm_pool_commit_metadata() failed, error = %d (switching to read-only mode)",
-		      __func__, r);
-		read_only_mode(pool);
-	}
+	commit(pool);
 }
 
 static int check_arg_count(unsigned argc, unsigned args_required)
@@ -2428,12 +2420,8 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	else
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
 
-	if (!r) {
-		r = dm_pool_commit_metadata(pool->pmd);
-		if (r)
-			DMERR("%s message: dm_pool_commit_metadata() failed, error = %d",
-			      argv[0], r);
-	}
+	if (!r)
+		r = commit(pool);
 
 	return r;
 }
@@ -2471,7 +2459,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		 * counts can be quite out of date, so we do a quick
 		 * commit.
 		 */
-		r = dm_pool_commit_metadata(pool->pmd);
+		r = commit(pool);
 		if (r)
 			return r;
 
