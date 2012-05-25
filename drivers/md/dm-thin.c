@@ -866,9 +866,9 @@ static void process_prepared_mapping(struct new_mapping *m)
 	if (bio)
 		bio->bi_end_io = m->saved_bi_end_io;
 
-	if (m->err) {
+	if (m->err || tc->pool->pf.read_only) {
 		cell_error(m->cell);
-		return;
+		goto out;
 	}
 
 	/*
@@ -880,7 +880,7 @@ static void process_prepared_mapping(struct new_mapping *m)
 	if (r) {
 		DMERR("dm_thin_insert_block() failed");
 		cell_error(m->cell);
-		return;
+		goto out;
 	}
 
 	/*
@@ -895,6 +895,7 @@ static void process_prepared_mapping(struct new_mapping *m)
 	} else
 		cell_defer(tc, m->cell, m->data_block);
 
+out:
 	list_del(&m->list);
 	mempool_free(m, tc->pool->mapping_pool);
 }
@@ -1098,14 +1099,40 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	}
 }
 
+static void read_only_mode(struct pool *pool)
+{
+	DMERR("switching pool to read-only mode");
+	pool->pf.read_only = 1;
+	dm_pool_metadata_read_only(pool->pmd);
+}
+
 static int commit(struct pool *pool)
 {
-	int r = dm_pool_commit_metadata(pool->pmd);
-	if (r) {
-		DMERR("commit failed, switching pool to read-only mode, error = %d", r);
-		pool->pf.read_only = 1;
-		dm_pool_metadata_read_only(pool->pmd);
-	}
+	int r;
+
+	BUG_ON(pool->pf.read_only);
+
+	r = dm_pool_commit_metadata(pool->pmd);
+	if (r)
+		DMERR("commit failed, error = %d", r);
+
+	return r;
+}
+
+/*
+ * Returns a boolean to indicate whether we're in read-only mode after this
+ * call.  Many callers don't care about the return value.
+ */
+static int commit_or_fallback(struct pool *pool)
+{
+	int r;
+
+	if (pool->pf.read_only)
+		return 1;
+
+	r = commit(pool);
+	if (r)
+		read_only_mode(pool);
 
 	return r;
 }
@@ -1138,9 +1165,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 			 * Try to commit to see if that will free up some
 			 * more space.
 			 */
-			r = commit(pool);
-			if (r)
-				return r;
+			commit_or_fallback(pool);
 
 			r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
 			if (r)
@@ -1373,6 +1398,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 
 	default:
 		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
+		read_only_mode(tc->pool);
 		cell_error(cell);
 		break;
 	}
@@ -1475,9 +1501,6 @@ static void process_deferred_bios(struct pool *pool)
 	unsigned long flags;
 	struct bio *bio;
 	struct bio_list bios;
-	void (*process_fn)(struct thin_c *, struct bio *) =
-		pool->pf.read_only ? process_read_only_bio : process_bio;
-	int r;
 
 	bio_list_init(&bios);
 
@@ -1509,7 +1532,10 @@ static void process_deferred_bios(struct pool *pool)
 			else
 				process_discard(tc, bio);
 		else
-			process_fn(tc, bio);
+			/*
+			 * We can switch into read-only mode at any time.
+			 */
+			(pool->pf.read_only ? process_read_only_bio : process_bio)(tc, bio);
 	}
 
 	/*
@@ -1525,15 +1551,19 @@ static void process_deferred_bios(struct pool *pool)
 	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
 		return;
 
-	if (!pool->pf.read_only) {
-		r = commit(pool);
-		if (r) {
-			while ((bio = bio_list_pop(&bios)))
-				bio_io_error(bio);
-			return;
-		}
-		pool->last_commit_jiffies = jiffies;
+	/*
+	 * FIXME: what happens if we've degraded to read-only mode, and
+	 * there's outstanding metadata, and we get a REQ_FLUSH?  In this
+	 * case we should error the FLUSH.  The easiest way to see if
+	 * there's data to commit is to try and do so.  No, what if the
+	 * device has come back up?!
+	 */
+	if (commit_or_fallback(pool)) {
+		while ((bio = bio_list_pop(&bios)))
+			bio_io_error(bio);
+		return;
 	}
+	pool->last_commit_jiffies = jiffies;
 
 	while ((bio = bio_list_pop(&bios)))
 		generic_make_request(bio);
@@ -2221,13 +2251,12 @@ static void pool_resume(struct dm_target *ti)
 
 static void pool_postsuspend(struct dm_target *ti)
 {
-	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
 	cancel_delayed_work(&pool->waker);
 	flush_workqueue(pool->wq);
-	commit(pool);
+	commit_or_fallback(pool);
 }
 
 static int check_arg_count(unsigned argc, unsigned args_required)
@@ -2421,9 +2450,29 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
 
 	if (!r)
-		r = commit(pool);
+		commit_or_fallback(pool);
 
 	return r;
+}
+
+static void emit_flags(struct pool_features *pf, char *result,
+		       unsigned sz, unsigned maxlen)
+{
+	unsigned count = !pf->zero_new_blocks + !pf->discard_enabled +
+		!pf->discard_passdown + pf->read_only;
+	DMEMIT(" %u ", count);
+
+	if (!pf->zero_new_blocks)
+		DMEMIT("skip_block_zeroing ");
+
+	if (!pf->discard_enabled)
+		DMEMIT("ignore_discard ");
+
+	if (!pf->discard_passdown)
+		DMEMIT("no_discard_passdown ");
+
+	if (pf->read_only)
+		DMEMIT("read_only");
 }
 
 /*
@@ -2434,7 +2483,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 static int pool_status(struct dm_target *ti, status_type_t type,
 		       char *result, unsigned maxlen)
 {
-	int r, count;
+	int r;
 	unsigned sz = 0;
 	uint64_t transaction_id;
 	dm_block_t nr_free_blocks_data;
@@ -2459,9 +2508,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		 * counts can be quite out of date, so we do a quick
 		 * commit.
 		 */
-		r = commit(pool);
-		if (r)
-			return r;
+		commit_or_fallback(pool);
 
 		r = dm_pool_get_free_metadata_block_count(pool->pmd,
 							  &nr_free_blocks_metadata);
@@ -2497,28 +2544,16 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		else
 			DMEMIT("-");
 
+		emit_flags(&pool->pf, result, sz, maxlen);
 		break;
 
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %lu %llu ",
+		DMEMIT("%s %s %lu %llu",
 		       format_dev_t(buf, pt->metadata_dev->bdev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long)pool->sectors_per_block,
 		       (unsigned long long)pt->low_water_blocks);
-
-		count = !pool->pf.zero_new_blocks + !pool->pf.discard_enabled +
-			!pt->pf.discard_passdown;
-		DMEMIT("%u ", count);
-
-		if (!pool->pf.zero_new_blocks)
-			DMEMIT("skip_block_zeroing ");
-
-		if (!pool->pf.discard_enabled)
-			DMEMIT("ignore_discard ");
-
-		if (!pt->pf.discard_passdown)
-			DMEMIT("no_discard_passdown ");
-
+		emit_flags(&pt->pf, result, sz, maxlen);
 		break;
 	}
 
