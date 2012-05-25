@@ -512,8 +512,6 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 	struct thin_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
-	WARN_ON(dm_tm_needs_commit(pmd->tm));
-
 	/*
 	 * We re-read the superblock every time.  Shouldn't need to do this
 	 * really.
@@ -611,9 +609,6 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 
 	r = __write_changed_details(pmd);
 	if (r < 0)
-		goto out;
-
-	if (!dm_tm_needs_commit(pmd->tm))
 		goto out;
 
 	r = dm_sm_commit(pmd->data_sm);
