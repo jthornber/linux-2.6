@@ -108,10 +108,11 @@ int dm_bm_unlock_move(struct dm_block *b, dm_block_t n);
  * It's a common idiom to have a superblock that should be committed last.
  *
  * @superblock should be write-locked on entry. It will be unlocked during
- * this function.  All dirty blocks are guaranteed to be written and flushed
- * before the superblock.
+ * this function (even if an IO error occurs and the data doesn't get
+ * written to disk).  All dirty blocks are guaranteed to be written and
+ * flushed before the superblock.
  *
- * This method always blocks.
+ * This method may blocks.
  */
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock);

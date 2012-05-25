@@ -616,16 +616,14 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 		return -EPERM;
 
 	r = dm_bufio_write_dirty_buffers(bm->bufio);
-	if (unlikely(r))
+	if (unlikely(r)) {
+		dm_bm_unlock(superblock);
 		return r;
+	}
 
 	dm_bm_unlock(superblock);
 
-	r = dm_bufio_write_dirty_buffers(bm->bufio);
-	if (unlikely(r))
-		return r;
-
-	return 0;
+	return dm_bufio_write_dirty_buffers(bm->bufio);
 }
 
 void dm_bm_read_only(struct dm_block_manager *bm)
