@@ -2390,6 +2390,8 @@ static int process_reserve_metadata_snap_mesg(unsigned argc, char **argv, struct
 	if (r)
 		return r;
 
+	commit_or_fallback(pool);
+
 	r = dm_pool_reserve_metadata_snap(pool->pmd);
 	if (r)
 		DMWARN("metadata snap request failed");
