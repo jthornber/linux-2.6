@@ -1102,15 +1102,17 @@ static int __reserve_metadata_snap(struct dm_pool_metadata *pmd)
 	 * Copy the superblock.
 	 */
 	dm_sm_inc_block(pmd->metadata_sm, THIN_SUPERBLOCK_LOCATION);
-	r = dm_tm_shadow_block(pmd->tm, THIN_SUPERBLOCK_LOCATION, &sb_validator, &copy, &inc);
+	r = dm_tm_shadow_block(pmd->tm, THIN_SUPERBLOCK_LOCATION,
+			       &sb_validator, &copy, &inc);
 	if (r)
 		return r;
+
 	BUG_ON(!inc);
 
 	held_root = dm_block_location(copy);
 	disk_super = dm_block_data(copy);
 	if (le64_to_cpu(disk_super->held_root)) {
-		DMWARN("pool already has a metadata snapshot");
+		DMWARN("Pool metadata snapshot already exists: release this before taking another.");
 		dm_tm_dec(pmd->tm, held_root);
 		dm_tm_unlock(pmd->tm, copy);
 		return -EBUSY;
@@ -1119,7 +1121,8 @@ static int __reserve_metadata_snap(struct dm_pool_metadata *pmd)
 	/*
 	 * Wipe the spacemap since we're not publishing this.
 	 */
-	memset(&disk_super->data_space_map_root, 0, sizeof(disk_super->data_space_map_root));
+	memset(&disk_super->data_space_map_root, 0,
+	       sizeof(disk_super->data_space_map_root));
 	memset(&disk_super->metadata_space_map_root, 0,
 	       sizeof(disk_super->metadata_space_map_root));
 

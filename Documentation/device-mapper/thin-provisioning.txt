@@ -292,7 +292,7 @@ iii) Messages
         Reserve a copy of the data mapping btree for use by userland.
         This allows userland to inspect the mappings as they were when
         this message was executed.  Use the pool's status command to
-        get the root block.
+        get the root block associated with the metadata snapshot.
 
     release_metadata_snap
 
