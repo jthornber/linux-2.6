@@ -1781,9 +1781,6 @@ static void pool_features_init(struct pool_features *pf)
 	pf->discard_passdown = 1;
 }
 
-static struct kmem_cache *dm_new_mapping_cache;
-static struct kmem_cache *dm_endio_hook_cache;
-
 static void __pool_destroy(struct pool *pool)
 {
 	__pool_table_remove(pool);
