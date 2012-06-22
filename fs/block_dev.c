@@ -222,11 +222,18 @@ blkdev_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
 
 int __sync_blockdev(struct block_device *bdev, int wait)
 {
+	int r;
+
 	if (!bdev)
 		return 0;
 	if (!wait)
 		return filemap_flush(bdev->bd_inode->i_mapping);
-	return filemap_write_and_wait(bdev->bd_inode->i_mapping);
+
+        r = filemap_write_and_wait(bdev->bd_inode->i_mapping);
+        if (r)
+                return r;
+
+        return blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
 }
 
 /*
