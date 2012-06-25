@@ -1321,10 +1321,9 @@ static int __insert(struct dm_thin_device *td, dm_block_t block,
 	if (r)
 		return r;
 
-	if (inserted) {
+	td->changed = 1;
+	if (inserted)
 		td->mapped_blocks++;
-		td->changed = 1;
-	}
 
 	return 0;
 }
@@ -1355,6 +1354,17 @@ static int __remove(struct dm_thin_device *td, dm_block_t block)
 	td->changed = 1;
 
 	return 0;
+}
+
+int dm_thin_changed_this_transaction(struct dm_thin_device *td)
+{
+	int r;
+
+	down_read(&td->pmd->root_lock);
+	r = td->changed;
+	up_read(&td->pmd->root_lock);
+
+	return r;
 }
 
 int dm_thin_remove_block(struct dm_thin_device *td, dm_block_t block)
