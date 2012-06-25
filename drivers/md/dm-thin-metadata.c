@@ -1356,7 +1356,7 @@ static int __remove(struct dm_thin_device *td, dm_block_t block)
 	return 0;
 }
 
-int dm_thin_changed_this_transaction(struct dm_thin_device *td)
+bool dm_thin_changed_this_transaction(struct dm_thin_device *td)
 {
 	int r;
 
