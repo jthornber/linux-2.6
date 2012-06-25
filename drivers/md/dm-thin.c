@@ -1734,14 +1734,11 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 
 	pool->ti = ti;
 	pool->low_water_blocks = pt->low_water_blocks;
+	pool->pf = pt->pf;
 
 	if (!ro && pt->pf.read_only)
 		dm_pool_metadata_read_only(pool->pmd);
-
-	pool->pf = pt->pf;
-
-	/* FIXME: ugly */
-	if (ro)
+	else
 		pool->pf.read_only = ro;
 
 	/*
