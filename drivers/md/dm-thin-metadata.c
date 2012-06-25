@@ -946,6 +946,9 @@ static int __set_snapshot_details(struct dm_pool_metadata *pmd,
 	td->changed = 1;
 	td->snapshotted_time = time;
 
+	/*
+	 * snap's changed flag already set when the device was created.
+	 */
 	snap->mapped_blocks = td->mapped_blocks;
 	snap->snapshotted_time = time;
 	__close_device(td);
