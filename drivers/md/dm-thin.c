@@ -708,16 +708,22 @@ static void remap_to_origin(struct thin_c *tc, struct bio *bio)
 	bio->bi_bdev = tc->origin_dev->bdev;
 }
 
+static int bio_triggers_commit(struct thin_c *tc, struct bio *bio)
+{
+	return (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) &&
+		dm_thin_changed_this_transaction(tc->td);
+}
+
 static void issue(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
 	/*
-	 * Batch together any FUA/FLUSH bios we find and then issue
-	 * a single commit for them in process_deferred_bios().
+	 * Batch together any bios that trigger commits and then issue a
+	 * single commit for them in process_deferred_bios().
 	 */
-	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+	if (bio_triggers_commit(tc, bio)) {
 		spin_lock_irqsave(&pool->lock, flags);
 		bio_list_add(&pool->deferred_flush_bios, bio);
 		spin_unlock_irqrestore(&pool->lock, flags);
@@ -1351,7 +1357,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	if (bio_detain(pool->prison, &key, bio, &cell))
 		return;
 
-	if (bio_data_dir(bio) == WRITE)
+	if (bio_data_dir(bio) == WRITE && bio->bi_size)
 		break_sharing(tc, bio, block, &key, lookup_result, cell);
 	else {
 		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
@@ -1470,7 +1476,7 @@ static void process_read_only_bio(struct thin_c *tc, struct bio *bio)
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		if (lookup_result.shared && (dir == WRITE))
+		if (lookup_result.shared && (dir == WRITE) && bio->bi_size)
 			bio_io_error(bio);
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
@@ -1556,13 +1562,6 @@ static void process_deferred_bios(struct pool *pool)
 	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
 		return;
 
-	/*
-	 * FIXME: what happens if we've degraded to read-only mode, and
-	 * there's outstanding metadata, and we get a REQ_FLUSH?  In this
-	 * case we should error the FLUSH.  The easiest way to see if
-	 * there's data to commit is to try and do so.  No, what if the
-	 * device has come back up?!
-	 */
 	if (commit_or_fallback(pool)) {
 		while ((bio = bio_list_pop(&bios)))
 			bio_io_error(bio);
@@ -2732,6 +2731,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->split_io = tc->pool->sectors_per_block;
 	ti->num_flush_requests = 1;
+	ti->flush_supported = 1;
 
 	/* In case the pool supports discards, pass them on. */
 	if (tc->pool->pf.discard_enabled) {
