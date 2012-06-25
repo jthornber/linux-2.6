@@ -1562,13 +1562,6 @@ static void process_deferred_bios(struct pool *pool)
 	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
 		return;
 
-	/*
-	 * FIXME: what happens if we've degraded to read-only mode, and
-	 * there's outstanding metadata, and we get a REQ_FLUSH?  In this
-	 * case we should error the FLUSH.  The easiest way to see if
-	 * there's data to commit is to try and do so.  No, what if the
-	 * device has come back up?!
-	 */
 	if (commit_or_fallback(pool)) {
 		while ((bio = bio_list_pop(&bios)))
 			bio_io_error(bio);
