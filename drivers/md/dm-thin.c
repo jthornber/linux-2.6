@@ -1351,7 +1351,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	if (bio_detain(pool->prison, &key, bio, &cell))
 		return;
 
-	if (bio_data_dir(bio) == WRITE)
+	if (bio_data_dir(bio) == WRITE && bio->bi_size)
 		break_sharing(tc, bio, block, &key, lookup_result, cell);
 	else {
 		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
@@ -1470,7 +1470,7 @@ static void process_read_only_bio(struct thin_c *tc, struct bio *bio)
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		if (lookup_result.shared && (dir == WRITE))
+		if (lookup_result.shared && (dir == WRITE) && bio->bi_size)
 			bio_io_error(bio);
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
