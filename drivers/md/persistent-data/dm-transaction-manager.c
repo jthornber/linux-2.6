@@ -5,7 +5,6 @@
  */
 #include "dm-transaction-manager.h"
 #include "dm-space-map.h"
-#include "dm-space-map-checker.h"
 #include "dm-space-map-disk.h"
 #include "dm-space-map-metadata.h"
 #include "dm-persistent-data-internal.h"
@@ -328,48 +327,37 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 				 void *sm_root, size_t sm_len)
 {
 	int r;
-	struct dm_space_map *inner;
 
-	inner = dm_sm_metadata_init();
-	if (IS_ERR(inner))
-		return PTR_ERR(inner);
+	*sm = dm_sm_metadata_init();
+	if (IS_ERR(*sm))
+		return PTR_ERR(*sm);
 
-	*tm = dm_tm_create(bm, inner);
+	*tm = dm_tm_create(bm, *sm);
 	if (IS_ERR(*tm)) {
-		dm_sm_destroy(inner);
+		dm_sm_destroy(*sm);
 		return PTR_ERR(*tm);
 	}
 
 	if (create) {
-		r = dm_sm_metadata_create(inner, *tm, dm_bm_nr_blocks(bm),
+		r = dm_sm_metadata_create(*sm, *tm, dm_bm_nr_blocks(bm),
 					  sb_location);
 		if (r) {
 			DMERR("couldn't create metadata space map");
-			goto bad1;
+			goto bad;
 		}
-
-		*sm = dm_sm_checker_create(inner);
-		if (!*sm)
-			goto bad2;
 
 	} else {
-		r = dm_sm_metadata_open(inner, *tm, sm_root, sm_len);
+		r = dm_sm_metadata_open(*sm, *tm, sm_root, sm_len);
 		if (r) {
 			DMERR("couldn't open metadata space map");
-			goto bad1;
+			goto bad;
 		}
-
-		*sm = dm_sm_checker_create(inner);
-		if (!*sm)
-			goto bad2;
 	}
 
 	return 0;
 
-bad2:
+bad:
 	dm_tm_destroy(*tm);
-bad1:
-	dm_sm_destroy(inner);
 	return r;
 }
 
