@@ -195,6 +195,7 @@ struct dm_thin_device {
 	int open_count;
 
 	bool changed:1;
+	bool aborted_with_changes:1;
 
 	uint64_t mapped_blocks;
 	uint64_t transaction_id;
@@ -908,6 +909,7 @@ static int __open_device(struct dm_pool_metadata *pmd,
 	(*td)->id = dev;
 	(*td)->open_count = 1;
 	(*td)->changed = changed;
+	(*td)->aborted_with_changes = 0;
 	(*td)->mapped_blocks = le64_to_cpu(details_le.mapped_blocks);
 	(*td)->transaction_id = le64_to_cpu(details_le.transaction_id);
 	(*td)->creation_time = le32_to_cpu(details_le.creation_time);
@@ -1413,6 +1415,17 @@ bool dm_thin_changed_this_transaction(struct dm_thin_device *td)
 	return r;
 }
 
+bool dm_thin_aborted_changes(struct dm_thin_device *td)
+{
+	int r;
+
+	down_read(&td->pmd->root_lock);
+	r = td->aborted_with_changes;
+	up_read(&td->pmd->root_lock);
+
+	return r;
+}
+
 int dm_thin_remove_block(struct dm_thin_device *td, dm_block_t block)
 {
 	int r;
@@ -1451,6 +1464,30 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd)
 	r = __begin_transaction(pmd);
 out:
 	up_write(&pmd->root_lock);
+	return r;
+}
+
+static void __set_abort_with_changes_flags(struct dm_pool_metadata *pmd)
+{
+	struct dm_thin_device *td;
+
+	list_for_each_entry(td, &pmd->thin_devices, list)
+		td->aborted_with_changes = td->changed;
+}
+
+int dm_pool_abort_metadata(struct dm_pool_metadata *pmd)
+{
+	int r;
+
+	down_write(&pmd->root_lock);
+	__set_abort_with_changes_flags(pmd);
+	__destroy_persistent_data_objects(pmd);
+	r = __create_persistent_data_objects(pmd, DM_THIN_OPEN);
+	up_write(&pmd->root_lock);
+
+	if (r)
+		kfree(pmd);
+
 	return r;
 }
 
