@@ -1809,8 +1809,9 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	void *err_p;
 	struct pool *pool;
 	struct dm_pool_metadata *pmd;
+	enum dm_thin_metadata_mode mode = DM_THIN_OPEN | (read_only ? 0 : DM_THIN_FORMAT);
 
-	pmd = dm_pool_metadata_open(metadata_dev, block_size, !read_only);
+	pmd = dm_pool_metadata_open(metadata_dev, block_size, mode);
 	if (IS_ERR(pmd)) {
 		*error = "Error creating metadata object";
 		return (struct pool *)pmd;

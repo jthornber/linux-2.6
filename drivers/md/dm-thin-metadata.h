@@ -37,9 +37,14 @@ typedef uint64_t dm_thin_id;
 /*
  * Reopens or creates a new, empty metadata volume.
  */
+enum dm_thin_metadata_mode {
+	DM_THIN_OPEN = 1,
+	DM_THIN_FORMAT = 2
+};
+
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 					       sector_t data_block_size,
-					       int may_create);
+					       enum dm_thin_metadata_mode mode);
 
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd);
 
