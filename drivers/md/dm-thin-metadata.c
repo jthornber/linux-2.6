@@ -485,7 +485,7 @@ out_locked:
 	return r;
 }
 
-static int __format_metadata(struct dm_pool_metadata *pmd, dm_block_t nr_blocks)
+static int __format_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
 
@@ -495,7 +495,7 @@ static int __format_metadata(struct dm_pool_metadata *pmd, dm_block_t nr_blocks)
 		return r;
 	}
 
-	pmd->data_sm = dm_sm_disk_create(pmd->tm, nr_blocks);
+	pmd->data_sm = dm_sm_disk_create(pmd->tm, 0);
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_create failed");
 		r = PTR_ERR(pmd->data_sm);
@@ -582,8 +582,7 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	return dm_bm_unlock(sblock);
 }
 
-static int __create_transaction_manager_and_space_maps(struct dm_pool_metadata *pmd,
-						       dm_block_t nr_blocks, int may_create)
+static int __open_or_format_metadata(struct dm_pool_metadata *pmd, int may_format)
 {
 	int r, unformatted;
 
@@ -591,16 +590,15 @@ static int __create_transaction_manager_and_space_maps(struct dm_pool_metadata *
 	if (r)
 		return r;
 
-	if (unformatted && !may_create)
+	if (unformatted && !may_format)
 		return -EPERM;
 
 	return unformatted ?
-		__format_metadata(pmd, nr_blocks) :
+		__format_metadata(pmd) :
 		__open_metadata(pmd);
 }
 
-static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
-					    dm_block_t nr_blocks, int may_create)
+static int __create_persistent_data_objects(struct dm_pool_metadata *pmd, int may_format)
 {
 	int r;
 
@@ -612,7 +610,7 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
 		return -ENOMEM;
 	}
 
-	r = __create_transaction_manager_and_space_maps(pmd, nr_blocks, may_create);
+	r = __open_or_format_metadata(pmd, may_format);
 	if (r)
 		dm_block_manager_destroy(pmd->bm);
 
@@ -793,7 +791,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	pmd->bdev = bdev;
 	pmd->data_block_size = data_block_size;
 
-	r = __create_persistent_data_objects(pmd, 0, may_create);
+	r = __create_persistent_data_objects(pmd, may_create);
 	if (r) {
 		kfree(pmd);
 		return ERR_PTR(r);
