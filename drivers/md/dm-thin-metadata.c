@@ -737,27 +737,27 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 
 	r = __write_changed_details(pmd);
 	if (r < 0)
-		goto out;
+		return r;
 
 	r = dm_sm_commit(pmd->data_sm);
 	if (r < 0)
-		goto out;
+		return r;
 
 	r = dm_tm_pre_commit(pmd->tm);
 	if (r < 0)
-		goto out;
+		return r;
 
 	r = dm_sm_root_size(pmd->metadata_sm, &metadata_len);
 	if (r < 0)
-		goto out;
+		return r;
 
 	r = dm_sm_root_size(pmd->data_sm, &data_len);
 	if (r < 0)
-		goto out;
+		return r;
 
 	r = superblock_lock(pmd, &sblock);
 	if (r)
-		goto out;
+		return r;
 
 	disk_super = dm_block_data(sblock);
 	disk_super->time = cpu_to_le32(pmd->time);
@@ -766,20 +766,19 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 	disk_super->device_details_root = cpu_to_le64(pmd->details_root);
 	disk_super->flags = cpu_to_le32(pmd->flags);
 
-	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root,
+	r = dm_sm_copy_root(pmd->metadata_sm,
+			    &disk_super->metadata_space_map_root,
 			    metadata_len);
 	if (r < 0)
 		goto out_locked;
 
-	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root,
+	r = dm_sm_copy_root(pmd->data_sm,
+			    &disk_super->data_space_map_root,
 			    data_len);
 	if (r < 0)
 		goto out_locked;
 
-	r = dm_tm_commit(pmd->tm, sblock);
-
-out:
-	return r;
+	return dm_tm_commit(pmd->tm, sblock);
 
 out_locked:
 	dm_bm_unlock(sblock);
