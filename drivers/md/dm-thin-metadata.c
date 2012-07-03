@@ -581,10 +581,8 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	disk_super = dm_block_data(sblock);
 
 	r = __check_incompat_features(disk_super, pmd);
-	if (r < 0) {
-		dm_bm_unlock(sblock);
-		return r;
-	}
+	if (r < 0)
+		goto out_unlock_sblock;
 
 	r = dm_tm_open_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
 			       disk_super->metadata_space_map_root,
@@ -592,32 +590,36 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 			       &pmd->tm, &pmd->metadata_sm);
 	if (r < 0) {
 		DMERR("tm_open_with_sm failed");
-		dm_bm_unlock(sblock);
-		return r;
+		goto out_unlock_sblock;
 	}
 
 	pmd->data_sm = dm_sm_disk_open(pmd->tm, disk_super->data_space_map_root,
 				       sizeof(disk_super->data_space_map_root));
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_open failed");
-		dm_bm_unlock(sblock);
-		dm_sm_destroy(pmd->metadata_sm);
-		dm_tm_destroy(pmd->tm);
-		return PTR_ERR(pmd->data_sm);
+		r = PTR_ERR(pmd->data_sm);
+		goto out_cleanup_tm;
 	}
 
 	pmd->nb_tm = dm_tm_create_non_blocking_clone(pmd->tm);
 	if (!pmd->nb_tm) {
 		DMERR("could not create non-blocking clone tm");
-		/* FIXME: refactor: it's not obvious that these are the elements that need destroying */
-		dm_sm_destroy(pmd->data_sm);
-		dm_sm_destroy(pmd->metadata_sm);
-		dm_tm_destroy(pmd->tm);
-		return -ENOMEM;
+		r = -ENOMEM;
+		goto out_cleanup_data_sm;
 	}
 
 	__setup_btree_details(pmd);
 	return dm_bm_unlock(sblock);
+
+out_cleanup_data_sm:
+	dm_sm_destroy(pmd->data_sm);
+out_cleanup_tm:
+	dm_sm_destroy(pmd->metadata_sm);
+	dm_tm_destroy(pmd->tm);
+out_unlock_sblock:
+	dm_bm_unlock(sblock);
+
+	return r;
 }
 
 static int __open_or_format_metadata(struct dm_pool_metadata *pmd, enum dm_thin_metadata_mode mode)
