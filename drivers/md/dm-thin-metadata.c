@@ -435,11 +435,11 @@ static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 
 	r = dm_sm_root_size(pmd->metadata_sm, &metadata_len);
 	if (r < 0)
-		goto out_locked;
+		return r;
 
 	r = dm_sm_root_size(pmd->data_sm, &data_len);
 	if (r < 0)
-		goto out_locked;
+		return r;
 
 	r = dm_sm_commit(pmd->data_sm);
 	if (r < 0)
@@ -523,7 +523,11 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 		goto cleanup_data_sm;
 	}
 
-	return __write_initial_superblock(pmd);
+	r = __write_initial_superblock(pmd);
+	if (r)
+		goto cleanup_data_sm;
+
+	return 0;
 
 cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
