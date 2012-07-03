@@ -490,7 +490,8 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
 
-	r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION, &pmd->tm, &pmd->metadata_sm);
+	r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+				 &pmd->tm, &pmd->metadata_sm);
 	if (r) {
 		DMERR("tm_create_with_sm failed");
 		return r;
@@ -500,39 +501,36 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_create failed");
 		r = PTR_ERR(pmd->data_sm);
-		dm_sm_destroy(pmd->metadata_sm);
-		dm_tm_destroy(pmd->tm);
-		return r;
+		goto cleanup_tm;
 	}
 
 	pmd->nb_tm = dm_tm_create_non_blocking_clone(pmd->tm);
 	if (!pmd->nb_tm) {
 		DMERR("could not create non-blocking clone tm");
-		/* FIXME: refactor: it's not obvious that these are the elements that need destroying */
-		dm_sm_destroy(pmd->data_sm);
-		dm_sm_destroy(pmd->metadata_sm);
-		dm_tm_destroy(pmd->tm);
-		return -ENOMEM;
+		r = -ENOMEM;
+		goto cleanup_data_sm;
 	}
 
 	__setup_btree_details(pmd);
 
 	r = dm_btree_empty(&pmd->info, &pmd->root);
 	if (r < 0)
-		goto bad;
+		goto cleanup_data_sm;
 
 	r = dm_btree_empty(&pmd->details_info, &pmd->details_root);
 	if (r < 0) {
 		DMERR("couldn't create devices root");
-		goto bad;
+		goto cleanup_data_sm;
 	}
 
 	return __write_initial_superblock(pmd);
 
-bad:
-	dm_sm_destroy(pmd->metadata_sm);
+cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
+cleanup_tm:
+	dm_sm_destroy(pmd->metadata_sm);
 	dm_tm_destroy(pmd->tm);
+
 	return r;
 }
 
