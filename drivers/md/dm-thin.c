@@ -1655,8 +1655,10 @@ static void set_pool_mode(struct pool *pool, enum pool_mode mode)
 		break;
 
 	case PM_READ_ONLY:
+		DMERR("switching pool to read-only mode");
 		r = dm_pool_abort_metadata(pool->pmd);
 		if (r) {
+			DMERR("aborting transaction failed");
 			pool->pmd = NULL;
 			set_pool_mode(pool, PM_FAIL);
 		} else {
@@ -2603,6 +2605,11 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
+		if (get_pool_mode(pool) == PM_FAIL) {
+			DMEMIT("fail");
+			break;
+		}
+
 		r = dm_pool_get_metadata_transaction_id(pool->pmd,
 							&transaction_id);
 		if (r)
