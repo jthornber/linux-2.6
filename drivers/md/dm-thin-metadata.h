@@ -37,9 +37,14 @@ typedef uint64_t dm_thin_id;
 /*
  * Reopens or creates a new, empty metadata volume.
  */
+enum dm_thin_metadata_mode {
+	DM_THIN_OPEN = 1,
+	DM_THIN_FORMAT = 2
+};
+
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 					       sector_t data_block_size,
-					       int may_create);
+					       enum dm_thin_metadata_mode mode);
 
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd);
 
@@ -78,6 +83,15 @@ int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,
  * updates.
  */
 int dm_pool_commit_metadata(struct dm_pool_metadata *pmd);
+
+/*
+ * Discards all uncommitted changes.  Rereads the superblock, rolling back
+ * to the last good transaction.  Thin devices remain open, if they had
+ * uncommitted changes dm_thin_aborted_changes() will tell you.
+ *
+ * If this call fails the pmd is destroyed and may not be used again.
+ */
+int dm_pool_abort_metadata(struct dm_pool_metadata *pmd);
 
 /*
  * Set/get userspace transaction id.
@@ -149,6 +163,8 @@ int dm_thin_remove_block(struct dm_thin_device *td, dm_block_t block);
  * Queries.
  */
 bool dm_thin_changed_this_transaction(struct dm_thin_device *td);
+
+bool dm_thin_aborted_changes(struct dm_thin_device *td);
 
 int dm_thin_get_highest_mapped_block(struct dm_thin_device *td,
 				     dm_block_t *highest_mapped);
