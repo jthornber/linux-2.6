@@ -1724,12 +1724,13 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 	struct dm_thin_device *td = tc->td;
 	struct dm_thin_lookup_result result;
 
+	map_context->ptr = thin_hook_bio(tc, bio);
+
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	map_context->ptr = thin_hook_bio(tc, bio);
 	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
 		thin_defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
