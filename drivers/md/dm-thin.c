@@ -1649,7 +1649,6 @@ static void set_pool_mode(struct pool *pool, enum pool_mode mode)
 		DMERR("switching pool to failure mode");
 		pool->process_bio = process_bio_fail;
 		pool->process_discard = process_bio_fail;
-
 		pool->process_prepared_mapping = process_prepared_mapping_fail;
 		pool->process_prepared_discard = process_prepared_discard_fail;
 		break;
