@@ -2826,7 +2826,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	__pool_inc(tc->pool);
 
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
-		ti->error = "Coudln't open thin device, Pool is in fail mode";
+		ti->error = "Couldn't open thin device, Pool is in fail mode";
 		goto bad_thin_open;
 	}
 
