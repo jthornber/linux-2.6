@@ -89,7 +89,8 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd);
  * to the last good transaction.  Thin devices remain open, if they had
  * uncommitted changes dm_thin_aborted_changes() will tell you.
  *
- * If this call fails the pmd is destroyed and may not be used again.
+ * If this call fails the pmd many methods may subsequently fail with
+ * -EINVAL.
  */
 int dm_pool_abort_metadata(struct dm_pool_metadata *pmd);
 

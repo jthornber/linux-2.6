@@ -1658,7 +1658,6 @@ static void set_pool_mode(struct pool *pool, enum pool_mode mode)
 		r = dm_pool_abort_metadata(pool->pmd);
 		if (r) {
 			DMERR("aborting transaction failed");
-			pool->pmd = NULL;
 			set_pool_mode(pool, PM_FAIL);
 		} else {
 			dm_pool_metadata_read_only(pool->pmd);
@@ -1877,10 +1876,7 @@ static void __pool_destroy(struct pool *pool)
 {
 	__pool_table_remove(pool);
 
-	/*
-	 * The pmd may be set to NULL if a transaction abort failed.
-	 */
-	if (pool->pmd && dm_pool_metadata_close(pool->pmd) < 0)
+	if (dm_pool_metadata_close(pool->pmd) < 0)
 		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
 
 	prison_destroy(pool->prison);
@@ -2829,6 +2825,11 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	__pool_inc(tc->pool);
 
+	if (get_pool_mode(tc->pool) == PM_FAIL) {
+		ti->error = "Coudln't open thin device, Pool is in fail mode";
+		goto bad_thin_open;
+	}
+
 	r = dm_pool_open_thin_device(tc->pool->pmd, tc->dev_id, &tc->td);
 	if (r) {
 		ti->error = "Couldn't open thin internal device";
@@ -2930,6 +2931,11 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	dm_block_t mapped, highest;
 	char buf[BDEVNAME_SIZE];
 	struct thin_c *tc = ti->private;
+
+	if (get_pool_mode(tc->pool) == PM_FAIL) {
+		DMEMIT("fail");
+		return 0;
+	}
 
 	if (!tc->td)
 		DMEMIT("-");
