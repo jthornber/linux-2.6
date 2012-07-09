@@ -345,7 +345,6 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 			DMERR("couldn't create metadata space map");
 			goto bad;
 		}
-
 	} else {
 		r = dm_sm_metadata_open(*sm, *tm, sm_root, sm_len);
 		if (r) {
