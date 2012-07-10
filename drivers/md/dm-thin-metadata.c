@@ -418,9 +418,9 @@ static void __setup_btree_details(struct dm_pool_metadata *pmd)
 	pmd->details_info.value_type.equal = NULL;
 }
 
-static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
-					    struct dm_block_manager *bm,
-					    dm_block_t nr_blocks, int create)
+static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
+				     struct dm_block_manager *bm,
+				     dm_block_t nr_blocks, int create)
 {
 	int r;
 	struct dm_space_map *sm, *data_sm;
@@ -502,6 +502,33 @@ bad:
 	dm_sm_destroy(sm);
 
 	return r;
+}
+
+static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
+					    dm_block_t nr_blocks,
+					    int *create)
+{
+        int r;
+
+        pmd->bm = dm_block_manager_create(pmd->bdev, THIN_METADATA_BLOCK_SIZE,
+                                          THIN_METADATA_CACHE_SIZE,
+                                          THIN_MAX_CONCURRENT_LOCKS);
+        if (!pmd->bm) {
+                DMERR("could not create block manager");
+                return -ENOMEM;
+        }
+
+	r = superblock_all_zeroes(pmd->bm, create);
+	if (r) {
+		dm_block_manager_destroy(pmd->bm);
+		return r;
+	}
+
+        r = __open_or_format_metadata(pmd, pmd->bm, nr_blocks, *create);
+        if (r)
+                dm_block_manager_destroy(pmd->bm);
+
+        return r;
 }
 
 static int __begin_transaction(struct dm_pool_metadata *pmd)
@@ -664,7 +691,6 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	struct thin_disk_superblock *disk_super;
 	struct dm_pool_metadata *pmd;
 	sector_t bdev_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
-	struct dm_block_manager *bm;
 	int create;
 	struct dm_block *sblock;
 
@@ -674,26 +700,8 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 		return ERR_PTR(-ENOMEM);
 	}
 
-	bm = dm_block_manager_create(bdev, THIN_METADATA_BLOCK_SIZE,
-				     THIN_METADATA_CACHE_SIZE,
-				     THIN_MAX_CONCURRENT_LOCKS);
-	if (!bm) {
-		DMERR("could not create block manager");
-		kfree(pmd);
-		return ERR_PTR(-ENOMEM);
-	}
-
-	r = superblock_all_zeroes(bm, &create);
+	r = __create_persistent_data_objects(pmd, 0, &create);
 	if (r) {
-		dm_block_manager_destroy(bm);
-		kfree(pmd);
-		return ERR_PTR(r);
-	}
-
-
-	r = __create_persistent_data_objects(pmd, bm, 0, create);
-	if (r) {
-		dm_block_manager_destroy(bm);
 		kfree(pmd);
 		return ERR_PTR(r);
 	}
