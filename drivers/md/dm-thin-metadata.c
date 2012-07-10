@@ -184,7 +184,6 @@ struct dm_pool_metadata {
 	uint64_t trans_id;
 	unsigned long flags;
 	sector_t data_block_size;
-	int valid_superblock;
 };
 
 struct dm_thin_device {
@@ -344,18 +343,14 @@ static int subtree_equal(void *context, void *value1_le, void *value2_le)
 
 /*----------------------------------------------------------------*/
 
+static int superblock_lock_zero(struct dm_pool_metadata *pmd, struct dm_block **sblock)
+{
+	return dm_bm_write_lock_zero(pmd->bm, THIN_SUPERBLOCK_LOCATION, &sb_validator, sblock);
+}
+
 static int superblock_lock(struct dm_pool_metadata *pmd, struct dm_block **sblock)
 {
-	int r;
-
-	if (pmd->valid_superblock)
-		r = dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION, &sb_validator, sblock);
-	else {
-		pmd->valid_superblock = 1;
-		r = dm_bm_write_lock_zero(pmd->bm, THIN_SUPERBLOCK_LOCATION, &sb_validator, sblock);
-	}
-
-	return r;
+	return dm_bm_write_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION, &sb_validator, sblock);
 }
 
 static int superblock_all_zeroes(struct dm_block_manager *bm, int *result)
@@ -407,9 +402,6 @@ static int init_pmd(struct dm_pool_metadata *pmd,
 			r = PTR_ERR(data_sm);
 			goto bad;
 		}
-
-		pmd->valid_superblock = 0;
-
 	} else {
 		struct thin_disk_superblock *disk_super;
 
@@ -440,7 +432,6 @@ static int init_pmd(struct dm_pool_metadata *pmd,
 		}
 
 		dm_bm_unlock(sblock);
-		pmd->valid_superblock = 1;
 	}
 
 	pmd->bm = bm;
@@ -714,7 +705,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	/*
 	 * Create.
 	 */
-	r = superblock_lock(pmd, &sblock);
+	r = superblock_lock_zero(pmd, &sblock);
 	if (r)
 		goto bad;
 
