@@ -418,6 +418,7 @@ static void __setup_btree_details(struct dm_pool_metadata *pmd)
 	pmd->details_info.value_type.equal = NULL;
 }
 
+static int __begin_transaction(struct dm_pool_metadata *pmd);
 static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 {
 	int r;
@@ -445,11 +446,61 @@ static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 		return r;
 
 	pmd->flags = 0;
-	r = dm_pool_commit_metadata(pmd);
-	if (r < 0)
-		DMERR("%s: dm_pool_commit_metadata() failed, error = %d",
-		      __func__, r);
 
+	{
+		int r;
+		size_t metadata_len, data_len;
+		struct thin_disk_superblock *disk_super;
+		struct dm_block *sblock;
+
+		r = dm_sm_commit(pmd->data_sm);
+		if (r < 0)
+			goto out;
+
+		r = dm_tm_pre_commit(pmd->tm);
+		if (r < 0)
+			goto out;
+
+		r = dm_sm_root_size(pmd->metadata_sm, &metadata_len);
+		if (r < 0)
+			goto out;
+
+		r = dm_sm_root_size(pmd->data_sm, &data_len);
+		if (r < 0)
+			goto out;
+
+		r = superblock_lock(pmd, &sblock);
+		if (r)
+			goto out;
+
+		disk_super = dm_block_data(sblock);
+		disk_super->time = cpu_to_le32(pmd->time);
+		disk_super->data_mapping_root = cpu_to_le64(pmd->root);
+		disk_super->device_details_root = cpu_to_le64(pmd->details_root);
+		disk_super->trans_id = cpu_to_le64(pmd->trans_id);
+		disk_super->flags = cpu_to_le32(pmd->flags);
+
+		r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root,
+				    metadata_len);
+		if (r < 0)
+			goto out_locked;
+
+		r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root,
+				    data_len);
+		if (r < 0)
+			goto out_locked;
+
+		r = dm_tm_commit(pmd->tm, sblock);
+		if (r)
+			return r;
+
+	}
+
+	return __begin_transaction(pmd);
+
+out_locked:
+	dm_bm_unlock(sblock);
+out:
 	return r;
 }
 
