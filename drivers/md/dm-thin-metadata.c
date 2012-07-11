@@ -422,21 +422,19 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 				     dm_block_t nr_blocks, int create)
 {
 	int r;
-	struct dm_space_map *sm, *data_sm;
-	struct dm_transaction_manager *tm;
 	struct dm_block *sblock;
 
 	if (create) {
-		r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION, &tm, &sm);
+		r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION, &pmd->tm, &pmd->metadata_sm);
 		if (r < 0) {
 			DMERR("tm_create_with_sm failed");
 			return r;
 		}
 
-		data_sm = dm_sm_disk_create(tm, nr_blocks);
-		if (IS_ERR(data_sm)) {
+		pmd->data_sm = dm_sm_disk_create(pmd->tm, nr_blocks);
+		if (IS_ERR(pmd->data_sm)) {
 			DMERR("sm_disk_create failed");
-			r = PTR_ERR(data_sm);
+			r = PTR_ERR(pmd->data_sm);
 			goto bad;
 		}
 	} else {
@@ -452,29 +450,26 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 		r = dm_tm_open_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
 				       disk_super->metadata_space_map_root,
 				       sizeof(disk_super->metadata_space_map_root),
-				       &tm, &sm);
+				       &pmd->tm, &pmd->metadata_sm);
 		if (r < 0) {
 			DMERR("tm_open_with_sm failed");
 			dm_bm_unlock(sblock);
 			return r;
 		}
 
-		data_sm = dm_sm_disk_open(tm, disk_super->data_space_map_root,
-					  sizeof(disk_super->data_space_map_root));
-		if (IS_ERR(data_sm)) {
+		pmd->data_sm = dm_sm_disk_open(pmd->tm, disk_super->data_space_map_root,
+					       sizeof(disk_super->data_space_map_root));
+		if (IS_ERR(pmd->data_sm)) {
 			DMERR("sm_disk_open failed");
 			dm_bm_unlock(sblock);
-			r = PTR_ERR(data_sm);
+			r = PTR_ERR(pmd->data_sm);
 			goto bad;
 		}
 
 		dm_bm_unlock(sblock);
 	}
 
-	pmd->metadata_sm = sm;
-	pmd->data_sm = data_sm;
-	pmd->tm = tm;
-	pmd->nb_tm = dm_tm_create_non_blocking_clone(tm);
+	pmd->nb_tm = dm_tm_create_non_blocking_clone(pmd->tm);
 	if (!pmd->nb_tm) {
 		DMERR("could not create clone tm");
 		r = -ENOMEM;
@@ -536,10 +531,10 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 	return 0;
 
 bad_data_sm:
-	dm_sm_destroy(data_sm);
+	dm_sm_destroy(pmd->data_sm);
 bad:
-	dm_tm_destroy(tm);
-	dm_sm_destroy(sm);
+	dm_tm_destroy(pmd->tm);
+	dm_sm_destroy(pmd->metadata_sm);
 
 	return r;
 }
