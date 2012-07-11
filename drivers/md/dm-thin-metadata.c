@@ -418,7 +418,6 @@ static void __setup_btree_details(struct dm_pool_metadata *pmd)
 	pmd->details_info.value_type.equal = NULL;
 }
 
-static int __begin_transaction(struct dm_pool_metadata *pmd);
 static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 {
 	int r;
@@ -474,11 +473,7 @@ static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 	disk_super->metadata_nr_blocks = cpu_to_le64(bdev_size >> SECTOR_TO_BLOCK_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(pmd->data_block_size);
 
-	r = dm_tm_commit(pmd->tm, sblock);
-	if (r)
-		return r;
-
-	return __begin_transaction(pmd);
+	return dm_tm_commit(pmd->tm, sblock);
 
 out_locked:
 	dm_bm_unlock(sblock);
@@ -813,13 +808,11 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 		return ERR_PTR(r);
 	}
 
-	if (!create) {
-		r = __begin_transaction(pmd);
-		if (r < 0) {
-			if (dm_pool_metadata_close(pmd) < 0)
-				DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
-			return ERR_PTR(r);
-		}
+	r = __begin_transaction(pmd);
+	if (r < 0) {
+		if (dm_pool_metadata_close(pmd) < 0)
+			DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
+		return ERR_PTR(r);
 	}
 
 	return pmd;
