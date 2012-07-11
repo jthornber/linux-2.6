@@ -589,15 +589,15 @@ cleanup_tm:
 
 static int __open_or_format_metadata(struct dm_pool_metadata *pmd)
 {
-	int r, create;
+	int r, unformatted;
 
-	r = superblock_all_zeroes(pmd->bm, &create);
+	r = superblock_all_zeroes(pmd->bm, &unformatted);
 	if (r) {
 		dm_block_manager_destroy(pmd->bm);
 		return r;
 	}
 
-	if (create)
+	if (unformatted)
 		return __format_metadata(pmd);
 	else
 		return __open_metadata(pmd);
