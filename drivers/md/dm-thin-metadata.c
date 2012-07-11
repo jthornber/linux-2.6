@@ -531,6 +531,36 @@ cleanup_tm:
 	return r;
 }
 
+static int __check_incompat_features(struct thin_disk_superblock *disk_super,
+                                     struct dm_pool_metadata *pmd)
+{
+	u32 features;
+
+	features = le32_to_cpu(disk_super->incompat_flags) & ~THIN_FEATURE_INCOMPAT_SUPP;
+	if (features) {
+		DMERR("could not access metadata due to "
+		      "unsupported optional features (%lx).",
+		      (unsigned long)features);
+		return -EINVAL;
+	}
+
+	/*
+	 * Check for read-only metadata to skip the following RDWR checks.
+	 */
+	if (get_disk_ro(pmd->bdev->bd_disk))
+		return 0;
+
+	features = le32_to_cpu(disk_super->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
+	if (features) {
+		DMERR("could not access metadata RDWR due to "
+		      "unsupported optional features (%lx).",
+		      (unsigned long)features);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int __open_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
@@ -544,6 +574,13 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	}
 
 	disk_super = dm_block_data(sblock);
+
+        r = __check_incompat_features(disk_super, pmd);
+        if (r < 0) {
+		dm_bm_unlock(sblock);
+		return r;
+	}
+
 	r = dm_tm_open_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
 			       disk_super->metadata_space_map_root,
 			       sizeof(disk_super->metadata_space_map_root),
@@ -625,7 +662,6 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd)
 static int __begin_transaction(struct dm_pool_metadata *pmd)
 {
 	int r;
-	u32 features;
 	struct thin_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
@@ -646,32 +682,8 @@ static int __begin_transaction(struct dm_pool_metadata *pmd)
 	pmd->flags = le32_to_cpu(disk_super->flags);
 	pmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 
-	features = le32_to_cpu(disk_super->incompat_flags) & ~THIN_FEATURE_INCOMPAT_SUPP;
-	if (features) {
-		DMERR("could not access metadata due to "
-		      "unsupported optional features (%lx).",
-		      (unsigned long)features);
-		r = -EINVAL;
-		goto out;
-	}
-
-	/*
-	 * Check for read-only metadata to skip the following RDWR checks.
-	 */
-	if (get_disk_ro(pmd->bdev->bd_disk))
-		goto out;
-
-	features = le32_to_cpu(disk_super->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
-	if (features) {
-		DMERR("could not access metadata RDWR due to "
-		      "unsupported optional features (%lx).",
-		      (unsigned long)features);
-		r = -EINVAL;
-	}
-
-out:
 	dm_bm_unlock(sblock);
-	return r;
+	return 0;
 }
 
 static int __write_changed_details(struct dm_pool_metadata *pmd)
