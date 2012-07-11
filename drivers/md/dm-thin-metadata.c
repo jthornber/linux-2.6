@@ -593,25 +593,23 @@ bad:
 	return r;
 }
 
-static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
-				     int *create)
+static int __open_or_format_metadata(struct dm_pool_metadata *pmd)
 {
-	int r;
+	int r, create;
 
-	r = superblock_all_zeroes(pmd->bm, create);
+	r = superblock_all_zeroes(pmd->bm, &create);
 	if (r) {
 		dm_block_manager_destroy(pmd->bm);
 		return r;
 	}
 
-	if (*create)
+	if (create)
 		return __format_metadata(pmd);
 	else
 		return __open_metadata(pmd);
 }
 
-static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
-					    int *create)
+static int __create_persistent_data_objects(struct dm_pool_metadata *pmd)
 {
         int r;
 
@@ -623,7 +621,7 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
                 return -ENOMEM;
         }
 
-        r = __open_or_format_metadata(pmd, create);
+        r = __open_or_format_metadata(pmd);
         if (r)
                 dm_block_manager_destroy(pmd->bm);
 
@@ -788,7 +786,6 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 {
 	int r;
 	struct dm_pool_metadata *pmd;
-	int create;
 
 	pmd = kmalloc(sizeof(*pmd), GFP_KERNEL);
 	if (!pmd) {
@@ -802,7 +799,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	pmd->bdev = bdev;
 	pmd->data_block_size = data_block_size;
 
-	r = __create_persistent_data_objects(pmd, &create);
+	r = __create_persistent_data_objects(pmd);
 	if (r) {
 		kfree(pmd);
 		return ERR_PTR(r);
