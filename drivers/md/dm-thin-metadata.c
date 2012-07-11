@@ -418,7 +418,7 @@ static void __setup_btree_details(struct dm_pool_metadata *pmd)
 	pmd->details_info.value_type.equal = NULL;
 }
 
-static int __format_metadata(struct dm_pool_metadata *pmd, dm_block_t nr_blocks)
+static int __format_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
 	struct dm_block *sblock;
@@ -431,7 +431,7 @@ static int __format_metadata(struct dm_pool_metadata *pmd, dm_block_t nr_blocks)
 		return r;
 	}
 
-	pmd->data_sm = dm_sm_disk_create(pmd->tm, nr_blocks);
+	pmd->data_sm = dm_sm_disk_create(pmd->tm, 0);
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_create failed");
 		r = PTR_ERR(pmd->data_sm);
@@ -556,16 +556,15 @@ bad:
 }
 
 static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
-				     dm_block_t nr_blocks, int create)
+				     int create)
 {
 	if (create)
-		return __format_metadata(pmd, nr_blocks);
+		return __format_metadata(pmd);
 	else
 		return __open_metadata(pmd);
 }
 
 static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
-					    dm_block_t nr_blocks,
 					    int *create)
 {
         int r;
@@ -584,7 +583,7 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
 		return r;
 	}
 
-        r = __open_or_format_metadata(pmd, nr_blocks, *create);
+        r = __open_or_format_metadata(pmd, *create);
         if (r)
                 dm_block_manager_destroy(pmd->bm);
 
@@ -763,7 +762,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	pmd->bdev = bdev;
 	pmd->data_block_size = data_block_size;
 
-	r = __create_persistent_data_objects(pmd, 0, &create);
+	r = __create_persistent_data_objects(pmd, &create);
 	if (r) {
 		kfree(pmd);
 		return ERR_PTR(r);
