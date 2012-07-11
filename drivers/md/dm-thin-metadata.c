@@ -458,12 +458,14 @@ static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 	disk_super->trans_id = 0;
 	disk_super->held_root = 0;
 
-	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root,
+	r = dm_sm_copy_root(pmd->metadata_sm,
+			    &disk_super->metadata_space_map_root,
 			    metadata_len);
 	if (r < 0)
 		goto out_locked;
 
-	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root,
+	r = dm_sm_copy_root(pmd->data_sm,
+			    &disk_super->data_space_map_root,
 			    data_len);
 	if (r < 0)
 		goto out_locked;
@@ -485,8 +487,9 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 {
 	int r;
 
-	r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION, &pmd->tm, &pmd->metadata_sm);
-	if (r < 0) {
+	r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
+				 &pmd->tm, &pmd->metadata_sm);
+	if (r) {
 		DMERR("tm_create_with_sm failed");
 		return r;
 	}
