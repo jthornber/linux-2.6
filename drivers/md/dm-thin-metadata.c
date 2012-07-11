@@ -560,7 +560,7 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 		DMERR("sm_disk_open failed");
 		dm_bm_unlock(sblock);
 		r = PTR_ERR(pmd->data_sm);
-		goto bad;
+		goto cleanup_tm;
 	}
 
 	dm_bm_unlock(sblock);
@@ -569,7 +569,7 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	if (!pmd->nb_tm) {
 		DMERR("could not create clone tm");
 		r = -ENOMEM;
-		goto bad_data_sm;
+		goto cleanup_data_sm;
 	}
 
 	__setup_btree_details(pmd);
@@ -579,12 +579,11 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	pmd->trans_id = 0;
 	pmd->flags = 0;
 
-bad_data_sm:
+cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
-bad:
+cleanup_tm:
 	dm_tm_destroy(pmd->tm);
 	dm_sm_destroy(pmd->metadata_sm);
-
 	return r;
 }
 
