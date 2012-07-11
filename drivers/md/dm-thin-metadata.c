@@ -419,7 +419,6 @@ static void __setup_btree_details(struct dm_pool_metadata *pmd)
 }
 
 static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
-				     struct dm_block_manager *bm,
 				     dm_block_t nr_blocks, int create)
 {
 	int r;
@@ -428,7 +427,7 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 	struct dm_block *sblock;
 
 	if (create) {
-		r = dm_tm_create_with_sm(bm, THIN_SUPERBLOCK_LOCATION, &tm, &sm);
+		r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION, &tm, &sm);
 		if (r < 0) {
 			DMERR("tm_create_with_sm failed");
 			return r;
@@ -443,14 +442,14 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 	} else {
 		struct thin_disk_superblock *disk_super;
 
-		r = dm_bm_read_lock(bm, THIN_SUPERBLOCK_LOCATION, &sb_validator, &sblock);
+		r = dm_bm_read_lock(pmd->bm, THIN_SUPERBLOCK_LOCATION, &sb_validator, &sblock);
 		if (r < 0) {
 			DMERR("couldn't read superblock");
 			return r;
 		}
 
 		disk_super = dm_block_data(sblock);
-		r = dm_tm_open_with_sm(bm, THIN_SUPERBLOCK_LOCATION,
+		r = dm_tm_open_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
 				       disk_super->metadata_space_map_root,
 				       sizeof(disk_super->metadata_space_map_root),
 				       &tm, &sm);
@@ -472,7 +471,6 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 		dm_bm_unlock(sblock);
 	}
 
-	pmd->bm = bm;
 	pmd->metadata_sm = sm;
 	pmd->data_sm = data_sm;
 	pmd->tm = tm;
@@ -566,7 +564,7 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
 		return r;
 	}
 
-        r = __open_or_format_metadata(pmd, pmd->bm, nr_blocks, *create);
+        r = __open_or_format_metadata(pmd, nr_blocks, *create);
         if (r)
                 dm_block_manager_destroy(pmd->bm);
 
