@@ -588,8 +588,7 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 			       &pmd->tm, &pmd->metadata_sm);
 	if (r < 0) {
 		DMERR("tm_open_with_sm failed");
-		dm_bm_unlock(sblock);
-		return r;
+		goto cleanup_sblock;
 	}
 
 	pmd->data_sm = dm_sm_disk_open(pmd->tm, disk_super->data_space_map_root,
@@ -600,8 +599,6 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 		r = PTR_ERR(pmd->data_sm);
 		goto cleanup_tm;
 	}
-
-	dm_bm_unlock(sblock);
 
 	pmd->nb_tm = dm_tm_create_non_blocking_clone(pmd->tm);
 	if (!pmd->nb_tm) {
@@ -622,6 +619,8 @@ cleanup_data_sm:
 cleanup_tm:
 	dm_tm_destroy(pmd->tm);
 	dm_sm_destroy(pmd->metadata_sm);
+cleanup_sblock:
+	dm_bm_unlock(sblock);
 	return r;
 }
 
