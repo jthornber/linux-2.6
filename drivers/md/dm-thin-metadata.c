@@ -613,6 +613,7 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	pmd->details_root = 0;
 	pmd->trans_id = 0;
 	pmd->flags = 0;
+	return dm_bm_unlock(sblock);
 
 cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
