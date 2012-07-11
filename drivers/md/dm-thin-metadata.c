@@ -494,37 +494,37 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_create failed");
 		r = PTR_ERR(pmd->data_sm);
-		goto bad;
+		goto cleanup_tm;
 	}
 
 	pmd->nb_tm = dm_tm_create_non_blocking_clone(pmd->tm);
 	if (!pmd->nb_tm) {
 		DMERR("could not create clone tm");
 		r = -ENOMEM;
-		goto bad_data_sm;
+		goto cleanup_data_sm;
 	}
 
 	__setup_btree_details(pmd);
 
 	r = dm_btree_empty(&pmd->info, &pmd->root);
 	if (r < 0)
-		goto bad_data_sm;
+		goto cleanup_data_sm;
 
 	r = dm_btree_empty(&pmd->details_info, &pmd->details_root);
 	if (r < 0) {
 		DMERR("couldn't create devices root");
-		goto bad_data_sm;
+		goto cleanup_data_sm;
 	}
 
 	r = __write_initial_superblock(pmd);
 	if (r)
-		goto bad_data_sm;
+		goto cleanup_data_sm;
 
 	return 0;
 
-bad_data_sm:
+cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
-bad:
+cleanup_tm:
 	dm_tm_destroy(pmd->tm);
 	dm_sm_destroy(pmd->metadata_sm);
 
