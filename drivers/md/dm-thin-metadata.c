@@ -700,12 +700,13 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 		return ERR_PTR(-ENOMEM);
 	}
 
+	pmd->bdev = bdev;
+
 	r = __create_persistent_data_objects(pmd, 0, &create);
 	if (r) {
 		kfree(pmd);
 		return ERR_PTR(r);
 	}
-	pmd->bdev = bdev;
 
 	if (!create) {
 		r = __begin_transaction(pmd);
