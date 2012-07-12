@@ -2942,6 +2942,11 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	char buf[BDEVNAME_SIZE];
 	struct thin_c *tc = ti->private;
 
+	if (get_pool_mode(tc->pool) == PM_FAIL) {
+		DMEMIT("fail");
+		return 0;
+	}
+
 	if (!tc->td)
 		DMEMIT("-");
 	else {
@@ -3010,7 +3015,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 2, 0},
+	.version = {1, 1, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
