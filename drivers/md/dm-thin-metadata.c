@@ -739,9 +739,6 @@ static int __write_changed_details(struct dm_pool_metadata *pmd)
 
 static int __commit_transaction(struct dm_pool_metadata *pmd)
 {
-	/*
-	 * FIXME: Associated pool should be made read-only on failure.
-	 */
 	int r;
 	size_t metadata_len, data_len;
 	struct thin_disk_superblock *disk_super;
