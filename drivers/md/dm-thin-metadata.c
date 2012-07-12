@@ -628,7 +628,8 @@ cleanup_sblock:
 	return r;
 }
 
-static int __open_or_format_metadata(struct dm_pool_metadata *pmd)
+static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
+				     enum dm_thin_metadata_mode mode)
 {
 	int r, unformatted;
 
@@ -639,12 +640,13 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd)
 	}
 
 	if (unformatted)
-		return __format_metadata(pmd);
+		return (mode & DM_THIN_FORMAT) ? __format_metadata(pmd) : -EPERM;
 	else
-		return __open_metadata(pmd);
+		return (mode & DM_THIN_OPEN) ? __open_metadata(pmd) : -EPERM;
 }
 
-static int __create_persistent_data_objects(struct dm_pool_metadata *pmd)
+static int __create_persistent_data_objects(struct dm_pool_metadata *pmd,
+					    enum dm_thin_metadata_mode mode)
 {
         int r;
 
@@ -656,7 +658,7 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd)
                 return -ENOMEM;
         }
 
-        r = __open_or_format_metadata(pmd);
+        r = __open_or_format_metadata(pmd, mode);
         if (r)
                 dm_block_manager_destroy(pmd->bm);
 
@@ -801,7 +803,8 @@ out_locked:
 }
 
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
-					       sector_t data_block_size)
+					       sector_t data_block_size,
+					       enum dm_thin_metadata_mode mode)
 {
 	int r;
 	struct dm_pool_metadata *pmd;
@@ -818,7 +821,7 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 	pmd->bdev = bdev;
 	pmd->data_block_size = data_block_size;
 
-	r = __create_persistent_data_objects(pmd);
+	r = __create_persistent_data_objects(pmd, mode);
 	if (r) {
 		kfree(pmd);
 		return ERR_PTR(r);
