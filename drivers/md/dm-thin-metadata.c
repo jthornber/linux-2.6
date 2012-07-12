@@ -780,12 +780,14 @@ static int __commit_transaction(struct dm_pool_metadata *pmd)
 	disk_super->trans_id = cpu_to_le64(pmd->trans_id);
 	disk_super->flags = cpu_to_le32(pmd->flags);
 
-	r = dm_sm_copy_root(pmd->metadata_sm, &disk_super->metadata_space_map_root,
+	r = dm_sm_copy_root(pmd->metadata_sm,
+			    &disk_super->metadata_space_map_root,
 			    metadata_len);
 	if (r < 0)
 		goto out_locked;
 
-	r = dm_sm_copy_root(pmd->data_sm, &disk_super->data_space_map_root,
+	r = dm_sm_copy_root(pmd->data_sm,
+			    &disk_super->data_space_map_root,
 			    data_len);
 	if (r < 0)
 		goto out_locked;
