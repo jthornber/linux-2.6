@@ -634,10 +634,8 @@ static int __open_or_format_metadata(struct dm_pool_metadata *pmd,
 	int r, unformatted;
 
 	r = superblock_all_zeroes(pmd->bm, &unformatted);
-	if (r) {
-		dm_block_manager_destroy(pmd->bm);
+	if (r)
 		return r;
-	}
 
 	if (unformatted)
 		return (mode & DM_THIN_FORMAT) ? __format_metadata(pmd) : -EPERM;
