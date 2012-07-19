@@ -1788,8 +1788,14 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 		thin_defer_bio(tc, bio);
 		r = DM_MAPIO_SUBMITTED;
 		break;
+
+	default:
+		bio_io_error(bio);
+		r = DM_MAPIO_SUBMITTED;
+		break;
 	}
 
+	BUG_ON(r < 0);
 	return r;
 }
 
