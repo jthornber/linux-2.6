@@ -78,6 +78,7 @@ struct ll_disk {
 	open_index_fn open_index;
 	max_index_entries_fn max_entries;
 	commit_fn commit;
+	int bitmap_index_changed;
 };
 
 struct disk_sm_root {

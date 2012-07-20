@@ -511,6 +511,22 @@ out:
 }
 EXPORT_SYMBOL(of_find_node_with_property);
 
+static const struct of_device_id *of_match_compat(const struct of_device_id *matches,
+						  const char *compat)
+{
+	while (matches->name[0] || matches->type[0] || matches->compatible[0]) {
+		const char *cp = matches->compatible;
+		int len = strlen(cp);
+
+		if (len > 0 && of_compat_cmp(compat, cp, len) == 0)
+			return matches;
+
+		matches++;
+	}
+
+	return NULL;
+}
+
 /**
  * of_match_node - Tell if an device_node has a matching of_match structure
  *	@matches:	array of of device match structures to search in
@@ -521,8 +537,17 @@ EXPORT_SYMBOL(of_find_node_with_property);
 const struct of_device_id *of_match_node(const struct of_device_id *matches,
 					 const struct device_node *node)
 {
+	struct property *prop;
+	const char *cp;
+
 	if (!matches)
 		return NULL;
+
+	of_property_for_each_string(node, "compatible", prop, cp) {
+		const struct of_device_id *match = of_match_compat(matches, cp);
+		if (match)
+			return match;
+	}
 
 	while (matches->name[0] || matches->type[0] || matches->compatible[0]) {
 		int match = 1;
@@ -532,10 +557,7 @@ const struct of_device_id *of_match_node(const struct of_device_id *matches,
 		if (matches->type[0])
 			match &= node->type
 				&& !strcmp(matches->type, node->type);
-		if (matches->compatible[0])
-			match &= of_device_is_compatible(node,
-						matches->compatible);
-		if (match)
+		if (match && !matches->compatible[0])
 			return matches;
 		matches++;
 	}
@@ -1260,3 +1282,44 @@ int of_alias_get_id(struct device_node *np, const char *stem)
 	return id;
 }
 EXPORT_SYMBOL_GPL(of_alias_get_id);
+
+const __be32 *of_prop_next_u32(struct property *prop, const __be32 *cur,
+			       u32 *pu)
+{
+	const void *curv = cur;
+
+	if (!prop)
+		return NULL;
+
+	if (!cur) {
+		curv = prop->value;
+		goto out_val;
+	}
+
+	curv += sizeof(*cur);
+	if (curv >= prop->value + prop->length)
+		return NULL;
+
+out_val:
+	*pu = be32_to_cpup(curv);
+	return curv;
+}
+EXPORT_SYMBOL_GPL(of_prop_next_u32);
+
+const char *of_prop_next_string(struct property *prop, const char *cur)
+{
+	const void *curv = cur;
+
+	if (!prop)
+		return NULL;
+
+	if (!cur)
+		return prop->value;
+
+	curv += strlen(cur) + 1;
+	if (curv >= prop->value + prop->length)
+		return NULL;
+
+	return curv;
+}
+EXPORT_SYMBOL_GPL(of_prop_next_string);
