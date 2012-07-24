@@ -1371,6 +1371,12 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 	r = dm_thin_find_block(td, block, 0, &result);
 
 	/*
+	 * FIXME: what if this is being discarded, we should be using a
+	 * bio-prison call.
+	 */
+
+
+	/*
 	 * Note that we defer readahead too.
 	 */
 	switch (r) {
