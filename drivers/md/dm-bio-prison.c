@@ -180,19 +180,20 @@ out:
 }
 
 int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
-			   struct bio *inmate, struct cell **cell)
+			   struct bio *inmate)
 {
 	int r = 0;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
+	struct cell *cell;
 
 	BUG_ON(hash > prison->nr_buckets);
 
 	spin_lock_irqsave(&prison->lock, flags);
 
-	*cell = __search_bucket(prison->cells + hash, key);
-	if (*cell) {
-		bio_list_add(&(*cell)->bios, inmate);
+	cell = __search_bucket(prison->cells + hash, key);
+	if (cell) {
+		bio_list_add(&cell->bios, inmate);
 		r = 1;
 	}
 
