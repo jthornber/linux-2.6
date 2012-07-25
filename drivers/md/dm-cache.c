@@ -2,25 +2,6 @@
  * Copyright (C) 2012 Red Hat GmbH. All rights reserved.
  *
  * This file is released under the GPL.
- *
- * Hierarchical Storage Management target.
- *
- * Features:
- * o manages a storage pool of blocks on a fast block device to
- *   allocate from in order to cache blocks of a slower cached device
- * o data block size selectable (2^^N)
- * o - status <chunks free> <chunks used>
- *   - userland to kernel message just be a single resume (no prior suspend)
- *   - status provide metadata stats, userland resizes via same
- *     mechanism as data extend
- *
- * FIXME:
- * o support DISCARD requests to free unused blocks
- * o support relocation of blocks to allow for hot spot removal
- *   and shrinking of the data device.
- * o writethrough
- * o eventually drop metadata store creation once userspace does it
- *
  */
 
 #include "dm.h"
@@ -36,52 +17,45 @@
 #include <linux/mempool.h>
 #include <linux/module.h>
 #include <linux/random.h>
-#include <linux/rbtree.h>
 #include <linux/slab.h>
-
-/* FIXME: describe, mechanism/controller/metadata split */
-
-/* FIXME: I think all the md_ functions will eventually be able to block,
- * once we allow for this we can drop the irq spin locking.
- */
 
 //#define debug(x...) pr_alert(x)
 #define debug(x...) ;
 
 /*----------------------------------------------------------------*/
 
-struct lru_queue {
+struct queue {
 	unsigned size;
 	struct list_head elts;
 };
 
-static void lru_init(struct lru_queue *ll)
+static void queue_init(struct queue *q)
 {
-	ll->size = 0;
-	INIT_LIST_HEAD(&ll->elts);
+	q->size = 0;
+	INIT_LIST_HEAD(&q->elts);
 }
 
-static unsigned lru_size(struct lru_queue *ll)
+static unsigned queue_size(struct queue *q)
 {
-	return ll->size;
+	return q->size;
 }
 
-static struct list_head *lru_pop(struct lru_queue *ll)
+static struct list_head *queue_pop(struct queue *q)
 {
 	struct list_head *r;
 
-	BUG_ON(list_empty(&ll->elts));
-	r = ll->elts.next;
+	BUG_ON(list_empty(&q->elts));
+	r = q->elts.next;
 	list_del(r);
-	ll->size--;
+	q->size--;
 
 	return r;
 }
 
-static void lru_push(struct lru_queue *ll, struct list_head *elt)
+static void queue_push(struct queue *q, struct list_head *elt)
 {
-	list_add_tail(elt, &ll->elts);
-	ll->size++;
+	list_add_tail(elt, &q->elts);
+	q->size++;
 }
 
 /*----------------------------------------------------------------*/
@@ -93,22 +67,12 @@ enum arc_state {
 	ARC_T2
 };
 
-enum arc_outcome {
-	ARC_HIT,
-	ARC_MISS,
-	ARC_NEW,
-	ARC_REPLACE
-};
-
 struct arc_entry {
 	enum arc_state state;
 	struct hlist_node hlist;
 	struct list_head list;
-	dm_block_t origin;
-	dm_block_t cache;
-
-	/* fields that aren't strictly part of the arc alg. */
-	unsigned dirty:1;
+	dm_block_t oblock;
+	dm_block_t cblock;
 };
 
 struct arc_policy {
@@ -117,7 +81,7 @@ struct arc_policy {
 	spinlock_t lock;
 
 	dm_block_t p;		/* the magic factor that balances lru vs lfu */
-	struct lru_queue b1, t1, b2, t2;
+	struct queue b1, t1, b2, t2;
 
 	/*
 	 * We know exactly how many entries will be needed, so we can
@@ -133,6 +97,20 @@ struct arc_policy {
 	dm_block_t *interesting_blocks;
 };
 
+enum arc_operation {
+	ARC_HIT,
+	ARC_MISS,
+	ARC_NEW,
+	ARC_REPLACE
+};
+
+struct arc_result {
+	enum arc_operation op;
+
+	dm_block_t old_oblock;
+	dm_block_t cblock;
+};
+
 static struct arc_policy *arc_create(dm_block_t cache_size)
 {
 	dm_block_t nr_buckets;
@@ -144,10 +122,10 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 	spin_lock_init(&a->lock);
 	a->p = 0;
 
-	lru_init(&a->b1);
-	lru_init(&a->t1);
-	lru_init(&a->b2);
-	lru_init(&a->t2);
+	queue_init(&a->b1);
+	queue_init(&a->t1);
+	queue_init(&a->b2);
+	queue_init(&a->t2);
 
 	/* FIXME: use vmalloc ? */
 	a->entries = kmalloc(sizeof(*a->entries) * 2 * cache_size, GFP_KERNEL);
@@ -165,9 +143,9 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 	a->nr_buckets = nr_buckets;
 
 	a->hash_mask = a->nr_buckets - 1;
-	a->table = kmalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
+	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
 	if (!a->table) {
-		vfree(a->entries);
+		kfree(a->entries);
 		kfree(a);
 		return NULL;
 	}
@@ -200,7 +178,7 @@ static unsigned hash(struct arc_policy *a, dm_block_t b)
 
 static void __arc_insert(struct arc_policy *a, struct arc_entry *e)
 {
-	unsigned h = hash(a, e->origin);
+	unsigned h = hash(a, e->oblock);
 	hlist_add_head(&e->hlist, a->table + h);
 }
 
@@ -212,7 +190,7 @@ static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
 	struct arc_entry *e;
 
 	hlist_for_each_entry(e, tmp, bucket, hlist)
-		if (e->origin == origin)
+		if (e->oblock == origin)
 			return e;
 
 	return NULL;
@@ -232,7 +210,9 @@ static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
 
 	BUG_ON(a->nr_allocated >= 2 * a->cache_size);
 	e = a->entries + a->nr_allocated;
-	e->cache = a->nr_allocated++;
+	INIT_LIST_HEAD(&e->list);
+	INIT_HLIST_NODE(&e->hlist);
+	e->cblock = a->nr_allocated++;
 	return e;
 }
 
@@ -243,30 +223,30 @@ static void __arc_push(struct arc_policy *a,
 
 	switch (s) {
 	case ARC_T1:
-		lru_push(&a->t1, &e->list);
+		queue_push(&a->t1, &e->list);
 		__arc_insert(a, e);
 		break;
 
 	case ARC_T2:
-		lru_push(&a->t2, &e->list);
+		queue_push(&a->t2, &e->list);
 		__arc_insert(a, e);
 		break;
 
 	case ARC_B1:
-		lru_push(&a->b1, &e->list);
+		queue_push(&a->b1, &e->list);
 		break;
 
 	case ARC_B2:
-		lru_push(&a->b2, &e->list);
+		queue_push(&a->b2, &e->list);
 		break;
 	}
 }
 
 static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 {
-	struct arc_entry *e;
+	struct arc_entry *e = NULL;
 
-#define POP(x) container_of(lru_pop(x), struct arc_entry, list)
+#define POP(x) container_of(queue_pop(x), struct arc_entry, list)
 
 	switch (s) {
 	case ARC_T1:
@@ -296,23 +276,32 @@ static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 /*
  * fe may be NULL.
  */
-static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe)
+/* FIXME: replace fe with a bool */
+static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe, struct arc_result *result)
 {
 	struct arc_entry *e;
-	dm_block_t t1_size = lru_size(&a->t1);
+	dm_block_t t1_size = queue_size(&a->t1);
+
+	result->op = ARC_REPLACE;
 
 	if (t1_size &&
 	    ((t1_size > a->p) || (fe && (fe->state == ARC_B2) && (t1_size == a->p)))) {
 		e = __arc_pop(a, ARC_T1);
-		/* FIXME: writeback */
+
+		result->old_oblock = e->oblock;
+		result->cblock = e->cblock;
+
 		__arc_push(a, ARC_B1, e);
 	} else {
 		e = __arc_pop(a, ARC_T2);
-		/* FIXME: writeback */
+
+		result->old_oblock = e->oblock;
+		result->cblock = e->cblock;
+
 		__arc_push(a, ARC_B2, e);
 	}
 
-	return e->cache;
+	return e->cblock;
 }
 
 /*
@@ -323,7 +312,6 @@ static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe)
 static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin)
 {
 	const dm_block_t BIG_PRIME = 4294967291UL;
-	dm_block_t h = origin * BIG_PRIME;
 	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->cache_size;
 
 	if (a->interesting_blocks[h] == origin)
@@ -333,113 +321,151 @@ static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin)
 	return 0;
 }
 
-static enum arc_outcome __arc_map(struct arc_policy *a,
-				  dm_block_t origin_block, struct arc_entry **result)
+/*
+ * return 0 on success, 1 if should be deferred.  |result| only valid if 0
+ * returned.
+ */
+static int __arc_quick_map(struct arc_policy *a,
+			   dm_block_t origin_block,
+			   struct arc_result *result)
 {
-	enum arc_outcome r;
-	dm_block_t new_cache;
-	dm_block_t delta;
-	dm_block_t b1_size = lru_size(&a->b1);
-	dm_block_t b2_size = lru_size(&a->b2);
-	dm_block_t l1_size, l2_size;
-
 	struct arc_entry *e = __arc_lookup(a, origin_block);
 	if (e) {
 		switch (e->state) {
 		case ARC_T1:
 		case ARC_T2:
+			result->op = ARC_HIT;
+			result->cblock = e->cblock;
 			list_del(&e->list);
-			break;
+			return 0;
 
-		case ARC_B1:
-			delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
-			a->p = min(a->p + delta, a->cache_size);
-			new_cache = __arc_demote(a, e);
-
-			list_del(&e->list);
-
-			e->origin = origin_block;
-			e->cache = new_cache;
-			break;
-
-		case ARC_B2:
-			delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
-			a->p = max(a->p - delta, 0ULL);
-			new_cache = __arc_demote(a, e);
-
-			list_del(&e->list);
-
-			e->origin = origin_block;
-			e->cache = new_cache;
-			break;
+		default:
+			return 1;
 		}
-
-		__arc_push(a, ARC_T2, e);
-		*result = e;
-		return ARC_HIT;
 	}
 
-	if (!__arc_interesting_block(a, origin_block))
-		return ARC_MISS;
-
-	l1_size = lru_size(&a->t1) + b1_size;
-	l2_size = lru_size(&a->t2) + b2_size;
-	r = ARC_REPLACE;
-	if (l1_size == a->cache_size) {
-		if (lru_size(&a->t1) < a->cache_size) {
-			e = __arc_pop(a, ARC_B1);
-
-			new_cache = __arc_demote(a, NULL);
-			e->origin = origin_block;
-			e->cache = new_cache;
-
-		} else {
-			e = __arc_pop(a, ARC_T1);
-			/* FIXME: writeback? */
-			e->origin = origin_block;
-		}
-
-	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
-		if (l1_size + l2_size == 2 * a->cache_size) {
-			e = __arc_pop(a, ARC_B2);
-			e->origin = origin_block;
-			e->cache = __arc_demote(a, NULL);
-
-		} else {
-			e = __arc_alloc_entry(a);
-			e->origin = origin_block;
-			e->cache = __arc_demote(a, NULL);
-		}
-
-	} else {
-		e = __arc_alloc_entry(a);
-		e->origin = origin_block;
-		r = ARC_NEW;
+	if (!__arc_interesting_block(a, origin_block)) {
+		result->op = ARC_MISS;
+		return 0;
 	}
 
-	__arc_push(a, ARC_T1, e);
-	*result = e;
-	return r;
+	return 1;
 }
 
-static enum arc_outcome arc_map(struct arc_policy *a, dm_block_t origin_block, struct arc_entry **result)
+static int arc_quick_map(struct arc_policy *a, dm_block_t origin_block, struct arc_result *result)
 {
+	int r;
 	unsigned long flags;
-	enum arc_outcome r;
 
 	spin_lock_irqsave(&a->lock, flags);
-	r = __arc_map(a, origin_block, result);
+	r = __arc_quick_map(a, origin_block, result);
 	spin_unlock_irqrestore(&a->lock, flags);
 
 	return r;
 }
 
-static void arc_mark_dirty(struct arc_policy *a, struct arc_entry *e)
+static void __arc_map(struct arc_policy *a,
+		      dm_block_t origin_block, struct arc_result *result)
+{
+	dm_block_t new_cache;
+	dm_block_t delta;
+	dm_block_t b1_size = queue_size(&a->b1);
+	dm_block_t b2_size = queue_size(&a->b2);
+	dm_block_t l1_size, l2_size;
+
+	struct arc_entry *e;
+
+	e = __arc_lookup(a, origin_block);
+	if (e) {
+		switch (e->state) {
+		case ARC_T1:
+		case ARC_T2:
+			result->op = ARC_HIT;
+			result->cblock = e->cblock;
+			list_del(&e->list);
+			__arc_remove(a, e);
+			break;
+
+		case ARC_B1:
+			delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
+			a->p = min(a->p + delta, a->cache_size);
+			new_cache = __arc_demote(a, e, result);
+
+			list_del(&e->list);
+
+			e->oblock = origin_block;
+			e->cblock = new_cache;
+			break;
+
+		case ARC_B2:
+			delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
+			a->p = max(a->p - delta, 0ULL);
+			new_cache = __arc_demote(a, e, result);
+
+			list_del(&e->list);
+
+			e->oblock = origin_block;
+			e->cblock = new_cache;
+			break;
+		}
+
+		__arc_push(a, ARC_T2, e);
+		return;
+	}
+
+	if (!__arc_interesting_block(a, origin_block)) {
+		result->op = ARC_MISS;
+		return;
+	}
+
+	l1_size = queue_size(&a->t1) + b1_size;
+	l2_size = queue_size(&a->t2) + b2_size;
+	if (l1_size == a->cache_size) {
+		if (queue_size(&a->t1) < a->cache_size) {
+			e = __arc_pop(a, ARC_B1);
+
+			new_cache = __arc_demote(a, NULL, result);
+			e->oblock = origin_block;
+			e->cblock = new_cache;
+
+		} else {
+			e = __arc_pop(a, ARC_T1);
+
+			result->op = ARC_REPLACE;
+			result->old_oblock = e->oblock;
+			e->oblock = origin_block;
+			result->cblock = e->cblock;
+		}
+
+	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
+		if (l1_size + l2_size == 2 * a->cache_size) {
+			e = __arc_pop(a, ARC_B2);
+			e->oblock = origin_block;
+			e->cblock = __arc_demote(a, NULL, result);
+
+		} else {
+			e = __arc_alloc_entry(a);
+			e->oblock = origin_block;
+			e->cblock = __arc_demote(a, NULL, result);
+		}
+
+	} else {
+		e = __arc_alloc_entry(a);
+
+		result->op = ARC_NEW;
+		result->cblock = e->cblock;
+		e->oblock = origin_block;
+	}
+
+	__arc_push(a, ARC_T1, e);
+}
+
+static void arc_map(struct arc_policy *a, dm_block_t origin_block, struct arc_result *result)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&a->lock, flags);
-	e->dirty = 1;
+	__arc_map(a, origin_block, result);
 	spin_unlock_irqrestore(&a->lock, flags);
 }
 
@@ -454,7 +480,6 @@ static void arc_mark_dirty(struct arc_policy *a, struct arc_entry *e)
 #define ENDIO_HOOK_POOL_SIZE 10240
 #define MIGRATION_POOL_SIZE 128
 
-/* FIXME: split target from mech */
 struct cache_c {
 	struct dm_target *ti;
 
@@ -462,22 +487,14 @@ struct cache_c {
 	struct dm_dev *cache_dev;
 
 	sector_t origin_size;
+	dm_block_t cache_size;
 	sector_t sectors_per_block;
 	sector_t offset_mask;
 	unsigned int block_shift;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
-
-	/*
-	 * We have a need to chain several ios, (eg, a read from the origin
-	 * followed by a write to the cache).  An endio fn cannot call
-	 * generic_make_request(), so we use the daemon to submit these.
-	 */
-	struct bio_list submit_bios;
-
 	struct list_head quiesced_migrations;
-	struct list_head copied_migrations;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -489,56 +506,33 @@ struct cache_c {
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
 
-	unsigned suspending:1;
+	struct arc_policy *policy;
 
 	atomic_t total;
 	atomic_t read_hit;
 	atomic_t read_miss;
-	atomic_t read_union;
 	atomic_t write_hit;
 	atomic_t write_miss;
-	atomic_t write_miss_partial;
 	atomic_t writeback;
 	atomic_t promotion;
 	atomic_t write_hit_new;
-	atomic_t useless_writebacks;
-
-	atomic_t writeback_threshold;
-
-	/*
-	 * Here are the fields I'm pulling out of the metadata object.
-	 * They should probably go into the policy object eventually.
-	 */
-	struct list_head lru;
-	wait_queue_head_t migrating_wq;
-	atomic_t nr_migrating;
-	struct list_head migrating;
 };
 
+/* FIXME: can we lose this? */
 struct endio_hook {
-	struct list_head list;
 	struct deferred_entry *all_io_entry;
-	struct cell *cell;
 };
 
-/* FIXME: way too big */
 struct migration {
 	struct list_head list;
+	struct cache_c *c;
 
-	unsigned to_cache:1;
-	unsigned free_mapping:1;
+	dm_block_t old_oblock;
+	dm_block_t new_oblock;
+	dm_block_t cblock;
 
-	struct bio *bio;
-	struct mapping *m;
-	uint64_t gen;
-	struct cell *cell;
-	int err;
-	atomic_t kcopyd_jobs;
-
-	struct cache_c *cache;
-
-	bio_end_io_t *saved_end_io;
-	void *saved_private;
+	struct cell *old_ocell;
+	struct cell *new_ocell;
 };
 
 static void build_key(dm_block_t block, struct cell_key *key)
@@ -548,301 +542,130 @@ static void build_key(dm_block_t block, struct cell_key *key)
 	key->block = block;
 }
 
-static void wake_worker(struct cache_c *cache)
+static void wake_worker(struct cache_c *c)
 {
-	queue_work(cache->wq, &cache->worker);
+	queue_work(c->wq, &c->worker);
 }
 
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
-static void remap_to_origin(struct cache_c *cache, struct bio *bio)
+static void remap_to_origin(struct cache_c *c, struct bio *bio)
 {
-	bio->bi_bdev = cache->origin_dev->bdev;
+	bio->bi_bdev = c->origin_dev->bdev;
 }
 
-/* FIXME: the name doesn't really indicate there's a side effect */
-/* FIXME: refactor these two fns */
-static void remap_to_cache(struct cache_c *cache, struct bio *bio, struct arc_entry *e)
+static void remap_to_cache(struct cache_c *c, struct bio *bio, dm_block_t cblock)
 {
-	if (bio_data_dir(bio) == WRITE)
-		arc_mark_dirty(a, e);
-
-	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (e->cache << cache->block_shift) +
-		(bio->bi_sector & cache->offset_mask);
+	bio->bi_bdev = c->cache_dev->bdev;
+	bio->bi_sector = (cblock << c->block_shift) + (bio->bi_sector & c->offset_mask);
 }
 
-static dm_block_t get_bio_block(struct cache_c *cache, struct bio *bio)
+static dm_block_t get_bio_block(struct cache_c *c, struct bio *bio)
 {
-	return bio->bi_sector >> cache->block_shift;
+	return bio->bi_sector >> c->block_shift;
 }
 
-/*----------------------------------------------------------------
- * Submitted bios
- *--------------------------------------------------------------*/
-static void process_submit_bios(struct cache_c *cache)
+static void issue(struct cache_c *cache, struct bio *bio)
 {
-	unsigned long flags;
-	struct bio *bio;
-	struct bio_list bios;
-
-	bio_list_init(&bios);
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_merge(&bios, &cache->submit_bios);
-	bio_list_init(&cache->submit_bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	while ((bio = bio_list_pop(&bios)))
-		generic_make_request(bio);
-}
-
-static void __submit_bio(struct cache_c *cache, struct bio *bio)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_add(&cache->submit_bios, bio);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
+	generic_make_request(bio);
 }
 
 /*----------------------------------------------------------------
  * Migration processing
+ *
+ * Migration covers moving data from the origin device to the cache, or
+ * vice versa.
  *--------------------------------------------------------------*/
-static void set_migrating(struct cache_c *cache, struct mapping *m, unsigned n)
+static void __cell_defer(struct cache_c *c, struct cell *cell, bool holder)
+{
+	(holder ? cell_release : cell_release_no_holder)(cell, &c->deferred_bios);
+}
+
+static void cell_defer(struct cache_c *c, struct cell *cell, bool holder)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&m->lock, flags);
-	list_move_tail(&m->list, n ? &cache->migrating : &cache->lru);
-	spin_unlock_irqrestore(&m->lock, flags);
+	spin_lock_irqsave(&c->lock, flags);
+	__cell_defer(c, cell, holder);
+	spin_unlock_irqrestore(&c->lock, flags);
 
-	if (n)
-		atomic_add(1, &cache->nr_migrating);
-	else
-		if (atomic_dec_and_test(&cache->nr_migrating)) {
-			BUG_ON(!list_empty(&cache->migrating));
-			wake_up(&cache->migrating_wq);
-		}
+	wake_worker(c);
 }
 
-static void cell_defer(struct cache_c *cache, struct cell *cell, int holder)
+static void error_migration(struct migration *mg)
 {
 	unsigned long flags;
+	struct cache_c *c = mg->c;
 
-	spin_lock_irqsave(&cache->lock, flags);
-	(holder ? cell_release : cell_release_no_holder)(cell, &cache->deferred_bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
+	spin_lock_irqsave(&c->lock, flags);
+	if (mg->old_ocell)
+		__cell_defer(c, mg->old_ocell, 0);
+	__cell_defer(c, mg->new_ocell, 1);
+	spin_unlock_irqrestore(&c->lock, flags);
 
-	wake_worker(cache);
-}
-
-static void promote_read_endio(struct bio *bio, int err)
-{
-	struct migration *mg = bio->bi_private;
-	struct bio *dup = mg->bio;
-
-	debug("in promote_read_endio\n");
-	bio->bi_end_io = mg->saved_end_io;
-	bio->bi_private = mg->saved_private;
-	mg->bio = bio;
-	__submit_bio(mg->cache, dup);
-}
-
-static void promote_write_endio(struct bio *bio, int err)
-{
-	struct migration *mg = bio->bi_private;
-	struct cache_c *cache = mg->cache;
-
-	debug("in promote_write_endio\n");
-	bio_put(bio);
-
-	set_migrating(cache, mg->m, 0);
-
-	cache->md->mark_valid_sectors(cache->md, mg->m, bio);
-	bio_endio(mg->bio, 0);
-	cell_defer(cache, mg->cell, 0);
-	mempool_free(mg, cache->migration_pool);
-}
-
-static void copy_via_clone(struct cache_c *cache, struct migration *mg)
-{
-	struct bio *bio = mg->bio;
-	struct bio *dup = bio_clone(bio, GFP_NOIO);
-
-	BUG_ON(!bio);
-	BUG_ON(!dup);
-
-	remap_to_origin(cache, bio);
-	mg->saved_end_io = bio->bi_end_io;
-	mg->saved_private = bio->bi_private;
-	bio->bi_end_io = promote_read_endio;
-	bio->bi_private = mg;
-
-	remap_to_cache(cache, dup, mg->m);
-
-	dup->bi_rw = WRITE;
-	dup->bi_end_io = promote_write_endio;
-	dup->bi_private = mg;
-	mg->bio = dup;
-
-	generic_make_request(bio);
+	mempool_free(mg, c->migration_pool);
+	wake_worker(c);
 }
 
 static void copy_complete(int read_err, unsigned long write_err, void *context)
 {
 	unsigned long flags;
 	struct migration *mg = (struct migration *) context;
-	struct cache_c *cache = mg->cache;
+	struct cache_c *c = mg->c;
 
-	debug("in copy complete");
-
-	if (!mg->err)
-		mg->err = read_err || write_err ? -EIO : 0;
-
-	if (atomic_dec_and_test(&mg->kcopyd_jobs)) {
-		spin_lock_irqsave(&cache->lock, flags);
-		list_add(&mg->list, &cache->copied_migrations);
-		spin_unlock_irqrestore(&cache->lock, flags);
-
-		wake_worker(cache);
+	if (read_err || write_err) {
+		error_migration(mg);
+		return;
 	}
+
+	spin_lock_irqsave(&c->lock, flags);
+
+	if (mg->old_ocell) {
+		debug("copy_complete c(%lu) -> o(%lu)\n",
+		      (unsigned long) mg->cblock,
+		      (unsigned long) mg->old_oblock);
+		__cell_defer(c, mg->old_ocell, 0);
+		mg->old_ocell = NULL;
+		list_add(&mg->list, &c->quiesced_migrations);
+	} else {
+		debug("copy_complete o(%lu) -> c(%lu)\n",
+		      (unsigned long) mg->new_oblock,
+		      (unsigned long) mg->cblock);
+		__cell_defer(c, mg->new_ocell, 1);
+		mempool_free(mg, c->migration_pool);
+	}
+
+	spin_unlock_irqrestore(&c->lock, flags);
+	wake_worker(c);
 }
 
-static void copy_via_kcopyd(struct cache_c *cache, struct migration *mg)
+static void issue_copy(struct cache_c *c, struct migration *mg)
 {
 	int r;
 	struct dm_io_region o_region, c_region;
 
-	debug("in process_quiesced\n");
-	BUG_ON(!cache);
-	BUG_ON(!mg);
-	BUG_ON(!mg->m);
+	o_region.bdev = c->origin_dev->bdev;
+	o_region.count = c->sectors_per_block;
 
-	atomic_set(&mg->kcopyd_jobs, 0);
-	o_region.bdev = cache->origin_dev->bdev;
-	c_region.bdev = cache->cache_dev->bdev;
+	c_region.bdev = c->cache_dev->bdev;
+	c_region.sector = mg->cblock * c->sectors_per_block;
+	c_region.count = c->sectors_per_block;
 
-	// FIXME: refactor
-	if (mg->to_cache) {
-		debug("copying to cache\n");
-		/*
-		 * Copy the whole block.
-		 */
-		o_region.sector = mg->m->origin * cache->sectors_per_block;
-		o_region.count = cache->sectors_per_block;
-
-		c_region.sector = mg->m->cache * cache->sectors_per_block;
-		c_region.count = cache->sectors_per_block;
-
-		atomic_inc(&mg->kcopyd_jobs);
-		r = dm_kcopyd_copy(cache->copier,
-				   mg->to_cache ? &o_region : &c_region,
-				   1,
-				   mg->to_cache ? &c_region : &o_region,
-				   0, copy_complete, mg);
+	if (mg->old_ocell) {
+		/* demote */
+		debug("issuing copy for demotion %lu\n", (unsigned long) mg->old_oblock);
+		o_region.sector = mg->old_oblock * c->sectors_per_block;
+		r = dm_kcopyd_copy(c->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
 	} else {
-		/*
-		 * copy all the valid regions in the cache.
-		 */
-		int submitted_something = 0;
-		unsigned b = 0, e = 0;
-
-		debug("copying to origin\n");
-		while (e != cache->sectors_per_block) {
-			b = e;
-
-			while (b < cache->sectors_per_block && !test_bit(b, mg->m->valid_sectors))
-				b++;
-
-			if (b >= cache->sectors_per_block)
-				break;
-
-			e = b;
-
-			while (e < cache->sectors_per_block && test_bit(e, mg->m->valid_sectors))
-				e++;
-
-			o_region.sector = mg->m->origin * cache->sectors_per_block + b;
-			o_region.count = e - b;
-
-			c_region.sector = mg->m->cache * cache->sectors_per_block + b;
-			c_region.count = e - b;
-
-			atomic_inc(&mg->kcopyd_jobs);
-
-			debug("o_region.sector = %u, o_region.count = %u\n",
-			      (unsigned) o_region.sector, (unsigned) o_region.count);
-			debug("c_region.sector = %u, c_region.count = %u\n",
-			      (unsigned) c_region.sector, (unsigned) c_region.count);
-
-			r = dm_kcopyd_copy(cache->copier,
-					   mg->to_cache ? &o_region : &c_region,
-					   1,
-					   mg->to_cache ? &c_region : &o_region,
-					   0, copy_complete, mg);
-			if (r) {
-				debug("kcopyd call failed\n");
-				break;
-			}
-
-			submitted_something = 1;
-		}
-
-		BUG_ON(!submitted_something);
+		/* promote */
+		debug("issuing copy for promotion %lu\n", (unsigned long) mg->new_oblock);
+		o_region.sector = mg->new_oblock * c->sectors_per_block;
+		r = dm_kcopyd_copy(c->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
 	}
 
-	if (r < 0) {
-		if (mg->cell)
-			cell_defer(cache, mg->cell, 1);
-		mempool_free(mg, cache->migration_pool);
-	}
-}
-
-static void process_quiesced(struct cache_c *cache, struct migration *mg)
-{
-	pr_alert("quiesced migration %p\n", mg);
-	// (mg->to_cache ? copy_via_clone : copy_via_kcopyd)(cache, mg);
-	copy_via_kcopyd(cache, mg);
-}
-
-static void process_copied(struct cache_c *cache, struct migration *mg)
-{
-	pr_alert("copied migration %p\n", mg);
-	debug("in process_copied");
-	set_migrating(cache, mg->m, 0);
-
-	/* if the migration failed, we reinsert the old mapping. */
-	if (!mg->err && !mg->to_cache) {
-		cache->md->set_origin_gen(cache->md, mg->m, mg->gen);
-		if (mg->gen != cache->md->get_cache_gen(cache->md, mg->m))
-			atomic_inc(&cache->useless_writebacks);
-	}
-
-	if (!mg->err && mg->free_mapping)
-		cache->md->remove_mapping(cache->md, mg->m);
-
-	if (!mg->err && mg->to_cache)
-		cache->md->set_valid_sectors(cache->md, mg->m);
-#if 0
-	if (mg->bio) {
-		spin_lock_irqsave(&cache->lock, flags);
-		bio_list_add(&cache->deferred_bios, mg->bio);
-		spin_unlock_irqrestore(&cache->lock, flags);
-		wake_worker(cache);
-	}
-#endif
-	/*
-	 * Even if there was an error we can release the bios from
-	 * the cell and let them proceed using the old location.
-	 */
-	if (mg->cell)
-		cell_defer(cache, mg->cell, 1);
-
-	mempool_free(mg, cache->migration_pool);
+	if (r < 0)
+		error_migration(mg);
 }
 
 static void process_migrations(struct cache_c *cache, struct list_head *head,
@@ -861,52 +684,91 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 		fn(cache, mg);
 }
 
-static void new_migration(struct cache_c *cache, int to_cache, int free_mapping,
-			  struct mapping *m, struct bio *bio, struct cell *cell)
+static void __queue_quiesced_migration(struct cache_c *c, struct migration *mg)
 {
-	struct migration *mg;
-
-	mg = mempool_alloc(cache->migration_pool, GFP_NOIO);
-	mg->to_cache = to_cache;
-	mg->free_mapping = free_mapping;
-	mg->bio = bio;
-	mg->m = m;
-	mg->gen = cache->md->get_cache_gen(cache->md, m);
-	mg->cell = cell;
-	mg->err = 0;
-	mg->cache = cache;
-
-	set_migrating(cache, m, 1);
-	if (!ds_add_work(cache->all_io_ds, &mg->list)) {
-		list_add_tail(&mg->list, &cache->quiesced_migrations);
-
-		// FIXME: this is the worker, so do we really need this?
-		wake_worker(cache);
-	}
-	pr_alert("queued migration %p\n", mg);
+	list_add_tail(&mg->list, &c->quiesced_migrations);
 }
 
-static void promote(struct cache_c *cache, struct mapping *m, struct bio *bio, struct cell *cell)
+static void queue_quiesced_migration(struct cache_c *c, struct migration *mg)
 {
-	new_migration(cache, 1, 0, m, bio, cell);
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
+	__queue_quiesced_migration(c, mg);
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	wake_worker(c);
 }
 
-static void writeback(struct cache_c *cache, struct mapping *m, int free_mapping, struct cell *cell)
+static void queue_quiesced_migrations(struct cache_c *c, struct list_head *work)
 {
-	new_migration(cache, 0, free_mapping, m, NULL, cell);
+	unsigned long flags;
+	struct migration *mg, *tmp;
+
+	spin_lock_irqsave(&c->lock, flags);
+	list_for_each_entry_safe(mg, tmp, work, list)
+		__queue_quiesced_migration(c, mg);
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	wake_worker(c);
+}
+
+static void check_for_quiesced_migrations(struct cache_c *c, struct endio_hook *h)
+{
+	struct list_head work;
+
+	if (!h->all_io_entry)
+		return;
+
+	INIT_LIST_HEAD(&work);
+	if (h->all_io_entry)
+		ds_dec(h->all_io_entry, &work);
+
+	if (!list_empty(&work))
+		queue_quiesced_migrations(c, &work);
+}
+
+static void quiesce_migration(struct cache_c *c, struct migration *mg)
+{
+	if (!ds_add_work(c->all_io_ds, &mg->list))
+		queue_quiesced_migration(c, mg);
+}
+
+static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct cell *cell)
+{
+	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
+
+	mg->c = c;
+	mg->new_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = NULL;
+	mg->new_ocell = cell;
+
+	quiesce_migration(c, mg);
+}
+
+static void writeback_then_promote(struct cache_c *c,
+				   dm_block_t old_oblock,
+				   dm_block_t new_oblock,
+				   dm_block_t cblock,
+				   struct cell *old_ocell,
+				   struct cell *new_ocell)
+{
+	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
+
+	mg->c = c;
+	mg->old_oblock = old_oblock;
+	mg->new_oblock = new_oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = old_ocell;
+	mg->new_ocell = new_ocell;
+
+	quiesce_migration(c, mg);
 }
 
 /*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
-#if 0
-static int io_overlaps_block(struct cache_c *cache, struct bio *bio)
-{
-	return !(bio->bi_sector & cache->offset_mask) &&
-		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
-
-}
-#endif
 static void defer_bio(struct cache_c *cache, struct bio *bio)
 {
 	unsigned long flags;
@@ -918,190 +780,70 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 	wake_worker(cache);
 }
 
-static void issue(struct cache_c *cache, struct bio *bio)
-{
-	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
-#if 0
-		int r = cache_metadata_commit(cache->hmd);
-		if (r) {
-			bio_io_error(bio);
-			return;
-		}
-#endif
-	}
-
-	generic_make_request(bio);
-}
-
 /*----------------------------------------------------------------*/
 
-static int map_bio(struct cache_c *cache, struct bio *bio)
+static void process_bio(struct cache_c *c, struct bio *bio)
 {
-	int r, i;
-	dm_block_t block = get_bio_block(cache, bio);
-	struct cell_key key;
-	struct cell *cell;
-	struct mapping *m;
+	int r;
 	int release_cell = 1;
-	struct action actions[MAX_ACTIONS];
-	unsigned count = 0;
-	int is_write = bio_data_dir(bio) == WRITE;
-
-	/* FIXME: paranoia */
-	memset(actions, 0, sizeof(actions));
+	struct cell_key key;
+	dm_block_t block = get_bio_block(c, bio);
+	struct cell *old_ocell, *new_ocell;
+	struct arc_result lookup_result;
+	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
 	build_key(block, &key);
-	r = bio_detain(cache->prison, &key, bio, &cell);
+	r = bio_detain(c->prison, &key, bio, &new_ocell);
 	if (r > 0)
-		return DM_MAPIO_SUBMITTED;
+		return;
 
-	get_actions(cache, cache->md, block, bio, actions, &count);
-	atomic_inc(&cache->total);
-
-#if 0
-	struct arc_entry *entry;
-	enum arc_outcome outcome = arc_map(cache->md, block, &entry);
-
-	*count = 0;
-	switch (outcome) {
+	arc_map(c->policy, block, &lookup_result);
+	switch (lookup_result.op) {
 	case ARC_HIT:
-		m = md->lookup_mapping(md, block); /* FIXME: duplicate lookup, the policy has already done this */
-		push_action(REMAP_CACHE, m);
+		debug("hit %lu -> %lu (process_bio)\n",
+		      (unsigned long) block,
+		      (unsigned long) lookup_result.cblock);
+		h->all_io_entry = ds_inc(c->all_io_ds); /* FIXME: is this too late? */
+		remap_to_cache(c, bio, lookup_result.cblock);
+		issue(c, bio);
 		break;
 
 	case ARC_MISS:
-		push_action(REMAP_ORIGIN, NULL);
+		debug("miss %lu (process_bio)\n",
+		      (unsigned long) block);
+		h->all_io_entry = ds_inc(c->all_io_ds); /* FIXME: is this too late? */
+		remap_to_origin(c, bio);
+		issue(c, bio);
 		break;
 
 	case ARC_NEW:
-		m = md->lookup_by_cache(md, entry->cache);
-		if (!m) {
-
-		}
-		push_action(PROMOTE, entry->cache);
+		debug("promote %lu -> %lu (process_bio)\n",
+		      (unsigned long) block,
+		      (unsigned long) lookup_result.cblock);
+		promote(c, block, lookup_result.cblock, new_ocell);
+		release_cell = 0;
 		break;
 
 	case ARC_REPLACE:
-
-		break;
-	}
-#endif
-
-	r = DM_MAPIO_REMAPPED;
-	for (i = 0; i < count; i++) {
-		m = actions[i].m;
-
-		switch (actions[i].cmd) {
-		case REMAP_ORIGIN:
-			BUG_ON(m);
-			debug("REMAP_ORIGIN\n");
-
-			if (is_write) {
-				atomic_inc(&cache->write_miss);
-				atomic_inc(&cache->writeback_threshold);
-			} else
-				atomic_inc(&cache->read_miss);
-
-			remap_to_origin(cache, bio);
-			break;
-
-		case REMAP_CACHE:
-			BUG_ON(!m);
-			debug("REMAP_CACHE\n");
-			atomic_inc(is_write ? &cache->write_hit : &cache->read_hit);
-			remap_to_cache(cache, bio, m);
-			break;
-
-		case REMAP_NEW_CACHE:
-			BUG_ON(!m);
-			debug("REMAP_NEW_CACHE\n");
-			atomic_inc(&cache->write_hit_new);
-			cache->md->remove_mapping(cache->md, m);
-			m->origin = block;
-			cache->md->insert_mapping(cache->md, m);
-			list_move_tail(&m->list, &cache->lru);
-			cache->md->clear_valid_sectors(cache->md, m);
-			remap_to_cache(cache, bio, m);
-			break;
-
-		case WRITEBACK:
-			BUG_ON(!m);
-			debug("REMAP_WRITEBACK\n");
-			atomic_inc(&cache->writeback);
-
-			/*
-			 * Even though we're writing back an old mapping,
-			 * we don't let the bio proceed.
-			 */
-			writeback(cache, m, 0, cell);
-			release_cell = 0;
-			r = DM_MAPIO_SUBMITTED;
-			break;
-
-		case PROMOTE:
-#if 1
-			BUG_ON(!m);
-			debug("PROMOTE\n");
-			atomic_inc(&cache->promotion);
-			cache->md->remove_mapping(cache->md, m);
-			m->origin = block;
-			cache->md->insert_mapping(cache->md, m);
-			list_move_tail(&m->list, &cache->lru);
-			promote(cache, m, bio, cell);
-			release_cell = 0;
-			r = DM_MAPIO_SUBMITTED;
-#else
-			remap_to_origin(cache, bio);
-#endif
-
-			break;
-
-		case REMAP_UNION:
-			BUG_ON(!m);
-			debug("REMAP_UNION\n");
-			atomic_inc(&cache->read_union);
-
-			/* slow, but simple ... we writeback, drop the cache entry, then retry */
-			atomic_inc(&cache->writeback);
-			writeback(cache, m, 1, cell);
-			release_cell = 0;
-			r = DM_MAPIO_SUBMITTED;
-			break;
-
-		default:
+		debug("demote/promote (process_bio)\n");
+		build_key(lookup_result.old_oblock, &key);
+		r = bio_detain(c->prison, &key, bio, &old_ocell);
+		if (r > 0) {
+			// FIXME: convince me this can't happen
 			BUG();
 		}
-		debug("done");
+		writeback_then_promote(c, lookup_result.old_oblock, block,
+				       lookup_result.cblock,
+				       old_ocell, new_ocell);
+		release_cell = 0;
+		break;
 	}
 
 	if (release_cell)
-		cell_defer(cache, cell, 0);
-
-	return r;
-}
-
-static void process_bio(struct cache_c *cache, struct bio *bio)
-{
-	struct endio_hook *h;
-
-	switch (map_bio(cache, bio)) {
-	case DM_MAPIO_REMAPPED:
-		h = dm_get_mapinfo(bio)->ptr;
-		h->all_io_entry = ds_inc(cache->all_io_ds);
-		issue(cache, bio);
-		break;
-
-	case DM_MAPIO_SUBMITTED:
-		// FIXME: all_io_entry not used?
-		break;
-
-	default:
-		bio_io_error(bio);
-		break;
-	}
+		cell_defer(c, new_ocell, 0);
 }
 
 static void process_deferred_bios(struct cache_c *cache)
@@ -1127,26 +869,16 @@ static void process_deferred_bios(struct cache_c *cache)
 static int more_work(struct cache_c *cache)
 {
 	return !bio_list_empty(&cache->deferred_bios) ||
-		!bio_list_empty(&cache->submit_bios) ||
-		!list_empty(&cache->quiesced_migrations) ||
-		!list_empty(&cache->copied_migrations);
+		!list_empty(&cache->quiesced_migrations);
 }
 
 static void do_work(struct work_struct *ws)
 {
-	unsigned sus;
-	unsigned long flags;
 	struct cache_c *cache = container_of(ws, struct cache_c, worker);
 
 	do {
 		process_deferred_bios(cache);
-		process_migrations(cache, &cache->quiesced_migrations, process_quiesced);
-		process_migrations(cache, &cache->copied_migrations, process_copied);
-		process_submit_bios(cache);
-
-		spin_lock_irqsave(&cache->lock, flags);
-		sus = cache->suspending;
-		spin_unlock_irqrestore(&cache->lock, flags);
+		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
 
 	} while (more_work(cache));
 }
@@ -1183,32 +915,29 @@ static void set_congestion_fn(struct cache_c *cache)
 
 static void cache_dtr(struct dm_target *ti)
 {
-	struct cache_c *cache = ti->private;
+	struct cache_c *c = ti->private;
 
 	pr_alert("dm-cache statistics:\n");
-	pr_alert("total ios:\t%u\n", (unsigned) atomic_read(&cache->total));
-	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
-	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->read_miss));
-	pr_alert("read union:\t%u\n", (unsigned) atomic_read(&cache->read_union));
-	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->write_hit));
-	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->write_miss));
-	pr_alert("write misses due to partial block:\t%u\n", (unsigned) atomic_read(&cache->write_miss_partial));
-	pr_alert("writebacks:\t%u\n", (unsigned) atomic_read(&cache->writeback));
-	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&cache->promotion));
-	pr_alert("write hit new:\t%u\n", (unsigned) atomic_read(&cache->write_hit_new));
-	pr_alert("useless writebacks:\t%u\n", (unsigned) atomic_read(&cache->useless_writebacks));
+	pr_alert("total ios:\t%u\n", (unsigned) atomic_read(&c->total));
+	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&c->read_hit));
+	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&c->read_miss));
+	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&c->write_hit));
+	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&c->write_miss));
+	pr_alert("writebacks:\t%u\n", (unsigned) atomic_read(&c->writeback));
+	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
+	pr_alert("write hit new:\t%u\n", (unsigned) atomic_read(&c->write_hit_new));
 
-	mempool_destroy(cache->migration_pool);
-	mempool_destroy(cache->endio_hook_pool);
-	cache->md->destroy(cache->md);
-	ds_destroy(cache->all_io_ds);
-	prison_destroy(cache->prison);
-	destroy_workqueue(cache->wq);
-	dm_kcopyd_client_destroy(cache->copier);
-	dm_put_device(ti, cache->origin_dev);
-	dm_put_device(ti, cache->cache_dev);
+	mempool_destroy(c->migration_pool);
+	mempool_destroy(c->endio_hook_pool);
+	ds_destroy(c->all_io_ds);
+	prison_destroy(c->prison);
+	destroy_workqueue(c->wq);
+	dm_kcopyd_client_destroy(c->copier);
+	dm_put_device(ti, c->origin_dev);
+	dm_put_device(ti, c->cache_dev);
+	arc_destroy(c->policy);
 
-	kfree(cache);
+	kfree(c);
 }
 
 static int get_device_(struct dm_target *ti, char *arg, struct dm_dev **dev,
@@ -1281,10 +1010,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
-	bio_list_init(&cache->submit_bios);
-
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
-	INIT_LIST_HEAD(&cache->copied_migrations);
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
@@ -1311,14 +1037,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad6;
 	}
 
-	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
-	pr_alert("%u cache blocks\n", (unsigned) nr_cache_blocks);
-	cache->md = dm_cache_metadata_create(block_size, nr_cache_blocks);
-	if (!cache->md) {
-		ti->error = "couldn't create metadata";
-		goto bad7;
-	}
-
 	cache->endio_hook_pool =
 		mempool_create_kmalloc_pool(ENDIO_HOOK_POOL_SIZE, sizeof(struct endio_hook));
 	if (!cache->endio_hook_pool) {
@@ -1333,23 +1051,16 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad9;
 	}
 
-	cache->suspending = 0;
+	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
+	cache->policy = arc_create(nr_cache_blocks);
+
 	atomic_set(&cache->total, 0);
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
-	atomic_set(&cache->read_union, 0);
 	atomic_set(&cache->write_hit, 0);
 	atomic_set(&cache->write_miss, 0);
-	atomic_set(&cache->write_miss_partial, 0);
 	atomic_set(&cache->writeback, 0);
 	atomic_set(&cache->write_hit_new, 0);
-	atomic_set(&cache->useless_writebacks, 0);
-	atomic_set(&cache->writeback_threshold, 0);
-
-	INIT_LIST_HEAD(&cache->lru);
-	INIT_LIST_HEAD(&cache->migrating);
-	init_waitqueue_head(&cache->migrating_wq);
-	atomic_set(&cache->nr_migrating, 0);
 
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
@@ -1359,8 +1070,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 bad9:
 	mempool_destroy(cache->migration_pool);
 bad8:
-	cache->md->destroy(cache->md);
-bad7:
 	ds_destroy(cache->all_io_ds);
 bad6:
 	prison_destroy(cache->prison);
@@ -1377,116 +1086,84 @@ bad1:
 	return -EINVAL;
 }
 
+static struct endio_hook *hook_endio(struct cache_c *c, struct bio *bio)
+{
+	struct endio_hook *h = mempool_alloc(c->endio_hook_pool, GFP_NOIO);
+	h->all_io_entry = NULL;
+
+	return h;
+}
+
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
-	struct cache_c *cache = ti->private;
-	dm_block_t block = get_bio_block(cache, bio);
+#if 0
+	int need_defer;
 	struct cell_key key;
-	struct cell *cell;
-	struct endio_hook *h = mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
-	struct mapping *m;
-	int is_write = bio_data_dir(bio) == WRITE;
-	int r;
-	unsigned long flags;
+	struct cache_c *c = ti->private;
+	dm_block_t block = get_bio_block(c, bio);
+	struct arc_result lookup_result;
 
-	h->all_io_entry = NULL;
-	h->cell = NULL;
-	map_context->ptr = h;
+	map_context->ptr = hook_endio(c, bio);
 
 	build_key(block, &key);
-	r = bio_detain_if_occupied(cache->prison, &key, bio, &cell);
-	if (r > 0)
+	if (bio_detain_if_occupied(c->prison, &key, bio))
+		/* This block is busy, data moving around */
 		return DM_MAPIO_SUBMITTED;
 
-	m = cache->md->lookup_mapping(cache->md, block);
-	if (m) {
-		if (is_write) {
-			spin_lock_irqsave(&cache->lock, flags);
-			list_move_tail(&m->list, &cache->lru);
-			spin_unlock_irqrestore(&cache->lock, flags);
-
-			atomic_inc(&cache->total);
-			atomic_inc(&cache->write_hit);
-			h->all_io_entry = ds_inc(cache->all_io_ds);
-			remap_to_cache(cache, bio, m);
-			return DM_MAPIO_REMAPPED;
-
-		} else if (cache->md->check_valid_sectors(cache->md, m, bio)) {
-
-			spin_lock_irqsave(&cache->lock, flags);
-			list_move_tail(&m->list, &cache->lru);
-			spin_unlock_irqrestore(&cache->lock, flags);
-
-			atomic_inc(&cache->total);
-			atomic_inc(&cache->read_hit);
-			h->all_io_entry = ds_inc(cache->all_io_ds);
-			remap_to_cache(cache, bio, m);
-			return DM_MAPIO_REMAPPED;
-
-		} else {
-			defer_bio(cache, bio);
-			return DM_MAPIO_SUBMITTED;
-		}
+	need_defer = arc_quick_map(c->policy, block, &lookup_result);
+	if (need_defer) {
+		defer_bio(c, bio);
+		return DM_MAPIO_SUBMITTED;
 	}
 
-	defer_bio(cache, bio);
+	switch (lookup_result.op) {
+	case ARC_HIT:
+		debug("hit (cache_map)\n");
+		remap_to_cache(c, bio, lookup_result.cblock);
+		break;
+
+	case ARC_MISS:
+		debug("miss (cache_map)\n");
+		remap_to_origin(c, bio);
+		break;
+
+	default:
+		BUG();
+	}
+
+	return DM_MAPIO_REMAPPED;
+#else
+	struct cache_c *c = ti->private;
+	map_context->ptr = hook_endio(c, bio);
+	defer_bio(c, bio);
 	return DM_MAPIO_SUBMITTED;
+#endif
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio,
 			int error, union map_info *info)
 {
-	unsigned long flags;
-	struct cache_c *cache = ti->private;
-	struct list_head work;
+	struct cache_c *c = ti->private;
 	struct endio_hook *h = info->ptr;
 
-	INIT_LIST_HEAD(&work);
-	if (h->all_io_entry)
-		ds_dec(h->all_io_entry, &work);
-
-	if (!list_empty(&work)) {
-		spin_lock_irqsave(&cache->lock, flags);
-		list_splice(&work, &cache->quiesced_migrations);
-		spin_unlock_irqrestore(&cache->lock, flags);
-		wake_worker(cache);
-	}
-
-	if (h->cell)
-		cell_defer(cache, h->cell, 0);
-
-	mempool_free(h, cache->endio_hook_pool);
+	check_for_quiesced_migrations(c, h);
+	mempool_free(h, c->endio_hook_pool);
 	return 0;
 }
 
 static void cache_postsuspend(struct dm_target *ti)
 {
-	struct cache_c *cache = ti->private;
-	unsigned long flags;
+	struct cache_c *c = ti->private;
+	flush_workqueue(c->wq);
 
-	spin_lock_irqsave(&cache->lock, flags);
-	cache->suspending = 1;
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	flush_workqueue(cache->wq);
-
-	/*
-	 * Wait for any background migrations to finish.
-	 */
-	wait_event(cache->migrating_wq, !atomic_read(&cache->nr_migrating));
+	/* FIXME: wait for in flight migrations */
 }
 
 static void cache_resume(struct dm_target *ti)
 {
-	struct cache_c *cache = ti->private;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	cache->suspending = 0;
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
+	struct cache_c *c = ti->private;
+	wake_worker(c);
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
@@ -1494,7 +1171,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 {
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
-	struct cache_c *cache = ti->private;
+	struct cache_c *c = ti->private;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
@@ -1503,9 +1180,9 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
+		format_dev_t(buf, c->origin_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
+		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 	}
 
@@ -1515,36 +1192,36 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 static int cache_iterate_devices(struct dm_target *ti,
 				 iterate_devices_callout_fn fn, void *data)
 {
-	struct cache_c *cache = ti->private;
+	struct cache_c *c = ti->private;
 
 	/*
 	 * We don't include the cache device in the iteration since
 	 * device_area_is_invalid checks that all iteratees are at least
 	 * the size of the target.
 	 */
-	return fn(ti, cache->origin_dev, 0, ti->len, data);
+	return fn(ti, c->origin_dev, 0, ti->len, data);
 }
 
 static int cache_bvec_merge(struct dm_target *ti,
 			  struct bvec_merge_data *bvm,
 			  struct bio_vec *biovec, int max_size)
 {
-	struct cache_c *cache = ti->private;
-	struct request_queue *q = bdev_get_queue(cache->origin_dev->bdev);
+	struct cache_c *c = ti->private;
+	struct request_queue *q = bdev_get_queue(c->origin_dev->bdev);
 
 	if (!q->merge_bvec_fn)
 		return max_size;
 
-	bvm->bi_bdev = cache->origin_dev->bdev;
+	bvm->bi_bdev = c->origin_dev->bdev;
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
-	struct cache_c *cache = ti->private;
+	struct cache_c *c = ti->private;
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+	blk_limits_io_opt(limits, c->sectors_per_block << SECTOR_SHIFT);
 }
 
 /*----------------------------------------------------------------*/
