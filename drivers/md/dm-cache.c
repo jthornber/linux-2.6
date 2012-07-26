@@ -1350,14 +1350,14 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 static int cache_iterate_devices(struct dm_target *ti,
 				 iterate_devices_callout_fn fn, void *data)
 {
+	int r = 0;
 	struct cache_c *c = ti->private;
 
-	/*
-	 * We don't include the cache device in the iteration since
-	 * device_area_is_invalid checks that all iteratees are at least
-	 * the size of the target.
-	 */
-	return fn(ti, c->origin_dev, 0, ti->len, data);
+	r = fn(ti, c->cache_dev, 0, get_dev_size(c->cache_dev), data);
+	if (!r)
+		r = fn(ti, c->origin_dev, 0, ti->len, data);
+
+	return r;
 }
 
 static int cache_bvec_merge(struct dm_target *ti,
