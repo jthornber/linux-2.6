@@ -903,8 +903,12 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
+	bool can_migrate = 0;
+
+#if 0
+(atomic_read(&c->nr_migrations) == 0) &&
 		times_below_percentage(&c->migration_times, 60); /* FIXME: hard coded value */
+#endif
 
 	/*
 	 * Check to see if that block is currently migrating.
