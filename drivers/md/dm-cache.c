@@ -512,6 +512,72 @@ static void arc_map(struct arc_policy *a, dm_block_t origin_block,
 
 /*----------------------------------------------------------------*/
 
+#define NR_TIMES 10
+
+struct times {
+	unsigned nr_times;
+	unsigned slot;
+	unsigned long total_durations;
+	unsigned long starts[NR_TIMES];
+	unsigned long durations[NR_TIMES];
+};
+
+static void times_init(struct times *ts)
+{
+	ts->nr_times = 0;
+	ts->slot = 0;
+	ts->total_durations = 0;
+}
+
+static void times_start(struct times *ts)
+{
+	ts->starts[ts->slot] = jiffies;
+}
+
+static unsigned long elapsed(unsigned long start, unsigned long end)
+{
+	if (start < end)
+		return end + (ULONG_MAX - start);
+	else
+		return end - start;
+}
+
+static unsigned next_slot(unsigned s)
+{
+	s++;
+	if (s == NR_TIMES)
+		s = 0;
+	return s;
+}
+
+static void times_end(struct times *ts)
+{
+	ts->total_durations -= ts->durations[ts->slot];
+	ts->durations[ts->slot] = elapsed(ts->starts[ts->slot], jiffies);
+	ts->total_durations += ts->durations[ts->slot];
+
+	if (ts->nr_times < NR_TIMES)
+		ts->nr_times++;
+
+	ts->slot = next_slot(ts->slot);
+}
+
+/*
+ * This curious interface avoids floating point math.
+ */
+static bool times_below_percentage(struct times *ts, unsigned percentage)
+{
+	if (!ts->nr_times)
+		return true;
+	else {
+		unsigned start_slot = ts->nr_times < NR_TIMES ? 0 : next_slot(ts->slot);
+		unsigned long period = elapsed(ts->starts[start_slot], jiffies);
+		return ts->total_durations < ((period / 100) * percentage);
+	}
+}
+
+/*----------------------------------------------------------------*/
+
 /* Mechanism */
 
 #define BLOCK_SIZE_MIN 64
@@ -537,6 +603,7 @@ struct cache_c {
 	struct bio_list deferred_bios;
 	struct list_head quiesced_migrations;
 	atomic_t nr_migrations;
+	struct times migration_times;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -645,6 +712,7 @@ static void error_migration(struct migration *mg)
 	spin_unlock_irqrestore(&c->lock, flags);
 
 	atomic_dec(&c->nr_migrations);
+	times_end(&c->migration_times);
 	mempool_free(mg, c->migration_pool);
 	wake_worker(c);
 }
@@ -676,6 +744,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 		__cell_defer(c, mg->new_ocell, 1);
 		mempool_free(mg, c->migration_pool);
 		atomic_dec(&c->nr_migrations);
+		times_end(&c->migration_times);
 	}
 
 	spin_unlock_irqrestore(&c->lock, flags);
@@ -787,6 +856,7 @@ static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, str
 	mg->old_ocell = NULL;
 	mg->new_ocell = cell;
 
+	times_start(&c->migration_times);
 	quiesce_migration(c, mg);
 }
 
@@ -806,6 +876,7 @@ static void writeback_then_promote(struct cache_c *c,
 	mg->old_ocell = old_ocell;
 	mg->new_ocell = new_ocell;
 
+	times_start(&c->migration_times);
 	quiesce_migration(c, mg);
 }
 
@@ -823,8 +894,6 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 	wake_worker(cache);
 }
 
-/*----------------------------------------------------------------*/
-#define MAX_MIGRATIONS 1
 static void process_bio(struct cache_c *c, struct bio *bio)
 {
 	int r;
@@ -834,6 +903,8 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
+		times_below_percentage(&c->migration_times, 60); /* FIXME: hard coded value */
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -843,7 +914,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, atomic_read(&c->nr_migrations) < MAX_MIGRATIONS, &lookup_result);
+	arc_map(c->policy, block, can_migrate, &lookup_result);
 	switch (lookup_result.op) {
 	case ARC_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",
@@ -1066,6 +1137,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	bio_list_init(&cache->deferred_bios);
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	atomic_set(&cache->nr_migrations, 0);
+	times_init(&cache->migration_times);
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
