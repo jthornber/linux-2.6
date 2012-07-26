@@ -550,14 +550,12 @@ struct cache_c {
 
 	struct arc_policy *policy;
 
-	atomic_t total;
 	atomic_t read_hit;
 	atomic_t read_miss;
 	atomic_t write_hit;
 	atomic_t write_miss;
-	atomic_t writeback;
+	atomic_t demotion;
 	atomic_t promotion;
-	atomic_t write_hit_new;
 };
 
 /* FIXME: can we lose this? */
@@ -851,6 +849,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		debug("hit %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
+		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
 		h->all_io_entry = ds_inc(c->all_io_ds); /* FIXME: is this too late? */
 		remap_to_cache(c, bio, lookup_result.cblock);
 		issue(c, bio);
@@ -859,6 +858,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	case ARC_MISS:
 		debug("miss %lu (process_bio)\n",
 		      (unsigned long) block);
+		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
 		h->all_io_entry = ds_inc(c->all_io_ds); /* FIXME: is this too late? */
 		remap_to_origin(c, bio);
 		issue(c, bio);
@@ -869,6 +869,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
 		atomic_inc(&c->nr_migrations);
+		atomic_inc(&c->promotion);
 		promote(c, block, lookup_result.cblock, new_ocell);
 		release_cell = 0;
 		break;
@@ -876,6 +877,8 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	case ARC_REPLACE:
 		debug("demote/promote (process_bio)\n");
 		atomic_inc(&c->nr_migrations);
+		atomic_inc(&c->demotion);
+		atomic_inc(&c->promotion);
 		build_key(lookup_result.old_oblock, &key);
 		r = bio_detain(c->prison, &key, bio, &old_ocell);
 		if (r > 0) {
@@ -971,14 +974,12 @@ static void cache_dtr(struct dm_target *ti)
 	struct cache_c *c = ti->private;
 
 	pr_alert("dm-cache statistics:\n");
-	pr_alert("total ios:\t%u\n", (unsigned) atomic_read(&c->total));
 	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&c->read_hit));
 	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&c->read_miss));
 	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&c->write_hit));
 	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&c->write_miss));
-	pr_alert("writebacks:\t%u\n", (unsigned) atomic_read(&c->writeback));
+	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&c->demotion));
 	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
-	pr_alert("write hit new:\t%u\n", (unsigned) atomic_read(&c->write_hit_new));
 
 	mempool_destroy(c->migration_pool);
 	mempool_destroy(c->endio_hook_pool);
@@ -1108,13 +1109,12 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
 	cache->policy = arc_create(nr_cache_blocks);
 
-	atomic_set(&cache->total, 0);
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
 	atomic_set(&cache->write_hit, 0);
 	atomic_set(&cache->write_miss, 0);
-	atomic_set(&cache->writeback, 0);
-	atomic_set(&cache->write_hit_new, 0);
+	atomic_set(&cache->demotion, 0);
+	atomic_set(&cache->promotion, 0);
 
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
