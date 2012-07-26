@@ -8,6 +8,7 @@
 
 #include <linux/spinlock.h>
 #include <linux/mempool.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 
 /*----------------------------------------------------------------*/
@@ -87,6 +88,7 @@ struct bio_prison *prison_create(unsigned nr_cells)
 
 	return prison;
 }
+EXPORT_SYMBOL_GPL(prison_create);
 
 void prison_destroy(struct bio_prison *prison)
 {
@@ -94,6 +96,7 @@ void prison_destroy(struct bio_prison *prison)
 	kmem_cache_destroy(prison->cell_cache);
 	kfree(prison);
 }
+EXPORT_SYMBOL_GPL(prison_destroy);
 
 static uint32_t hash_key(struct bio_prison *prison, struct cell_key *key)
 {
@@ -178,6 +181,7 @@ out:
 	*ref = cell;
 	return r;
 }
+EXPORT_SYMBOL_GPL(bio_detain);
 
 int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
 			   struct bio *inmate)
@@ -200,6 +204,7 @@ int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
 	spin_unlock_irqrestore(&prison->lock, flags);
 	return r;
 }
+EXPORT_SYMBOL_GPL(bio_detain_if_occupied);
 
 /*
  * @inmates must have been initialised prior to this call
@@ -227,6 +232,7 @@ void cell_release(struct cell *cell, struct bio_list *bios)
 	__cell_release(cell, bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
+EXPORT_SYMBOL_GPL(cell_release);
 
 /*
  * There are a couple of places where we put a bio into a cell briefly
@@ -251,6 +257,7 @@ void cell_release_singleton(struct cell *cell, struct bio *bio)
 	__cell_release_singleton(cell, bio);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
+EXPORT_SYMBOL_GPL(cell_release_singleton);
 
 /*
  * Sometimes we don't want the holder, just the additional bios.
@@ -274,11 +281,13 @@ void cell_release_no_holder(struct cell *cell, struct bio_list *inmates)
 	__cell_release_no_holder(cell, inmates);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
+EXPORT_SYMBOL_GPL(cell_release_no_holder);
 
 struct bio *cell_holder(struct cell *cell)
 {
 	return cell->holder;
 }
+EXPORT_SYMBOL_GPL(cell_holder);
 
 void cell_error(struct cell *cell)
 {
@@ -296,6 +305,7 @@ void cell_error(struct cell *cell)
 	while ((bio = bio_list_pop(&bios)))
 		bio_io_error(bio);
 }
+EXPORT_SYMBOL_GPL(cell_error);
 
 /*----------------------------------------------------------------*/
 
@@ -332,11 +342,13 @@ struct deferred_set *ds_create(void)
 
 	return ds;
 }
+EXPORT_SYMBOL_GPL(ds_create);
 
 void ds_destroy(struct deferred_set *ds)
 {
 	kfree(ds);
 }
+EXPORT_SYMBOL_GPL(ds_destroy);
 
 struct deferred_entry *ds_inc(struct deferred_set *ds)
 {
@@ -350,6 +362,7 @@ struct deferred_entry *ds_inc(struct deferred_set *ds)
 
 	return entry;
 }
+EXPORT_SYMBOL_GPL(ds_inc);
 
 static unsigned ds_next(unsigned index)
 {
@@ -378,6 +391,7 @@ void ds_dec(struct deferred_entry *entry, struct list_head *head)
 	__sweep(entry->ds, head);
 	spin_unlock_irqrestore(&entry->ds->lock, flags);
 }
+EXPORT_SYMBOL_GPL(ds_dec);
 
 /*
  * Returns 1 if deferred or 0 if no pending items to delay job.
@@ -402,5 +416,6 @@ int ds_add_work(struct deferred_set *ds, struct list_head *work)
 
 	return r;
 }
+EXPORT_SYMBOL_GPL(ds_add_work);
 
 /*----------------------------------------------------------------*/
