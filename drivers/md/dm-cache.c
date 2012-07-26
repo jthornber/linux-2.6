@@ -140,8 +140,7 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 	queue_init(&a->b2);
 	queue_init(&a->t2);
 
-	/* FIXME: use vmalloc ? */
-	a->entries = kmalloc(sizeof(*a->entries) * 2 * cache_size, GFP_KERNEL);
+	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
 	if (!a->entries) {
 		kfree(a);
 		return NULL;
@@ -158,15 +157,15 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 	a->hash_mask = a->nr_buckets - 1;
 	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
 	if (!a->table) {
-		kfree(a->entries);
+		vfree(a->entries);
 		kfree(a);
 		return NULL;
 	}
 
-	a->interesting_blocks = kmalloc(sizeof(*a->interesting_blocks) * cache_size, GFP_KERNEL);
+	a->interesting_blocks = vmalloc(sizeof(*a->interesting_blocks) * cache_size);
 	if (!a->interesting_blocks) {
 		kfree(a->table);
-		kfree(a->entries);
+		vfree(a->entries);
 		kfree(a);
 	}
 
@@ -175,9 +174,9 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 
 static void arc_destroy(struct arc_policy *a)
 {
-	kfree(a->interesting_blocks);
+	vfree(a->interesting_blocks);
 	kfree(a->table);
-	kfree(a->entries);
+	vfree(a->entries);
 	kfree(a);
 }
 
