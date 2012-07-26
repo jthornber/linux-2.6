@@ -108,6 +108,7 @@ struct arc_policy {
 	struct hlist_head *table;
 
 	dm_block_t *interesting_blocks;
+	dm_block_t last_lookup;
 };
 
 enum arc_operation {
@@ -359,19 +360,27 @@ static void __arc_map(struct arc_policy *a,
 
 	e = __arc_lookup(a, origin_block);
 	if (e) {
+		bool do_push = 1;
+
 		switch (e->state) {
 		case ARC_T1:
 			result->op = ARC_HIT;
 			result->cblock = e->cblock;
-			queue_del(&a->t1, &e->list);
-			__arc_remove(a, e);
+			if (a->last_lookup != origin_block) {
+				queue_del(&a->t1, &e->list);
+				__arc_remove(a, e);
+			} else
+				do_push = 0;
 			break;
 
 		case ARC_T2:
 			result->op = ARC_HIT;
 			result->cblock = e->cblock;
-			queue_del(&a->t2, &e->list);
-			__arc_remove(a, e);
+			if (a->last_lookup != origin_block) {
+				queue_del(&a->t2, &e->list);
+				__arc_remove(a, e);
+			} else
+				do_push = 0;
 			break;
 
 		case ARC_B1:
@@ -407,7 +416,8 @@ static void __arc_map(struct arc_policy *a,
 			break;
 		}
 
-		__arc_push(a, ARC_T2, e);
+		if (do_push)
+			__arc_push(a, ARC_T2, e);
 		return;
 	}
 
@@ -479,6 +489,7 @@ static void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
 
 	spin_lock_irqsave(&a->lock, flags);
 	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
+	a->last_lookup = origin_block;
 	spin_unlock_irqrestore(&a->lock, flags);
 }
 
