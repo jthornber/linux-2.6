@@ -228,6 +228,11 @@ static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
 	return e;
 }
 
+static bool __free_entries(struct arc_policy *a)
+{
+	return a->nr_allocated < a->cache_size;
+}
+
 static void __arc_push(struct arc_policy *a,
 		     enum arc_state s, struct arc_entry *e)
 {
@@ -325,7 +330,7 @@ static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe, struc
  * directly related to the eviction rate.  So maybe we should resize on the
  * fly to get to a target eviction rate?
  */
-static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin)
+static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int data_dir)
 {
 	const dm_block_t BIG_PRIME = 4294967291UL;
 	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->cache_size;
@@ -337,57 +342,11 @@ static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin)
 	return 0;
 }
 
-/*
- * return 0 on success, 1 if should be deferred.  |result| only valid if 0
- * returned.
- */
-static int __arc_quick_map(struct arc_policy *a,
-			   dm_block_t origin_block,
-			   struct arc_result *result)
-{
-	struct arc_entry *e = __arc_lookup(a, origin_block);
-	if (e) {
-		switch (e->state) {
-		case ARC_T1:
-			result->op = ARC_HIT;
-			result->cblock = e->cblock;
-			queue_del(&a->t1, &e->list);
-			return 0;
-
-		case ARC_T2:
-			result->op = ARC_HIT;
-			result->cblock = e->cblock;
-			queue_del(&a->t2, &e->list);
-			return 0;
-
-		default:
-			return 1;
-		}
-	}
-
-	if (!__arc_interesting_block(a, origin_block)) {
-		result->op = ARC_MISS;
-		return 0;
-	}
-
-	return 1;
-}
-
-static int arc_quick_map(struct arc_policy *a, dm_block_t origin_block, struct arc_result *result)
-{
-	int r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&a->lock, flags);
-	r = __arc_quick_map(a, origin_block, result);
-	spin_unlock_irqrestore(&a->lock, flags);
-
-	return r;
-}
-
 static void __arc_map(struct arc_policy *a,
 		      dm_block_t origin_block,
+		      int data_dir,
 		      bool can_migrate,
+		      bool cheap_copy,
 		      struct arc_result *result)
 {
 	dm_block_t new_cache;
@@ -452,7 +411,11 @@ static void __arc_map(struct arc_policy *a,
 		return;
 	}
 
-	if (!can_migrate || !__arc_interesting_block(a, origin_block)) {
+	/* FIXME: this is turning into a huge mess */
+	cheap_copy = cheap_copy && __free_entries(a);
+	if (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir))) {
+		/* carry on, perverse logic */
+	} else {
 		result->op = ARC_MISS;
 		return;
 	}
@@ -460,6 +423,11 @@ static void __arc_map(struct arc_policy *a,
 	l1_size = queue_size(&a->t1) + b1_size;
 	l2_size = queue_size(&a->t2) + b2_size;
 	if (l1_size == a->cache_size) {
+		if (!can_migrate)  {
+			result->op = ARC_MISS;
+			return;
+		}
+
 		if (queue_size(&a->t1) < a->cache_size) {
 			e = __arc_pop(a, ARC_B1);
 
@@ -477,6 +445,11 @@ static void __arc_map(struct arc_policy *a,
 		}
 
 	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
+		if (!can_migrate)  {
+			result->op = ARC_MISS;
+			return;
+		}
+
 		if (l1_size + l2_size == 2 * a->cache_size) {
 			e = __arc_pop(a, ARC_B2);
 			e->oblock = origin_block;
@@ -499,13 +472,13 @@ static void __arc_map(struct arc_policy *a,
 	__arc_push(a, ARC_T1, e);
 }
 
-static void arc_map(struct arc_policy *a, dm_block_t origin_block,
-		    bool can_migrate, struct arc_result *result)
+static void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
+		    bool can_migrate, bool cheap_copy, struct arc_result *result)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&a->lock, flags);
-	__arc_map(a, origin_block, can_migrate, result);
+	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
 	spin_unlock_irqrestore(&a->lock, flags);
 }
 
@@ -592,7 +565,7 @@ struct cache_c {
 	struct dm_dev *origin_dev;
 	struct dm_dev *cache_dev;
 
-	sector_t origin_size;
+	dm_block_t origin_blocks;
 	dm_block_t cache_size;
 	sector_t sectors_per_block;
 	sector_t offset_mask;
@@ -603,6 +576,7 @@ struct cache_c {
 	struct list_head quiesced_migrations;
 	atomic_t nr_migrations;
 	struct times migration_times;
+	unsigned long *dirty_bitset;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -622,6 +596,7 @@ struct cache_c {
 	atomic_t write_miss;
 	atomic_t demotion;
 	atomic_t promotion;
+	atomic_t no_copy_promotion;
 };
 
 /* FIXME: can we lose this? */
@@ -656,13 +631,16 @@ static void wake_worker(struct cache_c *c)
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
-static void remap_to_origin(struct cache_c *c, struct bio *bio)
+static void remap_to_origin(struct cache_c *c, struct bio *bio, dm_block_t oblock)
 {
+	set_bit(oblock, c->dirty_bitset);
 	bio->bi_bdev = c->origin_dev->bdev;
 }
 
-static void remap_to_cache(struct cache_c *c, struct bio *bio, dm_block_t cblock)
+static void remap_to_cache(struct cache_c *c, struct bio *bio,
+			   dm_block_t oblock, dm_block_t cblock)
 {
+	set_bit(oblock, c->dirty_bitset);
 	bio->bi_bdev = c->cache_dev->bdev;
 	bio->bi_sector = (cblock << c->block_shift) + (bio->bi_sector & c->offset_mask);
 }
@@ -902,8 +880,9 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	bool cheap_copy = !test_bit(block, c->dirty_bitset);
 	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
-		times_below_percentage(&c->migration_times, 60); /* FIXME: hard coded value */
+		times_below_percentage(&c->migration_times, 100); /* FIXME: hard coded value */
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -913,15 +892,15 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, can_migrate, &lookup_result);
+	arc_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, &lookup_result);
 	switch (lookup_result.op) {
 	case ARC_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = ds_inc(c->all_io_ds); /* FIXME: is this too late? */
-		remap_to_cache(c, bio, lookup_result.cblock);
+		h->all_io_entry = ds_inc(c->all_io_ds);
+		remap_to_cache(c, bio, block, lookup_result.cblock);
 		issue(c, bio);
 		break;
 
@@ -929,8 +908,8 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		debug("miss %lu (process_bio)\n",
 		      (unsigned long) block);
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = ds_inc(c->all_io_ds); /* FIXME: is this too late? */
-		remap_to_origin(c, bio);
+		h->all_io_entry = ds_inc(c->all_io_ds);
+		remap_to_origin(c, bio, block);
 		issue(c, bio);
 		break;
 
@@ -938,10 +917,17 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		debug("promote %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
-		atomic_inc(&c->nr_migrations);
-		atomic_inc(&c->promotion);
-		promote(c, block, lookup_result.cblock, new_ocell);
-		release_cell = 0;
+		if (!cheap_copy) {
+			atomic_inc(&c->nr_migrations);
+			atomic_inc(&c->promotion);
+			promote(c, block, lookup_result.cblock, new_ocell);
+			release_cell = 0;
+		} else {
+			atomic_inc(&c->no_copy_promotion);
+			h->all_io_entry = ds_inc(c->all_io_ds);
+			remap_to_cache(c, bio, block, lookup_result.cblock);
+			issue(c, bio);
+		}
 		break;
 
 	case ARC_REPLACE:
@@ -1050,12 +1036,14 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&c->write_miss));
 	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&c->demotion));
 	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
+	pr_alert("no copy promotions:\t%u\n", (unsigned) atomic_read(&c->no_copy_promotion));
 
 	mempool_destroy(c->migration_pool);
 	mempool_destroy(c->endio_hook_pool);
 	ds_destroy(c->all_io_ds);
 	prison_destroy(c->prison);
 	destroy_workqueue(c->wq);
+	vfree(c->dirty_bitset);
 	dm_kcopyd_client_destroy(c->copier);
 	dm_put_device(ti, c->origin_dev);
 	dm_put_device(ti, c->cache_dev);
@@ -1091,7 +1079,7 @@ static sector_t get_dev_size(struct dm_dev *dev)
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	dm_block_t nr_cache_blocks;
-	sector_t block_size;
+	sector_t block_size, origin_size;
 	struct cache_c *cache;
 	char *end;
 
@@ -1122,12 +1110,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 			"Error opening cache device"))
 		goto bad2;
 
-	cache->origin_size = get_dev_size(cache->origin_dev);
-	if (ti->len > cache->origin_size) {
+	origin_size = get_dev_size(cache->origin_dev);
+	if (ti->len > origin_size) {
 		ti->error = "Device size larger than cached device";
 		goto bad3;
 	}
 
+	cache->origin_blocks = origin_size / block_size;
 	cache->sectors_per_block = block_size;
 	cache->offset_mask = block_size - 1;
 	cache->block_shift = ffs(block_size) - 1;
@@ -1138,10 +1127,16 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->nr_migrations, 0);
 	times_init(&cache->migration_times);
 
+	cache->dirty_bitset = vzalloc(sizeof(unsigned long) * dm_div_up(cache->origin_blocks, sizeof(unsigned long) * 8));
+	if (!cache->dirty_bitset) {
+		ti->error = "Couldn't allocate discard bitset";
+		goto bad3;
+	}
+
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
 		ti->error = "Couldn't create kcopyd client";
-		goto bad3;
+		goto bad3_5;
 	}
 
 	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
@@ -1186,6 +1181,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->write_miss, 0);
 	atomic_set(&cache->demotion, 0);
 	atomic_set(&cache->promotion, 0);
+	atomic_set(&cache->no_copy_promotion, 0);
 
 	ti->split_io = cache->sectors_per_block;
 	ti->num_flush_requests = 1;
@@ -1202,6 +1198,8 @@ bad5:
 	destroy_workqueue(cache->wq);
 bad4:
 	dm_kcopyd_client_destroy(cache->copier);
+bad3_5:
+	vfree(cache->dirty_bitset);
 bad3:
 	dm_put_device(ti, cache->cache_dev);
 bad2:
