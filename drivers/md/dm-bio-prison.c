@@ -272,12 +272,6 @@ void cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *in
 }
 EXPORT_SYMBOL_GPL(cell_release_no_holder);
 
-struct bio *cell_holder(struct dm_bio_prison_cell *cell)
-{
-	return cell->holder;
-}
-EXPORT_SYMBOL_GPL(cell_holder);
-
 void cell_error(struct dm_bio_prison_cell *cell)
 {
 	struct bio_prison *prison = cell->prison;
