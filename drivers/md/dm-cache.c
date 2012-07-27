@@ -1214,7 +1214,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad9:
-	mempool_destroy(cache->migration_pool);
+	mempool_destroy(cache->endio_hook_pool);
 bad8:
 	ds_destroy(cache->all_io_ds);
 bad6:
