@@ -5,6 +5,7 @@
  */
 
 #include "dm-thin-metadata.h"
+#include "dm-bio-prison.h"
 #include "dm.h"
 
 #include <linux/device-mapper.h>
@@ -21,7 +22,6 @@
  * Tunable constants
  */
 #define ENDIO_HOOK_POOL_SIZE 1024
-#define DEFERRED_SET_SIZE 64
 #define MAPPING_POOL_SIZE 1024
 #define PRISON_CELLS 1024
 #define COMMIT_PERIOD HZ
@@ -98,6 +98,7 @@
 
 /*----------------------------------------------------------------*/
 
+#if 0
 /*
  * Sometimes we can't deal with a bio straight away.  We put them in prison
  * where they can't cause any mischief.  Bios are put in a cell identified
@@ -467,6 +468,8 @@ static int ds_add_work(struct deferred_set *ds, struct list_head *work)
 	return r;
 }
 
+#endif
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -552,8 +555,8 @@ struct pool {
 
 	struct bio_list retry_on_resume_list;
 
-	struct deferred_set shared_read_ds;
-	struct deferred_set all_io_ds;
+	struct deferred_set *shared_read_ds;
+	struct deferred_set *all_io_ds;
 
 	struct dm_thin_new_mapping *next_mapping;
 	mempool_t *mapping_pool;
@@ -1066,7 +1069,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	m->err = 0;
 	m->bio = NULL;
 
-	if (!ds_add_work(&pool->shared_read_ds, &m->list))
+	if (!ds_add_work(pool->shared_read_ds, &m->list))
 		m->quiesced = 1;
 
 	/*
@@ -1325,7 +1328,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			m->err = 0;
 			m->bio = bio;
 
-			if (!ds_add_work(&pool->all_io_ds, &m->list)) {
+			if (!ds_add_work(pool->all_io_ds, &m->list)) {
 				spin_lock_irqsave(&pool->lock, flags);
 				list_add(&m->list, &pool->prepared_discards);
 				spin_unlock_irqrestore(&pool->lock, flags);
@@ -1409,7 +1412,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	else {
 		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
-		h->shared_read_entry = ds_inc(&pool->shared_read_ds);
+		h->shared_read_entry = ds_inc(pool->shared_read_ds);
 
 		cell_release_singleton(cell, bio);
 		remap_and_issue(tc, bio, lookup_result->block);
@@ -1717,7 +1720,7 @@ static struct dm_thin_endio_hook *thin_hook_bio(struct thin_c *tc, struct bio *b
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
-	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : ds_inc(&pool->all_io_ds);
+	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : ds_inc(pool->all_io_ds);
 	h->overwrite_mapping = NULL;
 
 	return h;
@@ -1911,6 +1914,8 @@ static void __pool_destroy(struct pool *pool)
 		mempool_free(pool->next_mapping, pool->mapping_pool);
 	mempool_destroy(pool->mapping_pool);
 	mempool_destroy(pool->endio_hook_pool);
+	ds_destroy(pool->shared_read_ds);
+	ds_destroy(pool->all_io_ds);
 	kfree(pool);
 }
 
@@ -1985,8 +1990,14 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->low_water_triggered = 0;
 	pool->no_free_space = 0;
 	bio_list_init(&pool->retry_on_resume_list);
-	ds_init(&pool->shared_read_ds);
-	ds_init(&pool->all_io_ds);
+
+	pool->shared_read_ds = ds_create();
+	if (!pool->shared_read_ds)
+		goto bad_shared_ds;
+
+	pool->all_io_ds = ds_create();
+	if (!pool->all_io_ds)
+		goto bad_all_io_ds;
 
 	pool->next_mapping = NULL;
 	pool->mapping_pool = mempool_create_slab_pool(MAPPING_POOL_SIZE,
@@ -2015,6 +2026,10 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 bad_endio_hook_pool:
 	mempool_destroy(pool->mapping_pool);
 bad_mapping_pool:
+	ds_destroy(pool->all_io_ds);
+bad_all_io_ds:
+	ds_destroy(pool->shared_read_ds);
+bad_shared_ds:
 	destroy_workqueue(pool->wq);
 bad_wq:
 	dm_kcopyd_client_destroy(pool->copier);
@@ -3083,10 +3098,6 @@ static int __init dm_thin_init(void)
 
 	r = -ENOMEM;
 
-	_cell_cache = KMEM_CACHE(dm_bio_prison_cell, 0);
-	if (!_cell_cache)
-		goto bad_cell_cache;
-
 	_new_mapping_cache = KMEM_CACHE(dm_thin_new_mapping, 0);
 	if (!_new_mapping_cache)
 		goto bad_new_mapping_cache;
@@ -3100,8 +3111,6 @@ static int __init dm_thin_init(void)
 bad_endio_hook_cache:
 	kmem_cache_destroy(_new_mapping_cache);
 bad_new_mapping_cache:
-	kmem_cache_destroy(_cell_cache);
-bad_cell_cache:
 	dm_unregister_target(&pool_target);
 bad_pool_target:
 	dm_unregister_target(&thin_target);
@@ -3114,7 +3123,6 @@ static void dm_thin_exit(void)
 	dm_unregister_target(&thin_target);
 	dm_unregister_target(&pool_target);
 
-	kmem_cache_destroy(_cell_cache);
 	kmem_cache_destroy(_new_mapping_cache);
 	kmem_cache_destroy(_endio_hook_cache);
 }

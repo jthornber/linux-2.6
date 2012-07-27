@@ -629,8 +629,8 @@ struct migration {
 	dm_block_t new_oblock;
 	dm_block_t cblock;
 
-	struct cell *old_ocell;
-	struct cell *new_ocell;
+	struct dm_bio_prison_cell *old_ocell;
+	struct dm_bio_prison_cell *new_ocell;
 };
 
 static void build_key(dm_block_t block, struct cell_key *key)
@@ -678,12 +678,12 @@ static void issue(struct cache_c *cache, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
-static void __cell_defer(struct cache_c *c, struct cell *cell, bool holder)
+static void __cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
 	(holder ? cell_release : cell_release_no_holder)(cell, &c->deferred_bios);
 }
 
-static void cell_defer(struct cache_c *c, struct cell *cell, bool holder)
+static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
 	unsigned long flags;
 
@@ -840,7 +840,7 @@ static void quiesce_migration(struct cache_c *c, struct migration *mg)
 }
 
 /* FIXME: we can't just block here, need to ensure the migration is allocated before we start processing a bio */
-static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct cell *cell)
+static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
 {
 	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
 
@@ -858,8 +858,8 @@ static void writeback_then_promote(struct cache_c *c,
 				   dm_block_t old_oblock,
 				   dm_block_t new_oblock,
 				   dm_block_t cblock,
-				   struct cell *old_ocell,
-				   struct cell *new_ocell)
+				   struct dm_bio_prison_cell *old_ocell,
+				   struct dm_bio_prison_cell *new_ocell)
 {
 	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
 
@@ -894,7 +894,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	int release_cell = 1;
 	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
-	struct cell *old_ocell, *new_ocell;
+	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 #if 0
