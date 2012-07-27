@@ -107,6 +107,7 @@ struct arc_policy {
 	dm_block_t hash_mask;
 	struct hlist_head *table;
 
+	dm_block_t interesting_size;
 	dm_block_t *interesting_blocks;
 	dm_block_t last_lookup;
 };
@@ -163,7 +164,8 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 		return NULL;
 	}
 
-	a->interesting_blocks = vmalloc(sizeof(*a->interesting_blocks) * cache_size);
+	a->interesting_size = cache_size / 8;
+	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
 	if (!a->interesting_blocks) {
 		kfree(a->table);
 		vfree(a->entries);
@@ -334,7 +336,7 @@ static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe, struc
 static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int data_dir)
 {
 	const dm_block_t BIG_PRIME = 4294967291UL;
-	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->cache_size;
+	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->interesting_size;
 
 	if (origin == a->last_lookup)
 		return 0;
