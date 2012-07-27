@@ -100,11 +100,10 @@ int dm_bm_unlock(struct dm_block *b);
  * It's a common idiom to have a superblock that should be committed last.
  *
  * @superblock should be write-locked on entry. It will be unlocked during
- * this function (even if an IO error occurs and the data doesn't get
- * written to disk).  All dirty blocks are guaranteed to be written and
- * flushed before the superblock.
+ * this function.  All dirty blocks are guaranteed to be written and flushed
+ * before the superblock.
  *
- * This method may blocks.
+ * This method always blocks.
  */
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock);
@@ -120,7 +119,7 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
  * Additionally you should not use dm_bm_unlock_move, however no error will
  * be returned if you do.
  */
-void dm_bm_read_only(struct dm_block_manager *bm);
+void dm_bm_set_read_only(struct dm_block_manager *bm);
 
 u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor);
 

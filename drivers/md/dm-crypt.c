@@ -1241,7 +1241,6 @@ static void kcryptd_queue_crypt(struct dm_crypt_io *io)
 static int crypt_decode_key(u8 *key, char *hex, unsigned int size)
 {
 	char buffer[3];
-	char *endp;
 	unsigned int i;
 
 	buffer[2] = '\0';
@@ -1250,9 +1249,7 @@ static int crypt_decode_key(u8 *key, char *hex, unsigned int size)
 		buffer[0] = *hex++;
 		buffer[1] = *hex++;
 
-		key[i] = (u8)simple_strtoul(buffer, &endp, 16);
-
-		if (endp != &buffer[2])
+		if (kstrtou8(buffer, 16, &key[i]))
 			return -EINVAL;
 	}
 
@@ -1702,7 +1699,7 @@ static int crypt_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	ti->num_flush_requests = 1;
-	ti->discard_zeroes_data_unsupported = 1;
+	ti->discard_zeroes_data_unsupported = true;
 
 	return 0;
 
@@ -1742,7 +1739,7 @@ static int crypt_map(struct dm_target *ti, struct bio *bio,
 }
 
 static int crypt_status(struct dm_target *ti, status_type_t type,
-			char *result, unsigned int maxlen)
+			unsigned status_flags, char *result, unsigned maxlen)
 {
 	struct crypt_config *cc = ti->private;
 	unsigned int sz = 0;

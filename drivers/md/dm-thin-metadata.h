@@ -37,14 +37,9 @@ typedef uint64_t dm_thin_id;
 /*
  * Reopens or creates a new, empty metadata volume.
  */
-enum dm_thin_metadata_mode {
-	DM_THIN_OPEN = 1,
-	DM_THIN_FORMAT = 2
-};
-
 struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 					       sector_t data_block_size,
-					       enum dm_thin_metadata_mode mode);
+					       bool format_device);
 
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd);
 
@@ -86,8 +81,8 @@ int dm_pool_commit_metadata(struct dm_pool_metadata *pmd);
 
 /*
  * Discards all uncommitted changes.  Rereads the superblock, rolling back
- * to the last good transaction.  Thin devices remain open, if they had
- * uncommitted changes dm_thin_aborted_changes() will tell you.
+ * to the last good transaction.  Thin devices remain open.
+ * dm_thin_aborted_changes() tells you if they had uncommitted changes.
  *
  * If this call fails it's only useful to call dm_pool_metadata_close().
  * All other methods will fail with -EINVAL.
