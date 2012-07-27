@@ -572,7 +572,7 @@ static bool times_below_percentage(struct times *ts, unsigned percentage)
 #define DM_MSG_PREFIX "cache"
 #define DAEMON "cached"
 #define PRISON_CELLS 1024
-#define ENDIO_HOOK_POOL_SIZE 10240
+#define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
 
 struct cache_c {
