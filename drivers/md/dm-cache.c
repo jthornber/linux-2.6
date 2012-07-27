@@ -580,6 +580,7 @@ struct cache_c {
 
 	struct dm_dev *origin_dev;
 	struct dm_dev *cache_dev;
+	struct dm_target_callbacks callbacks;
 
 	dm_block_t origin_blocks;
 	dm_block_t cache_size;
@@ -1021,31 +1022,21 @@ static void do_work(struct work_struct *ws)
 }
 
 /*----------------------------------------------------------------*/
-#if 0
+
 static int is_congested(struct dm_dev *dev, int bdi_bits)
 {
 	struct request_queue *q = bdev_get_queue(dev->bdev);
 	return bdi_congested(&q->backing_dev_info, bdi_bits);
 }
 
-static int congested(void *congested_data, int bdi_bits)
+static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 {
-	struct cache_c *cache = congested_data;
+	struct cache_c *cache = container_of(cb, struct cache_c, callbacks);
 
 	return is_congested(cache->origin_dev, bdi_bits) ||
 		is_congested(cache->cache_dev, bdi_bits);
 }
 
-static void set_congestion_fn(struct cache_c *cache)
-{
-	struct mapped_device *md = dm_table_get_md(cache->ti->table);
-	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
-
-	/* Set congested function and data. */
-	bdi->congested_fn = congested;
-	bdi->congested_data = cache;
-}
-#endif
 /*----------------------------------------------------------------
  * Target methods
  *--------------------------------------------------------------*/
@@ -1151,6 +1142,9 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	atomic_set(&cache->nr_migrations, 0);
 	times_init(&cache->migration_times);
+
+	cache->callbacks.congested_fn = cache_is_congested;
+	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
 
 	cache->dirty_bitset = vzalloc(sizeof(unsigned long) * dm_div_up(cache->origin_blocks, sizeof(unsigned long) * 8));
 	if (!cache->dirty_bitset) {
