@@ -1334,7 +1334,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 
 			cell_release_singleton(cell, bio);
 			cell_release_singleton(cell2, bio);
-			if ((!lookup_result.shared) & pool->pf.discard_passdown)
+			if ((!lookup_result.shared) && pool->pf.discard_passdown)
 				remap_and_issue(tc, bio, lookup_result.block);
 			else
 				bio_endio(bio, 0);
