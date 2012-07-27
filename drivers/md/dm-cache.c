@@ -1199,6 +1199,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
 	cache->policy = arc_create(nr_cache_blocks);
+	if (!cache->policy) {
+		ti->error = "Error creating cache's policy";
+		goto bad10;
+	}
 
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
@@ -1208,11 +1212,17 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->promotion, 0);
 	atomic_set(&cache->no_copy_promotion, 0);
 
-	ti->split_io = cache->sectors_per_block;
+	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
+		goto bad11;
+
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 0;
 	return 0;
 
+bad11:
+	arc_destroy(cache->policy);
+bad10:
+	mempool_destroy(cache->migration_pool);
 bad9:
 	mempool_destroy(cache->endio_hook_pool);
 bad8:
@@ -1315,7 +1325,7 @@ static void cache_resume(struct dm_target *ti)
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
-		      char *result, unsigned maxlen)
+			unsigned status_flags, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
