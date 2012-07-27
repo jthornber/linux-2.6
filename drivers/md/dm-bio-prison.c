@@ -4,6 +4,7 @@
  * This file is released under the GPL.
  */
 
+#include "dm.h"
 #include "dm-bio-prison.h"
 
 #include <linux/spinlock.h>
@@ -23,8 +24,6 @@ struct cell {
 
 struct bio_prison {
 	spinlock_t lock;
-
-	struct kmem_cache *cell_cache;
 	mempool_t *cell_pool;
 
 	unsigned nr_buckets;
@@ -47,6 +46,8 @@ static uint32_t calc_nr_buckets(unsigned nr_cells)
 	return n;
 }
 
+static struct kmem_cache *_cell_cache;
+
 /*
  * @nr_cells should be the number of cells you want in use _concurrently_.
  * Don't confuse it with the number of distinct keys.
@@ -58,24 +59,13 @@ struct bio_prison *prison_create(unsigned nr_cells)
 	size_t len = sizeof(struct bio_prison) +
 		(sizeof(struct hlist_head) * nr_buckets);
 	struct bio_prison *prison = kmalloc(len, GFP_KERNEL);
-	char buffer[32];
 
 	if (!prison)
 		return NULL;
 
 	spin_lock_init(&prison->lock);
-	snprintf(buffer, sizeof(buffer), "dm_prison_cache_%p", prison);
-	prison->cell_cache = kmem_cache_create(buffer,
-					       sizeof(struct cell),
-					       __alignof__(struct cell), 0, NULL);
-	if (!prison->cell_cache) {
-		kfree(prison);
-		return NULL;
-	}
-
-	prison->cell_pool = mempool_create_slab_pool(nr_cells, prison->cell_cache);
+	prison->cell_pool = mempool_create_slab_pool(nr_cells, _cell_cache);
 	if (!prison->cell_pool) {
-		kmem_cache_destroy(prison->cell_cache);
 		kfree(prison);
 		return NULL;
 	}
@@ -93,7 +83,6 @@ EXPORT_SYMBOL_GPL(prison_create);
 void prison_destroy(struct bio_prison *prison)
 {
 	mempool_destroy(prison->cell_pool);
-	kmem_cache_destroy(prison->cell_cache);
 	kfree(prison);
 }
 EXPORT_SYMBOL_GPL(prison_destroy);
@@ -419,3 +408,28 @@ int ds_add_work(struct deferred_set *ds, struct list_head *work)
 EXPORT_SYMBOL_GPL(ds_add_work);
 
 /*----------------------------------------------------------------*/
+
+static int __init dm_bio_prison_init(void)
+{
+	_cell_cache = KMEM_CACHE(cell, 0);
+	if (!_cell_cache)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void __exit dm_bio_prison_exit(void)
+{
+	kmem_cache_destroy(_cell_cache);
+	_cell_cache = NULL;
+}
+
+/*
+ * module hooks
+ */
+module_init(dm_bio_prison_init);
+module_exit(dm_bio_prison_exit);
+
+MODULE_DESCRIPTION(DM_NAME " bio prison");
+MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
+MODULE_LICENSE("GPL");
