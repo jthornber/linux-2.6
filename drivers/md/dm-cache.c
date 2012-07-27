@@ -894,7 +894,16 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+#if 0
+	/*
+	 * Use this branch if you want the no copy optimisation.  atm this
+	 * means your origin must initially contain junk.
+	 */
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
+#else
+	bool cheap_copy = 0;
+#endif
+
 	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
 		times_below_percentage(&c->migration_times, 100); /* FIXME: hard coded value */
 
