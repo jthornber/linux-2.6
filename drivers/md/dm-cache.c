@@ -336,6 +336,9 @@ static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int 
 	const dm_block_t BIG_PRIME = 4294967291UL;
 	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->cache_size;
 
+	if (origin == a->last_lookup)
+		return 0;
+
 	if (a->interesting_blocks[h] == origin)
 		return 1;
 
