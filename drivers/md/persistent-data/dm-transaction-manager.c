@@ -220,9 +220,9 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 		return r;
 
 	/*
-	 * It would be tempting to use dm_bm_unlock_move here.  But some
-	 * code, such as the space maps, keep using the old data structures
-	 * - secure in the knowledge they wont be changed until the next
+	 * It would be tempting to use dm_bm_unlock_move here, but some
+	 * code, such as the space maps, keeps using the old data structures
+	 * secure in the knowledge they won't be changed until the next
 	 * transaction.  Using unlock_move would force a synchronous read
 	 * since the old block would no longer be in the cache.
 	 */
@@ -345,6 +345,7 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 			DMERR("couldn't create metadata space map");
 			goto bad;
 		}
+
 	} else {
 		r = dm_sm_metadata_open(*sm, *tm, sm_root, sm_len);
 		if (r) {
@@ -357,6 +358,7 @@ static int dm_tm_create_internal(struct dm_block_manager *bm,
 
 bad:
 	dm_tm_destroy(*tm);
+	dm_sm_destroy(*sm);
 	return r;
 }
 

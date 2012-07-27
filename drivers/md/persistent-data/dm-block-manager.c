@@ -364,7 +364,7 @@ static void dm_block_manager_write_callback(struct dm_buffer *buf)
  *--------------------------------------------------------------*/
 struct dm_block_manager {
 	struct dm_bufio_client *bufio;
-	int read_only;
+	bool read_only:1;
 };
 
 struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
@@ -372,34 +372,36 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 						 unsigned cache_size,
 						 unsigned max_held_per_thread)
 {
-	struct dm_block_manager *bm = kmalloc(sizeof(*bm), GFP_KERNEL);
+	int r;
+	struct dm_block_manager *bm;
 
-	if (!bm)
-		return NULL;
+	bm = kmalloc(sizeof(*bm), GFP_KERNEL);
+	if (!bm) {
+		r = -ENOMEM;
+		goto bad;
+	}
 
 	bm->bufio = dm_bufio_client_create(bdev, block_size, max_held_per_thread,
 					   sizeof(struct buffer_aux),
 					   dm_block_manager_alloc_callback,
 					   dm_block_manager_write_callback);
-	if (!bm->bufio) {
+	if (IS_ERR(bm->bufio)) {
+		r = PTR_ERR(bm->bufio);
 		kfree(bm);
-		return NULL;
+		goto bad;
 	}
 
-	bm->read_only = 0;
+	bm->read_only = false;
+
 	return bm;
+
+bad:
+	return ERR_PTR(r);
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_create);
 
 void dm_block_manager_destroy(struct dm_block_manager *bm)
 {
-	/*
-	 * This should only happen if there's an error while we're creating
-	 * a new pool metadata.  At which point work has been done that
-	 * incurs changes on disk, but we've not got enough pieces together
-	 * to do a tm commit.
-	 */
-	WARN_ON(dm_bufio_has_dirty_buffers(bm->bufio));
 	dm_bufio_client_destroy(bm->bufio);
 	kfree(bm);
 }
@@ -610,11 +612,11 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 	return dm_bufio_write_dirty_buffers(bm->bufio);
 }
 
-void dm_bm_read_only(struct dm_block_manager *bm)
+void dm_bm_set_read_only(struct dm_block_manager *bm)
 {
-	bm->read_only = 1;
+	bm->read_only = true;
 }
-EXPORT_SYMBOL_GPL(dm_bm_read_only);
+EXPORT_SYMBOL_GPL(dm_bm_set_read_only);
 
 u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor)
 {

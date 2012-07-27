@@ -28,15 +28,7 @@ struct sm_disk {
 	struct ll_disk old_ll;
 
 	dm_block_t begin;
-
-	/*
-	 * The allocator should not wrap past this block within a
-	 * transaction.
-	 */
-	dm_block_t end;
 	dm_block_t nr_allocated_this_transaction;
-
-	unsigned first_alloc:1;
 };
 
 static void sm_disk_destroy(struct dm_space_map *sm)
@@ -172,35 +164,20 @@ static int sm_disk_dec_block(struct dm_space_map *sm, dm_block_t b)
 
 static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
-	int r = -ENOSPC;
+	int r;
 	enum allocation_event ev;
 	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
-	dm_block_t end;
 
-	while (smd->first_alloc || smd->begin != smd->end) {
-		smd->first_alloc = 0;
+	/* FIXME: we should loop round a couple of times */
+	r = sm_ll_find_free_block(&smd->old_ll, smd->begin, smd->old_ll.nr_blocks, b);
+	if (r)
+		return r;
 
-		if (smd->begin >= smd->old_ll.nr_blocks)
-			smd->begin = 0;
-
-		end = (smd->begin < smd->end) ? smd->end : smd->old_ll.nr_blocks;
-
-		r = sm_ll_find_free_block(&smd->old_ll, smd->begin, end, b);
-		if (r && r != -ENOSPC)
-			return r;
-
-		else if (!r) {
-			smd->begin = *b + 1;
-			r = sm_ll_inc(&smd->ll, *b, &ev);
-			if (!r) {
-				BUG_ON(ev != SM_ALLOC);
-				smd->nr_allocated_this_transaction++;
-			}
-
-			return r;
-		}
-
-		smd->begin = end;
+	smd->begin = *b + 1;
+	r = sm_ll_inc(&smd->ll, *b, &ev);
+	if (!r) {
+		BUG_ON(ev != SM_ALLOC);
+		smd->nr_allocated_this_transaction++;
 	}
 
 	return r;
@@ -221,8 +198,7 @@ static int sm_disk_commit(struct dm_space_map *sm)
 		return r;
 
 	memcpy(&smd->old_ll, &smd->ll, sizeof(smd->old_ll));
-	smd->end = smd->begin;
-	smd->first_alloc = 1;
+	smd->begin = 0;
 	smd->nr_allocated_this_transaction = 0;
 
 	r = sm_disk_get_nr_free(sm, &nr_free);
@@ -285,8 +261,7 @@ struct dm_space_map *dm_sm_disk_create(struct dm_transaction_manager *tm,
 	if (!smd)
 		return ERR_PTR(-ENOMEM);
 
-	smd->begin = smd->end = 0;
-	smd->first_alloc = 1;
+	smd->begin = 0;
 	smd->nr_allocated_this_transaction = 0;
 	memcpy(&smd->sm, &ops, sizeof(smd->sm));
 
