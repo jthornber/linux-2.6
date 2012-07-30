@@ -7,16 +7,15 @@
 #ifndef DM_BIO_PRISON_H
 #define DM_BIO_PRISON_H
 
+#include "persistent-data/dm-block-manager.h" /* FIXME: for dm_block_t */
+#include "dm-thin-metadata.h" /* FIXME: for dm_thin_id */
+
 #include <linux/list.h>
 #include <linux/bio.h>
 
 /*----------------------------------------------------------------*/
 
 /* FIXME: prefix everything */
-
-
-typedef uint64_t dm_thin_id;	// FIXME: rename
-typedef uint64_t dm_block_t;	// FIXME: rename
 
 /*
  * Sometimes we can't deal with a bio straight away.  We put them in prison
@@ -25,7 +24,7 @@ typedef uint64_t dm_block_t;	// FIXME: rename
  * subsequently unlocked the bios become available.
  */
 struct bio_prison;
-struct cell;
+struct dm_bio_prison_cell;
 
 /* FIXME: this needs to be more abstract */
 struct cell_key {
@@ -44,15 +43,14 @@ void prison_destroy(struct bio_prison *prison);
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
 int bio_detain(struct bio_prison *prison, struct cell_key *key,
-	       struct bio *inmate, struct cell **ref);
+	       struct bio *inmate, struct dm_bio_prison_cell **ref);
 int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
 			   struct bio *inmate);
 
-void cell_release(struct cell *cell, struct bio_list *bios);
-void cell_release_singleton(struct cell *cell, struct bio *bio); // FIXME: bio arg not needed
-void cell_release_no_holder(struct cell *cell, struct bio_list *inmates);
-struct bio *cell_holder(struct cell *cell);
-void cell_error(struct cell *cell);
+void cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios);
+void cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio); // FIXME: bio arg not needed
+void cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates);
+void cell_error(struct dm_bio_prison_cell *cell);
 
 /*----------------------------------------------------------------*/
 

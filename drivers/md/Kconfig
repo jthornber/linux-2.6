@@ -273,7 +273,7 @@ config DM_CACHE
        select DM_PERSISTENT_DATA
        select DM_PRISON
        ---help---
-         Use and SSD to speed up a slower device.
+         Use an SSD to speed up a slower device.
 
 config DM_MIRROR
        tristate "Mirror target"
@@ -363,12 +363,6 @@ config DM_DELAY
 	them to different devices.  Useful for testing.
 
 	If unsure, say N.
-
-config DM_HSM
-       tristate "Single pool hierachical storage target"
-       select DM_PERSISTENT_DATA
-       ---help---
-         Hierachical storage target for volume managers.
 
 config DM_UEVENT
 	bool "DM uevents"

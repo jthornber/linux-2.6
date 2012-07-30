@@ -224,7 +224,7 @@ static int sm_ll_init(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	ll->nr_blocks = 0;
 	ll->bitmap_root = 0;
 	ll->ref_count_root = 0;
-	ll->bitmap_index_changed = 0;
+	ll->bitmap_index_changed = false;
 
 	return 0;
 }
@@ -482,7 +482,7 @@ int sm_ll_commit(struct ll_disk *ll)
 	if (ll->bitmap_index_changed) {
 		r = ll->commit(ll);
 		if (!r)
-			ll->bitmap_index_changed = 0;
+			ll->bitmap_index_changed = false;
 	}
 
 	return r;
@@ -500,7 +500,7 @@ static int metadata_ll_load_ie(struct ll_disk *ll, dm_block_t index,
 static int metadata_ll_save_ie(struct ll_disk *ll, dm_block_t index,
 			       struct disk_index_entry *ie)
 {
-	ll->bitmap_index_changed = 1;
+	ll->bitmap_index_changed = true;
 	memcpy(ll->mi_le.index + index, ie, sizeof(*ie));
 	return 0;
 }

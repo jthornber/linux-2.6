@@ -6,6 +6,7 @@
 
 #include "dm-thin-metadata.h"
 #include "dm-bio-prison.h"
+#include "dm.h"
 
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
@@ -20,7 +21,7 @@
 /*
  * Tunable constants
  */
-#define ENDIO_HOOK_POOL_SIZE 10240
+#define ENDIO_HOOK_POOL_SIZE 1024
 #define MAPPING_POOL_SIZE 1024
 #define PRISON_CELLS 1024
 #define COMMIT_PERIOD HZ
@@ -131,7 +132,7 @@ struct dm_thin_new_mapping;
 enum pool_mode {
 	PM_WRITE,		/* metadata may be changed */
 	PM_READ_ONLY,		/* metadata may not be changed */
-	PM_FAIL			/* all io fails */
+	PM_FAIL,		/* all I/O fails */
 };
 
 struct pool_features {
@@ -156,6 +157,7 @@ struct pool {
 
 	dm_block_t low_water_blocks;
 	uint32_t sectors_per_block;
+	int sectors_per_block_shift;
 
 	struct pool_features pf;
 	unsigned low_water_triggered:1;	/* A dm event has been sent */
@@ -192,6 +194,9 @@ struct pool {
 	process_mapping_fn process_prepared_mapping;
 	process_mapping_fn process_prepared_discard;
 };
+
+static enum pool_mode get_pool_mode(struct pool *pool);
+static void set_pool_mode(struct pool *pool, enum pool_mode mode);
 
 /*
  * Target context for a pool.
@@ -325,32 +330,30 @@ static void requeue_io(struct thin_c *tc)
  * target.
  */
 
-/*
- * do_div wrappers that don't modify the dividend
- */
-static sector_t dm_thin_do_div(sector_t a, __u32 b)
-{
-	do_div(a, b);
-	return a;
-}
-
-static sector_t dm_thin_do_mod(sector_t a, __u32 b)
-{
-	return do_div(a, b);
-}
-
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
-	return dm_thin_do_div(bio->bi_sector, tc->pool->sectors_per_block);
+	sector_t block_nr = bio->bi_sector;
+
+	if (tc->pool->sectors_per_block_shift < 0)
+		(void) sector_div(block_nr, tc->pool->sectors_per_block);
+	else
+		block_nr >>= tc->pool->sectors_per_block_shift;
+
+	return block_nr;
 }
 
 static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 {
 	struct pool *pool = tc->pool;
+	sector_t bi_sector = bio->bi_sector;
 
 	bio->bi_bdev = tc->pool_dev->bdev;
-	bio->bi_sector = (block * pool->sectors_per_block) +
-		dm_thin_do_mod(bio->bi_sector, pool->sectors_per_block);
+	if (tc->pool->sectors_per_block_shift < 0)
+		bio->bi_sector = (block * pool->sectors_per_block) +
+				 sector_div(bi_sector, pool->sectors_per_block);
+	else
+		bio->bi_sector = (block << pool->sectors_per_block_shift) |
+				(bi_sector & (pool->sectors_per_block - 1));
 }
 
 static void remap_to_origin(struct thin_c *tc, struct bio *bio)
@@ -369,25 +372,28 @@ static void issue(struct thin_c *tc, struct bio *bio)
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
+	if (!bio_triggers_commit(tc, bio)) {
+		generic_make_request(bio);
+		return;
+	}
+
+	/*
+	 * Complete bio with an error if earlier I/O caused changes to
+	 * the metadata that can't be committed e.g, due to I/O errors
+	 * on the metadata device.
+	 */
+	if (dm_thin_aborted_changes(tc->td)) {
+		bio_io_error(bio);
+		return;
+	}
+
 	/*
 	 * Batch together any bios that trigger commits and then issue a
 	 * single commit for them in process_deferred_bios().
 	 */
-	if (bio_triggers_commit(tc, bio)) {
-		if (dm_thin_aborted_changes(tc->td)) {
-			/*
-			 * Earlier io caused changes to the metadata that
-			 * can't be committed (eg, due to io errors on the
-			 * metadata device).
-			 */
-			bio_io_error(bio);
-		} else {
-			spin_lock_irqsave(&pool->lock, flags);
-			bio_list_add(&pool->deferred_flush_bios, bio);
-			spin_unlock_irqrestore(&pool->lock, flags);
-		}
-	} else
-		generic_make_request(bio);
+	spin_lock_irqsave(&pool->lock, flags);
+	bio_list_add(&pool->deferred_flush_bios, bio);
+	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
 static void remap_to_origin_and_issue(struct thin_c *tc, struct bio *bio)
@@ -481,8 +487,13 @@ static void overwrite_endio(struct bio *bio, int err)
 
 /*----------------------------------------------------------------*/
 
-static enum pool_mode get_pool_mode(struct pool *pool);
-static void set_pool_mode(struct pool *pool, enum pool_mode mode);
+/*
+ * Workqueue.
+ */
+
+/*
+ * Prepared mapping jobs.
+ */
 
 /*
  * This sends the bios in the cell back to the deferred_bios list.
@@ -628,8 +639,7 @@ static void process_prepared(struct pool *pool, struct list_head *head,
  */
 static int io_overlaps_block(struct pool *pool, struct bio *bio)
 {
-	return !dm_thin_do_mod(bio->bi_sector, pool->sectors_per_block) &&
-		(bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT));
+	return bio->bi_size == (pool->sectors_per_block << SECTOR_SHIFT);
 }
 
 static int io_overwrites_block(struct pool *pool, struct bio *bio)
@@ -660,6 +670,7 @@ static struct dm_thin_new_mapping *get_next_mapping(struct pool *pool)
 	struct dm_thin_new_mapping *r = pool->next_mapping;
 
 	BUG_ON(!pool->next_mapping);
+
 	pool->next_mapping = NULL;
 
 	return r;
@@ -790,8 +801,6 @@ static int commit(struct pool *pool)
 {
 	int r;
 
-	BUG_ON(!get_pool_mode(pool) == PM_WRITE);
-
 	r = dm_pool_commit_metadata(pool->pmd);
 	if (r)
 		DMERR("commit failed, error = %d", r);
@@ -800,15 +809,15 @@ static int commit(struct pool *pool)
 }
 
 /*
- * Returns a boolean to indicate whether we're in a fallback mode after this
- * call.  Many callers don't care about the return value.
+ * A non-zero return indicates read_only or fail_io mode.
+ * Many callers don't care about the return value.
  */
 static int commit_or_fallback(struct pool *pool)
 {
 	int r;
 
 	if (get_pool_mode(pool) != PM_WRITE)
-		return 1;
+		return -EINVAL;
 
 	r = commit(pool);
 	if (r)
@@ -845,7 +854,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 			 * Try to commit to see if that will free up some
 			 * more space.
 			 */
-			commit_or_fallback(pool);
+			(void) commit_or_fallback(pool);
 
 			r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
 			if (r)
@@ -953,18 +962,13 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			}
 		} else {
 			/*
-			 * This path is hit if people are ignoring
-			 * limits->discard_granularity.  It ignores any
-			 * part of the discard that is in a subsequent
-			 * block.
+			 * The DM core makes sure that the discard doesn't span
+			 * a block boundary.  So we submit the discard of a
+			 * partial block appropriately.
 			 */
-			sector_t offset = bio->bi_sector - (block * pool->sectors_per_block);
-			unsigned remaining = (pool->sectors_per_block - offset) << SECTOR_SHIFT;
-			bio->bi_size = min(bio->bi_size, remaining);
-
 			cell_release_singleton(cell, bio);
 			cell_release_singleton(cell2, bio);
-			if ((!lookup_result.shared) & pool->pf.discard_passdown)
+			if ((!lookup_result.shared) && pool->pf.discard_passdown)
 				remap_and_issue(tc, bio, lookup_result.block);
 			else
 				bio_endio(bio, 0);
@@ -1141,29 +1145,33 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 static void process_bio_read_only(struct thin_c *tc, struct bio *bio)
 {
-	int r, dir = bio_data_dir(bio);
+	int r;
+	int rw = bio_data_dir(bio);
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		if (lookup_result.shared && (dir == WRITE) && bio->bi_size)
+		if (lookup_result.shared && (rw == WRITE) && bio->bi_size)
 			bio_io_error(bio);
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
 		break;
 
 	case -ENODATA:
-		if (dir == READ && tc->origin_dev)
-			remap_to_origin_and_issue(tc, bio);
-
-		else if (dir == READ) {
-			zero_fill_bio(bio);
-			bio_endio(bio, 0);
-
-		} else
+		if (rw != READ) {
 			bio_io_error(bio);
+			break;
+		}
+
+		if (tc->origin_dev) {
+			remap_to_origin_and_issue(tc, bio);
+			break;
+		}
+
+		zero_fill_bio(bio);
+		bio_endio(bio, 0);
 		break;
 
 	default:
@@ -1230,7 +1238,7 @@ static void process_deferred_bios(struct pool *pool)
 	bio_list_init(&pool->deferred_flush_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	if (bio_list_empty(&bios)) // && !need_commit_due_to_time(pool))
+	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
 		return;
 
 	if (commit_or_fallback(pool)) {
@@ -1277,7 +1285,7 @@ static void set_pool_mode(struct pool *pool, enum pool_mode mode)
 
 	pool->pf.mode = mode;
 
-	switch(mode) {
+	switch (mode) {
 	case PM_FAIL:
 		DMERR("switching pool to failure mode");
 		pool->process_bio = process_bio_fail;
@@ -1371,12 +1379,6 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 	r = dm_thin_find_block(td, block, 0, &result);
 
 	/*
-	 * FIXME: what if this is being discarded, we should be using a
-	 * bio-prison call.
-	 */
-
-
-	/*
 	 * Note that we defer readahead too.
 	 */
 	switch (r) {
@@ -1426,12 +1428,16 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	default:
+		/*
+		 * Must always call bio_io_error on failure.
+		 * dm_thin_find_block can fail with -EINVAL if the
+		 * pool is switched to fail-io mode.
+		 */
 		bio_io_error(bio);
 		r = DM_MAPIO_SUBMITTED;
 		break;
 	}
 
-	BUG_ON(r < 0);
 	return r;
 }
 
@@ -1551,9 +1557,9 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	void *err_p;
 	struct pool *pool;
 	struct dm_pool_metadata *pmd;
-	enum dm_thin_metadata_mode mode = DM_THIN_OPEN | (read_only ? 0 : DM_THIN_FORMAT);
+	bool format_device = read_only ? false : true;
 
-	pmd = dm_pool_metadata_open(metadata_dev, block_size, mode);
+	pmd = dm_pool_metadata_open(metadata_dev, block_size, format_device);
 	if (IS_ERR(pmd)) {
 		*error = "Error creating metadata object";
 		return (struct pool *)pmd;
@@ -1568,6 +1574,10 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 
 	pool->pmd = pmd;
 	pool->sectors_per_block = block_size;
+	if (block_size & (block_size - 1))
+		pool->sectors_per_block_shift = -1;
+	else
+		pool->sectors_per_block_shift = __ffs(block_size);
 	pool->low_water_blocks = 0;
 	pool_features_init(&pool->pf);
 	pool->prison = prison_create(PRISON_CELLS);
@@ -1681,7 +1691,6 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 {
 	struct pool *pool = __pool_table_lookup_metadata_dev(metadata_dev);
 
-	*created = 0;
 	if (pool) {
 		if (pool->pool_md != pool_md) {
 			*error = "metadata device already in use by a pool";
@@ -1830,7 +1839,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (kstrtoul(argv[2], 10, &block_size) || !block_size ||
 	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
 	    block_size > DATA_DEV_BLOCK_SIZE_MAX_SECTORS ||
-	    dm_thin_do_mod(block_size, DATA_DEV_BLOCK_SIZE_MIN_SECTORS)) {
+	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		ti->error = "Invalid block size";
 		r = -EINVAL;
 		goto out;
@@ -1877,6 +1886,15 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_flags_changed;
 	}
 
+	/*
+	 * The block layer requires discard_granularity to be a power of 2.
+	 */
+	if (pf.discard_enabled && !is_power_of_2(block_size)) {
+		ti->error = "Discard support must be disabled when the block size is not a power of 2";
+		r = -EINVAL;
+		goto out_flags_changed;
+	}
+
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->metadata_dev = metadata_dev;
@@ -1884,7 +1902,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_blocks = low_water_blocks;
 	pt->pf = pf;
 	ti->num_flush_requests = 1;
-
 	/*
 	 * Only need to enable discards if the pool should pass
 	 * them down to the data device.  The thin device's discard
@@ -1897,7 +1914,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		 * stacking of discard limits (this keeps the pool and
 		 * thin devices' discard limits consistent).
 		 */
-		ti->discards_supported = 1;
+		ti->discards_supported = true;
 	}
 	ti->private = pt;
 
@@ -1957,7 +1974,8 @@ static int pool_preresume(struct dm_target *ti)
 	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	dm_block_t data_size, sb_data_size;
+	sector_t data_size = ti->len;
+	dm_block_t sb_data_size;
 
 	/*
 	 * Take control of the pool object.
@@ -1966,7 +1984,8 @@ static int pool_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	data_size = dm_thin_do_div(ti->len, pool->sectors_per_block);
+	(void) sector_div(data_size, pool->sectors_per_block);
+
 	r = dm_pool_get_data_dev_size(pool->pmd, &sb_data_size);
 	if (r) {
 		DMERR("failed to retrieve data device size");
@@ -1975,19 +1994,19 @@ static int pool_preresume(struct dm_target *ti)
 
 	if (data_size < sb_data_size) {
 		DMERR("pool target too small, is %llu blocks (expected %llu)",
-		      data_size, sb_data_size);
+		      (unsigned long long)data_size, sb_data_size);
 		return -EINVAL;
 
 	} else if (data_size > sb_data_size) {
 		r = dm_pool_resize_data_dev(pool->pmd, data_size);
 		if (r) {
 			DMERR("failed to resize data device");
+			/* FIXME Stricter than necessary: Rollback transaction instead here */
+			set_pool_mode(pool, PM_READ_ONLY);
 			return r;
 		}
 
-		r = commit(pool);
-		if (r)
-			return r;
+		(void) commit_or_fallback(pool);
 	}
 
 	return 0;
@@ -2015,7 +2034,7 @@ static void pool_postsuspend(struct dm_target *ti)
 
 	cancel_delayed_work(&pool->waker);
 	flush_workqueue(pool->wq);
-	commit_or_fallback(pool);
+	(void) commit_or_fallback(pool);
 }
 
 static int check_arg_count(unsigned argc, unsigned args_required)
@@ -2149,7 +2168,7 @@ static int process_reserve_metadata_snap_mesg(unsigned argc, char **argv, struct
 	if (r)
 		return r;
 
-	commit_or_fallback(pool);
+	(void) commit_or_fallback(pool);
 
 	r = dm_pool_reserve_metadata_snap(pool->pmd);
 	if (r)
@@ -2211,7 +2230,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
 
 	if (!r)
-		commit_or_fallback(pool);
+		(void) commit_or_fallback(pool);
 
 	return r;
 }
@@ -2221,7 +2240,7 @@ static void emit_flags(struct pool_features *pf, char *result,
 {
 	unsigned count = !pf->zero_new_blocks + !pf->discard_enabled +
 		!pf->discard_passdown + (pf->mode == PM_READ_ONLY);
-	DMEMIT(" %u ", count);
+	DMEMIT("%u ", count);
 
 	if (!pf->zero_new_blocks)
 		DMEMIT("skip_block_zeroing ");
@@ -2233,7 +2252,7 @@ static void emit_flags(struct pool_features *pf, char *result,
 		DMEMIT("no_discard_passdown ");
 
 	if (pf->mode == PM_READ_ONLY)
-		DMEMIT("read_only");
+		DMEMIT("read_only ");
 }
 
 /*
@@ -2242,7 +2261,7 @@ static void emit_flags(struct pool_features *pf, char *result,
  *    <used data sectors>/<total data sectors> <held metadata root>
  */
 static int pool_status(struct dm_target *ti, status_type_t type,
-		       char *result, unsigned maxlen)
+		       unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r;
 	unsigned sz = 0;
@@ -2260,21 +2279,18 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 	switch (type) {
 	case STATUSTYPE_INFO:
 		if (get_pool_mode(pool) == PM_FAIL) {
-			DMEMIT("fail");
+			DMEMIT("Fail");
 			break;
 		}
+
+		/* Commit to ensure statistics aren't out-of-date */
+		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti))
+			(void) commit_or_fallback(pool);
 
 		r = dm_pool_get_metadata_transaction_id(pool->pmd,
 							&transaction_id);
 		if (r)
 			return r;
-
-		/*
-		 * If we're in the middle of a transaction the free block
-		 * counts can be quite out of date, so we do a quick
-		 * commit.
-		 */
-		commit_or_fallback(pool);
 
 		r = dm_pool_get_free_metadata_block_count(pool->pmd,
 							  &nr_free_blocks_metadata);
@@ -2306,15 +2322,23 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long)nr_blocks_data);
 
 		if (held_root)
-			DMEMIT("%llu", held_root);
+			DMEMIT("%llu ", held_root);
 		else
-			DMEMIT("-");
+			DMEMIT("- ");
 
-		emit_flags(&pool->pf, result, sz, maxlen);
+		if (pool->pf.discard_enabled && pool->pf.discard_passdown)
+			DMEMIT("discard_passdown ");
+		else
+			DMEMIT("no_discard_passdown ");
+
+		if (pool->pf.mode == PM_READ_ONLY)
+			DMEMIT("read_only");
+		else
+			DMEMIT("read_write");
 		break;
 
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %lu %llu",
+		DMEMIT("%s %s %lu %llu ",
 		       format_dev_t(buf, pt->metadata_dev->bdev->bd_dev),
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long)pool->sectors_per_block,
@@ -2357,7 +2381,8 @@ static void set_discard_limits(struct pool *pool, struct queue_limits *limits)
 
 	/*
 	 * This is just a hint, and not enforced.  We have to cope with
-	 * bios that overlap 2 blocks.
+	 * bios that cover a block partially.  A discard that spans a block
+	 * boundary is not sent to this target.
 	 */
 	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
 	limits->discard_zeroes_data = pool->pf.zero_new_blocks;
@@ -2378,7 +2403,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 2, 0},
+	.version = {1, 3, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -2494,15 +2519,20 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_thin_open;
 	}
 
-	ti->split_io = tc->pool->sectors_per_block;
+	r = dm_set_target_max_io_len(ti, tc->pool->sectors_per_block);
+	if (r)
+		goto bad_thin_open;
+
 	ti->num_flush_requests = 1;
-	ti->flush_supported = 1;
+	ti->flush_supported = true;
 
 	/* In case the pool supports discards, pass them on. */
 	if (tc->pool->pf.discard_enabled) {
-		ti->discards_supported = 1;
+		ti->discards_supported = true;
 		ti->num_discard_requests = 1;
-		ti->discard_zeroes_data_unsupported = 1;
+		ti->discard_zeroes_data_unsupported = true;
+		/* Discard requests must be split on a block boundary */
+		ti->split_discard_requests = true;
 	}
 
 	dm_put(pool_md);
@@ -2583,7 +2613,7 @@ static void thin_postsuspend(struct dm_target *ti)
  * <nr mapped sectors> <highest mapped sector>
  */
 static int thin_status(struct dm_target *ti, status_type_t type,
-		       char *result, unsigned maxlen)
+		       unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r;
 	ssize_t sz = 0;
@@ -2592,7 +2622,7 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 	struct thin_c *tc = ti->private;
 
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
-		DMEMIT("fail");
+		DMEMIT("Fail");
 		return 0;
 	}
 
@@ -2633,7 +2663,7 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
-	dm_block_t blocks;
+	sector_t blocks;
 	struct thin_c *tc = ti->private;
 	struct pool *pool = tc->pool;
 
@@ -2644,7 +2674,8 @@ static int thin_iterate_devices(struct dm_target *ti,
 	if (!pool->ti)
 		return 0;	/* nothing is bound */
 
-	blocks = dm_thin_do_div(pool->ti->len, pool->sectors_per_block);
+	blocks = pool->ti->len;
+	(void) sector_div(blocks, pool->sectors_per_block);
 	if (blocks)
 		return fn(ti, tc->pool_dev, 0, pool->sectors_per_block * blocks, data);
 
@@ -2663,7 +2694,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 1, 0},
+	.version = {1, 3, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
@@ -2691,13 +2722,11 @@ static int __init dm_thin_init(void)
 	if (r)
 		goto bad_pool_target;
 
-	dm_new_mapping_cache = kmem_cache_create("dm_thin_new_mapping",
-						 sizeof(struct new_mapping),
-						 __alignof__(struct new_mapping), 0, NULL);
-	if (!dm_new_mapping_cache) {
-		r = -ENOMEM;
+	r = -ENOMEM;
+
+	_new_mapping_cache = KMEM_CACHE(dm_thin_new_mapping, 0);
+	if (!_new_mapping_cache)
 		goto bad_new_mapping_cache;
-	}
 
 	_endio_hook_cache = KMEM_CACHE(dm_thin_endio_hook, 0);
 	if (!_endio_hook_cache)
@@ -2708,8 +2737,6 @@ static int __init dm_thin_init(void)
 bad_endio_hook_cache:
 	kmem_cache_destroy(_new_mapping_cache);
 bad_new_mapping_cache:
-	kmem_cache_destroy(_cell_cache);
-bad_cell_cache:
 	dm_unregister_target(&pool_target);
 bad_pool_target:
 	dm_unregister_target(&thin_target);
@@ -2721,8 +2748,9 @@ static void dm_thin_exit(void)
 {
 	dm_unregister_target(&thin_target);
 	dm_unregister_target(&pool_target);
-	kmem_cache_destroy(dm_new_mapping_cache);
-	kmem_cache_destroy(dm_endio_hook_cache);
+
+	kmem_cache_destroy(_new_mapping_cache);
+	kmem_cache_destroy(_endio_hook_cache);
 }
 
 module_init(dm_thin_init);

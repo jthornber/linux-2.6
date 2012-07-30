@@ -572,7 +572,7 @@ static bool times_below_percentage(struct times *ts, unsigned percentage)
 #define DM_MSG_PREFIX "cache"
 #define DAEMON "cached"
 #define PRISON_CELLS 1024
-#define ENDIO_HOOK_POOL_SIZE 10240
+#define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
 
 struct cache_c {
@@ -580,6 +580,7 @@ struct cache_c {
 
 	struct dm_dev *origin_dev;
 	struct dm_dev *cache_dev;
+	struct dm_target_callbacks callbacks;
 
 	dm_block_t origin_blocks;
 	dm_block_t cache_size;
@@ -628,8 +629,8 @@ struct migration {
 	dm_block_t new_oblock;
 	dm_block_t cblock;
 
-	struct cell *old_ocell;
-	struct cell *new_ocell;
+	struct dm_bio_prison_cell *old_ocell;
+	struct dm_bio_prison_cell *new_ocell;
 };
 
 static void build_key(dm_block_t block, struct cell_key *key)
@@ -677,12 +678,12 @@ static void issue(struct cache_c *cache, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
-static void __cell_defer(struct cache_c *c, struct cell *cell, bool holder)
+static void __cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
 	(holder ? cell_release : cell_release_no_holder)(cell, &c->deferred_bios);
 }
 
-static void cell_defer(struct cache_c *c, struct cell *cell, bool holder)
+static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
 	unsigned long flags;
 
@@ -839,7 +840,7 @@ static void quiesce_migration(struct cache_c *c, struct migration *mg)
 }
 
 /* FIXME: we can't just block here, need to ensure the migration is allocated before we start processing a bio */
-static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct cell *cell)
+static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
 {
 	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
 
@@ -857,8 +858,8 @@ static void writeback_then_promote(struct cache_c *c,
 				   dm_block_t old_oblock,
 				   dm_block_t new_oblock,
 				   dm_block_t cblock,
-				   struct cell *old_ocell,
-				   struct cell *new_ocell)
+				   struct dm_bio_prison_cell *old_ocell,
+				   struct dm_bio_prison_cell *new_ocell)
 {
 	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
 
@@ -893,7 +894,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	int release_cell = 1;
 	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
-	struct cell *old_ocell, *new_ocell;
+	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 #if 0
@@ -1021,31 +1022,21 @@ static void do_work(struct work_struct *ws)
 }
 
 /*----------------------------------------------------------------*/
-#if 0
+
 static int is_congested(struct dm_dev *dev, int bdi_bits)
 {
 	struct request_queue *q = bdev_get_queue(dev->bdev);
 	return bdi_congested(&q->backing_dev_info, bdi_bits);
 }
 
-static int congested(void *congested_data, int bdi_bits)
+static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 {
-	struct cache_c *cache = congested_data;
+	struct cache_c *cache = container_of(cb, struct cache_c, callbacks);
 
 	return is_congested(cache->origin_dev, bdi_bits) ||
 		is_congested(cache->cache_dev, bdi_bits);
 }
 
-static void set_congestion_fn(struct cache_c *cache)
-{
-	struct mapped_device *md = dm_table_get_md(cache->ti->table);
-	struct backing_dev_info *bdi = &dm_disk(md)->queue->backing_dev_info;
-
-	/* Set congested function and data. */
-	bdi->congested_fn = congested;
-	bdi->congested_data = cache;
-}
-#endif
 /*----------------------------------------------------------------
  * Target methods
  *--------------------------------------------------------------*/
@@ -1152,6 +1143,9 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->nr_migrations, 0);
 	times_init(&cache->migration_times);
 
+	cache->callbacks.congested_fn = cache_is_congested;
+	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
+
 	cache->dirty_bitset = vzalloc(sizeof(unsigned long) * dm_div_up(cache->origin_blocks, sizeof(unsigned long) * 8));
 	if (!cache->dirty_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
@@ -1199,6 +1193,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	nr_cache_blocks = get_dev_size(cache->cache_dev) >> cache->block_shift;
 	cache->policy = arc_create(nr_cache_blocks);
+	if (!cache->policy) {
+		ti->error = "Error creating cache's policy";
+		goto bad10;
+	}
 
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
@@ -1208,13 +1206,19 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->promotion, 0);
 	atomic_set(&cache->no_copy_promotion, 0);
 
-	ti->split_io = cache->sectors_per_block;
+	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
+		goto bad11;
+
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 0;
 	return 0;
 
-bad9:
+bad11:
+	arc_destroy(cache->policy);
+bad10:
 	mempool_destroy(cache->migration_pool);
+bad9:
+	mempool_destroy(cache->endio_hook_pool);
 bad8:
 	ds_destroy(cache->all_io_ds);
 bad6:
@@ -1315,7 +1319,7 @@ static void cache_resume(struct dm_target *ti)
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
-		      char *result, unsigned maxlen)
+			unsigned status_flags, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
@@ -1340,14 +1344,14 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 static int cache_iterate_devices(struct dm_target *ti,
 				 iterate_devices_callout_fn fn, void *data)
 {
+	int r = 0;
 	struct cache_c *c = ti->private;
 
-	/*
-	 * We don't include the cache device in the iteration since
-	 * device_area_is_invalid checks that all iteratees are at least
-	 * the size of the target.
-	 */
-	return fn(ti, c->origin_dev, 0, ti->len, data);
+	r = fn(ti, c->cache_dev, 0, get_dev_size(c->cache_dev), data);
+	if (!r)
+		r = fn(ti, c->origin_dev, 0, ti->len, data);
+
+	return r;
 }
 
 static int cache_bvec_merge(struct dm_target *ti,
