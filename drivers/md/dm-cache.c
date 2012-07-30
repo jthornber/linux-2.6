@@ -164,7 +164,7 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 		return NULL;
 	}
 
-	a->interesting_size = cache_size / 8;
+	a->interesting_size = cache_size / 2;
 	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
 	if (!a->interesting_blocks) {
 		kfree(a->table);
