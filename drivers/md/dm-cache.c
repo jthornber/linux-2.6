@@ -1354,8 +1354,9 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 /*
  * Construct a hierarchical storage device mapping:
  *
- * cache <origin dev> <cache dev> <block size>
+ * cache <metadata dev> <origin dev> <cache dev> <block size>
  *
+ * metadata dev    : fast device holding the persistent metadata
  * origin dev	   : slow device holding original data blocks
  * cache dev	   : fast device holding cached data blocks
  * data block size : cache unit size in sectors
@@ -1617,18 +1618,30 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
 	struct cache_c *c = ti->private;
+	dm_block_t residency;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		/*   <hits> <misses> */
-		DMEMIT("%llu %llu", 0LL, 0LL);
+		residency = min(c->policy->nr_allocated, c->policy->cache_size);
+
+		DMEMIT("%u %u %u %u %u %u %llu",
+		       (unsigned) atomic_read(&c->read_hit),
+		       (unsigned) atomic_read(&c->read_miss),
+		       (unsigned) atomic_read(&c->write_hit),
+		       (unsigned) atomic_read(&c->write_miss),
+		       (unsigned) atomic_read(&c->demotion),
+		       (unsigned) atomic_read(&c->promotion),
+		       (unsigned long long) residency);
 		break;
 
 	case STATUSTYPE_TABLE:
+		format_dev_t(buf, c->metadata_dev->bdev->bd_dev);
+		DMEMIT("%s ", buf);
 		format_dev_t(buf, c->origin_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
+		DMEMIT("%llu", (unsigned long long) c->sectors_per_block);
 	}
 
 	return 0;
