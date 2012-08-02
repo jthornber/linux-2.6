@@ -142,4 +142,7 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 			      uint64_t *result_keys);
 
+int dm_btree_walk(struct dm_btree_info *info, dm_block_t root,
+		  int (*fn)(void *, uint64_t *keys, void *leaf), void *context);
+
 #endif	/* _LINUX_DM_BTREE_H */
