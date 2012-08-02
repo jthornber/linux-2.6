@@ -24,9 +24,14 @@
 
 /*----------------------------------------------------------------*/
 
-static unsigned long *alloc_bitset(unsigned nr_entries)
+static unsigned long *alloc_bitset(unsigned nr_entries, bool set_to_ones)
 {
-	return vzalloc(sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG));
+	size_t s = sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
+	unsigned long *r = vzalloc(s);
+	if (r && set_to_ones)
+		memset(r, ~0, s);
+
+	return r;
 }
 
 static void free_bitset(unsigned long *bits)
@@ -186,7 +191,7 @@ static struct arc_policy *arc_create(dm_block_t cache_size)
 		return NULL;
 	}
 
-	a->allocation_bitset = alloc_bitset(cache_size);
+	a->allocation_bitset = alloc_bitset(cache_size, 0);
 	if (!a->allocation_bitset) {
 		vfree(a->interesting_blocks);
 		kfree(a->table);
@@ -1050,6 +1055,54 @@ static void process_flush_bio(struct cache_c *c, struct bio *bio)
 	issue(c, bio);
 }
 
+static bool covers_block(struct cache_c *c, struct bio *bio)
+{
+	return !(bio->bi_sector & c->offset_mask) &&
+		(bio->bi_size == (c->sectors_per_block << SECTOR_SHIFT));
+}
+
+static void process_discard_bio(struct cache_c *c, struct bio *bio)
+{
+	int r;
+	struct cell_key key;
+	struct arc_result lookup_result;
+	dm_block_t block = get_bio_block(c, bio);
+	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+
+	pr_alert("process_discard_bio: bi_sector = %lu, bi_size = %lu\n",
+		 (unsigned long) bio->bi_sector,
+		 (unsigned long) bio->bi_size);
+
+	/*
+	 * Check to see if that block is currently migrating.
+	 */
+	build_key(block, &key);
+	r = bio_detain_if_occupied(c->prison, &key, bio);
+	if (r > 0)
+		return;
+
+	arc_map(c->policy, block, bio_data_dir(bio), 0, 0, &lookup_result);
+	switch (lookup_result.op) {
+	case ARC_HIT:
+		h->all_io_entry = ds_inc(c->all_io_ds);
+		remap_to_cache(c, bio, lookup_result.cblock);
+		issue(c, bio);
+		break;
+
+	case ARC_MISS:
+		h->all_io_entry = ds_inc(c->all_io_ds);
+		remap_to_origin(c, bio);
+		issue(c, bio);
+		break;
+
+	default:
+		BUG();
+	}
+
+	if (covers_block(c, bio))
+		clear_bit(block, c->dirty_bitset);
+}
+
 static void process_bio(struct cache_c *c, struct bio *bio)
 {
 	int r;
@@ -1059,16 +1112,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct arc_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-#if 0
-	/*
-	 * Use this branch if you want the no copy optimisation.  atm this
-	 * means your origin must initially contain junk.
-	 */
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
-#else
-	bool cheap_copy = 0;
-#endif
-
 	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
 		times_below_percentage(&c->migration_times, 100); /* FIXME: hard coded value */
 
@@ -1162,6 +1206,10 @@ static void process_deferred_bios(struct cache_c *c)
 	while ((bio = bio_list_pop(&bios))) {
 		if (bio->bi_rw & REQ_FLUSH)
 			process_flush_bio(c, bio);
+
+		else if (bio->bi_rw & REQ_DISCARD)
+			process_discard_bio(c, bio);
+
 		else
 			process_bio(c, bio);
 	}
@@ -1380,7 +1428,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);
 
-	c->dirty_bitset = alloc_bitset(c->origin_blocks);
+	c->dirty_bitset = alloc_bitset(c->origin_blocks, 1);
 	if (!c->dirty_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad3;	/* FIXME: wrong */
@@ -1450,7 +1498,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	ti->num_flush_requests = 2;
-	ti->num_discard_requests = 2;
+	ti->flush_supported = true;
+
+	ti->num_discard_requests = 1;
+	ti->discards_supported = true;
 	return 0;
 
 bad11:
