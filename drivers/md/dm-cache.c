@@ -128,6 +128,12 @@ struct arc_policy {
 	dm_block_t interesting_size;
 	dm_block_t *interesting_blocks;
 	dm_block_t last_lookup;
+
+	/* Fields for tracking IO pattern */
+	/* 0: IO stream is random. 1: IO stream is sequential */
+	bool seq_stream;
+	unsigned nr_seq_samples, nr_rand_samples;
+	dm_block_t last_end_oblock;
 };
 
 enum arc_operation {
@@ -420,6 +426,49 @@ static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int 
 	return 0;
 }
 
+static inline bool arc_random_stream(struct arc_policy *a)
+{
+	return !a->seq_stream;
+}
+
+static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
+{
+	if (bio->bi_sector == a->last_end_oblock + 1) {
+		/* Block sequential to last io */
+		a->nr_seq_samples++;
+	} else {
+		/* One non sequential IO resets the existing data */
+		if (a->nr_seq_samples) {
+			a->nr_seq_samples = 0;
+			a->nr_rand_samples = 0;
+		}
+		a->nr_rand_samples++;
+	}
+
+	a->last_end_oblock = bio->bi_sector + (bio->bi_size >> SECTOR_SHIFT) - 1;
+
+	/*
+	 * If current stream state is sequential and we see 4 random IO,
+	 * change state. Otherwise if current state is random and we see
+	 * 512 sequential IO, change stream state to sequential.
+	 *
+	 * FIXME: This number (512) should be tunable so that a user can
+	 * control the sequential IO caching behavior based on the workload.
+	 */
+
+	if (a->seq_stream && a->nr_rand_samples >= 4) {
+		a->seq_stream = false;
+		a->nr_seq_samples = a->nr_rand_samples = 0;
+		pr_alert("switched stream state to random. nr_rand=%u"
+			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
+	} else if (!a->seq_stream && a->nr_seq_samples >= 512) {
+		a->seq_stream = true;
+		a->nr_seq_samples = a->nr_rand_samples = 0;
+		pr_alert("switched stream state to sequential. nr_rand=%u"
+			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
+	}
+}
+
 static void __arc_map(struct arc_policy *a,
 		      dm_block_t origin_block,
 		      int data_dir,
@@ -503,7 +552,7 @@ static void __arc_map(struct arc_policy *a,
 
 	/* FIXME: this is turning into a huge mess */
 	cheap_copy = cheap_copy && __any_free_entries(a);
-	if (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir))) {
+	if (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir) && arc_random_stream(a))) {
 		/* carry on, perverse logic */
 	} else {
 		result->op = ARC_MISS;
@@ -566,11 +615,13 @@ static void __arc_map(struct arc_policy *a,
 }
 
 static void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
-		    bool can_migrate, bool cheap_copy, struct arc_result *result)
+		    bool can_migrate, bool cheap_copy,
+		    struct arc_result *result, struct bio *bio)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&a->lock, flags);
+	__arc_update_io_stream_data(a, bio);
 	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
 	a->last_lookup = origin_block;
 	spin_unlock_irqrestore(&a->lock, flags);
@@ -1081,7 +1132,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, bio_data_dir(bio), 0, 0, &lookup_result);
+	arc_map(c->policy, block, bio_data_dir(bio), 0, 0, &lookup_result, bio);
 	switch (lookup_result.op) {
 	case ARC_HIT:
 		h->all_io_entry = ds_inc(c->all_io_ds);
@@ -1124,7 +1175,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, &lookup_result);
+	arc_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, &lookup_result, bio);
 	switch (lookup_result.op) {
 	case ARC_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",
