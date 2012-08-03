@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Red Hat GmbH. All rights reserved.
+ * Copyright (C) 2012 Red Hat. All rights reserved.
  *
  * This file is released under the GPL.
  */
@@ -7,6 +7,7 @@
 #include "dm.h"
 #include "dm-bio-prison.h"
 #include "dm-cache-metadata.h"
+#include "dm-cache-policy.h"
 
 #include <asm/div64.h>
 
@@ -37,594 +38,6 @@ static unsigned long *alloc_bitset(unsigned nr_entries, bool set_to_ones)
 static void free_bitset(unsigned long *bits)
 {
 	vfree(bits);
-}
-
-/*----------------------------------------------------------------*/
-
-struct queue {
-	unsigned size;
-	struct list_head elts;
-};
-
-static void queue_init(struct queue *q)
-{
-	q->size = 0;
-	INIT_LIST_HEAD(&q->elts);
-}
-
-static unsigned queue_size(struct queue *q)
-{
-	return q->size;
-}
-
-static bool queue_empty(struct queue *q)
-{
-	BUG_ON(q->size ? list_empty(&q->elts) : !list_empty(&q->elts));
-	return !q->size;
-}
-
-static struct list_head *queue_pop(struct queue *q)
-{
-	struct list_head *r;
-
-	BUG_ON(list_empty(&q->elts));
-	r = q->elts.next;
-	list_del(r);
-	q->size--;
-
-	return r;
-}
-
-static void queue_del(struct queue *q, struct list_head *elt)
-{
-	BUG_ON(!q->size);
-	list_del(elt);
-	q->size--;
-}
-
-static void queue_push(struct queue *q, struct list_head *elt)
-{
-	list_add_tail(elt, &q->elts);
-	q->size++;
-}
-
-/*----------------------------------------------------------------*/
-
-enum arc_state {
-	ARC_B1,
-	ARC_T1,
-	ARC_B2,
-	ARC_T2
-};
-
-struct arc_entry {
-	enum arc_state state;
-	struct hlist_node hlist;
-	struct list_head list;
-	dm_block_t oblock;
-	dm_block_t cblock;
-};
-
-struct arc_policy {
-	dm_block_t cache_size;
-
-	spinlock_t lock;
-
-	dm_block_t p;		/* the magic factor that balances lru vs lfu */
-	struct queue b1, t1, b2, t2;
-
-	/*
-	 * We know exactly how many entries will be needed, so we can
-	 * allocate them up front.
-	 */
-	struct arc_entry *entries;
-	unsigned long *allocation_bitset;
-	dm_block_t nr_allocated;
-
-	unsigned nr_buckets;
-	dm_block_t hash_mask;
-	struct hlist_head *table;
-
-	dm_block_t interesting_size;
-	dm_block_t *interesting_blocks;
-	dm_block_t last_lookup;
-
-	/* Fields for tracking IO pattern */
-	/* 0: IO stream is random. 1: IO stream is sequential */
-	bool seq_stream;
-	unsigned nr_seq_samples, nr_rand_samples;
-	dm_block_t last_end_oblock;
-};
-
-enum arc_operation {
-	ARC_HIT,
-	ARC_MISS,
-	ARC_NEW,
-	ARC_REPLACE
-};
-
-struct arc_result {
-	enum arc_operation op;
-
-	dm_block_t old_oblock;
-	dm_block_t cblock;
-};
-
-static struct arc_policy *arc_create(dm_block_t cache_size)
-{
-	dm_block_t nr_buckets;
-	struct arc_policy *a = kmalloc(sizeof(*a), GFP_KERNEL);
-	if (!a)
-		return NULL;
-
-	a->cache_size = cache_size;
-	spin_lock_init(&a->lock);
-	a->p = 0;
-
-	queue_init(&a->b1);
-	queue_init(&a->t1);
-	queue_init(&a->b2);
-	queue_init(&a->t2);
-
-	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
-	if (!a->entries) {
-		kfree(a);
-		return NULL;
-	}
-
-	a->nr_allocated = 0;
-
-	a->nr_buckets = cache_size / 8;
-	nr_buckets = 16;
-	while (nr_buckets < a->nr_buckets)
-		nr_buckets <<= 1;
-	a->nr_buckets = nr_buckets;
-
-	a->hash_mask = a->nr_buckets - 1;
-	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
-	if (!a->table) {
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
-	a->interesting_size = cache_size / 2;
-	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
-	if (!a->interesting_blocks) {
-		kfree(a->table);
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
-	a->allocation_bitset = alloc_bitset(cache_size, 0);
-	if (!a->allocation_bitset) {
-		vfree(a->interesting_blocks);
-		kfree(a->table);
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
-	return a;
-}
-
-static void arc_destroy(struct arc_policy *a)
-{
-	free_bitset(a->allocation_bitset);
-	vfree(a->interesting_blocks);
-	kfree(a->table);
-	vfree(a->entries);
-	kfree(a);
-}
-
-static unsigned hash(struct arc_policy *a, dm_block_t b)
-{
-	const dm_block_t BIG_PRIME = 4294967291UL;
-	dm_block_t h = b * BIG_PRIME;
-
-	return (uint32_t) (h & a->hash_mask);
-}
-
-static void __arc_insert(struct arc_policy *a, struct arc_entry *e)
-{
-	unsigned h = hash(a, e->oblock);
-	hlist_add_head(&e->hlist, a->table + h);
-}
-
-static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
-{
-	unsigned h = hash(a, origin);
-	struct hlist_head *bucket = a->table + h;
-	struct hlist_node *tmp;
-	struct arc_entry *e;
-
-	hlist_for_each_entry(e, tmp, bucket, hlist)
-		if (e->oblock == origin)
-			return e;
-
-	return NULL;
-}
-
-static void __arc_remove(struct arc_policy *a, struct arc_entry *e)
-{
-	hlist_del(&e->hlist);
-}
-
-static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
-{
-	struct arc_entry *e;
-
-	BUG_ON(a->nr_allocated >= 2 * a->cache_size);
-	e = a->entries + a->nr_allocated;
-	INIT_LIST_HEAD(&e->list);
-	INIT_HLIST_NODE(&e->hlist);
-	a->nr_allocated++;
-
-	return e;
-}
-
-static void __alloc_cblock(struct arc_policy *a, dm_block_t cblock)
-{
-	BUG_ON(cblock > a->cache_size);
-	BUG_ON(test_bit(cblock, a->allocation_bitset));
-	set_bit(cblock, a->allocation_bitset);
-}
-
-static void __free_cblock(struct arc_policy *a, dm_block_t cblock)
-{
-	BUG_ON(cblock > a->cache_size);
-	BUG_ON(!test_bit(cblock, a->allocation_bitset));
-	clear_bit(cblock, a->allocation_bitset);
-}
-
-/*
- * This doesn't allocate the block.
- */
-static int __find_free_cblock(struct arc_policy *a, dm_block_t *result)
-{
-	int r = -ENOSPC;
-	unsigned nr_words = dm_div_up(a->cache_size, BITS_PER_LONG);
-	unsigned w, b;
-
-	for (w = 0; w < nr_words; w++) {
-		/*
-		 * ffz is undefined if no zero exists
-		 */
-		if (a->allocation_bitset[w] != ~0UL) {
-			b = ffz(a->allocation_bitset[w]);
-
-			*result = (w * BITS_PER_LONG) + b;
-			if (*result < a->cache_size)
-				r = 0;
-
-			break;
-		}
-	}
-
-	return r;
-}
-
-static bool __any_free_entries(struct arc_policy *a)
-{
-	return a->nr_allocated < a->cache_size;
-}
-
-static void __arc_push(struct arc_policy *a,
-		     enum arc_state s, struct arc_entry *e)
-{
-	e->state = s;
-
-	switch (s) {
-	case ARC_T1:
-		__alloc_cblock(a, e->cblock);
-		queue_push(&a->t1, &e->list);
-		__arc_insert(a, e);
-		break;
-
-	case ARC_T2:
-		__alloc_cblock(a, e->cblock);
-		queue_push(&a->t2, &e->list);
-		__arc_insert(a, e);
-		break;
-
-	case ARC_B1:
-		queue_push(&a->b1, &e->list);
-		break;
-
-	case ARC_B2:
-		queue_push(&a->b2, &e->list);
-		break;
-	}
-}
-
-static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
-{
-	struct arc_entry *e = NULL;
-
-#define POP(x) container_of(queue_pop(x), struct arc_entry, list)
-
-	switch (s) {
-	case ARC_T1:
-		BUG_ON(queue_empty(&a->t1));
-		e = POP(&a->t1);
-		__arc_remove(a, e);
-		__free_cblock(a, e->cblock);
-		break;
-
-	case ARC_T2:
-		BUG_ON(queue_empty(&a->t2));
-		e = POP(&a->t2);
-		__arc_remove(a, e);
-		__free_cblock(a, e->cblock);
-		break;
-
-	case ARC_B1:
-		BUG_ON(queue_empty(&a->b1));
-		e = POP(&a->b1);
-		break;
-
-	case ARC_B2:
-		BUG_ON(queue_empty(&a->b2));
-		e = POP(&a->b2);
-		break;
-	}
-
-#undef POP
-
-	return e;
-}
-
-/*
- * fe may be NULL.
- */
-/* FIXME: replace fe with a bool */
-static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe, struct arc_result *result)
-{
-	struct arc_entry *e;
-	dm_block_t t1_size = queue_size(&a->t1);
-
-	result->op = ARC_REPLACE;
-
-	if (t1_size &&
-	    ((t1_size > a->p) || (fe && (fe->state == ARC_B2) && (t1_size == a->p)))) {
-		e = __arc_pop(a, ARC_T1);
-
-		result->old_oblock = e->oblock;
-		result->cblock = e->cblock;
-
-		__arc_push(a, ARC_B1, e);
-	} else {
-		e = __arc_pop(a, ARC_T2);
-
-		result->old_oblock = e->oblock;
-		result->cblock = e->cblock;
-
-		__arc_push(a, ARC_B2, e);
-	}
-
-	return e->cblock;
-}
-
-/*
- * FIXME: the size of the interesting blocks hash table seems to be
- * directly related to the eviction rate.  So maybe we should resize on the
- * fly to get to a target eviction rate?
- */
-static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int data_dir)
-{
-	const dm_block_t BIG_PRIME = 4294967291UL;
-	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->interesting_size;
-
-	if (origin == a->last_lookup)
-		return 0;
-
-	if (a->interesting_blocks[h] == origin)
-		return 1;
-
-	a->interesting_blocks[h] = origin;
-	return 0;
-}
-
-static inline bool arc_random_stream(struct arc_policy *a)
-{
-	return !a->seq_stream;
-}
-
-static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
-{
-	if (bio->bi_sector == a->last_end_oblock + 1) {
-		/* Block sequential to last io */
-		a->nr_seq_samples++;
-	} else {
-		/* One non sequential IO resets the existing data */
-		if (a->nr_seq_samples) {
-			a->nr_seq_samples = 0;
-			a->nr_rand_samples = 0;
-		}
-		a->nr_rand_samples++;
-	}
-
-	a->last_end_oblock = bio->bi_sector + (bio->bi_size >> SECTOR_SHIFT) - 1;
-
-	/*
-	 * If current stream state is sequential and we see 4 random IO,
-	 * change state. Otherwise if current state is random and we see
-	 * 512 sequential IO, change stream state to sequential.
-	 *
-	 * FIXME: This number (512) should be tunable so that a user can
-	 * control the sequential IO caching behavior based on the workload.
-	 */
-
-	if (a->seq_stream && a->nr_rand_samples >= 4) {
-		a->seq_stream = false;
-		a->nr_seq_samples = a->nr_rand_samples = 0;
-		pr_alert("switched stream state to random. nr_rand=%u"
-			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
-	} else if (!a->seq_stream && a->nr_seq_samples >= 512) {
-		a->seq_stream = true;
-		a->nr_seq_samples = a->nr_rand_samples = 0;
-		pr_alert("switched stream state to sequential. nr_rand=%u"
-			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
-	}
-}
-
-static void __arc_map(struct arc_policy *a,
-		      dm_block_t origin_block,
-		      int data_dir,
-		      bool can_migrate,
-		      bool cheap_copy,
-		      struct arc_result *result)
-{
-	int r;
-	dm_block_t new_cache;
-	dm_block_t delta;
-	dm_block_t b1_size = queue_size(&a->b1);
-	dm_block_t b2_size = queue_size(&a->b2);
-	dm_block_t l1_size, l2_size;
-
-	struct arc_entry *e;
-
-	e = __arc_lookup(a, origin_block);
-	if (e) {
-		bool do_push = 1;
-
-		switch (e->state) {
-		case ARC_T1:
-			result->op = ARC_HIT;
-			result->cblock = e->cblock;
-			if (a->last_lookup != origin_block) {
-				__free_cblock(a, e->cblock);
-				queue_del(&a->t1, &e->list);
-				__arc_remove(a, e);
-			} else
-				do_push = 0;
-			break;
-
-		case ARC_T2:
-			result->op = ARC_HIT;
-			result->cblock = e->cblock;
-			if (a->last_lookup != origin_block) {
-				__free_cblock(a, e->cblock);
-				queue_del(&a->t2, &e->list);
-				__arc_remove(a, e);
-			} else
-				do_push = 0;
-			break;
-
-		case ARC_B1:
-			if (!can_migrate) {
-				result->op = ARC_MISS;
-				return;
-			}
-
-			delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
-			a->p = min(a->p + delta, a->cache_size);
-			new_cache = __arc_demote(a, e, result);
-
-			queue_del(&a->b1, &e->list);
-
-			e->oblock = origin_block;
-			e->cblock = new_cache;
-			break;
-
-		case ARC_B2:
-			if (!can_migrate) {
-				result->op = ARC_MISS;
-				return;
-			}
-
-			delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
-			a->p = max(a->p - delta, 0ULL);
-			new_cache = __arc_demote(a, e, result);
-
-			queue_del(&a->b2, &e->list);
-
-			e->oblock = origin_block;
-			e->cblock = new_cache;
-			break;
-		}
-
-		if (do_push)
-			__arc_push(a, ARC_T2, e);
-		return;
-	}
-
-	/* FIXME: this is turning into a huge mess */
-	cheap_copy = cheap_copy && __any_free_entries(a);
-	if (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir) && arc_random_stream(a))) {
-		/* carry on, perverse logic */
-	} else {
-		result->op = ARC_MISS;
-		return;
-	}
-
-	l1_size = queue_size(&a->t1) + b1_size;
-	l2_size = queue_size(&a->t2) + b2_size;
-	if (l1_size == a->cache_size) {
-		if (!can_migrate)  {
-			result->op = ARC_MISS;
-			return;
-		}
-
-		if (queue_size(&a->t1) < a->cache_size) {
-			e = __arc_pop(a, ARC_B1);
-
-			new_cache = __arc_demote(a, NULL, result);
-			e->oblock = origin_block;
-			e->cblock = new_cache;
-
-		} else {
-			e = __arc_pop(a, ARC_T1);
-
-			result->op = ARC_REPLACE;
-			result->old_oblock = e->oblock;
-			e->oblock = origin_block;
-			result->cblock = e->cblock;
-		}
-
-	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
-		if (!can_migrate)  {
-			result->op = ARC_MISS;
-			return;
-		}
-
-		if (l1_size + l2_size == 2 * a->cache_size) {
-			e = __arc_pop(a, ARC_B2);
-			e->oblock = origin_block;
-			e->cblock = __arc_demote(a, NULL, result);
-
-		} else {
-			e = __arc_alloc_entry(a);
-			e->oblock = origin_block;
-			e->cblock = __arc_demote(a, NULL, result);
-			//__alloc_cblock(a, e->cblock);
-		}
-
-	} else {
-		e = __arc_alloc_entry(a);
-		r = __find_free_cblock(a, &e->cblock);
-		BUG_ON(r);
-
-		result->op = ARC_NEW;
-		result->cblock = e->cblock;
-		e->oblock = origin_block;
-	}
-
-	__arc_push(a, ARC_T1, e);
-}
-
-static void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
-		    bool can_migrate, bool cheap_copy,
-		    struct arc_result *result, struct bio *bio)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&a->lock, flags);
-	__arc_update_io_stream_data(a, bio);
-	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
-	a->last_lookup = origin_block;
-	spin_unlock_irqrestore(&a->lock, flags);
 }
 
 /*----------------------------------------------------------------*/
@@ -739,7 +152,7 @@ struct cache_c {
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
 
-	struct arc_policy *policy;
+	struct dm_cache_policy *policy;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -1106,23 +519,22 @@ static void process_flush_bio(struct cache_c *c, struct bio *bio)
 	issue(c, bio);
 }
 
+#if 0
 static bool covers_block(struct cache_c *c, struct bio *bio)
 {
 	return !(bio->bi_sector & c->offset_mask) &&
 		(bio->bi_size == (c->sectors_per_block << SECTOR_SHIFT));
 }
+#endif
 
 static void process_discard_bio(struct cache_c *c, struct bio *bio)
 {
+#if 0
 	int r;
 	struct cell_key key;
-	struct arc_result lookup_result;
+	struct policy_result lookup_result;
 	dm_block_t block = get_bio_block(c, bio);
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-
-	pr_alert("process_discard_bio: bi_sector = %lu, bi_size = %lu\n",
-		 (unsigned long) bio->bi_sector,
-		 (unsigned long) bio->bi_size);
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -1132,15 +544,15 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, bio_data_dir(bio), 0, 0, &lookup_result, bio);
+	policy_map(c->policy, block, bio_data_dir(bio), 0, 0, bio, &lookup_result);
 	switch (lookup_result.op) {
-	case ARC_HIT:
+	case POLICY_HIT:
 		h->all_io_entry = ds_inc(c->all_io_ds);
 		remap_to_cache(c, bio, lookup_result.cblock);
 		issue(c, bio);
 		break;
 
-	case ARC_MISS:
+	case POLICY_MISS:
 		h->all_io_entry = ds_inc(c->all_io_ds);
 		remap_to_origin(c, bio);
 		issue(c, bio);
@@ -1152,6 +564,23 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 
 	if (covers_block(c, bio))
 		clear_bit(block, c->dirty_bitset);
+#else
+	/*
+	 * No passdown.
+	 */
+	dm_block_t start_block = dm_div_up(bio->bi_sector, c->sectors_per_block);
+	dm_block_t end_block = bio->bi_sector + (bio->bi_size >> SECTOR_SHIFT);
+	dm_block_t b;
+
+	do_div(end_block, c->sectors_per_block);
+
+	for (b = start_block; b < end_block; b++) {
+		//pr_alert("discarding block %lu\n", (unsigned long) b);
+		clear_bit(b, c->dirty_bitset);
+	}
+
+	bio_endio(bio, 0);
+#endif
 }
 
 static void process_bio(struct cache_c *c, struct bio *bio)
@@ -1161,7 +590,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
-	struct arc_result lookup_result;
+	struct policy_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
 	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
@@ -1175,9 +604,9 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, &lookup_result, bio);
+	policy_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, bio, &lookup_result);
 	switch (lookup_result.op) {
-	case ARC_HIT:
+	case POLICY_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
@@ -1187,7 +616,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		issue(c, bio);
 		break;
 
-	case ARC_MISS:
+	case POLICY_MISS:
 		debug("miss %lu (process_bio)\n",
 		      (unsigned long) block);
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
@@ -1196,7 +625,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		issue(c, bio);
 		break;
 
-	case ARC_NEW:
+	case POLICY_NEW:
 		debug("promote %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
@@ -1213,7 +642,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		}
 		break;
 
-	case ARC_REPLACE:
+	case POLICY_REPLACE:
 		debug("demote/promote (process_bio)\n");
 		atomic_inc(&c->nr_migrations);
 		atomic_inc(&c->demotion);
@@ -1361,7 +790,7 @@ static void cache_dtr(struct dm_target *ti)
 	dm_put_device(ti, c->metadata_dev);
 	dm_put_device(ti, c->origin_dev);
 	dm_put_device(ti, c->cache_dev);
-	arc_destroy(c->policy);
+	policy_destroy(c->policy);
 
 	kfree(c);
 }
@@ -1384,22 +813,7 @@ static sector_t get_dev_size(struct dm_dev *dev)
 static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 {
 	struct cache_c *c = context;
-	struct arc_entry *e;
-
-	debug("loading mapping %lu -> %lu, context = %p\n",
-	      (unsigned long) oblock,
-	      (unsigned long) cblock,
-	      context);
-
-	e = __arc_alloc_entry(c->policy);
-	if (!e)
-		return -ENOMEM;
-
-	e->cblock = cblock;
-	e->oblock = oblock;
-	__arc_push(c->policy, ARC_T1, e);
-
-	return 0;
+	return policy_load_mapping(c->policy, oblock, cblock);
 }
 
 /*
@@ -1526,7 +940,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	nr_cache_blocks = get_dev_size(c->cache_dev) >> c->block_shift;
-	c->policy = arc_create(nr_cache_blocks);
+	c->policy = arc_policy_create(nr_cache_blocks);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad10;
@@ -1557,7 +971,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad11:
-	arc_destroy(c->policy);
+	policy_destroy(c->policy);
 bad10:
 	mempool_destroy(c->migration_pool);
 bad9:
@@ -1673,7 +1087,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		residency = min(c->policy->nr_allocated, c->policy->cache_size);
+		residency = policy_residency(c->policy);
 
 		DMEMIT("%u %u %u %u %u %u %llu",
 		       (unsigned) atomic_read(&c->read_hit),
@@ -1725,12 +1139,29 @@ static int cache_bvec_merge(struct dm_target *ti,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
+static void set_discard_limits(struct cache_c *c, struct queue_limits *limits)
+{
+	/*
+	 * FIXME: these limits may be incompatible with the cache's data device
+	 */
+	limits->max_discard_sectors = c->sectors_per_block * 1024;
+
+	/*
+	 * This is just a hint, and not enforced.  We have to cope with
+	 * bios that cover a block partially.  A discard that spans a block
+	 * boundary is not sent to this target.
+	 */
+	limits->discard_granularity = c->sectors_per_block << SECTOR_SHIFT;
+	limits->discard_zeroes_data = 0;
+}
+
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct cache_c *c = ti->private;
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, c->sectors_per_block << SECTOR_SHIFT);
+	set_discard_limits(c, limits);
 }
 
 /*----------------------------------------------------------------*/
