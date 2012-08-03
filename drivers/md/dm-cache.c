@@ -519,23 +519,22 @@ static void process_flush_bio(struct cache_c *c, struct bio *bio)
 	issue(c, bio);
 }
 
+#if 0
 static bool covers_block(struct cache_c *c, struct bio *bio)
 {
 	return !(bio->bi_sector & c->offset_mask) &&
 		(bio->bi_size == (c->sectors_per_block << SECTOR_SHIFT));
 }
+#endif
 
 static void process_discard_bio(struct cache_c *c, struct bio *bio)
 {
+#if 0
 	int r;
 	struct cell_key key;
 	struct policy_result lookup_result;
 	dm_block_t block = get_bio_block(c, bio);
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-
-	pr_alert("process_discard_bio: bi_sector = %lu, bi_size = %lu\n",
-		 (unsigned long) bio->bi_sector,
-		 (unsigned long) bio->bi_size);
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -565,6 +564,23 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 
 	if (covers_block(c, bio))
 		clear_bit(block, c->dirty_bitset);
+#else
+	/*
+	 * No passdown.
+	 */
+	dm_block_t start_block = dm_div_up(bio->bi_sector, c->sectors_per_block);
+	dm_block_t end_block = bio->bi_sector + (bio->bi_size >> SECTOR_SHIFT);
+	dm_block_t b;
+
+	do_div(end_block, c->sectors_per_block);
+
+	for (b = start_block; b < end_block; b++) {
+		//pr_alert("discarding block %lu\n", (unsigned long) b);
+		clear_bit(b, c->dirty_bitset);
+	}
+
+	bio_endio(bio, 0);
+#endif
 }
 
 static void process_bio(struct cache_c *c, struct bio *bio)
@@ -796,7 +812,7 @@ static sector_t get_dev_size(struct dm_dev *dev)
 
 static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 {
-	struct cache_c *c;
+	struct cache_c *c = context;
 	return policy_load_mapping(c->policy, oblock, cblock);
 }
 
@@ -1123,12 +1139,29 @@ static int cache_bvec_merge(struct dm_target *ti,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
+static void set_discard_limits(struct cache_c *c, struct queue_limits *limits)
+{
+	/*
+	 * FIXME: these limits may be incompatible with the cache's data device
+	 */
+	limits->max_discard_sectors = c->sectors_per_block * 1024;
+
+	/*
+	 * This is just a hint, and not enforced.  We have to cope with
+	 * bios that cover a block partially.  A discard that spans a block
+	 * boundary is not sent to this target.
+	 */
+	limits->discard_granularity = c->sectors_per_block << SECTOR_SHIFT;
+	limits->discard_zeroes_data = 0;
+}
+
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct cache_c *c = ti->private;
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, c->sectors_per_block << SECTOR_SHIFT);
+	set_discard_limits(c, limits);
 }
 
 /*----------------------------------------------------------------*/
