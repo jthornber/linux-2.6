@@ -152,7 +152,7 @@ struct cache_c {
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
 
-	struct arc_policy *policy;
+	struct dm_cache_policy *policy;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -529,7 +529,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 {
 	int r;
 	struct cell_key key;
-	struct arc_result lookup_result;
+	struct policy_result lookup_result;
 	dm_block_t block = get_bio_block(c, bio);
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
@@ -545,15 +545,15 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, bio_data_dir(bio), 0, 0, &lookup_result);
+	policy_map(c->policy, block, bio_data_dir(bio), 0, 0, &lookup_result);
 	switch (lookup_result.op) {
-	case ARC_HIT:
+	case POLICY_HIT:
 		h->all_io_entry = ds_inc(c->all_io_ds);
 		remap_to_cache(c, bio, lookup_result.cblock);
 		issue(c, bio);
 		break;
 
-	case ARC_MISS:
+	case POLICY_MISS:
 		h->all_io_entry = ds_inc(c->all_io_ds);
 		remap_to_origin(c, bio);
 		issue(c, bio);
@@ -574,7 +574,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
-	struct arc_result lookup_result;
+	struct policy_result lookup_result;
 	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
 	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
@@ -588,9 +588,9 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	arc_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, &lookup_result);
+	policy_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, &lookup_result);
 	switch (lookup_result.op) {
-	case ARC_HIT:
+	case POLICY_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
@@ -600,7 +600,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		issue(c, bio);
 		break;
 
-	case ARC_MISS:
+	case POLICY_MISS:
 		debug("miss %lu (process_bio)\n",
 		      (unsigned long) block);
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
@@ -609,7 +609,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		issue(c, bio);
 		break;
 
-	case ARC_NEW:
+	case POLICY_NEW:
 		debug("promote %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
@@ -626,7 +626,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		}
 		break;
 
-	case ARC_REPLACE:
+	case POLICY_REPLACE:
 		debug("demote/promote (process_bio)\n");
 		atomic_inc(&c->nr_migrations);
 		atomic_inc(&c->demotion);
@@ -774,7 +774,7 @@ static void cache_dtr(struct dm_target *ti)
 	dm_put_device(ti, c->metadata_dev);
 	dm_put_device(ti, c->origin_dev);
 	dm_put_device(ti, c->cache_dev);
-	arc_destroy(c->policy);
+	policy_destroy(c->policy);
 
 	kfree(c);
 }
@@ -797,7 +797,7 @@ static sector_t get_dev_size(struct dm_dev *dev)
 static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 {
 	struct cache_c *c;
-	return arc_load_mapping(c->policy, oblock, cblock);
+	return policy_load_mapping(c->policy, oblock, cblock);
 }
 
 /*
@@ -924,7 +924,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	nr_cache_blocks = get_dev_size(c->cache_dev) >> c->block_shift;
-	c->policy = arc_create(nr_cache_blocks);
+	c->policy = arc_policy_create(nr_cache_blocks);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad10;
@@ -955,7 +955,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad11:
-	arc_destroy(c->policy);
+	policy_destroy(c->policy);
 bad10:
 	mempool_destroy(c->migration_pool);
 bad9:
@@ -1071,7 +1071,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		residency = arc_residency(c->policy);
+		residency = policy_residency(c->policy);
 
 		DMEMIT("%u %u %u %u %u %u %llu",
 		       (unsigned) atomic_read(&c->read_hit),

@@ -97,6 +97,8 @@ struct arc_entry {
 };
 
 struct arc_policy {
+	struct dm_cache_policy policy;
+
 	dm_block_t cache_size;
 
 	spinlock_t lock;
@@ -121,67 +123,15 @@ struct arc_policy {
 	dm_block_t last_lookup;
 };
 
-struct arc_policy *arc_create(dm_block_t cache_size)
+static struct arc_policy *to_arc_policy(struct dm_cache_policy *p)
 {
-	dm_block_t nr_buckets;
-	struct arc_policy *a = kmalloc(sizeof(*a), GFP_KERNEL);
-	if (!a)
-		return NULL;
-
-	a->cache_size = cache_size;
-	spin_lock_init(&a->lock);
-	a->p = 0;
-
-	queue_init(&a->b1);
-	queue_init(&a->t1);
-	queue_init(&a->b2);
-	queue_init(&a->t2);
-
-	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
-	if (!a->entries) {
-		kfree(a);
-		return NULL;
-	}
-
-	a->nr_allocated = 0;
-
-	a->nr_buckets = cache_size / 8;
-	nr_buckets = 16;
-	while (nr_buckets < a->nr_buckets)
-		nr_buckets <<= 1;
-	a->nr_buckets = nr_buckets;
-
-	a->hash_mask = a->nr_buckets - 1;
-	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
-	if (!a->table) {
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
-	a->interesting_size = cache_size / 2;
-	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
-	if (!a->interesting_blocks) {
-		kfree(a->table);
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
-	a->allocation_bitset = alloc_bitset(cache_size, 0);
-	if (!a->allocation_bitset) {
-		vfree(a->interesting_blocks);
-		kfree(a->table);
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
-	return a;
+	return container_of(p, struct arc_policy, policy);
 }
 
-void arc_destroy(struct arc_policy *a)
+static void arc_destroy(struct dm_cache_policy *p)
 {
+	struct arc_policy *a = to_arc_policy(p);
+
 	free_bitset(a->allocation_bitset);
 	vfree(a->interesting_blocks);
 	kfree(a->table);
@@ -349,12 +299,12 @@ static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 /*
  * fe may be NULL.
  */
-static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct arc_result *result)
+static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct policy_result *result)
 {
 	struct arc_entry *e;
 	dm_block_t t1_size = queue_size(&a->t1);
 
-	result->op = ARC_REPLACE;
+	result->op = POLICY_REPLACE;
 
 	if (t1_size &&
 	    ((t1_size > a->p) || (is_arc_b2 && (t1_size == a->p)))) {
@@ -401,7 +351,7 @@ static void __arc_map(struct arc_policy *a,
 		      int data_dir,
 		      bool can_migrate,
 		      bool cheap_copy,
-		      struct arc_result *result)
+		      struct policy_result *result)
 {
 	int r;
 	dm_block_t new_cache;
@@ -418,7 +368,7 @@ static void __arc_map(struct arc_policy *a,
 
 		switch (e->state) {
 		case ARC_T1:
-			result->op = ARC_HIT;
+			result->op = POLICY_HIT;
 			result->cblock = e->cblock;
 			if (a->last_lookup != origin_block) {
 				__free_cblock(a, e->cblock);
@@ -429,7 +379,7 @@ static void __arc_map(struct arc_policy *a,
 			break;
 
 		case ARC_T2:
-			result->op = ARC_HIT;
+			result->op = POLICY_HIT;
 			result->cblock = e->cblock;
 			if (a->last_lookup != origin_block) {
 				__free_cblock(a, e->cblock);
@@ -441,7 +391,7 @@ static void __arc_map(struct arc_policy *a,
 
 		case ARC_B1:
 			if (!can_migrate) {
-				result->op = ARC_MISS;
+				result->op = POLICY_MISS;
 				return;
 			}
 
@@ -457,7 +407,7 @@ static void __arc_map(struct arc_policy *a,
 
 		case ARC_B2:
 			if (!can_migrate) {
-				result->op = ARC_MISS;
+				result->op = POLICY_MISS;
 				return;
 			}
 
@@ -482,7 +432,7 @@ static void __arc_map(struct arc_policy *a,
 	if (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir))) {
 		/* carry on, perverse logic */
 	} else {
-		result->op = ARC_MISS;
+		result->op = POLICY_MISS;
 		return;
 	}
 
@@ -490,7 +440,7 @@ static void __arc_map(struct arc_policy *a,
 	l2_size = queue_size(&a->t2) + b2_size;
 	if (l1_size == a->cache_size) {
 		if (!can_migrate)  {
-			result->op = ARC_MISS;
+			result->op = POLICY_MISS;
 			return;
 		}
 
@@ -504,7 +454,7 @@ static void __arc_map(struct arc_policy *a,
 		} else {
 			e = __arc_pop(a, ARC_T1);
 
-			result->op = ARC_REPLACE;
+			result->op = POLICY_REPLACE;
 			result->old_oblock = e->oblock;
 			e->oblock = origin_block;
 			result->cblock = e->cblock;
@@ -512,7 +462,7 @@ static void __arc_map(struct arc_policy *a,
 
 	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
 		if (!can_migrate)  {
-			result->op = ARC_MISS;
+			result->op = POLICY_MISS;
 			return;
 		}
 
@@ -533,7 +483,7 @@ static void __arc_map(struct arc_policy *a,
 		r = __find_free_cblock(a, &e->cblock);
 		BUG_ON(r);
 
-		result->op = ARC_NEW;
+		result->op = POLICY_NEW;
 		result->cblock = e->cblock;
 		e->oblock = origin_block;
 	}
@@ -541,10 +491,11 @@ static void __arc_map(struct arc_policy *a,
 	__arc_push(a, ARC_T1, e);
 }
 
-void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
-	     bool can_migrate, bool cheap_copy, struct arc_result *result)
+static void arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+		    bool can_migrate, bool cheap_copy, struct policy_result *result)
 {
 	unsigned long flags;
+	struct arc_policy *a = to_arc_policy(p);
 
 	spin_lock_irqsave(&a->lock, flags);
 	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
@@ -552,8 +503,9 @@ void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
 	spin_unlock_irqrestore(&a->lock, flags);
 }
 
-int arc_load_mapping(struct arc_policy *a, dm_block_t oblock, dm_block_t cblock)
+static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
 {
+	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e;
 
 	debug("loading mapping %lu -> %lu, context = %p\n",
@@ -572,9 +524,76 @@ int arc_load_mapping(struct arc_policy *a, dm_block_t oblock, dm_block_t cblock)
 	return 0;
 }
 
-dm_block_t arc_residency(struct arc_policy *a)
+static dm_block_t arc_residency(struct dm_cache_policy *p)
 {
+	struct arc_policy *a = to_arc_policy(p);
 	return min(a->nr_allocated, a->cache_size);
+}
+
+/*----------------------------------------------------------------*/
+
+struct dm_cache_policy *arc_policy_create(dm_block_t cache_size)
+{
+	dm_block_t nr_buckets;
+	struct arc_policy *a = kmalloc(sizeof(*a), GFP_KERNEL);
+	if (!a)
+		return NULL;
+
+	a->policy.destroy = arc_destroy;
+	a->policy.map = arc_map;
+	a->policy.load_mapping = arc_load_mapping;
+	a->policy.residency = arc_residency;
+
+	a->cache_size = cache_size;
+	spin_lock_init(&a->lock);
+	a->p = 0;
+
+	queue_init(&a->b1);
+	queue_init(&a->t1);
+	queue_init(&a->b2);
+	queue_init(&a->t2);
+
+	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
+	if (!a->entries) {
+		kfree(a);
+		return NULL;
+	}
+
+	a->nr_allocated = 0;
+
+	a->nr_buckets = cache_size / 8;
+	nr_buckets = 16;
+	while (nr_buckets < a->nr_buckets)
+		nr_buckets <<= 1;
+	a->nr_buckets = nr_buckets;
+
+	a->hash_mask = a->nr_buckets - 1;
+	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
+	if (!a->table) {
+		vfree(a->entries);
+		kfree(a);
+		return NULL;
+	}
+
+	a->interesting_size = cache_size / 2;
+	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
+	if (!a->interesting_blocks) {
+		kfree(a->table);
+		vfree(a->entries);
+		kfree(a);
+		return NULL;
+	}
+
+	a->allocation_bitset = alloc_bitset(cache_size, 0);
+	if (!a->allocation_bitset) {
+		vfree(a->interesting_blocks);
+		kfree(a->table);
+		vfree(a->entries);
+		kfree(a);
+		return NULL;
+	}
+
+	return &a->policy;
 }
 
 /*----------------------------------------------------------------*/

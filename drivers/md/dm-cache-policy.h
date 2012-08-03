@@ -11,26 +11,53 @@
 
 /*----------------------------------------------------------------*/
 
-enum arc_operation {
-	ARC_HIT,
-	ARC_MISS,
-	ARC_NEW,
-	ARC_REPLACE
+enum policy_operation {
+	POLICY_HIT,
+	POLICY_MISS,
+	POLICY_NEW,
+	POLICY_REPLACE
 };
 
-struct arc_result {
-	enum arc_operation op;
-
+struct policy_result {
+	enum policy_operation op;
 	dm_block_t old_oblock;
 	dm_block_t cblock;
 };
 
-struct arc_policy *arc_create(dm_block_t cache_size);
-void arc_destroy(struct arc_policy *a);
-void arc_map(struct arc_policy *a, dm_block_t origin_block, int data_dir,
-	     bool can_migrate, bool cheap_copy, struct arc_result *result);
-int arc_load_mapping(struct arc_policy *a, dm_block_t oblock, dm_block_t cblock);
-dm_block_t arc_residency(struct arc_policy *a);
+struct dm_cache_policy {
+	void (*destroy)(struct dm_cache_policy *p);
+	void (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+		    bool can_migrate, bool cheap_copy,
+		    struct policy_result *result);
+	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
+	dm_block_t (*residency)(struct dm_cache_policy *p);
+};
+
+static inline void policy_destroy(struct dm_cache_policy *p)
+{
+	p->destroy(p);
+}
+
+static inline void policy_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+			      bool can_migrate, bool cheap_copy,
+			      struct policy_result *result)
+{
+	p->map(p, origin_block, data_dir, can_migrate, cheap_copy, result);
+}
+
+static inline int policy_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
+{
+	return p->load_mapping(p, oblock, cblock);
+}
+
+static inline dm_block_t policy_residency(struct dm_cache_policy *p)
+{
+	return p->residency(p);
+}
+
+/*----------------------------------------------------------------*/
+
+struct dm_cache_policy *arc_policy_create(dm_block_t cache_size);
 
 /*----------------------------------------------------------------*/
 
