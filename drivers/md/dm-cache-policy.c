@@ -296,9 +296,6 @@ static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 	return e;
 }
 
-/*
- * fe may be NULL.
- */
 static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct policy_result *result)
 {
 	struct arc_entry *e;
