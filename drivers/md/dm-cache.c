@@ -372,8 +372,7 @@ static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 /*
  * fe may be NULL.
  */
-/* FIXME: replace fe with a bool */
-static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe, struct arc_result *result)
+static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct arc_result *result)
 {
 	struct arc_entry *e;
 	dm_block_t t1_size = queue_size(&a->t1);
@@ -381,7 +380,7 @@ static dm_block_t __arc_demote(struct arc_policy *a, struct arc_entry *fe, struc
 	result->op = ARC_REPLACE;
 
 	if (t1_size &&
-	    ((t1_size > a->p) || (fe && (fe->state == ARC_B2) && (t1_size == a->p)))) {
+	    ((t1_size > a->p) || (is_arc_b2 && (t1_size == a->p)))) {
 		e = __arc_pop(a, ARC_T1);
 
 		result->old_oblock = e->oblock;
@@ -471,7 +470,7 @@ static void __arc_map(struct arc_policy *a,
 
 			delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
 			a->p = min(a->p + delta, a->cache_size);
-			new_cache = __arc_demote(a, e, result);
+			new_cache = __arc_demote(a, 0, result);
 
 			queue_del(&a->b1, &e->list);
 
@@ -487,7 +486,7 @@ static void __arc_map(struct arc_policy *a,
 
 			delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
 			a->p = max(a->p - delta, 0ULL);
-			new_cache = __arc_demote(a, e, result);
+			new_cache = __arc_demote(a, 1, result);
 
 			queue_del(&a->b2, &e->list);
 
@@ -521,7 +520,7 @@ static void __arc_map(struct arc_policy *a,
 		if (queue_size(&a->t1) < a->cache_size) {
 			e = __arc_pop(a, ARC_B1);
 
-			new_cache = __arc_demote(a, NULL, result);
+			new_cache = __arc_demote(a, 0, result);
 			e->oblock = origin_block;
 			e->cblock = new_cache;
 
@@ -543,12 +542,12 @@ static void __arc_map(struct arc_policy *a,
 		if (l1_size + l2_size == 2 * a->cache_size) {
 			e = __arc_pop(a, ARC_B2);
 			e->oblock = origin_block;
-			e->cblock = __arc_demote(a, NULL, result);
+			e->cblock = __arc_demote(a, 0, result);
 
 		} else {
 			e = __arc_alloc_entry(a);
 			e->oblock = origin_block;
-			e->cblock = __arc_demote(a, NULL, result);
+			e->cblock = __arc_demote(a, 0, result);
 			//__alloc_cblock(a, e->cblock);
 		}
 
