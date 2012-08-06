@@ -905,16 +905,6 @@ static void cache_dtr(struct dm_target *ti)
 	kfree(c);
 }
 
-static int get_device_(struct dm_target *ti, char *arg, struct dm_dev **dev,
-		 char *errstr)
-{
-	int r = dm_get_device(ti, arg, FMODE_READ | FMODE_WRITE, dev);
-	if (r)
-		ti->error = errstr;
-
-	return r;
-}
-
 static sector_t get_dev_size(struct dm_dev *dev)
 {
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
@@ -963,17 +953,23 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	c->ti = ti;
 
-	if (get_device_(c->ti, argv[0], &c->metadata_dev,
-			"Error opening metadata device"))
+	r = dm_get_device(c->ti, argv[0], FMODE_READ | FMODE_WRITE, &c->metadata_dev);
+	if (r) {
+		ti->error = "Error opening metadata device";
 		goto bad1;
+	}
 
-	if (get_device_(c->ti, argv[1], &c->origin_dev,
-			"Error opening origin device"))
+	r = dm_get_device(c->ti, argv[1], FMODE_READ | FMODE_WRITE, &c->origin_dev);
+	if (r) {
+		ti->error = "Error opening origin device";
 		goto bad2;
+	}
 
-	if (get_device_(c->ti, argv[2], &c->cache_dev,
-			"Error opening cache device"))
+	r = dm_get_device(c->ti, argv[2], FMODE_READ | FMODE_WRITE, &c->cache_dev);
+	if (r) {
+		ti->error = "Error opening cache device";
 		goto bad3;
+	}
 
 	origin_size = get_dev_size(c->origin_dev);
 	if (ti->len > origin_size) {
@@ -1319,7 +1315,7 @@ static void dm_cache_exit(void)
 module_init(dm_cache_init);
 module_exit(dm_cache_exit);
 
-MODULE_DESCRIPTION(DM_NAME "device-mapper cache target");
+MODULE_DESCRIPTION(DM_NAME " cache target");
 MODULE_AUTHOR("Joe Thornber <ejt@redhat.com>");
 MODULE_LICENSE("GPL");
 
