@@ -151,6 +151,7 @@ struct cache_c {
 
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
+	struct migration *next_migration;
 
 	struct dm_cache_policy *policy;
 
@@ -260,6 +261,30 @@ static void issue(struct cache_c *c, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
+static int prealloc_migration(struct cache_c *c)
+{
+	if (c->next_migration)
+		return 0;
+
+	c->next_migration = mempool_alloc(c->migration_pool, GFP_ATOMIC);
+	return c->next_migration ? 0 : -ENOMEM;
+}
+
+static struct migration *alloc_migration(struct cache_c *c)
+{
+	struct migration *r = c->next_migration;
+
+	BUG_ON(!r);
+	c->next_migration = NULL;
+
+	return r;
+}
+
+static void free_migration(struct cache_c *c, struct migration *mg)
+{
+	mempool_free(mg, c->migration_pool);
+}
+
 static void __cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
 	(holder ? cell_release : cell_release_no_holder)(cell, &c->deferred_bios);
@@ -289,7 +314,7 @@ static void error_migration(struct migration *mg)
 
 	atomic_dec(&c->nr_migrations);
 	times_end(&c->migration_times);
-	mempool_free(mg, c->migration_pool);
+	free_migration(c, mg);
 	wake_worker(c);
 }
 
@@ -365,6 +390,7 @@ static void complete_migration(struct cache_c *c, struct migration *mg)
 	case MT_PROMOTE:
 		r = dm_cache_insert_mapping(c->cmd, mg->new_oblock, mg->cblock);
 		if (r)
+			/* FIXME: finish */
 			goto out;
 
 		__cell_defer(c, mg->new_ocell, 1);
@@ -382,7 +408,7 @@ static void complete_migration(struct cache_c *c, struct migration *mg)
 	}
 
 out:
-	mempool_free(mg, c->migration_pool);
+	free_migration(c, mg);
 	atomic_dec(&c->nr_migrations);
 	times_end(&c->migration_times);
 }
@@ -453,10 +479,9 @@ static void quiesce_migration(struct cache_c *c, struct migration *mg)
 		queue_quiesced_migration(c, mg);
 }
 
-/* FIXME: we can't just block here, need to ensure the migration is allocated before we start processing a bio */
 static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
 {
-	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
+	struct migration *mg = alloc_migration(c);
 
 	mg->type = MT_PROMOTE;
 	mg->need_demote = 0;
@@ -477,7 +502,7 @@ static void writeback_then_promote(struct cache_c *c,
 				   struct dm_bio_prison_cell *old_ocell,
 				   struct dm_bio_prison_cell *new_ocell)
 {
-	struct migration *mg = mempool_alloc(c->migration_pool, GFP_NOIO);
+	struct migration *mg = alloc_migration(c);
 
 	mg->type = MT_REPLACE;
 	mg->need_demote = 1;
@@ -684,6 +709,19 @@ static void process_deferred_bios(struct cache_c *c)
 	spin_unlock_irqrestore(&c->lock, flags);
 
 	while ((bio = bio_list_pop(&bios))) {
+		/*
+		 * If we've got no free migration structs, and processing
+		 * this bio might require one, we pause until there are some
+		 * prepared mappings to process.
+		 */
+		if (prealloc_migration(c)) {
+			spin_lock_irqsave(&c->lock, flags);
+			bio_list_merge(&c->deferred_bios, &bios);
+			spin_unlock_irqrestore(&c->lock, flags);
+
+			break;
+		}
+
 		if (bio->bi_rw & REQ_FLUSH)
 			process_flush_bio(c, bio);
 
@@ -778,6 +816,9 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&c->demotion));
 	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
 	pr_alert("no copy promotions:\t%u\n", (unsigned) atomic_read(&c->no_copy_promotion));
+
+	if (c->next_migration)
+		mempool_free(c->next_migration, c->migration_pool);
 
 	mempool_destroy(c->migration_pool);
 	mempool_destroy(c->endio_hook_pool);
