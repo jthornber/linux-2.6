@@ -11,6 +11,7 @@ dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
+dm-hsm-y	+= dm-cache.o dm-cache-metadata.o dm-cache-policy.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -29,6 +30,7 @@ obj-$(CONFIG_MD_FAULTY)		+= faulty.o
 obj-$(CONFIG_BLK_DEV_MD)	+= md-mod.o
 obj-$(CONFIG_BLK_DEV_DM)	+= dm-mod.o
 obj-$(CONFIG_DM_BUFIO)		+= dm-bufio.o
+obj-$(CONFIG_DM_PRISON)		+= dm-bio-prison.o
 obj-$(CONFIG_DM_CRYPT)		+= dm-crypt.o
 obj-$(CONFIG_DM_DELAY)		+= dm-delay.o
 obj-$(CONFIG_DM_FLAKEY)		+= dm-flakey.o
@@ -42,6 +44,7 @@ obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
+obj-$(CONFIG_DM_CACHE)		+= dm-hsm.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
