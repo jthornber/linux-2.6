@@ -361,6 +361,7 @@ static void issue_copy(struct cache_c *c, struct migration *mg)
 	int r;
 	struct dm_io_region o_region, c_region;
 
+	times_start(&c->migration_times);
 	o_region.bdev = c->origin_dev->bdev;
 	o_region.count = c->sectors_per_block;
 
@@ -505,8 +506,6 @@ static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, str
 	mg->cblock = cblock;
 	mg->old_ocell = NULL;
 	mg->new_ocell = cell;
-
-	times_start(&c->migration_times);
 	quiesce_migration(c, mg);
 }
 
@@ -527,8 +526,6 @@ static void writeback_then_promote(struct cache_c *c,
 	mg->cblock = cblock;
 	mg->old_ocell = old_ocell;
 	mg->new_ocell = new_ocell;
-
-	times_start(&c->migration_times);
 	quiesce_migration(c, mg);
 }
 
