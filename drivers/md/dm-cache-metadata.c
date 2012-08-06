@@ -18,7 +18,7 @@
 //#define debug(x...) pr_alert(x)
 #define debug(x...) ;
 
-#define DM_MSG_PREFIX   "thin metadata"
+#define DM_MSG_PREFIX   "cache metadata"
 
 #define CACHE_SUPERBLOCK_MAGIC 06142003
 #define CACHE_SUPERBLOCK_LOCATION 0
