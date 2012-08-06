@@ -139,6 +139,8 @@ struct cache_c {
 	struct list_head quiesced_migrations;
 	struct list_head completed_migrations;
 	atomic_t nr_migrations;
+	wait_queue_head_t migration_wait;
+
 	struct times migration_times;
 	unsigned long *dirty_bitset;
 
@@ -154,6 +156,7 @@ struct cache_c {
 	struct migration *next_migration;
 
 	struct dm_cache_policy *policy;
+	bool quiescing;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -285,6 +288,18 @@ static void free_migration(struct cache_c *c, struct migration *mg)
 	mempool_free(mg, c->migration_pool);
 }
 
+static void inc_nr_migrations(struct cache_c *c)
+{
+	atomic_inc(&c->nr_migrations);
+	wake_up(&c->migration_wait);
+}
+
+static void dec_nr_migrations(struct cache_c *c)
+{
+	atomic_dec(&c->nr_migrations);
+	wake_up(&c->migration_wait);
+}
+
 static void __cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
 	(holder ? cell_release : cell_release_no_holder)(cell, &c->deferred_bios);
@@ -312,7 +327,7 @@ static void error_migration(struct migration *mg)
 	__cell_defer(c, mg->new_ocell, 1);
 	spin_unlock_irqrestore(&c->lock, flags);
 
-	atomic_dec(&c->nr_migrations);
+	dec_nr_migrations(c);
 	times_end(&c->migration_times);
 	free_migration(c, mg);
 	wake_worker(c);
@@ -409,7 +424,7 @@ static void complete_migration(struct cache_c *c, struct migration *mg)
 
 out:
 	free_migration(c, mg);
-	atomic_dec(&c->nr_migrations);
+	dec_nr_migrations(c);
 	times_end(&c->migration_times);
 }
 
@@ -655,7 +670,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
 		if (!cheap_copy) {
-			atomic_inc(&c->nr_migrations);
+			inc_nr_migrations(c);
 			atomic_inc(&c->promotion);
 			promote(c, block, lookup_result.cblock, new_ocell);
 			release_cell = 0;
@@ -669,7 +684,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 
 	case POLICY_REPLACE:
 		debug("demote/promote (process_bio)\n");
-		atomic_inc(&c->nr_migrations);
+		inc_nr_migrations(c);
 		atomic_inc(&c->demotion);
 		atomic_inc(&c->promotion);
 		build_key(lookup_result.old_oblock, &key);
@@ -763,12 +778,64 @@ static void process_deferred_flush_bios(struct cache_c *c)
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
+static void start_quiescing(struct cache_c *c)
+{
+	spin_lock(&c->lock);
+	c->quiescing = 1;
+	spin_unlock(&c->lock);
+}
+
+static void stop_quiescing(struct cache_c *c)
+{
+	spin_lock(&c->lock);
+	c->quiescing = 0;
+	spin_unlock(&c->lock);
+}
+
+static bool is_quiescing(struct cache_c *c)
+{
+	int r;
+
+	spin_lock(&c->lock);
+	r = c->quiescing;
+	spin_unlock(&c->lock);
+
+	return r;
+}
+
+static void wait_for_migrations(struct cache_c *c)
+{
+	wait_event(c->migration_wait, atomic_read(&c->nr_migrations) == 0);
+}
+
+static void stop_worker(struct cache_c *c)
+{
+	flush_workqueue(c->wq);
+}
+
+static void requeue_deferred_io(struct cache_c *c)
+{
+	struct bio *bio;
+	struct bio_list bios;
+
+	bio_list_init(&bios);
+	bio_list_merge(&bios, &c->deferred_bios);
+	bio_list_init(&c->deferred_bios);
+
+	while ((bio = bio_list_pop(&bios)))
+		bio_endio(bio, DM_ENDIO_REQUEUE);
+}
+
 static int more_work(struct cache_c *c)
 {
-	return !bio_list_empty(&c->deferred_bios) ||
-		!bio_list_empty(&c->deferred_flush_bios) ||
-		!list_empty(&c->quiesced_migrations) ||
-		!list_empty(&c->completed_migrations);
+	if (is_quiescing(c))
+		return !list_empty(&c->quiesced_migrations) ||
+			!list_empty(&c->completed_migrations);
+	else
+		return !bio_list_empty(&c->deferred_bios) ||
+			!bio_list_empty(&c->deferred_flush_bios) ||
+			!list_empty(&c->quiesced_migrations) ||
+			!list_empty(&c->completed_migrations);
 }
 
 static void do_work(struct work_struct *ws)
@@ -776,10 +843,15 @@ static void do_work(struct work_struct *ws)
 	struct cache_c *c = container_of(ws, struct cache_c, worker);
 
 	do {
-		process_deferred_bios(c);
-		process_migrations(c, &c->quiesced_migrations, issue_copy);
-		process_migrations(c, &c->completed_migrations, complete_migration);
-		process_deferred_flush_bios(c);
+		if (is_quiescing(c)) {
+			process_migrations(c, &c->quiesced_migrations, issue_copy);
+			process_migrations(c, &c->completed_migrations, complete_migration);
+		} else {
+			process_deferred_bios(c);
+			process_migrations(c, &c->quiesced_migrations, issue_copy);
+			process_migrations(c, &c->completed_migrations, complete_migration);
+			process_deferred_flush_bios(c);
+		}
 
 	} while (more_work(c));
 }
@@ -930,6 +1002,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&c->quiesced_migrations);
 	INIT_LIST_HEAD(&c->completed_migrations);
 	atomic_set(&c->nr_migrations, 0);
+	init_waitqueue_head(&c->migration_wait);
 	times_init(&c->migration_times);
 
 	c->callbacks.congested_fn = cache_is_congested;
@@ -986,6 +1059,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error creating cache's policy";
 		goto bad10;
 	}
+	c->quiescing = 0;
 
 	atomic_set(&c->read_hit, 0);
 	atomic_set(&c->read_miss, 0);
@@ -1107,9 +1181,12 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 static void cache_postsuspend(struct dm_target *ti)
 {
 	struct cache_c *c = ti->private;
-	flush_workqueue(c->wq);
 
-	/* FIXME: wait for in flight migrations */
+	start_quiescing(c);
+	wait_for_migrations(c);
+	stop_worker(c);
+	requeue_deferred_io(c);
+	stop_quiescing(c);
 }
 
 static void cache_resume(struct dm_target *ti)
