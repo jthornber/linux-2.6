@@ -29,7 +29,15 @@ struct dm_cache_policy {
 	void (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
 		    bool can_migrate, bool cheap_copy,
 		    struct policy_result *result);
+
 	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
+
+	/* must succeed */
+	void (*remove_mapping)(struct dm_cache_policy *p, dm_block_t oblock);
+	void (*force_mapping)(struct dm_cache_policy *p, dm_block_t current_oblock,
+			      dm_block_t new_oblock,
+			      dm_block_t cblock);
+
 	dm_block_t (*residency)(struct dm_cache_policy *p);
 };
 
@@ -48,6 +56,18 @@ static inline void policy_map(struct dm_cache_policy *p, dm_block_t origin_block
 static inline int policy_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
 {
 	return p->load_mapping(p, oblock, cblock);
+}
+
+static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
+{
+	return p->remove_mapping(p, oblock);
+}
+
+static inline void policy_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblock,
+					dm_block_t new_oblock,
+					dm_block_t cblock)
+{
+	return p->force_mapping(p, current_oblock, new_oblock, cblock);
 }
 
 static inline dm_block_t policy_residency(struct dm_cache_policy *p)
