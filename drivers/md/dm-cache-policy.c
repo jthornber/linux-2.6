@@ -572,6 +572,37 @@ static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_blo
 	return 0;
 }
 
+static void arc_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
+{
+	struct arc_policy *a = to_arc_policy(p);
+	struct arc_entry *e = __arc_lookup(a, oblock);
+	struct queue *q;
+
+	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
+
+	__free_cblock(a, e->cblock);
+	queue_del(e->state == ARC_T1 ? &a->t1 : &a->t2, &e->list);
+	__arc_remove(a, e);
+	__arc_push(a, ARC_B2, e);
+}
+
+static void arc_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblock,
+			      dm_block_t new_oblock,
+			      dm_block_t cblock)
+{
+	struct arc_policy *a = to_arc_policy(p);
+	struct arc_entry *e = __arc_lookup(a, current_oblock);
+	struct queue *q;
+
+	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
+
+	__free_cblock(a, e->cblock);
+	queue_del(e->state == ARC_T1 ? &a->t1 : &a->t2, &e->list);
+	__arc_remove(a, e);
+	e->oblock = new_oblock;
+	__arc_push(a, ARC_T1, e);
+}
+
 static dm_block_t arc_residency(struct dm_cache_policy *p)
 {
 	struct arc_policy *a = to_arc_policy(p);
@@ -590,6 +621,8 @@ struct dm_cache_policy *arc_policy_create(dm_block_t cache_size)
 	a->policy.destroy = arc_destroy;
 	a->policy.map = arc_map;
 	a->policy.load_mapping = arc_load_mapping;
+	a->policy.remove_mapping = arc_remove_mapping;
+	a->policy.force_mapping = arc_force_mapping;
 	a->policy.residency = arc_residency;
 
 	a->cache_size = cache_size;
