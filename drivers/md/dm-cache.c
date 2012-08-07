@@ -153,7 +153,7 @@ struct cache_c {
 
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
-	struct migration *next_migration;
+	struct dm_cache_migration *next_migration;
 
 	struct dm_cache_policy *policy;
 	bool quiescing;
@@ -179,7 +179,7 @@ enum migration_type {
 	MT_REPLACE
 };
 
-struct migration {
+struct dm_cache_migration {
 	enum migration_type type;
 	bool need_demote;
 
@@ -273,9 +273,9 @@ static int prealloc_migration(struct cache_c *c)
 	return c->next_migration ? 0 : -ENOMEM;
 }
 
-static struct migration *alloc_migration(struct cache_c *c)
+static struct dm_cache_migration *alloc_migration(struct cache_c *c)
 {
-	struct migration *r = c->next_migration;
+	struct dm_cache_migration *r = c->next_migration;
 
 	BUG_ON(!r);
 	c->next_migration = NULL;
@@ -283,7 +283,7 @@ static struct migration *alloc_migration(struct cache_c *c)
 	return r;
 }
 
-static void free_migration(struct cache_c *c, struct migration *mg)
+static void free_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	mempool_free(mg, c->migration_pool);
 }
@@ -316,7 +316,7 @@ static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool 
 	wake_worker(c);
 }
 
-static void error_migration(struct migration *mg)
+static void error_migration(struct dm_cache_migration *mg)
 {
 	unsigned long flags;
 	struct cache_c *c = mg->c;
@@ -336,7 +336,7 @@ static void error_migration(struct migration *mg)
 static void copy_complete(int read_err, unsigned long write_err, void *context)
 {
 	unsigned long flags;
-	struct migration *mg = (struct migration *) context;
+	struct dm_cache_migration *mg = (struct dm_cache_migration *) context;
 	struct cache_c *c = mg->c;
 
 	if (read_err || write_err) {
@@ -356,7 +356,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	wake_worker(c);
 }
 
-static void issue_copy(struct cache_c *c, struct migration *mg)
+static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	int r;
 	struct dm_io_region o_region, c_region;
@@ -385,7 +385,7 @@ static void issue_copy(struct cache_c *c, struct migration *mg)
 		error_migration(mg);
 }
 
-static void complete_migration(struct cache_c *c, struct migration *mg)
+static void complete_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	int r;
 
@@ -430,11 +430,11 @@ out:
 }
 
 static void process_migrations(struct cache_c *cache, struct list_head *head,
-			       void (*fn)(struct cache_c *, struct migration *))
+			       void (*fn)(struct cache_c *, struct dm_cache_migration *))
 {
 	unsigned long flags;
 	struct list_head list;
-	struct migration *mg, *tmp;
+	struct dm_cache_migration *mg, *tmp;
 
 	INIT_LIST_HEAD(&list);
 	spin_lock_irqsave(&cache->lock, flags);
@@ -445,12 +445,12 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 		fn(cache, mg);
 }
 
-static void __queue_quiesced_migration(struct cache_c *c, struct migration *mg)
+static void __queue_quiesced_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	list_add_tail(&mg->list, &c->quiesced_migrations);
 }
 
-static void queue_quiesced_migration(struct cache_c *c, struct migration *mg)
+static void queue_quiesced_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	unsigned long flags;
 
@@ -464,7 +464,7 @@ static void queue_quiesced_migration(struct cache_c *c, struct migration *mg)
 static void queue_quiesced_migrations(struct cache_c *c, struct list_head *work)
 {
 	unsigned long flags;
-	struct migration *mg, *tmp;
+	struct dm_cache_migration *mg, *tmp;
 
 	spin_lock_irqsave(&c->lock, flags);
 	list_for_each_entry_safe(mg, tmp, work, list)
@@ -489,7 +489,7 @@ static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_end
 		queue_quiesced_migrations(c, &work);
 }
 
-static void quiesce_migration(struct cache_c *c, struct migration *mg)
+static void quiesce_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	if (!ds_add_work(c->all_io_ds, &mg->list))
 		queue_quiesced_migration(c, mg);
@@ -497,7 +497,7 @@ static void quiesce_migration(struct cache_c *c, struct migration *mg)
 
 static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
 {
-	struct migration *mg = alloc_migration(c);
+	struct dm_cache_migration *mg = alloc_migration(c);
 
 	mg->type = MT_PROMOTE;
 	mg->need_demote = 0;
@@ -516,7 +516,7 @@ static void writeback_then_promote(struct cache_c *c,
 				   struct dm_bio_prison_cell *old_ocell,
 				   struct dm_bio_prison_cell *new_ocell)
 {
-	struct migration *mg = alloc_migration(c);
+	struct dm_cache_migration *mg = alloc_migration(c);
 
 	mg->type = MT_REPLACE;
 	mg->need_demote = 1;
@@ -1309,8 +1309,7 @@ static int __init dm_cache_init(void)
 
 	r = -ENOMEM;
 
-	/* FIXME: rename structs to have 'dm_cache_' prefix */
-	_migration_cache = KMEM_CACHE(migration, 0);
+	_migration_cache = KMEM_CACHE(dm_cache_migration, 0);
 	if (!_migration_cache)
 		goto bad_migration_cache;
 
