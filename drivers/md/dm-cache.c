@@ -168,7 +168,7 @@ struct cache_c {
 };
 
 /* FIXME: can we lose this? */
-struct endio_hook {
+struct dm_cache_endio_hook {
 	unsigned req_nr;
 	struct deferred_entry *all_io_entry;
 };
@@ -474,7 +474,7 @@ static void queue_quiesced_migrations(struct cache_c *c, struct list_head *work)
 	wake_worker(c);
 }
 
-static void check_for_quiesced_migrations(struct cache_c *c, struct endio_hook *h)
+static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_endio_hook *h)
 {
 	struct list_head work;
 
@@ -545,7 +545,7 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 
 static void process_flush_bio(struct cache_c *c, struct bio *bio)
 {
-	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
 	BUG_ON(bio->bi_size);
 	if (h->req_nr == 0)
@@ -628,7 +628,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	dm_block_t block = get_bio_block(c, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
-	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
 	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
 		times_below_percentage(&c->migration_times, 100); /* FIXME: hard coded value */
@@ -1109,9 +1109,9 @@ bad_metadata:
 	return -EINVAL;
 }
 
-static struct endio_hook *hook_endio(struct cache_c *c, struct bio *bio, unsigned req_nr)
+static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio, unsigned req_nr)
 {
-	struct endio_hook *h = mempool_alloc(c->endio_hook_pool, GFP_NOIO);
+	struct dm_cache_endio_hook *h = mempool_alloc(c->endio_hook_pool, GFP_NOIO);
 
 	h->req_nr = req_nr;
 	h->all_io_entry = NULL;
@@ -1170,7 +1170,7 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 			int error, union map_info *info)
 {
 	struct cache_c *c = ti->private;
-	struct endio_hook *h = info->ptr;
+	struct dm_cache_endio_hook *h = info->ptr;
 
 	check_for_quiesced_migrations(c, h);
 	mempool_free(h, c->endio_hook_pool);
@@ -1314,7 +1314,7 @@ static int __init dm_cache_init(void)
 	if (!_migration_cache)
 		goto bad_migration_cache;
 
-	_endio_hook_cache = KMEM_CACHE(endio_hook, 0);
+	_endio_hook_cache = KMEM_CACHE(dm_cache_endio_hook, 0);
 	if (!_endio_hook_cache)
 		goto bad_endio_hook_cache;
 
