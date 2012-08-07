@@ -956,37 +956,39 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_get_device(c->ti, argv[0], FMODE_READ | FMODE_WRITE, &c->metadata_dev);
 	if (r) {
 		ti->error = "Error opening metadata device";
-		goto bad1;
+		goto bad_metadata;
 	}
 
 	r = dm_get_device(c->ti, argv[1], FMODE_READ | FMODE_WRITE, &c->origin_dev);
 	if (r) {
 		ti->error = "Error opening origin device";
-		goto bad2;
+		goto bad_origin;
 	}
 
 	r = dm_get_device(c->ti, argv[2], FMODE_READ | FMODE_WRITE, &c->cache_dev);
 	if (r) {
 		ti->error = "Error opening cache device";
-		goto bad3;
+		goto bad_cache;
 	}
 
 	origin_size = get_dev_size(c->origin_dev);
 	if (ti->len > origin_size) {
 		ti->error = "Device size larger than cached device";
-		goto bad3;
+		goto bad;
 	}
 
-	c->origin_blocks = origin_size / block_size;
+	c->origin_blocks = origin_size / block_size; /* FIXME: 64bit divide */
 	c->sectors_per_block = block_size;
 	c->offset_mask = block_size - 1;
 	c->block_shift = ffs(block_size) - 1;
 
-	c->cmd = dm_cache_metadata_open(c->metadata_dev->bdev,
-					block_size, 1);
+	if (dm_set_target_max_io_len(ti, c->sectors_per_block))
+		goto bad;
+
+	c->cmd = dm_cache_metadata_open(c->metadata_dev->bdev, block_size, 1);
 	if (!c->cmd) {
 		ti->error = "couldn't create cache metadata object";
-		goto bad3;	/* FIXME: wrong */
+		goto bad;
 	}
 
 	spin_lock_init(&c->lock);
@@ -1004,53 +1006,54 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	c->dirty_bitset = alloc_bitset(c->origin_blocks, 1);
 	if (!c->dirty_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
-		goto bad3;	/* FIXME: wrong */
+		goto bad_alloc_bitset;
 	}
 
 	c->copier = dm_kcopyd_client_create();
 	if (IS_ERR(c->copier)) {
 		ti->error = "Couldn't create kcopyd client";
-		goto bad3_5;
+		goto bad_kcopyd_client;
 	}
 
 	c->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
 	if (!c->wq) {
 		ti->error = "couldn't create workqueue for metadata object";
-		goto bad4;
+		goto bad_wq;
 	}
 	INIT_WORK(&c->worker, do_work);
 
 	c->prison = prison_create(PRISON_CELLS);
 	if (!c->prison) {
 		ti->error = "couldn't create bio prison";
-		goto bad5;
+		goto bad_prison;
 	}
 
 	c->all_io_ds = ds_create();
 	if (!c->all_io_ds) {
 		ti->error = "couldn't create all_io deferred set";
-		goto bad6;
+		goto bad_deferred_set;
 	}
 
+	/* FIXME: use slab pools and better names for structs so KMEM_CACHE is useful */
 	c->endio_hook_pool =
 		mempool_create_kmalloc_pool(ENDIO_HOOK_POOL_SIZE, sizeof(struct endio_hook));
 	if (!c->endio_hook_pool) {
 		ti->error = "Error creating cache's endio_hook mempool";
-		goto bad8;
+		goto bad_endio_hook_pool;
 	}
 
 	c->migration_pool =
 		mempool_create_kmalloc_pool(MIGRATION_POOL_SIZE, sizeof(struct migration));
 	if (!c->migration_pool) {
 		ti->error = "Error creating cache's endio_hook mempool";
-		goto bad9;
+		goto bad_migration_pool;
 	}
 
 	nr_cache_blocks = get_dev_size(c->cache_dev) >> c->block_shift;
 	c->policy = arc_policy_create(nr_cache_blocks);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
-		goto bad10;
+		goto bad_cache_policy;
 	}
 	c->quiescing = 0;
 
@@ -1062,13 +1065,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&c->promotion, 0);
 	atomic_set(&c->no_copy_promotion, 0);
 
-	if (dm_set_target_max_io_len(ti, c->sectors_per_block))
-		goto bad11;
-
 	r = dm_cache_load_mappings(c->cmd, load_mapping, c);
 	if (r) {
 		ti->error = "couldn't load cache mappings";
-		goto bad11;   	/* FIXME: wrong */
+		goto bad_load_mappings;
 	}
 
 	ti->num_flush_requests = 2;
@@ -1078,27 +1078,31 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->discards_supported = true;
 	return 0;
 
-bad11:
+bad_load_mappings:
 	policy_destroy(c->policy);
-bad10:
+bad_cache_policy:
 	mempool_destroy(c->migration_pool);
-bad9:
+bad_migration_pool:
 	mempool_destroy(c->endio_hook_pool);
-bad8:
+bad_endio_hook_pool:
 	ds_destroy(c->all_io_ds);
-bad6:
+bad_deferred_set:
 	prison_destroy(c->prison);
-bad5:
+bad_prison:
 	destroy_workqueue(c->wq);
-bad4:
+bad_wq:
 	dm_kcopyd_client_destroy(c->copier);
-bad3_5:
+bad_kcopyd_client:
 	free_bitset(c->dirty_bitset);
-bad3:
+bad_alloc_bitset:
+	dm_cache_metadata_close(c->cmd);
+bad:
 	dm_put_device(ti, c->cache_dev);
-bad2:
+bad_cache:
 	dm_put_device(ti, c->origin_dev);
-bad1:
+bad_origin:
+	dm_put_device(ti, c->metadata_dev);
+bad_metadata:
 	kfree(c);
 	return -EINVAL;
 }
