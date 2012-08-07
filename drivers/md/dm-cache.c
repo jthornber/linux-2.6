@@ -916,6 +916,9 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 	return policy_load_mapping(c->policy, oblock, cblock);
 }
 
+static struct kmem_cache *_migration_cache;
+static struct kmem_cache *_endio_hook_cache;
+
 /*
  * Construct a hierarchical storage device mapping:
  *
@@ -1034,16 +1037,15 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_deferred_set;
 	}
 
-	/* FIXME: use slab pools and better names for structs so KMEM_CACHE is useful */
-	c->endio_hook_pool =
-		mempool_create_kmalloc_pool(ENDIO_HOOK_POOL_SIZE, sizeof(struct endio_hook));
+	c->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
+						      _endio_hook_cache);
 	if (!c->endio_hook_pool) {
 		ti->error = "Error creating cache's endio_hook mempool";
 		goto bad_endio_hook_pool;
 	}
 
-	c->migration_pool =
-		mempool_create_kmalloc_pool(MIGRATION_POOL_SIZE, sizeof(struct migration));
+	c->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
+						     _migration_cache);
 	if (!c->migration_pool) {
 		ti->error = "Error creating cache's endio_hook mempool";
 		goto bad_migration_pool;
@@ -1302,10 +1304,26 @@ static int __init dm_cache_init(void)
 	int r;
 
 	r = dm_register_target(&cache_target);
-	if (r) {
-		DMERR("Failed to register %s", DM_MSG_PREFIX);
-	} else
-		DMINFO("Registered %s", DM_MSG_PREFIX);
+	if (r)
+		return r;
+
+	r = -ENOMEM;
+
+	/* FIXME: rename structs to have 'dm_cache_' prefix */
+	_migration_cache = KMEM_CACHE(migration, 0);
+	if (!_migration_cache)
+		goto bad_migration_cache;
+
+	_endio_hook_cache = KMEM_CACHE(endio_hook, 0);
+	if (!_endio_hook_cache)
+		goto bad_endio_hook_cache;
+
+	return 0;
+
+bad_endio_hook_cache:
+	kmem_cache_destroy(_migration_cache);
+bad_migration_cache:
+	dm_unregister_target(&cache_target);
 
 	return r;
 }
@@ -1313,14 +1331,14 @@ static int __init dm_cache_init(void)
 static void dm_cache_exit(void)
 {
 	dm_unregister_target(&cache_target);
+
+	kmem_cache_destroy(_migration_cache);
+	kmem_cache_destroy(_endio_hook_cache);
 }
 
-/* Module hooks */
 module_init(dm_cache_init);
 module_exit(dm_cache_exit);
 
 MODULE_DESCRIPTION(DM_NAME " cache target");
 MODULE_AUTHOR("Joe Thornber <ejt@redhat.com>");
 MODULE_LICENSE("GPL");
-
-/*----------------------------------------------------------------*/
