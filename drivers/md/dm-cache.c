@@ -413,6 +413,14 @@ static void complete_migration(struct cache_c *c, struct dm_cache_migration *mg)
 		break;
 
 	case MT_REPLACE:
+		r = dm_cache_remove_mapping(c->cmd, mg->old_oblock);
+		if (r)
+			/*
+                        * FIXME: We have already copied the data of new
+                        * block. How to handle it?
+                        */
+			goto out;
+
 		r = dm_cache_insert_mapping(c->cmd, mg->new_oblock, mg->cblock);
 		if (r)
 			/* FIXME: finish */
