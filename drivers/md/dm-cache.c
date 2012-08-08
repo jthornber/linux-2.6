@@ -165,6 +165,8 @@ struct cache_c {
 	atomic_t demotion;
 	atomic_t promotion;
 	atomic_t no_copy_promotion;
+
+	unsigned int seq_io_threshold;
 };
 
 /* FIXME: can we lose this? */
@@ -918,6 +920,55 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 	return policy_load_mapping(c->policy, oblock, cblock);
 }
 
+static int parse_features(struct dm_arg_set *as, struct cache_c *c,
+			  struct dm_target *ti)
+{
+	int r;
+	unsigned argc;
+	const char *arg_name;
+
+	static struct dm_arg _args[] = {
+		{0, 2, "Invalid number of feature args"},
+		{0, UINT_MAX, "Invalid sequential bio nr"},
+	};
+
+	/* No feature arguments supplied. */
+	if (!as->argc)
+		return 0;
+
+	r = dm_read_arg_group(_args, as, &argc, &ti->error);
+	if (r)
+		return r;
+
+	while (argc) {
+		arg_name = dm_shift_arg(as);
+		argc--;
+
+		/*
+		 * seq_io_threshold <nr-ios>
+		 * Number of sequential IOs after which an IO stream is
+		 * considered sequential and caching is skipped.
+		 */
+		if (!strcasecmp(arg_name, "seq_io_threshold")) {
+			if (!argc) {
+				ti->error = "Feature seq_io_threshold requires parameters";
+				return -EINVAL;
+			}
+
+			r = dm_read_arg(_args + 1, as, &c->seq_io_threshold, &ti->error);
+			if (r)
+				return r;
+			argc--;
+			continue;
+		}
+
+		ti->error = "Unrecognised cache feature requested";
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static struct kmem_cache *_migration_cache;
 static struct kmem_cache *_endio_hook_cache;
 
@@ -925,11 +976,15 @@ static struct kmem_cache *_endio_hook_cache;
  * Construct a hierarchical storage device mapping:
  *
  * cache <metadata dev> <origin dev> <cache dev> <block size>
+ * 			[<#feature args> [<arg>]*]
  *
  * metadata dev    : fast device holding the persistent metadata
  * origin dev	   : slow device holding original data blocks
  * cache dev	   : fast device holding cached data blocks
  * data block size : cache unit size in sectors
+ *
+ * Feature args:
+ * seq_io_threshold <number of sequential IO seen before caching stops >
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -938,11 +993,15 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	sector_t block_size, origin_size;
 	struct cache_c *c;
 	char *end;
+	struct dm_arg_set as;
 
-	if (argc != 4) {
+	if (argc < 4) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
+
+	as.argc = argc;
+	as.argv = argv;
 
 	block_size = simple_strtoul(argv[3], &end, 10);
 	if (block_size < BLOCK_SIZE_MIN ||
@@ -1059,6 +1118,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error creating cache's policy";
 		goto bad_cache_policy;
 	}
+
+	dm_consume_args(&as, 4);
+
+	c->seq_io_threshold = 512;
+	parse_features(&as, c, ti);
+	policy_set_seq_io_threshold(c->policy, c->seq_io_threshold);
+
 	c->quiescing = 0;
 
 	atomic_set(&c->read_hit, 0);

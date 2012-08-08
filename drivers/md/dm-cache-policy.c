@@ -127,6 +127,7 @@ struct arc_policy {
 	bool seq_stream;
 	unsigned nr_seq_samples, nr_rand_samples;
 	dm_block_t last_end_oblock;
+	unsigned int seq_io_threshold;
 };
 
 static struct arc_policy *to_arc_policy(struct dm_cache_policy *p)
@@ -373,10 +374,7 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 	/*
 	 * If current stream state is sequential and we see 4 random IO,
 	 * change state. Otherwise if current state is random and we see
-	 * 512 sequential IO, change stream state to sequential.
-	 *
-	 * FIXME: This number (512) should be tunable so that a user can
-	 * control the sequential IO caching behavior based on the workload.
+	 * seq_io_threshold sequential IO, change stream state to sequential.
 	 */
 
 	if (a->seq_stream && a->nr_rand_samples >= 4) {
@@ -384,7 +382,8 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 		debug("switched stream state to random. nr_rand=%u"
 			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
 		a->nr_seq_samples = a->nr_rand_samples = 0;
-	} else if (!a->seq_stream && a->nr_seq_samples >= 512) {
+	} else if (!a->seq_stream && a->seq_io_threshold &&
+                   a->nr_seq_samples >= a->seq_io_threshold) {
 		a->seq_stream = true;
 		debug("switched stream state to sequential. nr_rand=%u"
 			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
@@ -609,6 +608,14 @@ static dm_block_t arc_residency(struct dm_cache_policy *p)
 	return min(a->nr_allocated, a->cache_size);
 }
 
+static void arc_set_seq_io_threshold(struct dm_cache_policy *p,
+			unsigned int seq_io_thresh)
+{
+	struct arc_policy *a = to_arc_policy(p);
+
+	a->seq_io_threshold = seq_io_thresh;
+}
+
 /*----------------------------------------------------------------*/
 
 struct dm_cache_policy *arc_policy_create(dm_block_t cache_size)
@@ -624,6 +631,7 @@ struct dm_cache_policy *arc_policy_create(dm_block_t cache_size)
 	a->policy.remove_mapping = arc_remove_mapping;
 	a->policy.force_mapping = arc_force_mapping;
 	a->policy.residency = arc_residency;
+	a->policy.set_seq_io_threshold = arc_set_seq_io_threshold;
 
 	a->cache_size = cache_size;
 	spin_lock_init(&a->lock);
