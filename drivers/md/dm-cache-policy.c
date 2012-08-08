@@ -614,7 +614,7 @@ static dm_block_t arc_residency(struct dm_cache_policy *p)
 struct dm_cache_policy *arc_policy_create(dm_block_t cache_size)
 {
 	dm_block_t nr_buckets;
-	struct arc_policy *a = kmalloc(sizeof(*a), GFP_KERNEL);
+	struct arc_policy *a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return NULL;
 
