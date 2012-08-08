@@ -475,7 +475,7 @@ static void __arc_map(struct arc_policy *a,
 
 	/* FIXME: this is turning into a huge mess */
 	cheap_copy = cheap_copy && __any_free_entries(a);
-	if (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir))) {
+	if (arc_random_stream(a) && (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir)))) {
 		/* carry on, perverse logic */
 	} else {
 		result->op = POLICY_MISS;
