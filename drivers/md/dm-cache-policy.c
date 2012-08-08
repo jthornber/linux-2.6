@@ -381,14 +381,14 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 
 	if (a->seq_stream && a->nr_rand_samples >= 4) {
 		a->seq_stream = false;
-		a->nr_seq_samples = a->nr_rand_samples = 0;
-		pr_alert("switched stream state to random. nr_rand=%u"
+		debug("switched stream state to random. nr_rand=%u"
 			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
+		a->nr_seq_samples = a->nr_rand_samples = 0;
 	} else if (!a->seq_stream && a->nr_seq_samples >= 512) {
 		a->seq_stream = true;
-		a->nr_seq_samples = a->nr_rand_samples = 0;
-		pr_alert("switched stream state to sequential. nr_rand=%u"
+		debug("switched stream state to sequential. nr_rand=%u"
 			" nr_seq=%u\n", a->nr_rand_samples, a->nr_seq_samples);
+		a->nr_seq_samples = a->nr_rand_samples = 0;
 	}
 }
 
