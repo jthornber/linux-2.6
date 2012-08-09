@@ -164,7 +164,7 @@ struct cache_c {
 	atomic_t write_miss;
 	atomic_t demotion;
 	atomic_t promotion;
-	atomic_t no_copy_promotion;
+	atomic_t copies_avoided;
 
 	unsigned int seq_io_threshold;
 };
@@ -386,7 +386,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	wake_worker(c);
 }
 
-static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
+static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	int r;
 	struct dm_io_region o_region, c_region;
@@ -413,6 +413,23 @@ static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
 
 	if (r < 0)
 		migration_failure(c, mg);
+}
+
+static void issue_copy_maybe(struct cache_c *c, struct dm_cache_migration *mg, dm_block_t bit)
+{
+	if (!test_bit(bit, c->dirty_bitset)) {
+		atomic_inc(&c->copies_avoided);
+		migration_success(c, mg);
+	} else
+		issue_copy_real(c, mg);
+}
+
+static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
+{
+	if (mg->demote)
+		issue_copy_maybe(c, mg, mg->old_oblock);
+	else
+		issue_copy_maybe(c, mg, mg->new_oblock);
 }
 
 static void complete_migration(struct cache_c *c, struct dm_cache_migration *mg)
@@ -664,23 +681,10 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		debug("promote %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
-		if (!cheap_copy) {
-			inc_nr_migrations(c);
-			atomic_inc(&c->promotion);
-			promote(c, block, lookup_result.cblock, new_ocell);
-			release_cell = 0;
-		} else {
-			atomic_inc(&c->no_copy_promotion);
-			if (dm_cache_insert_mapping(c->cmd, block, lookup_result.cblock)) {
-				DMWARN("promotion failed; couldn't update on disk metadata\n");
-				policy_remove_mapping(c->policy, block);
-				remap_to_origin_dirty(c, bio, block);
-			} else {
-				h->all_io_entry = ds_inc(c->all_io_ds);
-				remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
-			}
-			issue(c, bio);
-		}
+		inc_nr_migrations(c);
+		atomic_inc(&c->promotion);
+		promote(c, block, lookup_result.cblock, new_ocell);
+		release_cell = 0;
 		break;
 
 	case POLICY_REPLACE:
@@ -888,7 +892,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&c->write_miss));
 	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&c->demotion));
 	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
-	pr_alert("no copy promotions:\t%u\n", (unsigned) atomic_read(&c->no_copy_promotion));
+	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&c->copies_avoided));
 
 	if (c->next_migration)
 		mempool_free(c->next_migration, c->migration_pool);
@@ -1133,7 +1137,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&c->write_miss, 0);
 	atomic_set(&c->demotion, 0);
 	atomic_set(&c->promotion, 0);
-	atomic_set(&c->no_copy_promotion, 0);
+	atomic_set(&c->copies_avoided, 0);
 
 	r = dm_cache_load_mappings(c->cmd, load_mapping, c);
 	if (r) {
