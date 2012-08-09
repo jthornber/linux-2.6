@@ -116,6 +116,7 @@ static bool times_below_percentage(struct times *ts, unsigned percentage)
 #define PRISON_CELLS 1024
 #define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
+#define COMMIT_PERIOD HZ
 
 struct cache_c {
 	struct dm_target *ti;
@@ -147,6 +148,9 @@ struct cache_c {
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
 	struct work_struct worker;
+
+	struct delayed_work waker;
+	unsigned long last_commit_jiffies;
 
 	struct bio_prison *prison;
 	struct deferred_set *all_io_ds;
@@ -715,6 +719,12 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		cell_defer(c, new_ocell, 0);
 }
 
+static int need_commit_due_to_time(struct cache_c *c)
+{
+	return jiffies < c->last_commit_jiffies ||
+	       jiffies > c->last_commit_jiffies + COMMIT_PERIOD;
+}
+
 static void process_deferred_bios(struct cache_c *c)
 {
 	unsigned long flags;
@@ -753,7 +763,6 @@ static void process_deferred_bios(struct cache_c *c)
 	}
 }
 
-/* FIXME: add time based commit as with dm-thin */
 static void process_deferred_flush_bios(struct cache_c *c)
 {
 	unsigned long flags;
@@ -767,7 +776,7 @@ static void process_deferred_flush_bios(struct cache_c *c)
 	bio_list_init(&c->deferred_flush_bios);
 	spin_unlock_irqrestore(&c->lock, flags);
 
-	if (bio_list_empty(&bios))
+	if (bio_list_empty(&bios) && !need_commit_due_to_time(c))
 		return;
 
 	if (dm_cache_commit(c->cmd)) {
@@ -775,6 +784,7 @@ static void process_deferred_flush_bios(struct cache_c *c)
 			bio_io_error(bio);
 		return;
 	}
+	c->last_commit_jiffies = jiffies;
 
 	while ((bio = bio_list_pop(&bios)))
 		generic_make_request(bio);
@@ -815,6 +825,7 @@ static void wait_for_migrations(struct cache_c *c)
 
 static void stop_worker(struct cache_c *c)
 {
+	cancel_delayed_work(&c->waker);
 	flush_workqueue(c->wq);
 }
 
@@ -859,6 +870,17 @@ static void do_work(struct work_struct *ws)
 		}
 
 	} while (more_work(c));
+}
+
+/*
+ * We want to commit periodically so that not too much
+ * unwritten data builds up.
+ */
+static void do_waker(struct work_struct *ws)
+{
+	struct cache_c *c = container_of(to_delayed_work(ws), struct cache_c, waker);
+	wake_worker(c);
+	queue_delayed_work(c->wq, &c->waker, COMMIT_PERIOD);
 }
 
 /*----------------------------------------------------------------*/
@@ -1089,6 +1111,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_wq;
 	}
 	INIT_WORK(&c->worker, do_work);
+	INIT_DELAYED_WORK(&c->waker, do_waker);
 
 	c->prison = prison_create(PRISON_CELLS);
 	if (!c->prison) {
@@ -1130,6 +1153,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	policy_set_seq_io_threshold(c->policy, c->seq_io_threshold);
 
 	c->quiescing = 0;
+	c->last_commit_jiffies = jiffies;
 
 	atomic_set(&c->read_hit, 0);
 	atomic_set(&c->read_miss, 0);
@@ -1263,7 +1287,7 @@ static void cache_postsuspend(struct dm_target *ti)
 static void cache_resume(struct dm_target *ti)
 {
 	struct cache_c *c = ti->private;
-	wake_worker(c);
+	do_waker(&c->waker.work);
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
