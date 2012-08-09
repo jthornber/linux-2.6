@@ -1113,7 +1113,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	nr_cache_blocks = get_dev_size(c->cache_dev) >> c->block_shift;
-	c->policy = arc_policy_create(nr_cache_blocks);
+	c->policy = dm_cache_policy_create("arc", nr_cache_blocks);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad_cache_policy;

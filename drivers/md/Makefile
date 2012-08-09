@@ -12,6 +12,7 @@ dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
 dm-hsm-y	+= dm-cache.o dm-cache-metadata.o dm-cache-policy.o
+dm-cache-arc-y  += dm-cache-policy-arc.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -45,6 +46,7 @@ obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
 obj-$(CONFIG_DM_CACHE)		+= dm-hsm.o
+obj-$(CONFIG_DM_CACHE_ARC)	+= dm-cache-arc.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)

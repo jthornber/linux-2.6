@@ -41,12 +41,13 @@ struct dm_cache_policy {
 	dm_block_t (*residency)(struct dm_cache_policy *p);
 	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
 					unsigned int seq_io_thresh);
+
+	void *private;		/* book keeping ptr, not for general use */
 };
 
-static inline void policy_destroy(struct dm_cache_policy *p)
-{
-	p->destroy(p);
-}
+/*----------------------------------------------------------------*/
+
+void policy_destroy(struct dm_cache_policy *p);
 
 static inline void policy_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
 			      bool can_migrate, bool cheap_copy, struct bio *bio,
@@ -84,7 +85,23 @@ static inline void policy_set_seq_io_threshold(struct dm_cache_policy *p, unsign
 
 /*----------------------------------------------------------------*/
 
-struct dm_cache_policy *arc_policy_create(dm_block_t cache_size);
+/*
+ * We maintain a little register of the different policy types.
+ */
+#define CACHE_POLICY_NAME_MAX 16
+
+struct dm_cache_policy_type {
+	struct list_head list;
+
+	char name[CACHE_POLICY_NAME_MAX];
+	struct module *owner;
+	struct dm_cache_policy *(*create)(dm_block_t cache_size);
+};
+
+int dm_cache_policy_register(struct dm_cache_policy_type *type);
+void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
+
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size);
 
 /*----------------------------------------------------------------*/
 
