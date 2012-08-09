@@ -40,7 +40,7 @@ struct dm_cache_policy {
 
 	dm_block_t (*residency)(struct dm_cache_policy *p);
 	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
-					unsigned int seq_io_thresh);
+				     unsigned int seq_io_thresh);
 
 	void *private;		/* book keeping ptr, not for general use */
 };
