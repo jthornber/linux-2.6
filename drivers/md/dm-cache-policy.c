@@ -575,7 +575,6 @@ static void arc_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 {
 	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e = __arc_lookup(a, oblock);
-	struct queue *q;
 
 	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
 
@@ -591,7 +590,6 @@ static void arc_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblo
 {
 	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e = __arc_lookup(a, current_oblock);
-	struct queue *q;
 
 	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
 
