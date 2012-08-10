@@ -395,7 +395,6 @@ static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 	int r;
 	struct dm_io_region o_region, c_region;
 
-	times_start(&c->migration_times);
 	o_region.bdev = c->origin_dev->bdev;
 	o_region.count = c->sectors_per_block;
 
@@ -523,6 +522,8 @@ static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, str
 	mg->old_ocell = NULL;
 	mg->new_ocell = cell;
 
+	times_start(&c->migration_times);
+	inc_nr_migrations(c);
 	quiesce_migration(c, mg);
 }
 
@@ -545,6 +546,8 @@ static void writeback_then_promote(struct cache_c *c,
 	mg->old_ocell = old_ocell;
 	mg->new_ocell = new_ocell;
 
+	times_start(&c->migration_times);
+	inc_nr_migrations(c);
 	quiesce_migration(c, mg);
 }
 
@@ -685,15 +688,12 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		debug("promote %lu -> %lu (process_bio)\n",
 		      (unsigned long) block,
 		      (unsigned long) lookup_result.cblock);
-		inc_nr_migrations(c);
 		atomic_inc(&c->promotion);
 		promote(c, block, lookup_result.cblock, new_ocell);
 		release_cell = 0;
 		break;
 
 	case POLICY_REPLACE:
-		debug("demote/promote (process_bio)\n");
-		inc_nr_migrations(c);
 		atomic_inc(&c->demotion);
 		atomic_inc(&c->promotion);
 		build_key(lookup_result.old_oblock, &key);
