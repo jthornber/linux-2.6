@@ -1001,13 +1001,14 @@ static struct kmem_cache *_endio_hook_cache;
 /*
  * Construct a hierarchical storage device mapping:
  *
- * cache <metadata dev> <origin dev> <cache dev> <block size>
+ * cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
  * 			[<#feature args> [<arg>]*]
  *
  * metadata dev    : fast device holding the persistent metadata
  * origin dev	   : slow device holding original data blocks
  * cache dev	   : fast device holding cached data blocks
  * data block size : cache unit size in sectors
+ * policy          : the replacement policy to use
  *
  * Feature args:
  * seq_io_threshold <number of sequential IO seen before caching stops >
@@ -1021,7 +1022,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	char *end;
 	struct dm_arg_set as;
 
-	if (argc < 4) {
+	if (argc < 5) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -1140,13 +1141,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	nr_cache_blocks = get_dev_size(c->cache_dev) >> c->block_shift;
-	c->policy = dm_cache_policy_create("arc", nr_cache_blocks);
+	c->policy = dm_cache_policy_create(argv[4], nr_cache_blocks);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad_cache_policy;
 	}
 
-	dm_consume_args(&as, 4);
+	dm_consume_args(&as, 5);
 
 	c->seq_io_threshold = 512;
 	parse_features(&as, c, ti);
