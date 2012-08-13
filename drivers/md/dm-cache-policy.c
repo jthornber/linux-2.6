@@ -106,14 +106,14 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cach
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_create);
 
-void policy_destroy(struct dm_cache_policy *p)
+void dm_cache_policy_destroy(struct dm_cache_policy *p)
 {
 	struct dm_cache_policy_type *t = p->private;
 
 	put_policy(t);
 	p->destroy(p);
 }
-EXPORT_SYMBOL_GPL(policy_destroy);
+EXPORT_SYMBOL_GPL(dm_cache_policy_destroy);
 
 const char *dm_cache_policy_get_name(struct dm_cache_policy *p)
 {
