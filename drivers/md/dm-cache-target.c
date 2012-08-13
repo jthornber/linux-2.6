@@ -1320,7 +1320,8 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		DMEMIT("%llu", (unsigned long long) c->sectors_per_block);
+		DMEMIT("%llu ", (unsigned long long) c->sectors_per_block);
+		DMEMIT("%s", dm_cache_policy_get_name(c->policy));
 	}
 
 	return 0;

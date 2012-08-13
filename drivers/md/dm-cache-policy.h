@@ -103,6 +103,8 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
 
 struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size);
 
+const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
+
 /*----------------------------------------------------------------*/
 
 #endif
