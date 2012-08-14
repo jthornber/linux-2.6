@@ -657,8 +657,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
-	bool can_migrate = (atomic_read(&c->nr_migrations) < 4) &&
-		times_below_percentage(&c->migration_times, 100); /* FIXME: hard coded value */
+	bool can_migrate = atomic_read(&c->nr_migrations) < 1;
 
 	/*
 	 * Check to see if that block is currently migrating.
