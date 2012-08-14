@@ -344,6 +344,8 @@ static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
 
 static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 {
+	unsigned long flags;
+
 	if (mg->demote) {
 		__cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
 
@@ -358,7 +360,10 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 
 		if (mg->promote) {
 			mg->demote = false;
+
+			spin_lock_irqsave(&c->lock, flags);
 			list_add(&mg->list, &c->quiesced_migrations);
+			spin_unlock_irqrestore(&c->lock, flags);
 		} else
 			cleanup_migration(c, mg);
 
