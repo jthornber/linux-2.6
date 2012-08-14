@@ -40,7 +40,7 @@ static struct dm_cache_policy_type *__get_policy(const char *name)
 	}
 
 	if (t && !try_module_get(t->owner)) {
-		DMWARN("couldn't get module\n");
+		DMWARN("couldn't get module");
 		t = NULL;
 	}
 
@@ -69,7 +69,7 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type)
 
 	spin_lock(&register_lock);
 	if (__find_policy(type->name)) {
-		DMWARN("attempt to register policy under duplicate name\n");
+		DMWARN("attempt to register policy under duplicate name");
 		r = -EINVAL;
 	} else {
 		list_add(&type->list, &register_list);
@@ -100,7 +100,7 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cach
 		if (p)
 			p->private = type;
 	} else
-		DMWARN("unknown policy type\n");
+		DMWARN("unknown policy type");
 
 	return p;
 }

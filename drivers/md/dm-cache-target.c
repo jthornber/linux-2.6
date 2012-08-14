@@ -327,16 +327,16 @@ static void cleanup_migration(struct cache_c *c, struct dm_cache_migration *mg)
 static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	if (mg->demote) {
-		DMWARN("demotion failed; couldn't copy block\n");
+		DMWARN("demotion failed; couldn't copy block");
 		policy_force_mapping(c->policy, mg->new_oblock, mg->old_oblock, mg->cblock);
 
-		__cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
+		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
 		if (mg->promote)
-			__cell_defer(c, mg->new_ocell, 1);
+			cell_defer(c, mg->new_ocell, 1);
 	} else {
-		DMWARN("promotion failed; couldn't copy block\n");
+		DMWARN("promotion failed; couldn't copy block");
 		policy_remove_mapping(c->policy, mg->new_oblock);
-		__cell_defer(c, mg->new_ocell, 1);
+		cell_defer(c, mg->new_ocell, 1);
 	}
 
 	cleanup_migration(c, mg);
@@ -344,29 +344,34 @@ static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
 
 static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 {
+	unsigned long flags;
+
 	if (mg->demote) {
-		__cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
+		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
 
 		if (dm_cache_remove_mapping(c->cmd, mg->old_oblock)) {
-			DMWARN("demotion failed; couldn't update on disk metadata\n");
+			DMWARN("demotion failed; couldn't update on disk metadata");
 			policy_force_mapping(c->policy, mg->new_oblock, mg->old_oblock, mg->cblock);
 			if (mg->promote)
-				__cell_defer(c, mg->new_ocell, 1);
+				cell_defer(c, mg->new_ocell, 1);
 			cleanup_migration(c, mg);
 			return;
 		}
 
 		if (mg->promote) {
 			mg->demote = false;
+
+			spin_lock_irqsave(&c->lock, flags);
 			list_add(&mg->list, &c->quiesced_migrations);
+			spin_unlock_irqrestore(&c->lock, flags);
 		} else
 			cleanup_migration(c, mg);
 
 	} else {
-		__cell_defer(c, mg->new_ocell, 1);
+		cell_defer(c, mg->new_ocell, 1);
 
 		if (dm_cache_insert_mapping(c->cmd, mg->new_oblock, mg->cblock)) {
-			DMWARN("promotion failed; couldn't update on disk metadata\n");
+			DMWARN("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(c->policy, mg->new_oblock);
 		}
 
@@ -652,8 +657,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
-	bool can_migrate = (atomic_read(&c->nr_migrations) == 0) &&
-		times_below_percentage(&c->migration_times, 100); /* FIXME: hard coded value */
+	bool can_migrate = atomic_read(&c->nr_migrations) < 1;
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -699,18 +703,20 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		build_key(lookup_result.old_oblock, &key);
 		r = bio_detain(c->prison, &key, bio, &old_ocell);
 		if (r > 0) {
-			/* hmm, awkward */
-			pr_alert("demoting a migrating block :( old_oblock = %lu, new_oblock = %lu, cache = %lu, nr_migrating = %lu\n",
-				 (unsigned long) lookup_result.old_oblock,
-				 (unsigned long) block,
-				 (unsigned long) lookup_result.cblock,
-				 (unsigned long) atomic_read(&c->nr_migrations));
-			BUG();
-		} else {
-			writeback_then_promote(c, lookup_result.old_oblock, block,
-					       lookup_result.cblock,
-					       old_ocell, new_ocell);
+			/*
+			 * We have to be careful to avoid lock inversion of
+			 * the cells.  So we back off, and wait for the
+			 * old_ocell to become free.
+			 */
+			policy_force_mapping(c->policy, block,
+					     lookup_result.old_oblock, lookup_result.cblock);
+			pr_alert("cache cell clash, backing off\n");
+			break;
 		}
+
+		writeback_then_promote(c, lookup_result.old_oblock, block,
+				       lookup_result.cblock,
+				       old_ocell, new_ocell);
 		release_cell = 0;
 		break;
 	}
