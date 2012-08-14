@@ -930,7 +930,7 @@ static void cache_dtr(struct dm_target *ti)
 	dm_put_device(ti, c->metadata_dev);
 	dm_put_device(ti, c->origin_dev);
 	dm_put_device(ti, c->cache_dev);
-	policy_destroy(c->policy);
+	dm_cache_policy_destroy(c->policy);
 
 	kfree(c);
 }
@@ -1178,7 +1178,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad_load_mappings:
-	policy_destroy(c->policy);
+	dm_cache_policy_destroy(c->policy);
 bad_cache_policy:
 	mempool_destroy(c->migration_pool);
 bad_migration_pool:
@@ -1320,7 +1320,8 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		DMEMIT("%llu", (unsigned long long) c->sectors_per_block);
+		DMEMIT("%llu ", (unsigned long long) c->sectors_per_block);
+		DMEMIT("%s", dm_cache_policy_get_name(c->policy));
 	}
 
 	return 0;

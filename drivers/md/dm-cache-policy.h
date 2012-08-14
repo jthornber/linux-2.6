@@ -47,8 +47,6 @@ struct dm_cache_policy {
 
 /*----------------------------------------------------------------*/
 
-void policy_destroy(struct dm_cache_policy *p);
-
 static inline void policy_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
 			      bool can_migrate, bool cheap_copy, struct bio *bio,
 			      struct policy_result *result)
@@ -102,6 +100,10 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type);
 void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
 
 struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size);
+
+void dm_cache_policy_destroy(struct dm_cache_policy *p);
+
+const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
 
 /*----------------------------------------------------------------*/
 
