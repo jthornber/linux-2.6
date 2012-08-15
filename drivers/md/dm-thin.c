@@ -209,6 +209,8 @@ struct pool_c {
 	struct dm_target_callbacks callbacks;
 
 	dm_block_t low_water_blocks;
+
+	struct pool_features original_pf; /* for table status */
 	struct pool_features pf;
 };
 
@@ -1898,6 +1900,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->metadata_dev = metadata_dev;
 	pt->data_dev = data_dev;
 	pt->low_water_blocks = low_water_blocks;
+	pt->original_pf = pf;
 	pt->pf = pf;
 	ti->num_flush_requests = 1;
 	/*
@@ -2341,7 +2344,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long)pool->sectors_per_block,
 		       (unsigned long long)pt->low_water_blocks);
-		emit_flags(&pt->pf, result, sz, maxlen);
+		emit_flags(&pt->original_pf, result, sz, maxlen);
 		break;
 	}
 
