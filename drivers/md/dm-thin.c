@@ -2373,21 +2373,28 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-static bool discard_limits_are_compatible(struct pool *pool, struct queue_limits *data_limits,
+static bool discard_limits_are_compatible(struct pool *pool,
+					  struct queue_limits *data_limits,
 					  const char **reason)
 {
+	/*
+	 * All reasons should be relative to the data device,
+	 * e.g.: Data device <reason>
+	 */
 	if (data_limits->max_discard_sectors < pool->sectors_per_block) {
-		*reason = "data device's max discard sectors smaller than a block";
+		*reason = "max discard sectors smaller than a block";
 		return false;
 	}
 
-	if (data_limits->discard_granularity > pool->sectors_per_block << SECTOR_SHIFT) {
-		*reason = "data device's granularity is bigger that block size";
+	if (data_limits->discard_granularity >
+	    (pool->sectors_per_block << SECTOR_SHIFT)) {
+		*reason = "discard granularity larger than a block";
 		return false;
 	}
 
-	if ((pool->sectors_per_block << SECTOR_SHIFT) & (data_limits->discard_granularity - 1)) {
-		*reason = "data device's granularity not a factor of the block size";
+	if ((pool->sectors_per_block << SECTOR_SHIFT)
+	     & (data_limits->discard_granularity - 1)) {
+		*reason = "discard granularity not a factor of block size";
 		return false;
 	}
 
@@ -2410,18 +2417,20 @@ static unsigned largest_power_below(unsigned limit, unsigned min)
 static void set_discard_granularity_no_passdown(struct pool *pool,
 						struct queue_limits *limits)
 {
-	unsigned g_sectors;
+	unsigned dg_sectors;
 
-	if (!block_size_is_power_of_2(pool))
-		g_sectors = largest_power_below(pool->sectors_per_block, DATA_DEV_BLOCK_SIZE_MIN_SECTORS);
-	else
-		g_sectors = pool->sectors_per_block;
+	if (!block_size_is_power_of_2(pool)) {
+		dg_sectors = largest_power_below(pool->sectors_per_block,
+						 DATA_DEV_BLOCK_SIZE_MIN_SECTORS);
+	} else
+		dg_sectors = pool->sectors_per_block;
 
-	limits->discard_granularity = g_sectors << SECTOR_SHIFT;
+	limits->discard_granularity = dg_sectors << SECTOR_SHIFT;
 }
 
 static void set_discard_limits(struct pool_c *pt,
-			       struct queue_limits *data_limits, struct queue_limits *limits)
+			       struct queue_limits *data_limits,
+			       struct queue_limits *limits)
 {
 	struct pool_features *pf = &pt->pf;
 	struct pool *pool = pt->pool;
@@ -2444,7 +2453,8 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 	const char *reason;
-	struct queue_limits *data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
+	struct block_device *data_bdev = pt->data_dev->bdev;
+	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
@@ -2455,12 +2465,11 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (pt->pf.discard_enabled) {
 		if (!discard_limits_are_compatible(pool, data_limits, &reason)) {
-			DMWARN("discard limits are incompatible between pool and data device,"
-			       "disabling passdown: %s",
-			       reason);
+			char buf[BDEVNAME_SIZE];
+			DMWARN("Data device (%s) %s: Disabling discard passdown.",
+			       bdevname(data_bdev, buf), reason);
 			pt->pf.discard_passdown = false;
 		}
-
 		set_discard_limits(pt, data_limits, limits);
 	}
 }
@@ -2751,6 +2760,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct thin_c *tc = ti->private;
+
 	*limits = bdev_get_queue(tc->pool_dev->bdev)->limits;
 }
 
