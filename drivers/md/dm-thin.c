@@ -2423,8 +2423,10 @@ static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 		       (src_limits->max_discard_sectors << SECTOR_SHIFT),
 		       pool->sectors_per_block);
 		pool->pf.discard_passdown = 0;
-		/* fall through to call set_discard_granularity_no_passdown */
+		goto set_granularity_no_passdown;
 	}
+
+	return;
 
 set_granularity_no_passdown:
 	set_discard_granularity_no_passdown(pool, limits);
