@@ -42,13 +42,12 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-#define NR_TIMES 10
+#define NR_TIMES 32
 
 struct times {
 	unsigned nr_times;
 	unsigned slot;
 	unsigned long total_durations;
-	unsigned long starts[NR_TIMES];
 	unsigned long durations[NR_TIMES];
 };
 
@@ -57,11 +56,7 @@ static void times_init(struct times *ts)
 	ts->nr_times = 0;
 	ts->slot = 0;
 	ts->total_durations = 0;
-}
-
-static void times_start(struct times *ts)
-{
-	ts->starts[ts->slot] = jiffies;
+	memset(ts->durations, 0, sizeof(ts->durations));
 }
 
 static unsigned long elapsed(unsigned long start, unsigned long end)
@@ -80,10 +75,10 @@ static unsigned next_slot(unsigned s)
 	return s;
 }
 
-static void times_end(struct times *ts)
+static void times_add(struct times *ts, unsigned long start)
 {
 	ts->total_durations -= ts->durations[ts->slot];
-	ts->durations[ts->slot] = elapsed(ts->starts[ts->slot], jiffies);
+	ts->durations[ts->slot] = elapsed(start, jiffies);
 	ts->total_durations += ts->durations[ts->slot];
 
 	if (ts->nr_times < NR_TIMES)
@@ -92,18 +87,9 @@ static void times_end(struct times *ts)
 	ts->slot = next_slot(ts->slot);
 }
 
-/*
- * This curious interface avoids floating point math.
- */
-static bool times_below_percentage(struct times *ts, unsigned percentage)
+static unsigned long average_duration(struct times *ts)
 {
-	if (!ts->nr_times)
-		return true;
-	else {
-		unsigned start_slot = ts->nr_times < NR_TIMES ? 0 : next_slot(ts->slot);
-		unsigned long period = elapsed(ts->starts[start_slot], jiffies);
-		return ts->total_durations < ((period / 100) * percentage);
-	}
+	return ts->nr_times ? (ts->total_durations / ts->nr_times) : 0;
 }
 
 /*----------------------------------------------------------------*/
@@ -159,6 +145,8 @@ struct cache_c {
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
+	bool need_tick_bio;
+
 	struct dm_cache_policy *policy;
 	bool quiescing;
 
@@ -175,6 +163,7 @@ struct cache_c {
 
 /* FIXME: can we lose this? */
 struct dm_cache_endio_hook {
+	bool tick;
 	unsigned req_nr;
 	struct deferred_entry *all_io_entry;
 };
@@ -187,6 +176,7 @@ struct dm_cache_migration {
 	struct list_head list;
 	struct cache_c *c;
 
+	unsigned long start_jiffies;
 	dm_block_t old_oblock;
 	dm_block_t new_oblock;
 	dm_block_t cblock;
@@ -212,6 +202,17 @@ static void wake_worker(struct cache_c *c)
  *--------------------------------------------------------------*/
 static void remap_to_origin(struct cache_c *c, struct bio *bio)
 {
+	unsigned long flags;
+	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+
+	// FIXME: I don't like this side effect here
+	spin_lock_irqsave(&c->lock, flags);
+	if (c->need_tick_bio && !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
+		h->tick = true;
+		c->need_tick_bio = false;
+	}
+	spin_unlock_irqrestore(&c->lock, flags);
+
 	bio->bi_bdev = c->origin_dev->bdev;
 }
 
@@ -321,7 +322,7 @@ static void cleanup_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	free_migration(c, mg);
 	dec_nr_migrations(c);
-	times_end(&c->migration_times);
+	times_add(&c->migration_times, mg->start_jiffies);
 }
 
 static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
@@ -526,8 +527,8 @@ static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, str
 	mg->cblock = cblock;
 	mg->old_ocell = NULL;
 	mg->new_ocell = cell;
+	mg->start_jiffies = jiffies;
 
-	times_start(&c->migration_times);
 	inc_nr_migrations(c);
 	quiesce_migration(c, mg);
 }
@@ -550,8 +551,8 @@ static void writeback_then_promote(struct cache_c *c,
 	mg->cblock = cblock;
 	mg->old_ocell = old_ocell;
 	mg->new_ocell = new_ocell;
+	mg->start_jiffies = jiffies;
 
-	times_start(&c->migration_times);
 	inc_nr_migrations(c);
 	quiesce_migration(c, mg);
 }
@@ -657,7 +658,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
-	bool can_migrate = atomic_read(&c->nr_migrations) < 1;
+	bool can_migrate = atomic_read(&c->nr_migrations) < 4;
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -801,25 +802,30 @@ static void process_deferred_flush_bios(struct cache_c *c)
  *--------------------------------------------------------------*/
 static void start_quiescing(struct cache_c *c)
 {
-	spin_lock(&c->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
 	c->quiescing = 1;
-	spin_unlock(&c->lock);
+	spin_unlock_irqrestore(&c->lock, flags);
 }
 
 static void stop_quiescing(struct cache_c *c)
 {
-	spin_lock(&c->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
 	c->quiescing = 0;
-	spin_unlock(&c->lock);
+	spin_unlock_irqrestore(&c->lock, flags);
 }
 
 static bool is_quiescing(struct cache_c *c)
 {
 	int r;
+	unsigned long flags;
 
-	spin_lock(&c->lock);
+	spin_lock_irqsave(&c->lock, flags);
 	r = c->quiescing;
-	spin_unlock(&c->lock);
+	spin_unlock_irqrestore(&c->lock, flags);
 
 	return r;
 }
@@ -1216,6 +1222,7 @@ static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio
 {
 	struct dm_cache_endio_hook *h = mempool_alloc(c->endio_hook_pool, GFP_NOIO);
 
+	h->tick = false;
 	h->req_nr = req_nr;
 	h->all_io_entry = NULL;
 
@@ -1273,7 +1280,16 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 			int error, union map_info *info)
 {
 	struct cache_c *c = ti->private;
+	unsigned long flags;
 	struct dm_cache_endio_hook *h = info->ptr;
+
+	if (h->tick) {
+		policy_tick(c->policy);
+
+		spin_lock_irqsave(&c->lock, flags);
+		c->need_tick_bio = true;
+		spin_unlock_irqrestore(&c->lock, flags);
+	}
 
 	check_for_quiesced_migrations(c, h);
 	mempool_free(h, c->endio_hook_pool);
@@ -1294,6 +1310,7 @@ static void cache_postsuspend(struct dm_target *ti)
 static void cache_resume(struct dm_target *ti)
 {
 	struct cache_c *c = ti->private;
+	c->need_tick_bio = true;
 	do_waker(&c->waker.work);
 }
 

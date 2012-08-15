@@ -16,6 +16,18 @@
 
 /*----------------------------------------------------------------*/
 
+static unsigned next_power(unsigned n, unsigned min)
+{
+	unsigned r = min;
+
+	while (r < n)
+		r <<= 1;
+
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
 static unsigned long *alloc_bitset(unsigned nr_entries, bool set_to_ones)
 {
 	size_t s = sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
@@ -53,6 +65,12 @@ static bool queue_empty(struct queue *q)
 {
 	BUG_ON(q->size ? list_empty(&q->elts) : !list_empty(&q->elts));
 	return !q->size;
+}
+
+static struct list_head *queue_head(struct queue *q)
+{
+	BUG_ON(list_empty(&q->elts));
+	return q->elts.next;
 }
 
 static struct list_head *queue_pop(struct queue *q)
@@ -95,12 +113,20 @@ struct arc_entry {
 	struct list_head list;
 	dm_block_t oblock;
 	dm_block_t cblock;
+
+	unsigned tick;
+};
+
+struct seen_block {
+	dm_block_t oblock;
+	unsigned tick;
 };
 
 struct arc_policy {
 	struct dm_cache_policy policy;
 
 	dm_block_t cache_size;
+	unsigned tick;
 
 	spinlock_t lock;
 
@@ -120,8 +146,7 @@ struct arc_policy {
 	struct hlist_head *table;
 
 	dm_block_t interesting_size;
-	dm_block_t *interesting_blocks;
-	dm_block_t last_lookup;
+	struct seen_block *interesting_array;
 
 	/* Fields for tracking IO pattern */
 	/* 0: IO stream is random. 1: IO stream is sequential */
@@ -141,7 +166,7 @@ static void arc_destroy(struct dm_cache_policy *p)
 	struct arc_policy *a = to_arc_policy(p);
 
 	free_bitset(a->allocation_bitset);
-	vfree(a->interesting_blocks);
+	vfree(a->interesting_array);
 	kfree(a->table);
 	vfree(a->entries);
 	kfree(a);
@@ -189,6 +214,7 @@ static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
 	INIT_LIST_HEAD(&e->list);
 	INIT_HLIST_NODE(&e->hlist);
 	a->nr_allocated++;
+	e->tick = a->tick;
 
 	return e;
 }
@@ -243,6 +269,7 @@ static void __arc_push(struct arc_policy *a,
 		     enum arc_state s, struct arc_entry *e)
 {
 	e->state = s;
+	e->tick = a->tick;
 
 	switch (s) {
 	case ARC_T1:
@@ -304,6 +331,53 @@ static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 	return e;
 }
 
+static struct arc_entry *__arc_peek(struct arc_policy *a, enum arc_state s)
+{
+	struct arc_entry *e = NULL;
+
+#define HEAD(x) container_of(queue_head(x), struct arc_entry, list)
+
+	switch (s) {
+	case ARC_T1:
+		BUG_ON(queue_empty(&a->t1));
+		e = HEAD(&a->t1);
+		break;
+
+	case ARC_T2:
+		BUG_ON(queue_empty(&a->t2));
+		e = HEAD(&a->t2);
+		break;
+
+	case ARC_B1:
+		BUG_ON(queue_empty(&a->b1));
+		e = HEAD(&a->b1);
+		break;
+
+	case ARC_B2:
+		BUG_ON(queue_empty(&a->b2));
+		e = HEAD(&a->b2);
+		break;
+	}
+
+#undef HEAD
+
+	return e;
+}
+
+static bool __can_demote(struct arc_policy *a)
+{
+	struct arc_entry *e;
+	dm_block_t t1_size = queue_size(&a->t1);
+
+
+	if (t1_size && ((t1_size > a->p) || (t1_size == a->p)))
+		e = __arc_peek(a, ARC_T1);
+	else
+		e = __arc_peek(a, ARC_T2);
+
+	return e->tick != a->tick;
+}
+
 static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct policy_result *result)
 {
 	struct arc_entry *e;
@@ -336,18 +410,21 @@ static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct poli
  * directly related to the eviction rate.  So maybe we should resize on the
  * fly to get to a target eviction rate?
  */
-static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int data_dir)
+static int __arc_interesting_block(struct arc_policy *a, dm_block_t oblock, int data_dir)
 {
 	const dm_block_t BIG_PRIME = 4294967291UL;
-	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->interesting_size;
+	unsigned h = ((unsigned) (oblock * BIG_PRIME)) % a->interesting_size;
+	struct seen_block *sb = a->interesting_array + h;
 
-	if (origin == a->last_lookup)
+	if (sb->tick == a->tick)
 		return 0;
 
-	if (a->interesting_blocks[h] == origin)
+	if (sb->oblock == oblock)
 		return 1;
 
-	a->interesting_blocks[h] = origin;
+	sb->oblock = oblock;
+	sb->tick = a->tick;
+
 	return 0;
 }
 
@@ -392,6 +469,11 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 	}
 }
 
+static bool updated_this_tick(struct arc_policy *a, struct arc_entry *e)
+{
+	return a->tick == e->tick;
+}
+
 static void __arc_map(struct arc_policy *a,
 		      dm_block_t origin_block,
 		      int data_dir,
@@ -416,7 +498,8 @@ static void __arc_map(struct arc_policy *a,
 		case ARC_T1:
 			result->op = POLICY_HIT;
 			result->cblock = e->cblock;
-			if (a->last_lookup != origin_block) {
+
+			if (!updated_this_tick(a, e)) {
 				__free_cblock(a, e->cblock);
 				queue_del(&a->t1, &e->list);
 				__arc_remove(a, e);
@@ -427,7 +510,7 @@ static void __arc_map(struct arc_policy *a,
 		case ARC_T2:
 			result->op = POLICY_HIT;
 			result->cblock = e->cblock;
-			if (a->last_lookup != origin_block) {
+			if (!updated_this_tick(a, e)) {
 				__free_cblock(a, e->cblock);
 				queue_del(&a->t2, &e->list);
 				__arc_remove(a, e);
@@ -436,7 +519,7 @@ static void __arc_map(struct arc_policy *a,
 			break;
 
 		case ARC_B1:
-			if (!can_migrate) {
+			if (!can_migrate || updated_this_tick(a, e)) {
 				result->op = POLICY_MISS;
 				return;
 			}
@@ -452,7 +535,7 @@ static void __arc_map(struct arc_policy *a,
 			break;
 
 		case ARC_B2:
-			if (!can_migrate) {
+			if (!can_migrate || updated_this_tick(a, e)) {
 				result->op = POLICY_MISS;
 				return;
 			}
@@ -485,7 +568,7 @@ static void __arc_map(struct arc_policy *a,
 	l1_size = queue_size(&a->t1) + b1_size;
 	l2_size = queue_size(&a->t2) + b2_size;
 	if (l1_size == a->cache_size) {
-		if (!can_migrate)  {
+		if (!can_migrate || !__can_demote(a))  {
 			result->op = POLICY_MISS;
 			return;
 		}
@@ -507,7 +590,7 @@ static void __arc_map(struct arc_policy *a,
 		}
 
 	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
-		if (!can_migrate)  {
+		if (!can_migrate || !__can_demote(a))  {
 			result->op = POLICY_MISS;
 			return;
 		}
@@ -547,7 +630,6 @@ static void arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data
 	spin_lock_irqsave(&a->lock, flags);
 	__arc_update_io_stream_data(a, bio);
 	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
-	a->last_lookup = origin_block;
 	spin_unlock_irqrestore(&a->lock, flags);
 }
 
@@ -615,9 +697,18 @@ static void arc_set_seq_io_threshold(struct dm_cache_policy *p,
 	a->seq_io_threshold = seq_io_thresh;
 }
 
+static void arc_tick(struct dm_cache_policy *p)
+{
+	struct arc_policy *a = to_arc_policy(p);
+	unsigned long flags;
+
+	spin_lock_irqsave(&a->lock, flags);
+	a->tick++;
+	spin_unlock_irqrestore(&a->lock, flags);
+}
+
 static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 {
-	dm_block_t nr_buckets;
 	struct arc_policy *a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return NULL;
@@ -629,8 +720,10 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 	a->policy.force_mapping = arc_force_mapping;
 	a->policy.residency = arc_residency;
 	a->policy.set_seq_io_threshold = arc_set_seq_io_threshold;
+	a->policy.tick = arc_tick;
 
 	a->cache_size = cache_size;
+	a->tick = 0;
 	spin_lock_init(&a->lock);
 	a->p = 0;
 
@@ -647,12 +740,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 
 	a->nr_allocated = 0;
 
-	a->nr_buckets = cache_size / 8;
-	nr_buckets = 16;
-	while (nr_buckets < a->nr_buckets)
-		nr_buckets <<= 1;
-	a->nr_buckets = nr_buckets;
-
+	a->nr_buckets = next_power(cache_size / 4, 16);
 	a->hash_mask = a->nr_buckets - 1;
 	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
 	if (!a->table) {
@@ -661,9 +749,9 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 		return NULL;
 	}
 
-	a->interesting_size = cache_size / 2;
-	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
-	if (!a->interesting_blocks) {
+	a->interesting_size = next_power(cache_size * 2, 16);
+	a->interesting_array = vzalloc(sizeof(*a->interesting_array) * a->interesting_size);
+	if (!a->interesting_array) {
 		kfree(a->table);
 		vfree(a->entries);
 		kfree(a);
@@ -672,7 +760,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 
 	a->allocation_bitset = alloc_bitset(cache_size, 0);
 	if (!a->allocation_bitset) {
-		vfree(a->interesting_blocks);
+		vfree(a->interesting_array);
 		kfree(a->table);
 		vfree(a->entries);
 		kfree(a);
