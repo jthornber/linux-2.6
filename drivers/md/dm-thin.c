@@ -2422,16 +2422,17 @@ static void set_discard_limits(struct pool_c *pt,
 {
 	struct pool_features *pf = &pt->pf;
 	struct pool *pool = pt->pool;
+	bool zeroes = pf->zero_new_blocks;
 
 	limits->max_discard_sectors = pool->sectors_per_block;
 
-	if (pf->discard_passdown)
+	if (pf->discard_passdown) {
 		limits->discard_granularity = data_limits->discard_granularity;
-	else
+		zeroes = zeroes || data_limits->discard_zeroes_data;
+	} else
 		set_discard_granularity_no_passdown(pool, limits);
 
-	limits-> discard_zeroes_data =
-		(pf->zero_new_blocks || (pf->discard_passdown && data_limits->discard_zeroes_data)) &&
+	limits->discard_zeroes_data = zeroes &&
 		limits->discard_granularity == (pool->sectors_per_block << SECTOR_SHIFT);
 }
 
