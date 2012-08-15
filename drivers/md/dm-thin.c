@@ -138,10 +138,9 @@ enum pool_mode {
 struct pool_features {
 	enum pool_mode mode;
 
-	unsigned zero_new_blocks:1;
-	unsigned discard_enabled:1;
-	unsigned discard_passdown:1;
-	unsigned discard_passdown_override:1;
+	bool zero_new_blocks:1;
+	bool discard_enabled:1;
+	bool discard_passdown:1;
 };
 
 struct thin_c;
@@ -1469,10 +1468,30 @@ static void __requeue_bios(struct pool *pool)
 /*----------------------------------------------------------------
  * Binding of control targets to a pool object
  *--------------------------------------------------------------*/
+static bool data_dev_supports_discard(struct pool_c *pt)
+{
+	struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
+	return q && blk_queue_discard(q);
+}
+
+static void disable_passdown_if_not_supported(struct pool *pool, struct pool_c *pt)
+{
+	/*
+	 * If discard_passdown was enabled verify that the data device
+	 * supports discards.  Disable discard_passdown if not; otherwise
+	 * -EOPNOTSUPP will be returned.
+	 */
+	if (pt->pf.discard_passdown && !data_dev_supports_discard(pt)) {
+		char buf[BDEVNAME_SIZE];
+		DMWARN("Discard unsupported by data device (%s): Disabling discard passdown.",
+		       bdevname(pt->data_dev->bdev, buf));
+		pool->pf.discard_passdown = 0;
+	}
+}
+
 static int bind_control_target(struct pool *pool, struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
-	struct pool_features saved_pf = pool->pf;
 
 	/*
 	 * We want to make sure that degraded pools are never upgraded.
@@ -1486,26 +1505,9 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->ti = ti;
 	pool->low_water_blocks = pt->low_water_blocks;
 	pool->pf = pt->pf;
-	if (saved_pf.discard_passdown_override)
-		pool->pf.discard_passdown = saved_pf.discard_passdown;
-		
-	set_pool_mode(pool, new_mode);
 
-	/*
-	 * If discard_passdown was enabled verify that the data device
-	 * supports discards.  Disable discard_passdown if not; otherwise
-	 * -EOPNOTSUPP will be returned.
-	 */
-	/* FIXME: pull this out into a sep fn. */
-	if (pt->pf.discard_passdown) {
-		struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
-		if (!q || !blk_queue_discard(q)) {
-			char buf[BDEVNAME_SIZE];
-			DMWARN("Discard unsupported by data device (%s): Disabling discard passdown.",
-			       bdevname(pt->data_dev->bdev, buf));
-			pool->pf.discard_passdown = 0;
-		}
-	}
+	disable_passdown_if_not_supported(pool, pt);
+	set_pool_mode(pool, new_mode);
 
 	return 0;
 }
@@ -1523,10 +1525,9 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
 static void pool_features_init(struct pool_features *pf)
 {
 	pf->mode = PM_WRITE;
-	pf->zero_new_blocks = 1;
-	pf->discard_enabled = 1;
-	pf->discard_passdown = 1;
-	pf->discard_passdown_override = 0;
+	pf->zero_new_blocks = true;
+	pf->discard_enabled = true;
+	pf->discard_passdown = true;
 }
 
 static void __pool_destroy(struct pool *pool)
@@ -2369,91 +2370,87 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
+static bool discard_limits_are_compatible(struct pool *pool, struct queue_limits *data_limits,
+					  const char **reason)
+{
+	if (data_limits->max_discard_sectors < pool->sectors_per_block) {
+		*reason = "data device's max discard sectors smaller than a block";
+		return false;
+	}
+
+	if (data_limits->discard_granularity % (pool->sectors_per_block << SECTOR_SHIFT)) {
+		*reason = "data device's granularity not a factor of the block size";
+		return false;
+	}
+
+	return true;
+}
+
+static bool block_size_is_power_of_2(struct pool *pool)
+{
+	return pool->sectors_per_block_shift >= 0;
+}
+
+static unsigned largest_power_below(unsigned limit, unsigned min)
+{
+	while ((min < limit) && (((limit / min) & 0x1) == 0))
+		min <<= 1;
+
+	return min;
+}
+
 static void set_discard_granularity_no_passdown(struct pool *pool,
 						struct queue_limits *limits)
 {
-	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-	if (pool->sectors_per_block_shift < 0) {
-		/*
-		 * Block size is not a power of 2 but the block layer assumes
-		 * discard_granularity is.  Leverage the fact that block size
-		 * is a multiple of DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
-		 */
-		limits->discard_granularity =
-			DATA_DEV_BLOCK_SIZE_MIN_SECTORS << SECTOR_SHIFT;
-	}
+	unsigned g_sectors;
+
+	if (!block_size_is_power_of_2(pool))
+		g_sectors = largest_power_below(pool->sectors_per_block, DATA_DEV_BLOCK_SIZE_MIN_SECTORS);
+	else
+		g_sectors = pool->sectors_per_block;
+
+	limits->discard_granularity = g_sectors << SECTOR_SHIFT;
 }
 
-static void set_discard_limits(struct pool *pool, struct pool_features *pf,
-			       struct block_device *src_bdev,
-			       struct queue_limits *limits)
+static void set_discard_limits(struct pool_c *pt,
+			       struct queue_limits *data_limits, struct queue_limits *limits)
 {
-	struct request_queue *q = bdev_get_queue(src_bdev);
-	struct queue_limits *src_limits = &q->limits;
+	struct pool_features *pf = &pt->pf;
+	struct pool *pool = pt->pool;
 
-	/*
-	 * We have to cope with discard bios that cover a block partially.
-	 * But a discard that spans a block boundary is not sent to this target.
-	 */
-	limits->discard_zeroes_data = pf->zero_new_blocks;
+	limits->discard_zeroes_data = pf->zero_new_blocks; /* FIXME: wrong */
 	limits->max_discard_sectors = pool->sectors_per_block;
 
-	if (!pf->discard_passdown)
-		goto set_granularity_no_passdown;
-
-	/*
-	 * discard passdown forces the need to establish a
-	 * discard_granularity that will work for both thinp and
-	 * the underlying data device.  So use the data device's
-	 * discard_granularity but make sure block size is a multiple of it.
-	 */
-	limits->discard_granularity = src_limits->discard_granularity;
-
-	if ((limits->max_discard_sectors << SECTOR_SHIFT)
-	    & (limits->discard_granularity - 1)) {
-		DMWARN("%s: max discard (%u) would not be a multiple of discard granularity (%u): Disabling discard passdown.",
-		       dm_device_name(pool->pool_md),
-		       (limits->max_discard_sectors << SECTOR_SHIFT),
-		       limits->discard_granularity);
-		pool->pf.discard_passdown = 0;
-		pool->pf.discard_passdown_override = 1;
-		goto set_granularity_no_passdown;
-	}
-
-	/*
-	 * discard passdown is enabled so we cannot support discards
-	 * that are larger than supported by the underlying data device.
-	 * Conversely, we don't want discards larger than the block size.
-	 */
-	if (src_limits->max_discard_sectors < pool->sectors_per_block) {
-		DMWARN("%s: max discard (%u) would be less than block size (%u): Disabling discard passdown.",
-		       dm_device_name(pool->pool_md),
-		       (src_limits->max_discard_sectors << SECTOR_SHIFT),
-		       pool->sectors_per_block);
-		pool->pf.discard_passdown = 0;
-		pool->pf.discard_passdown_override = 1;
-		goto set_granularity_no_passdown;
-	}
-
-	return;
-
-set_granularity_no_passdown:
-	set_discard_granularity_no_passdown(pool, limits);
+	if (pf->discard_passdown)
+		limits->discard_granularity = data_limits->discard_granularity;
+	else
+		set_discard_granularity_no_passdown(pool, limits);
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
+	const char *reason;
+	struct queue_limits *data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+
 	/*
 	 * pt->pf is used here because it reflects the features configured but
 	 * not yet transfered to the live pool (see: bind_control_target).
 	 */
-	if (pt->pf.discard_enabled)
-		set_discard_limits(pool, &pt->pf, pt->data_dev->bdev, limits);
+	if (pt->pf.discard_enabled) {
+		if (!discard_limits_are_compatible(pool, data_limits, &reason)) {
+			DMWARN("discard limits are incompatible between pool and data device,"
+			       "disabling passdown: %s",
+			       reason);
+			pt->pf.discard_passdown = false;
+		}
+
+		set_discard_limits(pt, data_limits, limits);
+	}
 }
 
 static struct target_type pool_target = {
@@ -2742,11 +2739,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct thin_c *tc = ti->private;
-	struct pool *pool = tc->pool;
-
-	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
-	set_discard_limits(pool, &pool->pf, tc->pool_dev->bdev, limits);
+	*limits = bdev_get_queue(tc->pool_dev->bdev)->limits;
 }
 
 static struct target_type thin_target = {
