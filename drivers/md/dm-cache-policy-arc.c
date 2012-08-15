@@ -16,6 +16,18 @@
 
 /*----------------------------------------------------------------*/
 
+static unsigned next_power(unsigned n, unsigned min)
+{
+	unsigned r = min;
+
+	while (r < n)
+		r <<= 1;
+
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
 static unsigned long *alloc_bitset(unsigned nr_entries, bool set_to_ones)
 {
 	size_t s = sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
@@ -102,14 +114,19 @@ struct arc_entry {
 	dm_block_t oblock;
 	dm_block_t cblock;
 
-	atomic_t tick;
+	unsigned tick;
+};
+
+struct seen_block {
+	dm_block_t oblock;
+	unsigned tick;
 };
 
 struct arc_policy {
 	struct dm_cache_policy policy;
 
 	dm_block_t cache_size;
-	atomic_t tick;
+	unsigned tick;
 
 	spinlock_t lock;
 
@@ -129,7 +146,7 @@ struct arc_policy {
 	struct hlist_head *table;
 
 	dm_block_t interesting_size;
-	dm_block_t *interesting_blocks;
+	struct seen_block *interesting_array;
 
 	/* Fields for tracking IO pattern */
 	/* 0: IO stream is random. 1: IO stream is sequential */
@@ -149,7 +166,7 @@ static void arc_destroy(struct dm_cache_policy *p)
 	struct arc_policy *a = to_arc_policy(p);
 
 	free_bitset(a->allocation_bitset);
-	vfree(a->interesting_blocks);
+	vfree(a->interesting_array);
 	kfree(a->table);
 	vfree(a->entries);
 	kfree(a);
@@ -197,7 +214,7 @@ static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
 	INIT_LIST_HEAD(&e->list);
 	INIT_HLIST_NODE(&e->hlist);
 	a->nr_allocated++;
-	atomic_set(&e->tick, atomic_read(&a->tick));
+	e->tick = a->tick;
 
 	return e;
 }
@@ -252,7 +269,7 @@ static void __arc_push(struct arc_policy *a,
 		     enum arc_state s, struct arc_entry *e)
 {
 	e->state = s;
-	atomic_set(&e->tick, atomic_read(&a->tick));
+	e->tick = a->tick;
 
 	switch (s) {
 	case ARC_T1:
@@ -358,7 +375,7 @@ static bool __can_demote(struct arc_policy *a)
 	else
 		e = __arc_peek(a, ARC_T2);
 
-	return atomic_read(&e->tick) != atomic_read(&a->tick);
+	return e->tick != a->tick;
 }
 
 static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct policy_result *result)
@@ -393,15 +410,21 @@ static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct poli
  * directly related to the eviction rate.  So maybe we should resize on the
  * fly to get to a target eviction rate?
  */
-static int __arc_interesting_block(struct arc_policy *a, dm_block_t origin, int data_dir)
+static int __arc_interesting_block(struct arc_policy *a, dm_block_t oblock, int data_dir)
 {
 	const dm_block_t BIG_PRIME = 4294967291UL;
-	unsigned h = ((unsigned) (origin * BIG_PRIME)) % a->interesting_size;
+	unsigned h = ((unsigned) (oblock * BIG_PRIME)) % a->interesting_size;
+	struct seen_block *sb = a->interesting_array + h;
 
-	if (a->interesting_blocks[h] == origin)
+	if (sb->tick == a->tick)
+		return 0;
+
+	if (sb->oblock == oblock)
 		return 1;
 
-	a->interesting_blocks[h] = origin;
+	sb->oblock = oblock;
+	sb->tick = a->tick;
+
 	return 0;
 }
 
@@ -448,7 +471,7 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 
 static bool updated_this_tick(struct arc_policy *a, struct arc_entry *e)
 {
-	return atomic_read(&a->tick) == atomic_read(&e->tick);
+	return a->tick == e->tick;
 }
 
 static void __arc_map(struct arc_policy *a,
@@ -677,12 +700,15 @@ static void arc_set_seq_io_threshold(struct dm_cache_policy *p,
 static void arc_tick(struct dm_cache_policy *p)
 {
 	struct arc_policy *a = to_arc_policy(p);
-	atomic_inc(&a->tick);
+	unsigned long flags;
+
+	spin_lock_irqsave(&a->lock, flags);
+	a->tick++;
+	spin_unlock_irqrestore(&a->lock, flags);
 }
 
 static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 {
-	dm_block_t nr_buckets;
 	struct arc_policy *a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return NULL;
@@ -697,7 +723,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 	a->policy.tick = arc_tick;
 
 	a->cache_size = cache_size;
-	atomic_set(&a->tick, 0);
+	a->tick = 0;
 	spin_lock_init(&a->lock);
 	a->p = 0;
 
@@ -714,12 +740,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 
 	a->nr_allocated = 0;
 
-	a->nr_buckets = cache_size / 8;
-	nr_buckets = 16;
-	while (nr_buckets < a->nr_buckets)
-		nr_buckets <<= 1;
-	a->nr_buckets = nr_buckets;
-
+	a->nr_buckets = next_power(cache_size / 4, 16);
 	a->hash_mask = a->nr_buckets - 1;
 	a->table = kzalloc(sizeof(*a->table) * a->nr_buckets, GFP_KERNEL);
 	if (!a->table) {
@@ -728,9 +749,9 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 		return NULL;
 	}
 
-	a->interesting_size = cache_size / 2;
-	a->interesting_blocks = vzalloc(sizeof(*a->interesting_blocks) * a->interesting_size);
-	if (!a->interesting_blocks) {
+	a->interesting_size = next_power(cache_size * 2, 16);
+	a->interesting_array = vzalloc(sizeof(*a->interesting_array) * a->interesting_size);
+	if (!a->interesting_array) {
 		kfree(a->table);
 		vfree(a->entries);
 		kfree(a);
@@ -739,7 +760,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 
 	a->allocation_bitset = alloc_bitset(cache_size, 0);
 	if (!a->allocation_bitset) {
-		vfree(a->interesting_blocks);
+		vfree(a->interesting_array);
 		kfree(a->table);
 		vfree(a->entries);
 		kfree(a);
