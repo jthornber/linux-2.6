@@ -2383,7 +2383,7 @@ static bool discard_limits_are_compatible(struct pool *pool, struct queue_limits
 		return false;
 	}
 
-	if (data_limits->discard_granularity % (pool->sectors_per_block << SECTOR_SHIFT)) {
+	if ((pool->sectors_per_block << SECTOR_SHIFT) % data_limits->discard_granularity) {
 		*reason = "data device's granularity not a factor of the block size";
 		return false;
 	}
