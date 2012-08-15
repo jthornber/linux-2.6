@@ -42,6 +42,8 @@ struct dm_cache_policy {
 	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
 				     unsigned int seq_io_thresh);
 
+	void (*tick)(struct dm_cache_policy *p);
+
 	void *private;		/* book keeping ptr, not for general use */
 };
 
@@ -79,6 +81,11 @@ static inline dm_block_t policy_residency(struct dm_cache_policy *p)
 static inline void policy_set_seq_io_threshold(struct dm_cache_policy *p, unsigned int seq_io_thresh)
 {
 	return p->set_seq_io_threshold(p, seq_io_thresh);
+}
+
+static inline void policy_tick(struct dm_cache_policy *p)
+{
+	return p->tick(p);
 }
 
 /*----------------------------------------------------------------*/
