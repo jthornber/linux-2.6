@@ -699,8 +699,6 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		break;
 
 	case POLICY_REPLACE:
-		atomic_inc(&c->demotion);
-		atomic_inc(&c->promotion);
 		build_key(lookup_result.old_oblock, &key);
 		r = bio_detain(c->prison, &key, bio, &old_ocell);
 		if (r > 0) {
@@ -714,6 +712,8 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 			pr_alert("cache cell clash, backing off\n");
 			break;
 		}
+		atomic_inc(&c->demotion);
+		atomic_inc(&c->promotion);
 
 		writeback_then_promote(c, lookup_result.old_oblock, block,
 				       lookup_result.cblock,
