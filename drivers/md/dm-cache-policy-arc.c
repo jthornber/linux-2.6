@@ -154,6 +154,9 @@ struct arc_policy {
 	unsigned nr_seq_samples, nr_rand_samples;
 	dm_block_t last_end_oblock;
 	unsigned int seq_io_threshold;
+
+	/* Last looked up cached entry */
+	struct arc_entry *last_lookup;
 };
 
 static struct arc_policy *to_arc_policy(struct dm_cache_policy *p)
@@ -193,10 +196,15 @@ static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
 	struct hlist_node *tmp;
 	struct arc_entry *e;
 
-	hlist_for_each_entry(e, tmp, bucket, hlist)
-		if (e->oblock == origin)
-			return e;
+	/* Check last lookup cache */
+	if (a->last_lookup && a->last_lookup->oblock == origin)
+		return a->last_lookup;
 
+	hlist_for_each_entry(e, tmp, bucket, hlist)
+		if (e->oblock == origin) {
+			a->last_lookup = e;
+			return e;
+		}
 	return NULL;
 }
 
@@ -730,6 +738,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 	queue_init(&a->b2);
 	queue_init(&a->t2);
 
+	a->last_lookup = NULL;
 	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
 	if (!a->entries) {
 		kfree(a);
