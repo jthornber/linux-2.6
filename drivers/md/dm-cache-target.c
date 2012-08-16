@@ -329,7 +329,7 @@ static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	if (mg->demote) {
 		DMWARN("demotion failed; couldn't copy block");
-		policy_force_mapping(c->policy, mg->new_oblock, mg->old_oblock, mg->cblock);
+		policy_force_mapping(c->policy, mg->new_oblock, mg->old_oblock);
 
 		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
 		if (mg->promote)
@@ -352,7 +352,7 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 
 		if (dm_cache_remove_mapping(c->cmd, mg->old_oblock)) {
 			DMWARN("demotion failed; couldn't update on disk metadata");
-			policy_force_mapping(c->policy, mg->new_oblock, mg->old_oblock, mg->cblock);
+			policy_force_mapping(c->policy, mg->new_oblock,								mg->old_oblock);
 			if (mg->promote)
 				cell_defer(c, mg->new_ocell, 1);
 			cleanup_migration(c, mg);
@@ -710,7 +710,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 			 * old_ocell to become free.
 			 */
 			policy_force_mapping(c->policy, block,
-					     lookup_result.old_oblock, lookup_result.cblock);
+					     lookup_result.old_oblock);
 			pr_alert("cache cell clash, backing off\n");
 			break;
 		}

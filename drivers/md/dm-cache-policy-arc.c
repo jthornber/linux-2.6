@@ -667,9 +667,8 @@ static void arc_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 	__arc_push(a, ARC_B2, e);
 }
 
-static void arc_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblock,
-			      dm_block_t new_oblock,
-			      dm_block_t cblock)
+static void arc_force_mapping(struct dm_cache_policy *p,
+		dm_block_t current_oblock, dm_block_t new_oblock)
 {
 	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e = __arc_lookup(a, current_oblock);
