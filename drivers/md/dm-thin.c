@@ -2377,6 +2377,8 @@ static bool discard_limits_are_compatible(struct pool *pool,
 					  struct queue_limits *data_limits,
 					  const char **reason)
 {
+	sector_t block_size = pool->sectors_per_block << SECTOR_SHIFT;
+
 	/*
 	 * All reasons should be relative to the data device,
 	 * e.g.: Data device <reason>
@@ -2386,14 +2388,12 @@ static bool discard_limits_are_compatible(struct pool *pool,
 		return false;
 	}
 
-	if (data_limits->discard_granularity >
-	    (pool->sectors_per_block << SECTOR_SHIFT)) {
+	if (data_limits->discard_granularity > block_size) {
 		*reason = "discard granularity larger than a block";
 		return false;
 	}
 
-	if ((pool->sectors_per_block << SECTOR_SHIFT)
-	     & (data_limits->discard_granularity - 1)) {
+	if (block_size & (data_limits->discard_granularity - 1)) {
 		*reason = "discard granularity not a factor of block size";
 		return false;
 	}
@@ -2406,7 +2406,7 @@ static bool block_size_is_power_of_2(struct pool *pool)
 	return pool->sectors_per_block_shift >= 0;
 }
 
-static unsigned largest_power_below(unsigned limit, unsigned min)
+static unsigned largest_power_factor(unsigned limit, unsigned min)
 {
 	while ((min < limit) && (((limit / min) & 0x1) == 0))
 		min <<= 1;
@@ -2420,8 +2420,8 @@ static void set_discard_granularity_no_passdown(struct pool *pool,
 	unsigned dg_sectors;
 
 	if (!block_size_is_power_of_2(pool)) {
-		dg_sectors = largest_power_below(pool->sectors_per_block,
-						 DATA_DEV_BLOCK_SIZE_MIN_SECTORS);
+		dg_sectors = largest_power_factor(pool->sectors_per_block,
+						  DATA_DEV_BLOCK_SIZE_MIN_SECTORS);
 	} else
 		dg_sectors = pool->sectors_per_block;
 
