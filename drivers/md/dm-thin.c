@@ -209,8 +209,6 @@ struct pool_c {
 	struct dm_target_callbacks callbacks;
 
 	dm_block_t low_water_blocks;
-
-	struct pool_features original_pf; /* for table status */
 	struct pool_features pf;
 };
 
@@ -1476,18 +1474,18 @@ static bool data_dev_supports_discard(struct pool_c *pt)
 	return q && blk_queue_discard(q);
 }
 
-static void disable_passdown_if_not_supported(struct pool_c *pt)
+static void disable_passdown_if_not_supported(struct pool_c *pt, struct pool_features *pf)
 {
 	/*
 	 * If discard_passdown was enabled verify that the data device
 	 * supports discards.  Disable discard_passdown if not; otherwise
 	 * -EOPNOTSUPP will be returned.
 	 */
-	if (pt->pf.discard_passdown && !data_dev_supports_discard(pt)) {
+	if (pf->discard_passdown && !data_dev_supports_discard(pt)) {
 		char buf[BDEVNAME_SIZE];
 		DMWARN("Discard unsupported by data device (%s): Disabling discard passdown.",
 		       bdevname(pt->data_dev->bdev, buf));
-		pt->pool->pf.discard_passdown = 0;
+		pf->discard_passdown = 0;
 	}
 }
 
@@ -1508,7 +1506,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->low_water_blocks = pt->low_water_blocks;
 	pool->pf = pt->pf;
 
-	disable_passdown_if_not_supported(pt);
+	disable_passdown_if_not_supported(pt, &pool->pf);
 	set_pool_mode(pool, new_mode);
 
 	return 0;
@@ -1900,9 +1898,9 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->metadata_dev = metadata_dev;
 	pt->data_dev = data_dev;
 	pt->low_water_blocks = low_water_blocks;
-	pt->original_pf = pf;
 	pt->pf = pf;
 	ti->num_flush_requests = 1;
+
 	/*
 	 * Only need to enable discards if the pool should pass
 	 * them down to the data device.  The thin device's discard
@@ -1910,6 +1908,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	 */
 	if (pf.discard_enabled && pf.discard_passdown) {
 		ti->num_discard_requests = 1;
+
 		/*
 		 * Setting 'discards_supported' circumvents the normal
 		 * stacking of discard limits (this keeps the pool and
@@ -2344,7 +2343,7 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		       format_dev_t(buf2, pt->data_dev->bdev->bd_dev),
 		       (unsigned long)pool->sectors_per_block,
 		       (unsigned long long)pt->low_water_blocks);
-		emit_flags(&pt->original_pf, result, sz, maxlen);
+		emit_flags(&pt->pf, result, sz, maxlen);
 		break;
 	}
 
@@ -2428,12 +2427,11 @@ static void set_discard_granularity_no_passdown(struct pool *pool,
 	limits->discard_granularity = dg_sectors << SECTOR_SHIFT;
 }
 
-static void set_discard_limits(struct pool_c *pt,
+static void set_discard_limits(struct pool *pool,
+			       struct pool_features *pf,
 			       struct queue_limits *data_limits,
 			       struct queue_limits *limits)
 {
-	struct pool_features *pf = &pt->pf;
-	struct pool *pool = pt->pool;
 	bool zeroes = pf->zero_new_blocks;
 
 	limits->max_discard_sectors = pool->sectors_per_block;
@@ -2452,6 +2450,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
+	struct pool_features pf = pt->pf;
 	const char *reason;
 	struct block_device *data_bdev = pt->data_dev->bdev;
 	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
@@ -2463,14 +2462,17 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 * pt->pf is used here because it reflects the features configured but
 	 * not yet transfered to the live pool (see: bind_control_target).
 	 */
-	if (pt->pf.discard_enabled) {
-		if (!discard_limits_are_compatible(pool, data_limits, &reason)) {
+	if (pf.discard_enabled) {
+		disable_passdown_if_not_supported(pt, &pf);
+
+		if (pf.discard_passdown && !discard_limits_are_compatible(pool, data_limits, &reason)) {
 			char buf[BDEVNAME_SIZE];
 			DMWARN("Data device (%s) %s: Disabling discard passdown.",
 			       bdevname(data_bdev, buf), reason);
-			pt->pf.discard_passdown = false;
+			pf.discard_passdown = false;
 		}
-		set_discard_limits(pt, data_limits, limits);
+
+		set_discard_limits(pt->pool, &pf, data_limits, limits);
 	}
 }
 
