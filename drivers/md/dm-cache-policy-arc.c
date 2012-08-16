@@ -638,10 +638,9 @@ static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_blo
 	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e;
 
-	debug("loading mapping %lu -> %lu, context = %p\n",
+	debug("loading mapping %lu -> %lu\n",
 	      (unsigned long) oblock,
-	      (unsigned long) cblock,
-	      context);
+	      (unsigned long) cblock);
 
 	e = __arc_alloc_entry(a);
 	if (!e)
