@@ -224,6 +224,13 @@ struct dm_target {
 	bool discards_supported:1;
 
 	/*
+	 * Set if this target should _not_ receive discards, regardless of
+	 * whether or not its underlygin devices have support.
+	 * Incompatible with discards_supported.
+	 */
+	bool discards_unsupported:1;
+
+	/*
 	 * Set if the target required discard request to be split
 	 * on max_io_len boundary.
 	 */
@@ -233,6 +240,7 @@ struct dm_target {
 	 * Set if this target does not return zeroes on discarded blocks.
 	 */
 	bool discard_zeroes_data_unsupported:1;
+	bool pretend_discard_zeroes_data:1;
 };
 
 /* Each target can link one of these into the table */
