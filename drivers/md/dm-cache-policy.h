@@ -35,12 +35,13 @@ struct dm_cache_policy {
 	/* must succeed */
 	void (*remove_mapping)(struct dm_cache_policy *p, dm_block_t oblock);
 	void (*force_mapping)(struct dm_cache_policy *p, dm_block_t current_oblock,
-			      dm_block_t new_oblock,
-			      dm_block_t cblock);
+			      dm_block_t new_oblock);
 
 	dm_block_t (*residency)(struct dm_cache_policy *p);
 	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
 				     unsigned int seq_io_thresh);
+
+	void (*tick)(struct dm_cache_policy *p);
 
 	void *private;		/* book keeping ptr, not for general use */
 };
@@ -64,11 +65,10 @@ static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_block_t o
 	return p->remove_mapping(p, oblock);
 }
 
-static inline void policy_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblock,
-					dm_block_t new_oblock,
-					dm_block_t cblock)
+static inline void policy_force_mapping(struct dm_cache_policy *p,
+			dm_block_t current_oblock, dm_block_t new_oblock)
 {
-	return p->force_mapping(p, current_oblock, new_oblock, cblock);
+	return p->force_mapping(p, current_oblock, new_oblock);
 }
 
 static inline dm_block_t policy_residency(struct dm_cache_policy *p)
@@ -79,6 +79,11 @@ static inline dm_block_t policy_residency(struct dm_cache_policy *p)
 static inline void policy_set_seq_io_threshold(struct dm_cache_policy *p, unsigned int seq_io_thresh)
 {
 	return p->set_seq_io_threshold(p, seq_io_thresh);
+}
+
+static inline void policy_tick(struct dm_cache_policy *p)
+{
+	return p->tick(p);
 }
 
 /*----------------------------------------------------------------*/
