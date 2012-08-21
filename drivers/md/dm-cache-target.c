@@ -42,21 +42,98 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-#define NR_TIMES 32
-
-struct times {
-	unsigned nr_times;
+struct rolling_average {
+	spinlock_t lock;
+	unsigned window;
+	unsigned nr_entries;
 	unsigned slot;
-	unsigned long total_durations;
-	unsigned long durations[NR_TIMES];
+	uint64_t total;
+	struct {
+		uint64_t sum;
+		unsigned long start;
+	} *values;
 };
 
-static void times_init(struct times *ts)
+static int rolling_average_init(struct rolling_average *ra, unsigned window)
 {
-	ts->nr_times = 0;
-	ts->slot = 0;
-	ts->total_durations = 0;
-	memset(ts->durations, 0, sizeof(ts->durations));
+	spin_lock_init(&ra->lock);
+	ra->window = window;
+	ra->nr_entries = 0;
+	ra->slot = 0;
+	ra->total = 0;
+	ra->values = vzalloc(sizeof(*ra->values) * window);
+	ra->values[ra->slot].start = jiffies;
+
+	return ra->values ? 0 : -ENOMEM;
+}
+
+static void rolling_average_exit(struct rolling_average *ra)
+{
+	vfree(ra->values);
+}
+
+static unsigned calc_next_slot(struct rolling_average *ra, unsigned s)
+{
+	s = ra->slot + 1;
+	if (s == ra->window)
+		s = 0;
+
+	return s;
+}
+
+static void ra_next_slot(struct rolling_average *ra)
+{
+	spin_lock(&ra->lock);
+
+	/* we only add complete values into the total */
+	ra->total += ra->values[ra->slot].sum;
+	ra->slot = calc_next_slot(ra, ra->slot);
+	ra->total -= ra->values[ra->slot].sum;
+
+	if (ra->nr_entries < ra->window)
+		ra->nr_entries++;
+
+	ra->values[ra->slot].sum = 0;
+	ra->values[ra->slot].start = jiffies;
+
+	spin_unlock(&ra->lock);
+}
+
+static void ra_add_to_slot(struct rolling_average *ra, uint64_t value)
+{
+	spin_lock(&ra->lock);
+	ra->values[ra->slot].sum += value;
+	spin_unlock(&ra->lock);
+}
+
+static uint64_t ra_total(struct rolling_average *ra)
+{
+	uint64_t r;
+
+	spin_lock(&ra->lock);
+	r = ra->total + ra->values[ra->slot].sum;
+	spin_unlock(&ra->lock);
+
+	return r;
+}
+
+static uint64_t __ra_average(struct rolling_average *ra)
+{
+	uint64_t total = ra->total + ra->values[ra->slot].sum;
+	uint64_t nr = ra->nr_entries + 1;
+
+	return total / nr;
+}
+
+static uint64_t ra_average(struct rolling_average *ra)
+{
+	uint64_t r;
+
+	spin_lock(&ra->lock);
+	r = __ra_average(ra);
+	spin_unlock(&ra->lock);
+
+	return r;
 }
 
 static unsigned long elapsed(unsigned long start, unsigned long end)
@@ -67,29 +144,44 @@ static unsigned long elapsed(unsigned long start, unsigned long end)
 		return end - start;
 }
 
-static unsigned next_slot(unsigned s)
+static unsigned long __ra_duration(struct rolling_average *ra)
 {
-	s++;
-	if (s == NR_TIMES)
-		s = 0;
-	return s;
+	unsigned start_slot;
+	unsigned long start;
+
+	if (ra->nr_entries == 0)
+		return 0;
+
+	if (ra->nr_entries < ra->window)
+		start_slot = 0;
+	else
+		start_slot = calc_next_slot(ra, ra->slot);
+
+	start = ra->values[start_slot].start;
+	return elapsed(start, jiffies);
 }
 
-static void times_add(struct times *ts, unsigned long start)
+static unsigned long ra_duration(struct rolling_average *ra)
 {
-	ts->total_durations -= ts->durations[ts->slot];
-	ts->durations[ts->slot] = elapsed(start, jiffies);
-	ts->total_durations += ts->durations[ts->slot];
+	unsigned long r;
 
-	if (ts->nr_times < NR_TIMES)
-		ts->nr_times++;
+	spin_lock(&ra->lock);
+	r = __ra_duration(ra);
+	spin_unlock(&ra->lock);
 
-	ts->slot = next_slot(ts->slot);
+	return r;
 }
 
-static unsigned long average_duration(struct times *ts)
+static uint64_t ra_average_per_second(struct rolling_average *ra)
 {
-	return ts->nr_times ? (ts->total_durations / ts->nr_times) : 0;
+	spin_lock(&ra->lock);
+	if (ra->nr_entries == 0) {
+		spin_unlock(&ra->lock);
+		return 0;
+	}
+	spin_unlock(&ra->lock);
+
+	return (ra_total(ra) * HZ) / ra_duration(ra);
 }
 
 /*----------------------------------------------------------------*/
@@ -128,7 +220,11 @@ struct cache_c {
 	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
 
-	struct times migration_times;
+	struct rolling_average hit_volume;
+	struct rolling_average miss_volume;
+	struct rolling_average migration_time;
+	struct rolling_average migration_count;
+
 	unsigned long *dirty_bitset;
 
 	struct dm_kcopyd_client *copier;
@@ -225,15 +321,21 @@ static void remap_to_cache(struct cache_c *c, struct bio *bio,
 
 static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t oblock)
 {
+	ra_add_to_slot(&c->miss_volume, bio->bi_size);
+
 	remap_to_origin(c, bio);
-	set_bit(oblock, c->dirty_bitset);
+	if (bio_data_dir(bio) == WRITE)
+		set_bit(oblock, c->dirty_bitset);
 }
 
 static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
 				 dm_block_t oblock, dm_block_t cblock)
 {
+	ra_add_to_slot(&c->hit_volume, bio->bi_size);
+
 	remap_to_cache(c, bio, cblock);
-	set_bit(oblock, c->dirty_bitset);
+	if (bio_data_dir(bio) == WRITE)
+		set_bit(oblock, c->dirty_bitset);
 }
 
 static dm_block_t get_bio_block(struct cache_c *c, struct bio *bio)
@@ -266,6 +368,9 @@ static void issue(struct cache_c *c, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
+#define MIGRATION_INC 1024
+#define MIGRATION_FACTOR 1024
+
 static int prealloc_migration(struct cache_c *c)
 {
 	if (c->next_migration)
@@ -292,6 +397,12 @@ static void free_migration(struct cache_c *c, struct dm_cache_migration *mg)
 
 static void inc_nr_migrations(struct cache_c *c)
 {
+	ra_add_to_slot(&c->migration_count, MIGRATION_INC);
+#if 0
+	pr_alert("migrations per second * 1024 = %llu, total_migrations * 1024 = %llu\n",
+		 (unsigned long long) ra_average_per_second(&c->migration_count),
+		 (unsigned long long) ra_total(&c->migration_count));
+#endif
 	atomic_inc(&c->nr_migrations);
 	wake_up(&c->migration_wait);
 }
@@ -320,9 +431,13 @@ static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool 
 
 static void cleanup_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
+	unsigned long duration = elapsed(mg->start_jiffies, jiffies);
+
 	free_migration(c, mg);
 	dec_nr_migrations(c);
-	times_add(&c->migration_times, mg->start_jiffies);
+
+	ra_add_to_slot(&c->migration_time, duration);
+	ra_next_slot(&c->migration_time);
 }
 
 static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
@@ -648,6 +763,67 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 #endif
 }
 
+/*
+ * FIXME: this is just thinking out loud, tidy up later.
+ *
+ * Migrating a block to the cache has various costs associated with it:
+ *
+ * i) A read to the origin, followed by a write to the cache.  Reducing the
+ * bandwidth of each.
+ *
+ * ii) A latency hit, io to the old _and_ new oblock get stalled until the
+ * migration is complete.
+ *
+ * iii) Hits to the old_oblock now go to the origin.
+ *
+ * The benefits:
+ *
+ * iv) Hits to the new_oblock now got to the cache
+ *
+ * [Ignoring the latency aspect]
+ *
+ * In practise, blocks are only temporarily resident on the cache, let's
+ * call this period t_resident (on average).
+ *
+ * The policy decides whether another block would be better in the cache.
+ * Here we're trying to decide if now would be a good moment to actually do
+ * the migration.  We also throttle migrations at this point; the policy
+ * assumes they're instant.
+ *
+ * Let's address the throttling issue first:
+ *
+ * [Assuming uniform io access pattern, address changing ones later]
+ *
+ * t_resident should be long enough to have a payoff.
+ * t_resident >= migration_io / (hit_rate * io_per_second)
+ * hit_rate needs to take into account the size of the bios.
+ */
+static bool migrations_allowed(struct cache_c *c)
+{
+#if 0
+	uint64_t migration_io = c->sectors_per_block * 2;
+	uint64_t expected_migrations = c->cache_size * migration_io *
+		(ra_average(&c->hit_volume) + ra_average(&c->miss_volume)) /
+		ra_average(&c->hit_volume);
+
+	// uint64_t actual_migrations = ra_total(&c->migrations);
+
+	pr_alert("hit_volume %llu, miss_volume %llu, expected_migrations = %llu\n",
+		 (unsigned long long) ra_average(&c->hit_volume),
+		 (unsigned long long) ra_average(&c->miss_volume),
+		 (unsigned long long) expected_migrations);
+	return true;
+#else
+	uint64_t target = MIGRATION_INC * c->cache_size / MIGRATION_FACTOR;
+	uint64_t migrations_per_second = ra_average_per_second(&c->migration_count);
+
+	if (target == 0)
+		target = 1;
+
+	return (atomic_read(&c->nr_migrations) < 30) && (migrations_per_second < target);
+#endif
+}
+
 static void process_bio(struct cache_c *c, struct bio *bio)
 {
 	int r;
@@ -658,7 +834,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = !test_bit(block, c->dirty_bitset);
-	bool can_migrate = atomic_read(&c->nr_migrations) < 4;
+	bool can_migrate = migrations_allowed(c);
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -879,6 +1055,9 @@ static void do_work(struct work_struct *ws)
 			process_migrations(c, &c->quiesced_migrations, issue_copy);
 			process_migrations(c, &c->completed_migrations, complete_migration);
 			process_deferred_flush_bios(c);
+
+			ra_next_slot(&c->hit_volume);
+			ra_next_slot(&c->miss_volume);
 		}
 
 	} while (more_work(c));
@@ -891,6 +1070,7 @@ static void do_work(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct cache_c *c = container_of(to_delayed_work(ws), struct cache_c, waker);
+	ra_next_slot(&c->migration_count);
 	wake_worker(c);
 	queue_delayed_work(c->wq, &c->waker, COMMIT_PERIOD);
 }
@@ -937,6 +1117,10 @@ static void cache_dtr(struct dm_target *ti)
 	prison_destroy(c->prison);
 	destroy_workqueue(c->wq);
 	free_bitset(c->dirty_bitset);
+	rolling_average_exit(&c->hit_volume);
+	rolling_average_exit(&c->miss_volume);
+	rolling_average_exit(&c->migration_time);
+	rolling_average_exit(&c->migration_count);
 	dm_kcopyd_client_destroy(c->copier);
 	dm_cache_metadata_close(c->cmd);
 	dm_put_device(ti, c->metadata_dev);
@@ -1028,7 +1212,6 @@ static struct kmem_cache *_endio_hook_cache;
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	dm_block_t nr_cache_blocks;
 	sector_t block_size, origin_size;
 	struct cache_c *c;
 	char *end;
@@ -1101,7 +1284,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&c->completed_migrations);
 	atomic_set(&c->nr_migrations, 0);
 	init_waitqueue_head(&c->migration_wait);
-	times_init(&c->migration_times);
+	rolling_average_init(&c->hit_volume, 2048); /* FIXME: magic number */
+	rolling_average_init(&c->miss_volume, 2048);
+	rolling_average_init(&c->migration_time, 2048);
+	rolling_average_init(&c->migration_count, 60); /* one sample per second */
 
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);
@@ -1152,8 +1338,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_migration_pool;
 	}
 
-	nr_cache_blocks = get_dev_size(c->cache_dev) >> c->block_shift;
-	c->policy = dm_cache_policy_create(argv[4], nr_cache_blocks);
+	c->cache_size = get_dev_size(c->cache_dev) >> c->block_shift;
+	c->policy = dm_cache_policy_create(argv[4], c->cache_size);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad_cache_policy;
