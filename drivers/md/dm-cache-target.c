@@ -195,6 +195,7 @@ static uint64_t ra_average_per_second(struct rolling_average *ra)
 #define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
+#define MIGRATION_COUNT_WINDOW 10
 
 struct cache_c {
 	struct dm_target *ti;
@@ -1287,7 +1288,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	rolling_average_init(&c->hit_volume, 2048); /* FIXME: magic number */
 	rolling_average_init(&c->miss_volume, 2048);
 	rolling_average_init(&c->migration_time, 2048);
-	rolling_average_init(&c->migration_count, 60); /* one sample per second */
+	rolling_average_init(&c->migration_count, MIGRATION_COUNT_WINDOW); /* one sample per second */
 
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);

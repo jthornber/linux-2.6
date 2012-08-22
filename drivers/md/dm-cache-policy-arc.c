@@ -739,7 +739,7 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 	queue_init(&a->t2);
 
 	a->last_lookup = NULL;
-	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
+	a->entries = vzalloc(sizeof(*a->entries) * 2 * cache_size);
 	if (!a->entries) {
 		kfree(a);
 		return NULL;
