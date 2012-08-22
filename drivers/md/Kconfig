@@ -282,6 +282,13 @@ config DM_CACHE_ARC
        ---help---
          Under development
 
+config DM_CACHE_LRU
+       tristate "LRU Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         Under development
+
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM
