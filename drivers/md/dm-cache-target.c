@@ -138,7 +138,7 @@ static uint64_t ra_average(struct rolling_average *ra)
 
 static unsigned long elapsed(unsigned long start, unsigned long end)
 {
-	if (start < end)
+	if (end < start)
 		return end + (ULONG_MAX - start);
 	else
 		return end - start;
