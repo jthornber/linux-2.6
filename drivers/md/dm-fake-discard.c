@@ -27,11 +27,6 @@ struct fake_discard {
 
 /*----------------------------------------------------------------*/
 
-static bool is_power(unsigned n)
-{
-	return !(n & (n - 1));
-}
-
 static int parse_features(struct dm_arg_set *as, struct fake_discard *fd,
 			  struct dm_target *ti)
 {
@@ -113,13 +108,18 @@ static int discard_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad;
 	}
 
-	if (!is_power(fd->discard_granularity)) {
+	if (!is_power_of_2(fd->discard_granularity)) {
 		ti->error = "Discard granularity must be a power of 2";
 		goto bad;
 	}
 
 	if (sscanf(argv[3], "%u%c", &fd->max_discard_sectors, &dummy) != 1) {
 		ti->error = "Invalid max discard sectors";
+		goto bad;
+	}
+
+	if (fd->discard_granularity > fd->max_discard_sectors) {
+		ti->error = "Discard granularity cannot be larger than max discard sectors";
 		goto bad;
 	}
 
@@ -177,9 +177,10 @@ static int discard_map(struct dm_target *ti, struct bio *bio,
 	struct fake_discard *fd = ti->private;
 
 	if (bio->bi_rw & REQ_DISCARD) {
-		if (fd->supports_discard)
+		if (fd->supports_discard) {
 			bio_endio(bio, 0);
-		else
+			return DM_MAPIO_SUBMITTED;
+		} else
 			bio_endio(bio, -ENOTSUPP);
 	} else {
 		bio->bi_bdev = fd->dev->bdev;
@@ -235,6 +236,14 @@ static int discard_iterate_devices(struct dm_target *ti,
 	return fn(ti, fd->dev, fd->offset, ti->len, data);
 }
 
+static void discard_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	struct fake_discard *fd = ti->private;
+
+	limits->discard_granularity = fd->discard_granularity;
+	limits->max_discard_sectors = fd->max_discard_sectors;
+}
+
 static struct target_type fake_discard_target = {
 	.name   = "fake-discard",
 	.version = {1, 0, 0},
@@ -245,6 +254,7 @@ static struct target_type fake_discard_target = {
 	.status = discard_status,
 	.merge  = discard_merge,
 	.iterate_devices = discard_iterate_devices,
+	.io_hints = discard_io_hints,
 };
 
 static int __init dm_discard_init(void)
