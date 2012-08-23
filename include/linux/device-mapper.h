@@ -225,7 +225,7 @@ struct dm_target {
 
 	/*
 	 * Set if this target should _not_ receive discards, regardless of
-	 * whether or not its underlygin devices have support.
+	 * whether or not its underlying devices have support.
 	 * Incompatible with discards_supported.
 	 */
 	bool discards_unsupported:1;

@@ -410,7 +410,7 @@ config DM_DELAY
 	If unsure, say N.
 
 config DM_FAKE_DISCARD
-       tristate "A linear target that pretends to support discard"
+       tristate "fake-discard, a linear target that pretends to support discard"
        depends on DM_TEST_TARGETS
        ---help---
        A target that pretends to support discard, with various parameters.
