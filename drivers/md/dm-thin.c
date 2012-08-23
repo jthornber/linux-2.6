@@ -2465,7 +2465,8 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	if (pf.discard_enabled) {
 		disable_passdown_if_not_supported(pt, &pf);
 
-		if (pf.discard_passdown && !discard_limits_are_compatible(pool, data_limits, &reason)) {
+		if (pf.discard_passdown &&
+		    !discard_limits_are_compatible(pool, data_limits, &reason)) {
 			char buf[BDEVNAME_SIZE];
 			DMWARN("Data device (%s) %s: Disabling discard passdown.",
 			       bdevname(data_bdev, buf), reason);
