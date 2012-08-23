@@ -1915,6 +1915,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		 * thin devices' discard limits consistent).
 		 */
 		ti->discards_supported = true;
+		ti->discard_zeroes_data_unsupported = true;
 	}
 	ti->private = pt;
 
@@ -2437,18 +2438,12 @@ static void set_discard_limits(struct pool *pool,
 			       struct queue_limits *data_limits,
 			       struct queue_limits *limits)
 {
-	bool zeroes = pf->zero_new_blocks;
-
 	limits->max_discard_sectors = pool->sectors_per_block;
 
-	if (pf->discard_passdown) {
+	if (pf->discard_passdown)
 		limits->discard_granularity = data_limits->discard_granularity;
-		zeroes = zeroes || data_limits->discard_zeroes_data;
-	} else
+	else
 		set_discard_granularity_no_passdown(pool, limits);
-
-	limits->discard_zeroes_data = zeroes &&
-		limits->discard_granularity == (pool->sectors_per_block << SECTOR_SHIFT);
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
