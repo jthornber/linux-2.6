@@ -692,6 +692,7 @@ static void arc_force_mapping(struct dm_cache_policy *p,
 static dm_block_t arc_residency(struct dm_cache_policy *p)
 {
 	struct arc_policy *a = to_arc_policy(p);
+	// FIXME: this may be wrong if arc_remove_mapping has been called
 	return min(a->nr_allocated, a->cache_size);
 }
 
