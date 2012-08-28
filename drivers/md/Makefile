@@ -13,7 +13,7 @@ dm-log-userspace-y \
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
 dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
 dm-cache-arc-y  += dm-cache-policy-arc.o
-dm-cache-lru-y  += dm-cache-policy-lru.o
+dm-cache-basic-y += dm-cache-policy-basic.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -48,7 +48,7 @@ obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_ARC)	+= dm-cache-arc.o
-obj-$(CONFIG_DM_CACHE_LRU)	+= dm-cache-lru.o
+obj-$(CONFIG_DM_CACHE_BASIC)	+= dm-cache-basic.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_FAKE_DISCARD)	+= dm-fake-discard.o
 
