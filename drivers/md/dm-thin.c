@@ -1474,7 +1474,8 @@ static bool data_dev_supports_discard(struct pool_c *pt)
 	return q && blk_queue_discard(q);
 }
 
-static void disable_passdown_if_not_supported(struct pool_c *pt, struct pool_features *pf)
+static void disable_passdown_if_not_supported(struct pool_c *pt,
+					      struct pool_features *pf)
 {
 	/*
 	 * If discard_passdown was enabled verify that the data device
@@ -1485,7 +1486,7 @@ static void disable_passdown_if_not_supported(struct pool_c *pt, struct pool_fea
 		char buf[BDEVNAME_SIZE];
 		DMWARN("Discard unsupported by data device (%s): Disabling discard passdown.",
 		       bdevname(pt->data_dev->bdev, buf));
-		pf->discard_passdown = 0;
+		pf->discard_passdown = false;
 	}
 }
 
@@ -1767,13 +1768,13 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 		argc--;
 
 		if (!strcasecmp(arg_name, "skip_block_zeroing"))
-			pf->zero_new_blocks = 0;
+			pf->zero_new_blocks = false;
 
 		else if (!strcasecmp(arg_name, "ignore_discard"))
-			pf->discard_enabled = 0;
+			pf->discard_enabled = false;
 
 		else if (!strcasecmp(arg_name, "no_discard_passdown"))
-			pf->discard_passdown = 0;
+			pf->discard_passdown = false;
 
 		else if (!strcasecmp(arg_name, "read_only"))
 			pf->mode = PM_READ_ONLY;
@@ -2450,7 +2451,6 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	struct pool_features pf = pt->pf;
 	const char *reason;
 	struct block_device *data_bdev = pt->data_dev->bdev;
 	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
@@ -2462,18 +2462,18 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 * pt->pf is used here because it reflects the features configured but
 	 * not yet transfered to the live pool (see: bind_control_target).
 	 */
-	if (pf.discard_enabled) {
-		disable_passdown_if_not_supported(pt, &pf);
+	if (pt->pf.discard_enabled) {
+		disable_passdown_if_not_supported(pt, &pt->pf);
 
-		if (pf.discard_passdown &&
+		if (pt->pf.discard_passdown &&
 		    !discard_limits_are_compatible(pool, data_limits, &reason)) {
 			char buf[BDEVNAME_SIZE];
 			DMWARN("Data device (%s) %s: Disabling discard passdown.",
 			       bdevname(data_bdev, buf), reason);
-			pf.discard_passdown = false;
+			pt->pf.discard_passdown = false;
 		}
 
-		set_discard_limits(pt->pool, &pf, data_limits, limits);
+		set_discard_limits(pt->pool, &pt->pf, data_limits, limits);
 	}
 }
 
