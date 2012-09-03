@@ -462,7 +462,7 @@ static void __arc_map_found(struct arc_policy *a,
 	__arc_push(a, ARC_T2, e);
 }
 
-static void __arc_map(struct arc_policy *a,
+static void __arc_map_not_found(struct arc_policy *a,
 		      dm_block_t origin_block,
 		      int data_dir,
 		      bool can_migrate,
@@ -470,26 +470,11 @@ static void __arc_map(struct arc_policy *a,
 		      struct policy_result *result)
 {
 	int r;
+	struct arc_entry *e;
 	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
 	dm_block_t b2_size = queue_size(&a->q[ARC_B2]);
 	dm_block_t l1_size, l2_size;
 	dm_block_t new_cache;
-	struct arc_entry *e;
-
-	e = __arc_lookup(a, origin_block);
-	if (e) {
-		__arc_map_found(a, e, origin_block, can_migrate, result);
-		return;
-	}
-
-	/* FIXME: this is turning into a huge mess */
-	cheap_copy = cheap_copy && __any_free_entries(a);
-	if (arc_random_stream(a) && (cheap_copy || (can_migrate && __arc_interesting_block(a, origin_block, data_dir)))) {
-		/* carry on, perverse logic */
-	} else {
-		result->op = POLICY_MISS;
-		return;
-	}
 
 	l1_size = queue_size(&a->q[ARC_T1]) + b1_size;
 	l2_size = queue_size(&a->q[ARC_T2]) + b2_size;
@@ -544,6 +529,37 @@ static void __arc_map(struct arc_policy *a,
 	}
 
 	__arc_push(a, ARC_T1, e);
+}
+
+static bool definitely_a_miss(struct arc_policy *a,
+			      dm_block_t origin_block,
+			      int data_dir,
+			      bool can_migrate,
+			      bool cheap_copy)
+{
+	bool possible_migration = can_migrate && __arc_interesting_block(a, origin_block, data_dir);
+	bool possible_new = cheap_copy && __any_free_entries(a);
+	bool maybe_a_hit = arc_random_stream(a) && (possible_new || possible_migration);
+
+	return !maybe_a_hit;
+}
+
+static void __arc_map(struct arc_policy *a,
+		      dm_block_t origin_block,
+		      int data_dir,
+		      bool can_migrate,
+		      bool cheap_copy,
+		      struct policy_result *result)
+{
+	struct arc_entry *e = __arc_lookup(a, origin_block);
+	if (e)
+		__arc_map_found(a, e, origin_block, can_migrate, result);
+
+	else if (definitely_a_miss(a, origin_block, data_dir, can_migrate, cheap_copy))
+		result->op = POLICY_MISS;
+
+	else
+		__arc_map_not_found(a, origin_block, data_dir, can_migrate, cheap_copy, result);
 }
 
 static void arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
