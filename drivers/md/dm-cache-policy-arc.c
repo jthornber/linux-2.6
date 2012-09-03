@@ -61,12 +61,6 @@ static unsigned queue_size(struct queue *q)
 	return q->size;
 }
 
-static bool queue_empty(struct queue *q)
-{
-	BUG_ON(q->size ? list_empty(&q->elts) : !list_empty(&q->elts));
-	return !q->size;
-}
-
 static struct list_head *queue_head(struct queue *q)
 {
 	BUG_ON(list_empty(&q->elts));
@@ -107,6 +101,8 @@ enum arc_state {
 	ARC_T2
 };
 
+#define ARC_NR_QUEUES 4
+
 struct arc_entry {
 	enum arc_state state;
 	struct hlist_node hlist;
@@ -131,7 +127,7 @@ struct arc_policy {
 	spinlock_t lock;
 
 	dm_block_t p;		/* the magic factor that balances lru vs lfu */
-	struct queue b1, t1, b2, t2;
+	struct queue q[ARC_NR_QUEUES];
 
 	/*
 	 * We know exactly how many entries will be needed, so we can
@@ -274,108 +270,46 @@ static bool __any_free_entries(struct arc_policy *a)
 }
 
 static void __arc_push(struct arc_policy *a,
-		     enum arc_state s, struct arc_entry *e)
+		       enum arc_state s, struct arc_entry *e)
 {
 	e->state = s;
 	e->tick = a->tick;
 
 	switch (s) {
 	case ARC_T1:
-		__alloc_cblock(a, e->cblock);
-		queue_push(&a->t1, &e->list);
-		__arc_insert(a, e);
-		break;
-
 	case ARC_T2:
 		__alloc_cblock(a, e->cblock);
-		queue_push(&a->t2, &e->list);
 		__arc_insert(a, e);
-		break;
+		/* fall through */
 
 	case ARC_B1:
-		queue_push(&a->b1, &e->list);
-		break;
-
 	case ARC_B2:
-		queue_push(&a->b2, &e->list);
+		queue_push(&a->q[s], &e->list);
 		break;
 	}
 }
 
 static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
 {
-	struct arc_entry *e = NULL;
+	struct arc_entry *e = container_of(queue_pop(&a->q[s]), struct arc_entry, list);
 
-#define POP(x) container_of(queue_pop(x), struct arc_entry, list)
-
-	switch (s) {
-	case ARC_T1:
-		BUG_ON(queue_empty(&a->t1));
-		e = POP(&a->t1);
+	if (s == ARC_T1 || s == ARC_T2) {
 		__arc_remove(a, e);
 		__free_cblock(a, e->cblock);
-		break;
-
-	case ARC_T2:
-		BUG_ON(queue_empty(&a->t2));
-		e = POP(&a->t2);
-		__arc_remove(a, e);
-		__free_cblock(a, e->cblock);
-		break;
-
-	case ARC_B1:
-		BUG_ON(queue_empty(&a->b1));
-		e = POP(&a->b1);
-		break;
-
-	case ARC_B2:
-		BUG_ON(queue_empty(&a->b2));
-		e = POP(&a->b2);
-		break;
 	}
-
-#undef POP
 
 	return e;
 }
 
 static struct arc_entry *__arc_peek(struct arc_policy *a, enum arc_state s)
 {
-	struct arc_entry *e = NULL;
-
-#define HEAD(x) container_of(queue_head(x), struct arc_entry, list)
-
-	switch (s) {
-	case ARC_T1:
-		BUG_ON(queue_empty(&a->t1));
-		e = HEAD(&a->t1);
-		break;
-
-	case ARC_T2:
-		BUG_ON(queue_empty(&a->t2));
-		e = HEAD(&a->t2);
-		break;
-
-	case ARC_B1:
-		BUG_ON(queue_empty(&a->b1));
-		e = HEAD(&a->b1);
-		break;
-
-	case ARC_B2:
-		BUG_ON(queue_empty(&a->b2));
-		e = HEAD(&a->b2);
-		break;
-	}
-
-#undef HEAD
-
-	return e;
+	return container_of(queue_head(&a->q[s]), struct arc_entry, list);
 }
 
 static bool __can_demote(struct arc_policy *a)
 {
 	struct arc_entry *e;
-	dm_block_t t1_size = queue_size(&a->t1);
+	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
 
 
 	if (t1_size && ((t1_size > a->p) || (t1_size == a->p)))
@@ -389,26 +323,24 @@ static bool __can_demote(struct arc_policy *a)
 static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct policy_result *result)
 {
 	struct arc_entry *e;
-	dm_block_t t1_size = queue_size(&a->t1);
+	enum arc_state s1, s2;
+	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
 
 	result->op = POLICY_REPLACE;
 
 	if (t1_size &&
 	    ((t1_size > a->p) || (is_arc_b2 && (t1_size == a->p)))) {
-		e = __arc_pop(a, ARC_T1);
-
-		result->old_oblock = e->oblock;
-		result->cblock = e->cblock;
-
-		__arc_push(a, ARC_B1, e);
+		s1 = ARC_T1;
+		s2 = ARC_B1;
 	} else {
-		e = __arc_pop(a, ARC_T2);
-
-		result->old_oblock = e->oblock;
-		result->cblock = e->cblock;
-
-		__arc_push(a, ARC_B2, e);
+		s1 = ARC_T2;
+		s2 = ARC_B2;
 	}
+
+	e = __arc_pop(a, s1);
+	result->old_oblock = e->oblock;
+	result->cblock = e->cblock;
+	__arc_push(a, s2, e);
 
 	return e->cblock;
 }
@@ -492,8 +424,8 @@ static void __arc_map(struct arc_policy *a,
 	int r;
 	dm_block_t new_cache;
 	dm_block_t delta;
-	dm_block_t b1_size = queue_size(&a->b1);
-	dm_block_t b2_size = queue_size(&a->b2);
+	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
+	dm_block_t b2_size = queue_size(&a->q[ARC_B2]);
 	dm_block_t l1_size, l2_size;
 
 	struct arc_entry *e;
@@ -509,7 +441,7 @@ static void __arc_map(struct arc_policy *a,
 
 			if (!updated_this_tick(a, e)) {
 				__free_cblock(a, e->cblock);
-				queue_del(&a->t1, &e->list);
+				queue_del(&a->q[e->state], &e->list);
 				__arc_remove(a, e);
 			} else
 				do_push = 0;
@@ -520,7 +452,7 @@ static void __arc_map(struct arc_policy *a,
 			result->cblock = e->cblock;
 			if (!updated_this_tick(a, e)) {
 				__free_cblock(a, e->cblock);
-				queue_del(&a->t2, &e->list);
+				queue_del(&a->q[e->state], &e->list);
 				__arc_remove(a, e);
 			} else
 				do_push = 0;
@@ -536,7 +468,7 @@ static void __arc_map(struct arc_policy *a,
 			a->p = min(a->p + delta, a->cache_size);
 			new_cache = __arc_demote(a, 0, result);
 
-			queue_del(&a->b1, &e->list);
+			queue_del(&a->q[e->state], &e->list);
 
 			e->oblock = origin_block;
 			e->cblock = new_cache;
@@ -552,7 +484,7 @@ static void __arc_map(struct arc_policy *a,
 			a->p = max(a->p - delta, 0ULL);
 			new_cache = __arc_demote(a, 1, result);
 
-			queue_del(&a->b2, &e->list);
+			queue_del(&a->q[e->state], &e->list);
 
 			e->oblock = origin_block;
 			e->cblock = new_cache;
@@ -573,15 +505,15 @@ static void __arc_map(struct arc_policy *a,
 		return;
 	}
 
-	l1_size = queue_size(&a->t1) + b1_size;
-	l2_size = queue_size(&a->t2) + b2_size;
+	l1_size = queue_size(&a->q[ARC_T1]) + b1_size;
+	l2_size = queue_size(&a->q[ARC_T2]) + b2_size;
 	if (l1_size == a->cache_size) {
 		if (!can_migrate || !__can_demote(a))  {
 			result->op = POLICY_MISS;
 			return;
 		}
 
-		if (queue_size(&a->t1) < a->cache_size) {
+		if (queue_size(&a->q[ARC_T1]) < a->cache_size) {
 			e = __arc_pop(a, ARC_B1);
 
 			new_cache = __arc_demote(a, 0, result);
@@ -669,7 +601,7 @@ static void arc_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
 
 	__free_cblock(a, e->cblock);
-	queue_del(e->state == ARC_T1 ? &a->t1 : &a->t2, &e->list);
+	queue_del(e->state == ARC_T1 ? &a->q[ARC_T1] : &a->q[ARC_T2], &e->list);
 	__arc_remove(a, e);
 	__arc_push(a, ARC_B2, e);
 }
@@ -683,7 +615,7 @@ static void arc_force_mapping(struct dm_cache_policy *p,
 	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
 
 	__free_cblock(a, e->cblock);
-	queue_del(e->state == ARC_T1 ? &a->t1 : &a->t2, &e->list);
+	queue_del(e->state == ARC_T1 ? &a->q[ARC_T1] : &a->q[ARC_T2], &e->list);
 	__arc_remove(a, e);
 	e->oblock = new_oblock;
 	__arc_push(a, ARC_T1, e);
@@ -716,6 +648,7 @@ static void arc_tick(struct dm_cache_policy *p)
 
 static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 {
+	int i;
 	struct arc_policy *a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return NULL;
@@ -734,10 +667,8 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 	spin_lock_init(&a->lock);
 	a->p = 0;
 
-	queue_init(&a->b1);
-	queue_init(&a->t1);
-	queue_init(&a->b2);
-	queue_init(&a->t2);
+	for (i = 0; i < ARC_NR_QUEUES; i++)
+		queue_init(&a->q[i]);
 
 	a->last_lookup = NULL;
 	a->entries = vzalloc(sizeof(*a->entries) * 2 * cache_size);
