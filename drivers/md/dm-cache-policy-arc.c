@@ -275,18 +275,12 @@ static void __arc_push(struct arc_policy *a,
 	e->state = s;
 	e->tick = a->tick;
 
-	switch (s) {
-	case ARC_T1:
-	case ARC_T2:
+	if (e->state == ARC_T1 || e->state == ARC_T2) {
 		__alloc_cblock(a, e->cblock);
 		__arc_insert(a, e);
-		/* fall through */
-
-	case ARC_B1:
-	case ARC_B2:
-		queue_push(&a->q[s], &e->list);
-		break;
 	}
+
+	queue_push(&a->q[s], &e->list);
 }
 
 static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
@@ -414,6 +408,60 @@ static bool updated_this_tick(struct arc_policy *a, struct arc_entry *e)
 	return a->tick == e->tick;
 }
 
+static void __arc_hit(struct arc_policy *a, struct arc_entry *e)
+{
+	BUG_ON(e->state != ARC_T1 && e->state != ARC_T2);
+
+	if (updated_this_tick(a, e))
+		return;
+
+	__free_cblock(a, e->cblock);
+	queue_del(&a->q[e->state], &e->list);
+	__arc_remove(a, e);
+	__arc_push(a, ARC_T2, e);
+}
+
+static void __arc_map_found(struct arc_policy *a,
+			    struct arc_entry *e,
+			    dm_block_t origin_block,
+			    bool can_migrate,
+			    struct policy_result *result)
+{
+	bool is_arc_b2 = false;
+	dm_block_t delta;
+	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
+	dm_block_t b2_size = queue_size(&a->q[ARC_B2]);
+	dm_block_t new_cache;
+
+	if (e->state == ARC_T1 || e->state == ARC_T2) {
+		result->op = POLICY_HIT;
+		result->cblock = e->cblock;
+		__arc_hit(a, e);
+		return;
+	}
+
+	if (!can_migrate || updated_this_tick(a, e)) {
+		result->op = POLICY_MISS;
+		return;
+	}
+
+	if (e->state == ARC_B1) {
+		delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
+		a->p = min(a->p + delta, a->cache_size);
+
+	} else { /* ARC_B2 */
+		is_arc_b2 = true;
+		delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
+		a->p = max(a->p - delta, 0ULL);
+	}
+
+	new_cache = __arc_demote(a, is_arc_b2, result);
+	queue_del(&a->q[e->state], &e->list);
+	e->oblock = origin_block;
+	e->cblock = new_cache;
+	__arc_push(a, ARC_T2, e);
+}
+
 static void __arc_map(struct arc_policy *a,
 		      dm_block_t origin_block,
 		      int data_dir,
@@ -422,77 +470,15 @@ static void __arc_map(struct arc_policy *a,
 		      struct policy_result *result)
 {
 	int r;
-	dm_block_t new_cache;
-	dm_block_t delta;
 	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
 	dm_block_t b2_size = queue_size(&a->q[ARC_B2]);
 	dm_block_t l1_size, l2_size;
-
+	dm_block_t new_cache;
 	struct arc_entry *e;
 
 	e = __arc_lookup(a, origin_block);
 	if (e) {
-		bool do_push = 1;
-
-		switch (e->state) {
-		case ARC_T1:
-			result->op = POLICY_HIT;
-			result->cblock = e->cblock;
-
-			if (!updated_this_tick(a, e)) {
-				__free_cblock(a, e->cblock);
-				queue_del(&a->q[e->state], &e->list);
-				__arc_remove(a, e);
-			} else
-				do_push = 0;
-			break;
-
-		case ARC_T2:
-			result->op = POLICY_HIT;
-			result->cblock = e->cblock;
-			if (!updated_this_tick(a, e)) {
-				__free_cblock(a, e->cblock);
-				queue_del(&a->q[e->state], &e->list);
-				__arc_remove(a, e);
-			} else
-				do_push = 0;
-			break;
-
-		case ARC_B1:
-			if (!can_migrate || updated_this_tick(a, e)) {
-				result->op = POLICY_MISS;
-				return;
-			}
-
-			delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
-			a->p = min(a->p + delta, a->cache_size);
-			new_cache = __arc_demote(a, 0, result);
-
-			queue_del(&a->q[e->state], &e->list);
-
-			e->oblock = origin_block;
-			e->cblock = new_cache;
-			break;
-
-		case ARC_B2:
-			if (!can_migrate || updated_this_tick(a, e)) {
-				result->op = POLICY_MISS;
-				return;
-			}
-
-			delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
-			a->p = max(a->p - delta, 0ULL);
-			new_cache = __arc_demote(a, 1, result);
-
-			queue_del(&a->q[e->state], &e->list);
-
-			e->oblock = origin_block;
-			e->cblock = new_cache;
-			break;
-		}
-
-		if (do_push)
-			__arc_push(a, ARC_T2, e);
+		__arc_map_found(a, e, origin_block, can_migrate, result);
 		return;
 	}
 
