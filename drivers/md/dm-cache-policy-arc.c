@@ -496,8 +496,9 @@ static void __arc_map_not_found(struct arc_policy *a,
 
 			result->op = POLICY_REPLACE;
 			result->old_oblock = e->oblock;
-			e->oblock = origin_block;
 			result->cblock = e->cblock;
+
+			e->oblock = origin_block;
 		}
 
 	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
@@ -506,17 +507,9 @@ static void __arc_map_not_found(struct arc_policy *a,
 			return;
 		}
 
-		if (l1_size + l2_size == 2 * a->cache_size) {
-			e = __arc_pop(a, ARC_B2);
-			e->oblock = origin_block;
-			e->cblock = __arc_demote(a, 0, result);
-
-		} else {
-			e = __arc_alloc_entry(a);
-			e->oblock = origin_block;
-			e->cblock = __arc_demote(a, 0, result);
-			//__alloc_cblock(a, e->cblock);
-		}
+		e = (l1_size + l2_size == 2 * a->cache_size) ? __arc_pop(a, ARC_B2) : __arc_alloc_entry(a);
+		e->oblock = origin_block;
+		e->cblock = __arc_demote(a, 0, result);
 
 	} else {
 		e = __arc_alloc_entry(a);
