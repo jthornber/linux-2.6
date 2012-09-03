@@ -462,66 +462,72 @@ static void __arc_map_found(struct arc_policy *a,
 	__arc_push(a, ARC_T2, e);
 }
 
-static void __arc_map_not_found(struct arc_policy *a,
-		      dm_block_t origin_block,
-		      int data_dir,
-		      bool can_migrate,
-		      bool cheap_copy,
-		      struct policy_result *result)
+static void __arc_replace(struct arc_policy *a,
+			  dm_block_t origin_block,
+			  bool can_migrate,
+			  enum arc_state s1,
+			  enum arc_state s2,
+			  struct policy_result *result)
 {
-	int r;
 	struct arc_entry *e;
-	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
-	dm_block_t b2_size = queue_size(&a->q[ARC_B2]);
-	dm_block_t l1_size, l2_size;
-	dm_block_t new_cache;
 
-	l1_size = queue_size(&a->q[ARC_T1]) + b1_size;
-	l2_size = queue_size(&a->q[ARC_T2]) + b2_size;
-	if (l1_size == a->cache_size) {
-		if (!can_migrate || !__can_demote(a))  {
-			result->op = POLICY_MISS;
-			return;
-		}
+	if (!can_migrate || !__can_demote(a))  {
+		result->op = POLICY_MISS;
+		return;
+	}
 
-		if (queue_size(&a->q[ARC_T1]) < a->cache_size) {
-			e = __arc_pop(a, ARC_B1);
-
-			new_cache = __arc_demote(a, 0, result);
-			e->oblock = origin_block;
-			e->cblock = new_cache;
-
-		} else {
-			e = __arc_pop(a, ARC_T1);
-
-			result->op = POLICY_REPLACE;
-			result->old_oblock = e->oblock;
-			result->cblock = e->cblock;
-
-			e->oblock = origin_block;
-		}
-
-	} else if (l1_size < a->cache_size && (l1_size + l2_size >= a->cache_size)) {
-		if (!can_migrate || !__can_demote(a))  {
-			result->op = POLICY_MISS;
-			return;
-		}
-
-		e = (l1_size + l2_size == 2 * a->cache_size) ? __arc_pop(a, ARC_B2) : __arc_alloc_entry(a);
+	if (queue_size(&a->q[s2]) > 0) {
+		e = __arc_pop(a, ARC_B1);
 		e->oblock = origin_block;
 		e->cblock = __arc_demote(a, 0, result);
 
 	} else {
-		e = __arc_alloc_entry(a);
-		r = __find_free_cblock(a, &e->cblock);
-		BUG_ON(r);
+		e = __arc_pop(a, s1);
 
-		result->op = POLICY_NEW;
+		result->op = POLICY_REPLACE;
+		result->old_oblock = e->oblock;
 		result->cblock = e->cblock;
+
 		e->oblock = origin_block;
 	}
 
 	__arc_push(a, ARC_T1, e);
+}
+
+static void __arc_new_block(struct arc_policy *a,
+			    dm_block_t origin_block,
+			    struct policy_result *result)
+{
+	int r;
+	struct arc_entry *e = __arc_alloc_entry(a);
+	r = __find_free_cblock(a, &e->cblock);
+	BUG_ON(r);
+
+	result->op = POLICY_NEW;
+	result->cblock = e->cblock;
+	e->oblock = origin_block;
+	__arc_push(a, ARC_T1, e);
+}
+
+static void __arc_map_not_found(struct arc_policy *a,
+				dm_block_t origin_block,
+				int data_dir,
+				bool can_migrate,
+				bool cheap_copy,
+				struct policy_result *result)
+{
+	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
+	dm_block_t t2_size = queue_size(&a->q[ARC_T2]);
+	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
+
+	if ((t1_size + b1_size) == a->cache_size)
+		__arc_replace(a, origin_block, can_migrate, ARC_T1, ARC_B1, result);
+
+	else if (t1_size + t2_size == a->cache_size)
+		__arc_replace(a, origin_block, can_migrate, ARC_T2, ARC_B2, result);
+
+	else
+		__arc_new_block(a, origin_block, result);
 }
 
 static bool definitely_a_miss(struct arc_policy *a,
