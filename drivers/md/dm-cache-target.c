@@ -750,7 +750,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 	 * No passdown.
 	 */
 	dm_block_t start_block = dm_div_up(bio->bi_sector, c->sectors_per_block);
-	dm_block_t end_block = bio->bi_sector + (bio->bi_size >> SECTOR_SHIFT);
+	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
 	do_div(end_block, c->sectors_per_block);

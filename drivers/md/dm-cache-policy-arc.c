@@ -387,7 +387,7 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 		a->nr_rand_samples++;
 	}
 
-	a->last_end_oblock = bio->bi_sector + (bio->bi_size >> SECTOR_SHIFT) - 1;
+	a->last_end_oblock = bio->bi_sector + bio_sectors(bio) - 1;
 
 	/*
 	 * If current stream state is sequential and we see 4 random IO,
