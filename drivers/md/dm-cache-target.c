@@ -468,7 +468,7 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 
 		if (dm_cache_remove_mapping(c->cmd, mg->old_oblock)) {
 			DMWARN("demotion failed; couldn't update on disk metadata");
-			policy_force_mapping(c->policy, mg->new_oblock,								mg->old_oblock);
+			policy_force_mapping(c->policy, mg->new_oblock,	mg->old_oblock);
 			if (mg->promote)
 				cell_defer(c, mg->new_ocell, 1);
 			cleanup_migration(c, mg);
