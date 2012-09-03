@@ -306,7 +306,7 @@ static bool __can_demote(struct arc_policy *a)
 	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
 
 
-	if (t1_size && ((t1_size > a->p) || (t1_size == a->p)))
+	if (t1_size && (t1_size >= a->p))
 		e = __arc_peek(a, ARC_T1);
 	else
 		e = __arc_peek(a, ARC_T2);
