@@ -226,7 +226,7 @@ struct cache_c {
 	struct rolling_average migration_time;
 	struct rolling_average migration_count;
 
-	unsigned long *dirty_bitset;
+	unsigned long *discard_bitset; /* origin block has been discarded if set */
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -326,7 +326,7 @@ static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t
 
 	remap_to_origin(c, bio);
 	if (bio_data_dir(bio) == WRITE)
-		set_bit(oblock, c->dirty_bitset);
+		set_bit(oblock, c->discard_bitset);
 }
 
 static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
@@ -336,7 +336,7 @@ static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
 
 	remap_to_cache(c, bio, cblock);
 	if (bio_data_dir(bio) == WRITE)
-		set_bit(oblock, c->dirty_bitset);
+		set_bit(oblock, c->discard_bitset);
 }
 
 static dm_block_t get_bio_block(struct cache_c *c, struct bio *bio)
@@ -542,7 +542,7 @@ static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 
 static void issue_copy_maybe(struct cache_c *c, struct dm_cache_migration *mg, dm_block_t bit)
 {
-	if (!test_bit(bit, c->dirty_bitset)) {
+	if (!test_bit(bit, c->discard_bitset)) {
 		atomic_inc(&c->copies_avoided);
 		migration_success(c, mg);
 	} else
@@ -744,7 +744,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 	}
 
 	if (covers_block(c, bio))
-		clear_bit(block, c->dirty_bitset);
+		clear_bit(block, c->discard_bitset);
 #else
 	/*
 	 * No passdown.
@@ -757,7 +757,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 
 	for (b = start_block; b < end_block; b++) {
 		//pr_alert("discarding block %lu\n", (unsigned long) b);
-		clear_bit(b, c->dirty_bitset);
+		clear_bit(b, c->discard_bitset);
 	}
 
 	bio_endio(bio, 0);
@@ -834,7 +834,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
-	bool cheap_copy = !test_bit(block, c->dirty_bitset);
+	bool cheap_copy = !test_bit(block, c->discard_bitset);
 	bool can_migrate = migrations_allowed(c);
 
 	/*
@@ -1117,7 +1117,7 @@ static void cache_dtr(struct dm_target *ti)
 	ds_destroy(c->all_io_ds);
 	prison_destroy(c->prison);
 	destroy_workqueue(c->wq);
-	free_bitset(c->dirty_bitset);
+	free_bitset(c->discard_bitset);
 	rolling_average_exit(&c->hit_volume);
 	rolling_average_exit(&c->miss_volume);
 	rolling_average_exit(&c->migration_time);
@@ -1293,8 +1293,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);
 
-	c->dirty_bitset = alloc_bitset(c->origin_blocks, 1);
-	if (!c->dirty_bitset) {
+	c->discard_bitset = alloc_bitset(c->origin_blocks, 1);
+	if (!c->discard_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad_alloc_bitset;
 	}
@@ -1391,7 +1391,7 @@ bad_prison:
 bad_wq:
 	dm_kcopyd_client_destroy(c->copier);
 bad_kcopyd_client:
-	free_bitset(c->dirty_bitset);
+	free_bitset(c->discard_bitset);
 bad_alloc_bitset:
 	dm_cache_metadata_close(c->cmd);
 bad:
