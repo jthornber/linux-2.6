@@ -1,0 +1,138 @@
+* Introduction
+
+- Simple cache target.
+
+- Need for a pure dm target that we can layer within dm stacks.
+  eg. data device of thin provisioning.
+
+- Modular policy, so everyone can join in and write their own.
+
+- Reuses the persistent-data library from thin provisioning.
+
+* Glossary
+
+  - Migration.  Movement of a logical block from one device to the other.
+  - Promotion.  Migration from slow device to fast device.
+  - Demotion.  Migration from fast device to slow device.
+
+* Target interface
+
+ cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
+ 			[<#feature args> [<arg>]*]
+
+ metadata dev    : fast device holding the persistent metadata
+ origin dev	 : slow device holding original data blocks
+ cache dev	 : fast device holding cached data blocks
+ data block size : cache unit size in sectors
+ policy          : the replacement policy to use
+
+ Feature args:
+ seq_io_threshold <number of sequential IO seen before caching stops >
+
+
+* Policy interface
+
+- Try and keep transactionality out of it.  The core is careful to
+  avoid asking about anything that is migrating.  This is a pain, but
+  makes it easier to write the policies.
+
+- Mappings are loaded into the policy at construction time.
+
+- Every bio that is mapped by the target is referred to the policy, it
+  can give a simle HIT or MISS or issue a migration.
+
+- Currently there's no way for the policy to issue background work,
+  eg, start writing back dirty blocks that are soon going to be evicted.
+
+- Because we map bios, rather than requests it's easy for the policy
+  to get fooled by many small bios.  For this reason the core target
+  issues periodic ticks to the policy.  It's suggested that the policy
+  doesn't update states (eg, hit counts) for a block more than once
+  for each tick.  [The core ticks by watching bios complete, and so
+  trying to see when the io scheduler has let the ios run]
+
+
+	void (*destroy)(struct dm_cache_policy *p);
+	void (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+		    bool can_migrate, bool cheap_copy, struct bio *bio,
+		    struct policy_result *result);
+
+	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
+
+	/* must succeed */
+	void (*remove_mapping)(struct dm_cache_policy *p, dm_block_t oblock);
+	void (*force_mapping)(struct dm_cache_policy *p, dm_block_t current_oblock,
+			      dm_block_t new_oblock);
+
+	dm_block_t (*residency)(struct dm_cache_policy *p);
+	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
+				     unsigned int seq_io_thresh);
+
+	void (*tick)(struct dm_cache_policy *p);
+
+
+* TODO list
+
+** Provide facility to store some policy data per block
+
+   - Currently planning on having 16 bits per block.  Although we
+     could let each policy say what it needs?  [Preliminary patches
+     from Vivek Goyal].
+
+   - This data cannot be updated live, it would force us to make too
+     many commits.  So it must only be a hint, the policy must be able
+     to recover from a crash, where this data will not have been
+     written.
+
+     An example might be keeping frequency counts for blocks, to
+     better make the decision for which block to evict.  Without this
+     information performance may be degraded for a period, but it'll
+     recover.
+
+** set migration rates in a more intelligent way
+
+   Scaling with small cache sizes isn't good.  We end up migrating too
+   much.
+
+   Probably end up handing this over to the policy, core target will
+   just estimate the migration costs.
+
+   This is the issue holding back release.
+
+** Policy customisation via sysfs
+
+   - eg, replace seq_io_threshold with a sysfs entry
+
+** dirty bitset
+
+   1 bit for every origin block.
+
+   eg, if origin is 1T and data block size is 1M then we'll use 128k
+   of kernel memory for this bitset.  Borderline acceptable.
+
+   Possible solutions:
+
+   - We could make the resolution of the bitset larger than that of the
+     data blocks?
+
+   - Other idea is to use a radix tree, but this could degenerate to
+     being more memory hungry than the bitset.
+
+   - Multiple resolution bitset
+
+     I like this.  Top level bitset would be have a large resolution,
+     eg, 32M.  Break down underneath it iff mixed.  eg. all dirty or
+     all clean wouldn't require a breakdown.
+
+     1M data block size, 1G big block, 1T origin.  top level map
+     requires 2 bits per big block + the pointers.  256 bytes + 4k for
+     top level, 128 bytes for each bottom level entry.
+
+     struct top_level_index {
+        unsigned long *bitset;
+        unsigned long **child_bitsets;
+     };
+
+     Don't do this until we've got some idea how fragmented
+     dirty/clean becomes with real work loads.
+

@@ -1474,7 +1474,8 @@ static bool data_dev_supports_discard(struct pool_c *pt)
 	return q && blk_queue_discard(q);
 }
 
-static void disable_passdown_if_not_supported(struct pool_c *pt, struct pool_features *pf)
+static void disable_passdown_if_not_supported(struct pool_c *pt,
+					      struct pool_features *pf)
 {
 	/*
 	 * If discard_passdown was enabled verify that the data device
@@ -1485,7 +1486,7 @@ static void disable_passdown_if_not_supported(struct pool_c *pt, struct pool_fea
 		char buf[BDEVNAME_SIZE];
 		DMWARN("Discard unsupported by data device (%s): Disabling discard passdown.",
 		       bdevname(pt->data_dev->bdev, buf));
-		pf->discard_passdown = 0;
+		pf->discard_passdown = false;
 	}
 }
 
@@ -1767,13 +1768,13 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 		argc--;
 
 		if (!strcasecmp(arg_name, "skip_block_zeroing"))
-			pf->zero_new_blocks = 0;
+			pf->zero_new_blocks = false;
 
 		else if (!strcasecmp(arg_name, "ignore_discard"))
-			pf->discard_enabled = 0;
+			pf->discard_enabled = false;
 
 		else if (!strcasecmp(arg_name, "no_discard_passdown"))
-			pf->discard_passdown = 0;
+			pf->discard_passdown = false;
 
 		else if (!strcasecmp(arg_name, "read_only"))
 			pf->mode = PM_READ_ONLY;
@@ -1915,6 +1916,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		 * thin devices' discard limits consistent).
 		 */
 		ti->discards_supported = true;
+		ti->discard_zeroes_data_unsupported = true;
 	}
 	ti->private = pt;
 
@@ -2405,9 +2407,14 @@ static bool block_size_is_power_of_2(struct pool *pool)
 	return pool->sectors_per_block_shift >= 0;
 }
 
+#define is_even(x) (((x) & 1) == 0)
+
 static unsigned largest_power_factor(unsigned limit, unsigned min)
 {
-	while ((min < limit) && (((limit / min) & 0x1) == 0))
+	/*
+	 * Determine largest power of 2 that is a factor of @limit
+	 */
+	while ((min < limit) && is_even(limit / min))
 		min <<= 1;
 
 	return min;
@@ -2432,18 +2439,12 @@ static void set_discard_limits(struct pool *pool,
 			       struct queue_limits *data_limits,
 			       struct queue_limits *limits)
 {
-	bool zeroes = pf->zero_new_blocks;
-
 	limits->max_discard_sectors = pool->sectors_per_block;
 
-	if (pf->discard_passdown) {
+	if (pf->discard_passdown)
 		limits->discard_granularity = data_limits->discard_granularity;
-		zeroes = zeroes || data_limits->discard_zeroes_data;
-	} else
+	else
 		set_discard_granularity_no_passdown(pool, limits);
-
-	limits->discard_zeroes_data = zeroes &&
-		limits->discard_granularity == (pool->sectors_per_block << SECTOR_SHIFT);
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -2458,10 +2459,6 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
 
-	/*
-	 * pt->pf is used here because it reflects the features configured but
-	 * not yet transfered to the live pool (see: bind_control_target).
-	 */
 	if (pf.discard_enabled) {
 		disable_passdown_if_not_supported(pt, &pf);
 

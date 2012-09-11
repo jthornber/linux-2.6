@@ -154,6 +154,9 @@ struct arc_policy {
 	unsigned nr_seq_samples, nr_rand_samples;
 	dm_block_t last_end_oblock;
 	unsigned int seq_io_threshold;
+
+	/* Last looked up cached entry */
+	struct arc_entry *last_lookup;
 };
 
 static struct arc_policy *to_arc_policy(struct dm_cache_policy *p)
@@ -193,10 +196,15 @@ static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
 	struct hlist_node *tmp;
 	struct arc_entry *e;
 
-	hlist_for_each_entry(e, tmp, bucket, hlist)
-		if (e->oblock == origin)
-			return e;
+	/* Check last lookup cache */
+	if (a->last_lookup && a->last_lookup->oblock == origin)
+		return a->last_lookup;
 
+	hlist_for_each_entry(e, tmp, bucket, hlist)
+		if (e->oblock == origin) {
+			a->last_lookup = e;
+			return e;
+		}
 	return NULL;
 }
 
@@ -638,10 +646,9 @@ static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_blo
 	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e;
 
-	debug("loading mapping %lu -> %lu, context = %p\n",
+	debug("loading mapping %lu -> %lu\n",
 	      (unsigned long) oblock,
-	      (unsigned long) cblock,
-	      context);
+	      (unsigned long) cblock);
 
 	e = __arc_alloc_entry(a);
 	if (!e)
@@ -667,9 +674,8 @@ static void arc_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 	__arc_push(a, ARC_B2, e);
 }
 
-static void arc_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblock,
-			      dm_block_t new_oblock,
-			      dm_block_t cblock)
+static void arc_force_mapping(struct dm_cache_policy *p,
+		dm_block_t current_oblock, dm_block_t new_oblock)
 {
 	struct arc_policy *a = to_arc_policy(p);
 	struct arc_entry *e = __arc_lookup(a, current_oblock);
@@ -686,6 +692,7 @@ static void arc_force_mapping(struct dm_cache_policy *p, dm_block_t current_oblo
 static dm_block_t arc_residency(struct dm_cache_policy *p)
 {
 	struct arc_policy *a = to_arc_policy(p);
+	// FIXME: this may be wrong if arc_remove_mapping has been called
 	return min(a->nr_allocated, a->cache_size);
 }
 
@@ -732,7 +739,8 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 	queue_init(&a->b2);
 	queue_init(&a->t2);
 
-	a->entries = vmalloc(sizeof(*a->entries) * 2 * cache_size);
+	a->last_lookup = NULL;
+	a->entries = vzalloc(sizeof(*a->entries) * 2 * cache_size);
 	if (!a->entries) {
 		kfree(a);
 		return NULL;

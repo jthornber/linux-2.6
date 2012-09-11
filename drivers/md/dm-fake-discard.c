@@ -240,7 +240,7 @@ static void discard_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct fake_discard *fd = ti->private;
 
-	limits->discard_granularity = fd->discard_granularity;
+	limits->discard_granularity = fd->discard_granularity << SECTOR_SHIFT;
 	limits->max_discard_sectors = fd->max_discard_sectors;
 }
 
