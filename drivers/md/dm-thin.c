@@ -2451,7 +2451,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
-	struct pool_features pf = pt->pf;
+	struct pool_features *pf = &pt->pf;
 	const char *reason;
 	struct block_device *data_bdev = pt->data_dev->bdev;
 	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
@@ -2459,17 +2459,17 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
 
-	if (pf.discard_enabled) {
-		disable_passdown_if_not_supported(pt, &pf);
+	if (pf->discard_enabled) {
+		disable_passdown_if_not_supported(pt, pf);
 
-		if (pf.discard_passdown && !discard_limits_are_compatible(pool, data_limits, &reason)) {
+		if (pf->discard_passdown && !discard_limits_are_compatible(pool, data_limits, &reason)) {
 			char buf[BDEVNAME_SIZE];
 			DMWARN("Data device (%s) %s: Disabling discard passdown.",
 			       bdevname(data_bdev, buf), reason);
-			pf.discard_passdown = false;
+			pf->discard_passdown = false;
 		}
 
-		set_discard_limits(pt->pool, &pf, data_limits, limits);
+		set_discard_limits(pt->pool, pf, data_limits, limits);
 	}
 }
 
