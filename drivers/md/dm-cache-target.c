@@ -550,19 +550,17 @@ static void avoid_copy(struct cache_c *c, struct dm_cache_migration *mg)
 	migration_success(c, mg);
 }
 
-static void maybe_copy(struct cache_c *c, struct dm_cache_migration *mg, bool avoid)
-{
-	avoid ?	avoid_copy(c, mg) : issue_copy_real(c, mg);
-}
-
 static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
 {
+	bool avoid;
+
 	if (mg->demote)
-		maybe_copy(c, mg,
-			   !test_bit(mg->cblock, c->dirty_bitset) ||
-			   test_bit(mg->old_oblock, c->discard_bitset));
+		avoid = !test_bit(mg->cblock, c->dirty_bitset) ||
+			test_bit(mg->old_oblock, c->discard_bitset);
 	else
-		maybe_copy(c, mg, test_bit(mg->new_oblock, c->discard_bitset));
+		avoid = test_bit(mg->new_oblock, c->discard_bitset);
+
+	avoid ? avoid_copy(c, mg) : issue_copy_real(c, mg);
 }
 
 static void complete_migration(struct cache_c *c, struct dm_cache_migration *mg)
