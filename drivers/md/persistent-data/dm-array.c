@@ -87,7 +87,7 @@ static void *elt_at(struct dm_array_info *info, struct array_block *ab, unsigned
 	return entry;
 }
 
-static void on_entries(struct dm_array_info *info, struct array_block *ab, void (*fn)(void *, void *))
+static void on_entries(struct dm_array_info *info, struct array_block *ab, void (*fn)(void *, const void *))
 {
 	unsigned i, nr_entries = le32_to_cpu(ab->nr_entries);
 
@@ -147,7 +147,7 @@ static void fill_ablock(struct dm_array_info *info, struct array_block *ab,
 	nr_entries = le32_to_cpu(ab->nr_entries);
 	for (i = nr_entries; i < new_nr; i++) {
 		if (vt->inc)
-			vt->inc(vt->context, (void *) value);
+			vt->inc(vt->context, value);
 		memcpy(elt_at(info, ab, i), value, vt->size);
 	}
 	ab->nr_entries = cpu_to_le32(new_nr);
@@ -415,7 +415,7 @@ static int grow(struct resize *resize)
  * These are the value_type functions for the btree elements, which point
  * to array blocks.
  */
-static void block_inc(void *context, void *value)
+static void block_inc(void *context, const void *value)
 {
 	__le64 block_le;
 	struct dm_array_info *info = context;
@@ -424,7 +424,7 @@ static void block_inc(void *context, void *value)
 	dm_tm_inc(info->btree_info.tm, le64_to_cpu(block_le));
 }
 
-static void block_dec(void *context, void *value)
+static void block_dec(void *context, const void *value)
 {
 	int r;
 	__le64 block_le;
@@ -462,7 +462,7 @@ static void block_dec(void *context, void *value)
 	dm_tm_dec(info->btree_info.tm, b);
 }
 
-static int block_equal(void *context, void *value1, void *value2)
+static int block_equal(void *context, const void *value1, const void *value2)
 {
 	return !memcmp(value1, value2, sizeof(__le64));
 }
@@ -589,10 +589,10 @@ static int dm_array_set_(struct dm_array_info *info, dm_block_t root,
 
 	old_value = elt_at(info, ab, entry);
 	if (vt->dec &&
-	    (!vt->equal || !vt->equal(vt->context, old_value, (void *) value))) {
+	    (!vt->equal || !vt->equal(vt->context, old_value, value))) {
 		vt->dec(vt->context, old_value);
 		if (vt->inc)
-			vt->inc(vt->context, (void *) value);
+			vt->inc(vt->context, value);
 	}
 
 	memcpy(elt_at(info, ab, entry), value, sizeof(info->value_type.size));
