@@ -255,6 +255,7 @@ struct cache_c {
 	atomic_t demotion;
 	atomic_t promotion;
 	atomic_t copies_avoided;
+	atomic_t cache_cell_clash;
 
 	unsigned int seq_io_threshold;
 };
@@ -892,7 +893,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 			 */
 			policy_force_mapping(c->policy, block,
 					     lookup_result.old_oblock);
-			pr_alert("cache cell clash, backing off\n");
+			atomic_inc(&c->cache_cell_clash);
 			break;
 		}
 		atomic_inc(&c->demotion);
@@ -1114,6 +1115,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&c->demotion));
 	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
 	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&c->copies_avoided));
+	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&c->cache_cell_clash));
 
 	if (c->next_migration)
 		mempool_free(c->next_migration, c->migration_pool);
@@ -1375,6 +1377,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&c->demotion, 0);
 	atomic_set(&c->promotion, 0);
 	atomic_set(&c->copies_avoided, 0);
+	atomic_set(&c->cache_cell_clash, 0);
 
 	r = dm_cache_load_mappings(c->cmd, load_mapping, c);
 	if (r) {
@@ -1528,14 +1531,15 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_INFO:
 		residency = policy_residency(c->policy);
 
-		DMEMIT("%u %u %u %u %u %u %llu",
+		DMEMIT("%u %u %u %u %u %u %llu %u",
 		       (unsigned) atomic_read(&c->read_hit),
 		       (unsigned) atomic_read(&c->read_miss),
 		       (unsigned) atomic_read(&c->write_hit),
 		       (unsigned) atomic_read(&c->write_miss),
 		       (unsigned) atomic_read(&c->demotion),
 		       (unsigned) atomic_read(&c->promotion),
-		       (unsigned long long) residency);
+		       (unsigned long long) residency,
+		       (unsigned) atomic_read(&c->cache_cell_clash));
 		break;
 
 	case STATUSTYPE_TABLE:
