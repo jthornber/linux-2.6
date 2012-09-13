@@ -35,7 +35,7 @@ static unsigned next_power(unsigned n, unsigned min)
 
 static unsigned long *alloc_bitset(unsigned nr_entries)
 {
-	return vzalloc(sizeof(*alloc_bitset) * dm_sector_div_up(nr_entries, BITS_PER_LONG));
+	return vzalloc(sizeof(unsigned long) * dm_sector_div_up(nr_entries, BITS_PER_LONG));
 }
 
 static void free_bitset(unsigned long *bits)

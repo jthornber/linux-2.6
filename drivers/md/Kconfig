@@ -285,6 +285,7 @@ config DM_CACHE_ARC
 config DM_CACHE_BASIC
        tristate "Basic (FIFO/LRU/MRU/LFU/MFU) Policies (EXPERIMENTAL)"
        depends on DM_CACHE
+       select BTREE
        default y
        ---help---
          Under development
