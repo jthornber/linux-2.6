@@ -14,6 +14,8 @@
 //#define debug(x...) pr_alert(x)
 #define debug(x...) ;
 
+#define DM_MSG_PREFIX "cache-policy-arc"
+
 /*----------------------------------------------------------------*/
 
 static unsigned next_power(unsigned n, unsigned min)
@@ -45,71 +47,87 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-struct queue {
-	unsigned size;
-	struct list_head elts;
+/*
+ * Multiqueue
+ * FIXME: explain
+ */
+#define NR_MQ_LEVELS 16
+
+typedef unsigned (*queue_level_fn)(void *context, struct list_head *entry, unsigned nr_levels);
+
+struct multiqueue {
+	queue_level_fn queue_level;
+	void *context;
+
+	struct list_head qs[NR_MQ_LEVELS];
 };
 
-static void queue_init(struct queue *q)
+static void mq_init(struct multiqueue *mq,
+		    queue_level_fn queue_level,
+		    void *context)
 {
-	q->size = 0;
-	INIT_LIST_HEAD(&q->elts);
+	unsigned i;
+
+	mq->queue_level = queue_level;
+	mq->context = context;
+
+	for (i = 0; i < NR_MQ_LEVELS; i++)
+		INIT_LIST_HEAD(mq->qs + i);
 }
 
-static unsigned queue_size(struct queue *q)
+static struct list_head *mq_get_q(struct multiqueue *mq, struct list_head *elt)
 {
-	return q->size;
+	unsigned level = mq->queue_level(mq->context, elt, NR_MQ_LEVELS);
+	BUG_ON(level >= NR_MQ_LEVELS);
+	return mq->qs + level;
 }
 
-static struct list_head *queue_head(struct queue *q)
+static void mq_push(struct multiqueue *mq, struct list_head *elt)
 {
-	BUG_ON(list_empty(&q->elts));
-	return q->elts.next;
+	list_add_tail(elt, mq_get_q(mq, elt));
 }
 
-static struct list_head *queue_pop(struct queue *q)
+static void mq_remove(struct list_head *elt)
 {
+	list_del(elt);
+}
+
+/*
+ * Gives us the oldest entry of the lowest level.
+ */
+static struct list_head *mq_pop(struct multiqueue *mq)
+{
+	unsigned i;
 	struct list_head *r;
 
-	BUG_ON(list_empty(&q->elts));
-	r = q->elts.next;
-	list_del(r);
-	q->size--;
+	for (i = 0; i < NR_MQ_LEVELS; i++)
+		if (!list_empty(mq->qs + i)) {
+			r = mq->qs[i].next;
+			list_del(r);
+			return r;
+		}
 
-	return r;
+	return NULL;
 }
 
-static void queue_del(struct queue *q, struct list_head *elt)
+static void mq_demote(struct multiqueue *mq)
 {
-	BUG_ON(!q->size);
-	list_del(elt);
-	q->size--;
-}
+	unsigned level;
 
-static void queue_push(struct queue *q, struct list_head *elt)
-{
-	list_add_tail(elt, &q->elts);
-	q->size++;
+	for (level = 1; level < NR_MQ_LEVELS; level++)
+		list_splice_init(mq->qs + level, mq->qs + level - 1);
 }
 
 /*----------------------------------------------------------------*/
 
-enum arc_state {
-	ARC_B1,
-	ARC_T1,
-	ARC_B2,
-	ARC_T2
-};
-
-#define ARC_NR_QUEUES 4
-
-struct arc_entry {
-	enum arc_state state;
+struct entry {
 	struct hlist_node hlist;
 	struct list_head list;
 	dm_block_t oblock;
 	dm_block_t cblock;
 
+	bool in_cache:1;
+	unsigned hit_count;
 	unsigned tick;
 };
 
@@ -123,26 +141,28 @@ struct arc_policy {
 
 	dm_block_t cache_size;
 	unsigned tick;
+	unsigned hits;
 
 	spinlock_t lock;
 
-	dm_block_t p;		/* the magic factor that balances lru vs lfu */
-	struct queue q[ARC_NR_QUEUES];
+	struct multiqueue mq_pre_cache;
+	struct multiqueue mq_cache;
+	unsigned demote_period_mask;
 
 	/*
 	 * We know exactly how many entries will be needed, so we can
 	 * allocate them up front.
 	 */
-	struct arc_entry *entries;
+	unsigned nr_entries;
+	unsigned nr_allocated;
+	struct entry *entries;
+
 	unsigned long *allocation_bitset;
-	dm_block_t nr_allocated;
+	unsigned nr_cblocks_allocated;
 
 	unsigned nr_buckets;
 	dm_block_t hash_mask;
 	struct hlist_head *table;
-
-	dm_block_t interesting_size;
-	struct seen_block *interesting_array;
 
 	/* Fields for tracking IO pattern */
 	/* 0: IO stream is random. 1: IO stream is sequential */
@@ -152,8 +172,10 @@ struct arc_policy {
 	unsigned int seq_io_threshold;
 
 	/* Last looked up cached entry */
-	struct arc_entry *last_lookup;
+	struct entry *last_lookup;
 };
+
+#define NR_PRE_CACHE_LEVELS 4
 
 static struct arc_policy *to_arc_policy(struct dm_cache_policy *p)
 {
@@ -165,11 +187,14 @@ static void arc_destroy(struct dm_cache_policy *p)
 	struct arc_policy *a = to_arc_policy(p);
 
 	free_bitset(a->allocation_bitset);
-	vfree(a->interesting_array);
 	kfree(a->table);
 	vfree(a->entries);
 	kfree(a);
 }
+
+/*----------------------------------------------------------------*/
+
+/* FIXME: replace with the new hash table stuff */
 
 static unsigned hash(struct arc_policy *a, dm_block_t b)
 {
@@ -179,18 +204,18 @@ static unsigned hash(struct arc_policy *a, dm_block_t b)
 	return (uint32_t) (h & a->hash_mask);
 }
 
-static void __arc_insert(struct arc_policy *a, struct arc_entry *e)
+static void __hash_insert(struct arc_policy *a, struct entry *e)
 {
 	unsigned h = hash(a, e->oblock);
 	hlist_add_head(&e->hlist, a->table + h);
 }
 
-static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
+static struct entry *__hash_lookup(struct arc_policy *a, dm_block_t origin)
 {
 	unsigned h = hash(a, origin);
 	struct hlist_head *bucket = a->table + h;
 	struct hlist_node *tmp;
-	struct arc_entry *e;
+	struct entry *e;
 
 	/* Check last lookup cache */
 	if (a->last_lookup && a->last_lookup->oblock == origin)
@@ -201,19 +226,24 @@ static struct arc_entry *__arc_lookup(struct arc_policy *a, dm_block_t origin)
 			a->last_lookup = e;
 			return e;
 		}
+
 	return NULL;
 }
 
-static void __arc_remove(struct arc_policy *a, struct arc_entry *e)
+static void __hash_remove(struct arc_policy *a, struct entry *e)
 {
 	hlist_del(&e->hlist);
 }
 
-static struct arc_entry *__arc_alloc_entry(struct arc_policy *a)
-{
-	struct arc_entry *e;
+/*----------------------------------------------------------------*/
 
-	BUG_ON(a->nr_allocated >= 2 * a->cache_size);
+static struct entry *__arc_alloc_entry(struct arc_policy *a)
+{
+	struct entry *e;
+
+	if (a->nr_allocated >= a->nr_entries)
+		return NULL;
+
 	e = a->entries + a->nr_allocated;
 	INIT_LIST_HEAD(&e->list);
 	INIT_HLIST_NODE(&e->hlist);
@@ -228,6 +258,7 @@ static void __alloc_cblock(struct arc_policy *a, dm_block_t cblock)
 	BUG_ON(cblock > a->cache_size);
 	BUG_ON(test_bit(cblock, a->allocation_bitset));
 	set_bit(cblock, a->allocation_bitset);
+	a->nr_cblocks_allocated++;
 }
 
 static void __free_cblock(struct arc_policy *a, dm_block_t cblock)
@@ -235,6 +266,7 @@ static void __free_cblock(struct arc_policy *a, dm_block_t cblock)
 	BUG_ON(cblock > a->cache_size);
 	BUG_ON(!test_bit(cblock, a->allocation_bitset));
 	clear_bit(cblock, a->allocation_bitset);
+	a->nr_cblocks_allocated--;
 }
 
 /*
@@ -245,6 +277,9 @@ static int __find_free_cblock(struct arc_policy *a, dm_block_t *result)
 	int r = -ENOSPC;
 	unsigned nr_words = dm_div_up(a->cache_size, BITS_PER_LONG);
 	unsigned w, b;
+
+	if (a->nr_cblocks_allocated >= a->cache_size)
+		return -ENOSPC;
 
 	for (w = 0; w < nr_words; w++) {
 		/*
@@ -264,102 +299,57 @@ static int __find_free_cblock(struct arc_policy *a, dm_block_t *result)
 	return r;
 }
 
-static bool __any_free_entries(struct arc_policy *a)
+static bool __any_free_cblocks(struct arc_policy *a)
 {
-	return a->nr_allocated < a->cache_size;
+	return a->nr_cblocks_allocated < a->cache_size;
 }
 
-static void __arc_push(struct arc_policy *a,
-		       enum arc_state s, struct arc_entry *e)
+/*----------------------------------------------------------------*/
+
+static void __arc_push(struct arc_policy *a, struct entry *e)
 {
-	e->state = s;
 	e->tick = a->tick;
+	__hash_insert(a, e);
 
-	if (e->state == ARC_T1 || e->state == ARC_T2) {
+	if (e->in_cache) {
 		__alloc_cblock(a, e->cblock);
-		__arc_insert(a, e);
-	}
-
-	queue_push(&a->q[s], &e->list);
+		mq_push(&a->mq_cache, &e->list);
+	} else
+		mq_push(&a->mq_pre_cache, &e->list);
 }
 
-static struct arc_entry *__arc_pop(struct arc_policy *a, enum arc_state s)
-{
-	struct arc_entry *e = container_of(queue_pop(&a->q[s]), struct arc_entry, list);
 
-	if (s == ARC_T1 || s == ARC_T2) {
-		__arc_remove(a, e);
+static void __arc_del(struct arc_policy *a, struct entry *e)
+{
+	mq_remove(&e->list);
+	__hash_remove(a, e);
+	if (e->in_cache)
 		__free_cblock(a, e->cblock);
+}
+
+// FIXME: move up with the structs
+enum queue_area {
+	QA_PRE_CACHE,
+	QA_CACHE
+};
+
+static struct entry *__arc_pop(struct arc_policy *a, enum queue_area area)
+{
+	struct entry *e;
+
+	if (area == QA_PRE_CACHE)
+		e = container_of(mq_pop(&a->mq_pre_cache), struct entry, list);
+	else
+		e = container_of(mq_pop(&a->mq_cache), struct entry, list);
+
+	if (e) {
+		__hash_remove(a, e);
+
+		if (e->in_cache)
+			__free_cblock(a, e->cblock);
 	}
 
 	return e;
-}
-
-static struct arc_entry *__arc_peek(struct arc_policy *a, enum arc_state s)
-{
-	return container_of(queue_head(&a->q[s]), struct arc_entry, list);
-}
-
-static bool __can_demote(struct arc_policy *a)
-{
-	struct arc_entry *e;
-	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
-
-
-	if (t1_size && (t1_size >= a->p))
-		e = __arc_peek(a, ARC_T1);
-	else
-		e = __arc_peek(a, ARC_T2);
-
-	return e->tick != a->tick;
-}
-
-static dm_block_t __arc_demote(struct arc_policy *a, bool is_arc_b2, struct policy_result *result)
-{
-	struct arc_entry *e;
-	enum arc_state s1, s2;
-	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
-
-	result->op = POLICY_REPLACE;
-
-	if (t1_size &&
-	    ((t1_size > a->p) || (is_arc_b2 && (t1_size == a->p)))) {
-		s1 = ARC_T1;
-		s2 = ARC_B1;
-	} else {
-		s1 = ARC_T2;
-		s2 = ARC_B2;
-	}
-
-	e = __arc_pop(a, s1);
-	result->old_oblock = e->oblock;
-	result->cblock = e->cblock;
-	__arc_push(a, s2, e);
-
-	return e->cblock;
-}
-
-/*
- * FIXME: the size of the interesting blocks hash table seems to be
- * directly related to the eviction rate.  So maybe we should resize on the
- * fly to get to a target eviction rate?
- */
-static int __arc_interesting_block(struct arc_policy *a, dm_block_t oblock, int data_dir)
-{
-	const dm_block_t BIG_PRIME = 4294967291UL;
-	unsigned h = ((unsigned) (oblock * BIG_PRIME)) % a->interesting_size;
-	struct seen_block *sb = a->interesting_array + h;
-
-	if (sb->tick == a->tick)
-		return 0;
-
-	if (sb->oblock == oblock)
-		return 1;
-
-	sb->oblock = oblock;
-	sb->tick = a->tick;
-
-	return 0;
 }
 
 static bool arc_random_stream(struct arc_policy *a)
@@ -403,162 +393,164 @@ static void __arc_update_io_stream_data(struct arc_policy *a, struct bio *bio)
 	}
 }
 
-static bool updated_this_tick(struct arc_policy *a, struct arc_entry *e)
+static bool updated_this_tick(struct arc_policy *a, struct entry *e)
 {
 	return a->tick == e->tick;
 }
 
-static void __arc_hit(struct arc_policy *a, struct arc_entry *e)
+static void __arc_hit(struct arc_policy *a, struct entry *e)
 {
-	BUG_ON(e->state != ARC_T1 && e->state != ARC_T2);
-
 	if (updated_this_tick(a, e))
 		return;
 
-	__free_cblock(a, e->cblock);
-	queue_del(&a->q[e->state], &e->list);
-	__arc_remove(a, e);
-	__arc_push(a, ARC_T2, e);
+	__arc_del(a, e);
+	e->hit_count++;
+	__arc_push(a, e);
+
+	if (!(++a->hits & a->demote_period_mask)) {
+		pr_alert("running mq_demote\n");
+		mq_demote(&a->mq_cache);
+		mq_demote(&a->mq_pre_cache);
+		a->hits = 0;
+	}
 }
 
+static dm_block_t demote_cblock(struct arc_policy *a, dm_block_t *oblock)
+{
+	dm_block_t result;
+	struct entry *demoted = __arc_pop(a, QA_CACHE);
+
+	BUG_ON(!demoted);
+	result = demoted->cblock;
+	*oblock = demoted->oblock;
+	demoted->in_cache = false;
+	__arc_push(a, demoted);
+
+	return result;
+}
+
+#define PROMOTE_THRESHOLD 128
+
+static bool should_promote(struct arc_policy *a,
+			   struct entry *e,
+			   bool can_migrate,
+			   bool cheap_copy)
+{
+	bool possible_migration = can_migrate && (e->hit_count >= PROMOTE_THRESHOLD);
+	bool possible_new = cheap_copy && __any_free_cblocks(a);
+	bool promote = arc_random_stream(a) && (possible_new || possible_migration);
+
+	return promote;
+}
+
+// FIXME: rename origin_block to oblock
 static void __arc_map_found(struct arc_policy *a,
-			    struct arc_entry *e,
+			    struct entry *e,
 			    dm_block_t origin_block,
 			    bool can_migrate,
+			    bool cheap_copy,
 			    struct policy_result *result)
 {
-	bool is_arc_b2 = false;
-	dm_block_t delta;
-	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
-	dm_block_t b2_size = queue_size(&a->q[ARC_B2]);
-	dm_block_t new_cache;
+	dm_block_t cblock;
+	bool updated = updated_this_tick(a, e); /* has to be done before __arc_hit */
 
-	if (e->state == ARC_T1 || e->state == ARC_T2) {
+	__arc_hit(a, e);
+
+	if (e->in_cache) {
 		result->op = POLICY_HIT;
 		result->cblock = e->cblock;
-		__arc_hit(a, e);
 		return;
 	}
 
-	if (!can_migrate || updated_this_tick(a, e)) {
+	if (updated || !should_promote(a, e, can_migrate, cheap_copy)) {
 		result->op = POLICY_MISS;
 		return;
 	}
 
-	if (e->state == ARC_B1) {
-		delta = (b1_size > b2_size) ? 1 : max(b2_size / b1_size, 1ULL);
-		a->p = min(a->p + delta, a->cache_size);
-
-	} else { /* ARC_B2 */
-		is_arc_b2 = true;
-		delta = b2_size >= b1_size ? 1 : max(b1_size / b2_size, 1ULL);
-		a->p = max(a->p - delta, 0ULL);
-	}
-
-	new_cache = __arc_demote(a, is_arc_b2, result);
-	queue_del(&a->q[e->state], &e->list);
-	e->oblock = origin_block;
-	e->cblock = new_cache;
-	__arc_push(a, ARC_T2, e);
-}
-
-static void __arc_replace(struct arc_policy *a,
-			  dm_block_t origin_block,
-			  bool can_migrate,
-			  enum arc_state s1,
-			  enum arc_state s2,
-			  struct policy_result *result)
-{
-	struct arc_entry *e;
-
-	if (!can_migrate || !__can_demote(a))  {
-		result->op = POLICY_MISS;
-		return;
-	}
-
-	if (queue_size(&a->q[s2]) > 0) {
-		e = __arc_pop(a, ARC_B1);
-		e->oblock = origin_block;
-		e->cblock = __arc_demote(a, 0, result);
-
-	} else {
-		e = __arc_pop(a, s1);
-
+	if (__find_free_cblock(a, &cblock) == -ENOSPC) {
 		result->op = POLICY_REPLACE;
-		result->old_oblock = e->oblock;
-		result->cblock = e->cblock;
-
-		e->oblock = origin_block;
+		cblock = demote_cblock(a, &result->old_oblock);
+	} else {
+		result->op = POLICY_NEW;
 	}
 
-	__arc_push(a, ARC_T1, e);
+	result->cblock = e->cblock = cblock;
+
+	__arc_del(a, e);
+	e->in_cache = true;
+	__arc_push(a, e);
 }
 
-static void __arc_new_block(struct arc_policy *a,
-			    dm_block_t origin_block,
-			    struct policy_result *result)
+static void to_pre_cache(struct arc_policy *a,
+			 dm_block_t oblock,
+			 struct policy_result *result)
 {
-	int r;
-	struct arc_entry *e = __arc_alloc_entry(a);
-	r = __find_free_cblock(a, &e->cblock);
-	BUG_ON(r);
+	struct entry *e = __arc_alloc_entry(a);
 
-	result->op = POLICY_NEW;
-	result->cblock = e->cblock;
-	e->oblock = origin_block;
-	__arc_push(a, ARC_T1, e);
+	if (!e)
+		e = __arc_pop(a, QA_PRE_CACHE);
+
+	if (unlikely(!e)) {
+		DMWARN("couldn't pop from pre cache");
+		return;
+	}
+
+	e->in_cache = false;
+	e->oblock = oblock;
+	e->hit_count = 1;
+	__arc_push(a, e);
+
+	result->op = POLICY_MISS;
 }
 
-static void __arc_map_not_found(struct arc_policy *a,
-				dm_block_t origin_block,
-				int data_dir,
-				bool can_migrate,
-				bool cheap_copy,
-				struct policy_result *result)
+static void straight_to_cache(struct arc_policy *a,
+			      dm_block_t oblock,
+			      struct policy_result *result)
 {
-	dm_block_t t1_size = queue_size(&a->q[ARC_T1]);
-	dm_block_t t2_size = queue_size(&a->q[ARC_T2]);
-	dm_block_t b1_size = queue_size(&a->q[ARC_B1]);
+	struct entry *e = __arc_alloc_entry(a);
 
-	if ((t1_size + b1_size) == a->cache_size)
-		__arc_replace(a, origin_block, can_migrate, ARC_T1, ARC_B1, result);
+	if (unlikely(!e))
+		return;
 
-	else if (t1_size + t2_size == a->cache_size)
-		__arc_replace(a, origin_block, can_migrate, ARC_T2, ARC_B2, result);
+	e->oblock = oblock;
+	e->hit_count = 1;
 
-	else
-		__arc_new_block(a, origin_block, result);
-}
+	if (__find_free_cblock(a, &e->cblock) == -ENOSPC) {
+		DMWARN("straight_to_cache couldn't allocate cblock");
+		result->op = POLICY_MISS;
+		e->in_cache = false;
+	} else {
+		result->op = POLICY_NEW;
+		result->cblock = e->cblock;
+		e->in_cache = true;
+	}
 
-static bool definitely_a_miss(struct arc_policy *a,
-			      dm_block_t origin_block,
-			      int data_dir,
-			      bool can_migrate,
-			      bool cheap_copy)
-{
-	bool possible_migration = can_migrate && __arc_interesting_block(a, origin_block, data_dir);
-	bool possible_new = cheap_copy && __any_free_entries(a);
-	bool maybe_a_hit = arc_random_stream(a) && (possible_new || possible_migration);
-
-	return !maybe_a_hit;
+	__arc_push(a, e);
 }
 
 static void __arc_map(struct arc_policy *a,
-		      dm_block_t origin_block,
+		      dm_block_t oblock,
 		      int data_dir,
 		      bool can_migrate,
 		      bool cheap_copy,
 		      struct policy_result *result)
 {
-	struct arc_entry *e = __arc_lookup(a, origin_block);
-	if (e)
-		__arc_map_found(a, e, origin_block, can_migrate, result);
+	struct entry *e = __hash_lookup(a, oblock);
+	if (e) {
+		__arc_map_found(a, e, oblock, can_migrate, cheap_copy, result);
+		return;
+	}
 
-	else if (definitely_a_miss(a, origin_block, data_dir, can_migrate, cheap_copy))
+	// FIXME: wrong place, and I'm not sure about the sequential stuff anyway
+	if (!arc_random_stream(a)) {
 		result->op = POLICY_MISS;
+		return;
+	}
 
+	if (cheap_copy && __any_free_cblocks(a))
+		straight_to_cache(a, oblock, result);
 	else
-		__arc_map_not_found(a, origin_block, data_dir, can_migrate, cheap_copy, result);
+		to_pre_cache(a, oblock, result);
 }
 
 static void arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
@@ -577,7 +569,7 @@ static void arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data
 static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
 {
 	struct arc_policy *a = to_arc_policy(p);
-	struct arc_entry *e;
+	struct entry *e;
 
 	debug("loading mapping %lu -> %lu\n",
 	      (unsigned long) oblock,
@@ -589,7 +581,8 @@ static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_blo
 
 	e->cblock = cblock;
 	e->oblock = oblock;
-	__arc_push(a, ARC_T1, e);
+	e->in_cache = true;
+	__arc_push(a, e);
 
 	return 0;
 }
@@ -597,36 +590,32 @@ static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_blo
 static void arc_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 {
 	struct arc_policy *a = to_arc_policy(p);
-	struct arc_entry *e = __arc_lookup(a, oblock);
+	struct entry *e = __hash_lookup(a, oblock);
 
-	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
+	BUG_ON(!e || e->in_cache);
 
-	__free_cblock(a, e->cblock);
-	queue_del(e->state == ARC_T1 ? &a->q[ARC_T1] : &a->q[ARC_T2], &e->list);
-	__arc_remove(a, e);
-	__arc_push(a, ARC_B2, e);
+	__arc_del(a, e);
+	e->in_cache = false;
+	__arc_push(a, e);
 }
 
 static void arc_force_mapping(struct dm_cache_policy *p,
 		dm_block_t current_oblock, dm_block_t new_oblock)
 {
 	struct arc_policy *a = to_arc_policy(p);
-	struct arc_entry *e = __arc_lookup(a, current_oblock);
+	struct entry *e = __hash_lookup(a, current_oblock);
 
-	BUG_ON(!e || e->state == ARC_B1 || e->state == ARC_B2);
+	BUG_ON(!e || e->in_cache);
 
-	__free_cblock(a, e->cblock);
-	queue_del(e->state == ARC_T1 ? &a->q[ARC_T1] : &a->q[ARC_T2], &e->list);
-	__arc_remove(a, e);
+	__arc_del(a, e);
 	e->oblock = new_oblock;
-	__arc_push(a, ARC_T1, e);
+	__arc_push(a, e);
 }
 
 static dm_block_t arc_residency(struct dm_cache_policy *p)
 {
 	struct arc_policy *a = to_arc_policy(p);
-	// FIXME: this may be wrong if arc_remove_mapping has been called
-	return min(a->nr_allocated, a->cache_size);
+	return a->nr_cblocks_allocated;
 }
 
 static void arc_set_seq_io_threshold(struct dm_cache_policy *p,
@@ -647,9 +636,14 @@ static void arc_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&a->lock, flags);
 }
 
+static unsigned arc_queue_level(void *context, struct list_head *elt, unsigned nr_levels)
+{
+	struct entry *e = container_of(elt, struct entry, list);
+	return min((unsigned) ilog2(e->hit_count), nr_levels);
+}
+
 static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 {
-	int i;
 	struct arc_policy *a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return NULL;
@@ -665,20 +659,24 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 
 	a->cache_size = cache_size;
 	a->tick = 0;
+	a->hits = 0;
 	spin_lock_init(&a->lock);
-	a->p = 0;
 
-	for (i = 0; i < ARC_NR_QUEUES; i++)
-		queue_init(&a->q[i]);
+	mq_init(&a->mq_pre_cache, arc_queue_level, a);
+	mq_init(&a->mq_cache, arc_queue_level, a);
+	a->demote_period_mask = next_power(cache_size, 1024) - 1;
 
 	a->last_lookup = NULL;
-	a->entries = vzalloc(sizeof(*a->entries) * 2 * cache_size);
+
+	a->nr_entries = 3 * cache_size;
+	a->entries = vzalloc(sizeof(*a->entries) * a->nr_entries);
 	if (!a->entries) {
 		kfree(a);
 		return NULL;
 	}
 
 	a->nr_allocated = 0;
+	a->nr_cblocks_allocated = 0;
 
 	a->nr_buckets = next_power(cache_size / 4, 16);
 	a->hash_mask = a->nr_buckets - 1;
@@ -689,18 +687,8 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 		return NULL;
 	}
 
-	a->interesting_size = next_power(cache_size * 2, 16);
-	a->interesting_array = vzalloc(sizeof(*a->interesting_array) * a->interesting_size);
-	if (!a->interesting_array) {
-		kfree(a->table);
-		vfree(a->entries);
-		kfree(a);
-		return NULL;
-	}
-
 	a->allocation_bitset = alloc_bitset(cache_size, 0);
 	if (!a->allocation_bitset) {
-		vfree(a->interesting_array);
 		kfree(a->table);
 		vfree(a->entries);
 		kfree(a);
@@ -711,6 +699,8 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 }
 
 /*----------------------------------------------------------------*/
+
+// FIXME: register this under the 'default' policy name too
 
 static struct dm_cache_policy_type arc_policy_type = {
 	.name = "arc",
