@@ -854,7 +854,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	policy_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, bio, &lookup_result);
+	policy_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, true, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",
@@ -1439,47 +1439,65 @@ static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
-#if 0
-	int need_defer;
-	struct cell_key key;
+#if 1
+	/* deferring everything seems to perform better */
+       struct cache_c *c = ti->private;
+       map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
+       defer_bio(c, bio);
+       return DM_MAPIO_SUBMITTED;
+#else
 	struct cache_c *c = ti->private;
+
+	int r;
+	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
-	struct arc_result lookup_result;
+	struct dm_bio_prison_cell *cell;
+	struct policy_result lookup_result;
+	struct dm_cache_endio_hook *h = map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
 
-	map_context->ptr = hook_endio(c, bio);
-
-	build_key(block, &key);
-	if (bio_detain_if_occupied(c->prison, &key, bio))
-		/* This block is busy, data moving around */
-		return DM_MAPIO_SUBMITTED;
-
-	need_defer = arc_quick_map(c->policy, block, &lookup_result);
-	if (need_defer) {
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
 		defer_bio(c, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
+	/*
+	 * Check to see if that block is currently migrating.
+	 */
+	build_key(block, &key);
+	r = bio_detain(c->prison, &key, bio, &cell);
+	if (r > 0)
+		return DM_MAPIO_SUBMITTED;
+
+	r = policy_map(c->policy, block, bio_data_dir(bio), true, true, false, bio, &lookup_result);
+	if (r == -EWOULDBLOCK) {
+		cell_defer(c, cell, true);
+		return DM_MAPIO_SUBMITTED;
+	}
+
+	if (r)
+		BUG();
+
 	switch (lookup_result.op) {
-	case ARC_HIT:
-		debug("hit (cache_map)\n");
-		remap_to_cache(c, bio, lookup_result.cblock);
+	case POLICY_HIT:
+		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
+		h->all_io_entry = ds_inc(c->all_io_ds);
+		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
+		cell_defer(c, cell, false);
 		break;
 
-	case ARC_MISS:
-		debug("miss (cache_map)\n");
-		remap_to_origin(c, bio);
+	case POLICY_MISS:
+		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
+		h->all_io_entry = ds_inc(c->all_io_ds);
+		remap_to_origin_dirty(c, bio, block);
+		cell_defer(c, cell, false);
 		break;
 
 	default:
+		pr_alert("illegal value: %u\n", (unsigned) lookup_result.op);
 		BUG();
 	}
 
 	return DM_MAPIO_REMAPPED;
-#else
-	struct cache_c *c = ti->private;
-	map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
-	defer_bio(c, bio);
-	return DM_MAPIO_SUBMITTED;
 #endif
 }
 

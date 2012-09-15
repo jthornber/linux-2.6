@@ -26,9 +26,13 @@ struct policy_result {
 
 struct dm_cache_policy {
 	void (*destroy)(struct dm_cache_policy *p);
-	void (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-		    bool can_migrate, bool cheap_copy, struct bio *bio,
-		    struct policy_result *result);
+
+	/*
+	 * May only return 0, or -EWOULDBLOCK
+	 */
+	int (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+		   bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
+		   struct policy_result *result);
 
 	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
 
@@ -48,11 +52,11 @@ struct dm_cache_policy {
 
 /*----------------------------------------------------------------*/
 
-static inline void policy_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-			      bool can_migrate, bool cheap_copy, struct bio *bio,
+static inline int policy_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+			      bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
 			      struct policy_result *result)
 {
-	p->map(p, origin_block, data_dir, can_migrate, cheap_copy, bio, result);
+	return p->map(p, origin_block, data_dir, can_migrate, cheap_copy, can_block, bio, result);
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)

@@ -408,7 +408,6 @@ static void __arc_hit(struct arc_policy *a, struct entry *e)
 	__arc_push(a, e);
 
 	if (!(++a->hits & a->demote_period_mask)) {
-		pr_alert("running mq_demote\n");
 		mq_demote(&a->mq_cache);
 		mq_demote(&a->mq_pre_cache);
 		a->hits = 0;
@@ -444,12 +443,13 @@ static bool should_promote(struct arc_policy *a,
 }
 
 // FIXME: rename origin_block to oblock
-static void __arc_map_found(struct arc_policy *a,
-			    struct entry *e,
-			    dm_block_t origin_block,
-			    bool can_migrate,
-			    bool cheap_copy,
-			    struct policy_result *result)
+static int __arc_map_found(struct arc_policy *a,
+			   struct entry *e,
+			   dm_block_t origin_block,
+			   bool can_migrate,
+			   bool cheap_copy,
+			   bool can_block,
+			   struct policy_result *result)
 {
 	dm_block_t cblock;
 	bool updated = updated_this_tick(a, e); /* has to be done before __arc_hit */
@@ -459,31 +459,34 @@ static void __arc_map_found(struct arc_policy *a,
 	if (e->in_cache) {
 		result->op = POLICY_HIT;
 		result->cblock = e->cblock;
-		return;
+		return 0;
 	}
 
-	if (updated || !should_promote(a, e, can_migrate, cheap_copy)) {
+	if (updated || !arc_random_stream(a) || !should_promote(a, e, can_migrate, cheap_copy)) {
 		result->op = POLICY_MISS;
-		return;
+		return 0;
 	}
+
+	if (!can_block)
+		return -EWOULDBLOCK;
 
 	if (__find_free_cblock(a, &cblock) == -ENOSPC) {
 		result->op = POLICY_REPLACE;
 		cblock = demote_cblock(a, &result->old_oblock);
-	} else {
+	} else
 		result->op = POLICY_NEW;
-	}
 
 	result->cblock = e->cblock = cblock;
 
 	__arc_del(a, e);
 	e->in_cache = true;
 	__arc_push(a, e);
+
+	return 0;
 }
 
 static void to_pre_cache(struct arc_policy *a,
-			 dm_block_t oblock,
-			 struct policy_result *result)
+			 dm_block_t oblock)
 {
 	struct entry *e = __arc_alloc_entry(a);
 
@@ -499,8 +502,6 @@ static void to_pre_cache(struct arc_policy *a,
 	e->oblock = oblock;
 	e->hit_count = 1;
 	__arc_push(a, e);
-
-	result->op = POLICY_MISS;
 }
 
 static void straight_to_cache(struct arc_policy *a,
@@ -509,8 +510,10 @@ static void straight_to_cache(struct arc_policy *a,
 {
 	struct entry *e = __arc_alloc_entry(a);
 
-	if (unlikely(!e))
+	if (unlikely(!e)) {
+		result->op = POLICY_MISS;
 		return;
+	}
 
 	e->oblock = oblock;
 	e->hit_count = 1;
@@ -528,42 +531,51 @@ static void straight_to_cache(struct arc_policy *a,
 	__arc_push(a, e);
 }
 
-static void __arc_map(struct arc_policy *a,
-		      dm_block_t oblock,
-		      int data_dir,
-		      bool can_migrate,
-		      bool cheap_copy,
-		      struct policy_result *result)
+static int __arc_map(struct arc_policy *a,
+		     dm_block_t oblock,
+		     int data_dir,
+		     bool can_migrate,
+		     bool cheap_copy,
+		     bool can_block,
+		     struct policy_result *result)
 {
 	struct entry *e = __hash_lookup(a, oblock);
-	if (e) {
-		__arc_map_found(a, e, oblock, can_migrate, cheap_copy, result);
-		return;
-	}
+	if (e)
+		return __arc_map_found(a, e, oblock, can_migrate, cheap_copy, can_block, result);
 
-	// FIXME: wrong place, and I'm not sure about the sequential stuff anyway
 	if (!arc_random_stream(a)) {
 		result->op = POLICY_MISS;
-		return;
+		return 0;
 	}
 
-	if (cheap_copy && __any_free_cblocks(a))
-		straight_to_cache(a, oblock, result);
-	else
-		to_pre_cache(a, oblock, result);
+	if (cheap_copy && __any_free_cblocks(a)) {
+		if (can_block) {
+			straight_to_cache(a, oblock, result);
+			return 0;
+		} else
+			return -EWOULDBLOCK;
+
+	} else {
+		to_pre_cache(a, oblock);
+		result->op = POLICY_MISS;
+		return 0;
+	}
 }
 
-static void arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-		    bool can_migrate, bool cheap_copy, struct bio *bio,
-		    struct policy_result *result)
+static int arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
+		   bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
+		   struct policy_result *result)
 {
+	int r;
 	unsigned long flags;
 	struct arc_policy *a = to_arc_policy(p);
 
 	spin_lock_irqsave(&a->lock, flags);
 	__arc_update_io_stream_data(a, bio);
-	__arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, result);
+	r = __arc_map(a, origin_block, data_dir, can_migrate, cheap_copy, can_block, result);
 	spin_unlock_irqrestore(&a->lock, flags);
+
+	return r;
 }
 
 static int arc_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
