@@ -806,9 +806,9 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
  * t_resident >= migration_io / (hit_rate * io_per_second)
  * hit_rate needs to take into account the size of the bios.
  */
-#if 0
 static bool migrations_allowed(struct cache_c *c)
 {
+#if 0
 #if 0
 	uint64_t migration_io = c->sectors_per_block * 2;
 	uint64_t expected_migrations = c->cache_size * migration_io *
@@ -831,8 +831,9 @@ static bool migrations_allowed(struct cache_c *c)
 
 	return (atomic_read(&c->nr_migrations) < 30) && (migrations_per_second < target);
 #endif
-}
 #endif
+	return atomic_read(&c->nr_migrations) < 100;
+}
 
 static void process_bio(struct cache_c *c, struct bio *bio)
 {
@@ -844,7 +845,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = test_bit(block, c->discard_bitset);
-	bool can_migrate = true; // migrations_allowed(c);
+	bool can_migrate = migrations_allowed(c);
 
 	/*
 	 * Check to see if that block is currently migrating.
