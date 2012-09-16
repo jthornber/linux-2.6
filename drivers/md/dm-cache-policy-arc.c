@@ -92,6 +92,14 @@ static void mq_remove(struct list_head *elt)
 	list_del(elt);
 }
 
+static void mq_shift_down(struct multiqueue *mq)
+{
+	unsigned level;
+
+	for (level = 1; level < NR_MQ_LEVELS; level++)
+		list_splice_init(mq->qs + level, mq->qs + level - 1);
+}
+
 /*
  * Gives us the oldest entry of the lowest level.
  */
@@ -104,30 +112,14 @@ static struct list_head *mq_pop(struct multiqueue *mq)
 		if (!list_empty(mq->qs + i)) {
 			r = mq->qs[i].next;
 			list_del(r);
+
+			if (i == 0 && list_empty(mq->qs))
+				mq_shift_down(mq);
+
 			return r;
 		}
 
 	return NULL;
-}
-
-static void mq_demote(struct multiqueue *mq)
-{
-	unsigned level;
-
-	for (level = 1; level < NR_MQ_LEVELS; level++)
-		list_splice_init(mq->qs + level, mq->qs + level - 1);
-}
-
-// FIXME: reduce NR_MQ_LEVELS and use a higher power for level spec
-static unsigned mq_min_level(struct multiqueue *mq)
-{
-	unsigned level;
-
-	for (level = 0; level < NR_MQ_LEVELS; level++)
-		if (!list_empty(mq->qs + level))
-			return level;
-
-	return 0;
 }
 
 /*----------------------------------------------------------------*/
@@ -631,14 +623,11 @@ static int __arc_map(struct arc_policy *a,
 	}
 }
 
-static void __arc_demote(struct arc_policy *a)
+static void __arc_stats(struct arc_policy *a)
 {
 	++a->lookup_count;
 
-	if (mq_min_level(&a->mq_cache) > 0) {
-		mq_demote(&a->mq_cache);
-		mq_demote(&a->mq_pre_cache);
-
+	if (a->lookup_count & (1024 * 16 - 1)) {
 		pr_alert("----  pre cache stats\n");
 		mq_stats(&a->mq_pre_cache);
 		pr_alert("----  cache stats\n");
@@ -661,7 +650,7 @@ static int arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_
 	spin_lock_irqsave(&a->lock, flags);
 	__arc_update_io_stream_data(a, bio);
 	r = __arc_map(a, origin_block, can_migrate, cheap_copy, can_block, bio_data_dir(bio), result);
-	__arc_demote(a);
+	__arc_stats(a);
 	spin_unlock_irqrestore(&a->lock, flags);
 
 	return r;
