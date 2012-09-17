@@ -58,6 +58,7 @@ typedef unsigned (*queue_level_fn)(void *context, struct list_head *entry, unsig
 struct multiqueue {
 	queue_level_fn queue_level;
 	void *context;
+	unsigned highest_level;
 
 	struct list_head qs[NR_MQ_LEVELS];
 };
@@ -70,6 +71,7 @@ static void mq_init(struct multiqueue *mq,
 
 	mq->queue_level = queue_level;
 	mq->context = context;
+	mq->highest_level = 0;
 
 	for (i = 0; i < NR_MQ_LEVELS; i++)
 		INIT_LIST_HEAD(mq->qs + i);
@@ -84,7 +86,9 @@ static struct list_head *mq_get_q(struct multiqueue *mq, struct list_head *elt)
 
 static void mq_push(struct multiqueue *mq, struct list_head *elt)
 {
-	list_add_tail(elt, mq_get_q(mq, elt));
+	unsigned level = mq->queue_level(mq->context, elt, NR_MQ_LEVELS);
+	mq->highest_level = max(mq->highest_level, level);
+	list_add_tail(elt, mq->qs + level);
 }
 
 static void mq_remove(struct list_head *elt)
@@ -96,6 +100,8 @@ static void mq_shift_down(struct multiqueue *mq)
 {
 	unsigned level;
 
+	if (mq->highest_level)
+		mq->highest_level--;
 	for (level = 1; level < NR_MQ_LEVELS; level++)
 		list_splice_init(mq->qs + level, mq->qs + level - 1);
 }
@@ -120,6 +126,22 @@ static struct list_head *mq_pop(struct multiqueue *mq)
 		}
 
 	return NULL;
+}
+
+static unsigned mq_highest_level(struct multiqueue *mq)
+{
+	unsigned level = mq->highest_level;
+
+	/*
+	 * Double check it still is since mq->highest_level doesn't get
+	 * updated by removals.
+	 */
+	for (level = mq->highest_level; level; level--)
+		if (!list_empty(mq->qs + level))
+			break;
+
+	mq->highest_level = level;
+	return level;
 }
 
 /*----------------------------------------------------------------*/
@@ -462,6 +484,7 @@ static void __arc_hit(struct arc_policy *a, struct entry *e)
 	if (!(a->hit_count & a->generation_period_mask) &&
 	    (a->nr_cblocks_allocated == a->cache_size)) {
 		unsigned total = 0, nr = 0;
+		struct list_head *head;
 		struct entry *e;
 
 		pr_alert("----  pre cache stats\n");
@@ -472,8 +495,12 @@ static void __arc_hit(struct arc_policy *a, struct entry *e)
 		a->hit_count = 0;
 		a->generation++;
 
-#if 0
-		list_for_each_entry (e, a->mq_cache.qs, list) {
+		head = a->mq_cache.qs + 1;
+		if (head)
+			head = a->mq_cache.qs;
+
+		// FIXME: just the first 20 or so should be enough
+		list_for_each_entry (e, head, list) {
 			nr++;
 			total += e->hit_count;
 		}
@@ -481,7 +508,6 @@ static void __arc_hit(struct arc_policy *a, struct entry *e)
 		a->promote_threshold = nr ? total / nr : 1;
 
 		pr_alert("promote_threshold = %u\n", a->promote_threshold);
-#endif
 	}
 
 	e->hit_count -= min(e->hit_count - 1, a->generation - e->generation);
@@ -505,8 +531,14 @@ static dm_block_t demote_cblock(struct arc_policy *a, dm_block_t *oblock)
 }
 
 #define DISCARDED_PROMOTE_THRESHOLD 1
-#define READ_PROMOTE_THRESHOLD 4
-#define WRITE_PROMOTE_THRESHOLD 8
+#define READ_PROMOTE_THRESHOLD 3
+#define WRITE_PROMOTE_THRESHOLD 5
+
+static unsigned arc_queue_level(void *context, struct list_head *elt, unsigned nr_levels)
+{
+	struct entry *e = container_of(elt, struct entry, list);
+	return min((unsigned) ilog2(e->hit_count), nr_levels - 1);
+}
 
 static bool should_promote(struct arc_policy *a,
 			   struct entry *e,
@@ -514,14 +546,20 @@ static bool should_promote(struct arc_policy *a,
 			   bool cheap_copy,
 			   int data_dir)
 {
-	bool possible_migration = can_migrate &&
-		(e->hit_count >= (data_dir == READ ?
-				  (a->promote_threshold + READ_PROMOTE_THRESHOLD) :
-				  (a->promote_threshold + WRITE_PROMOTE_THRESHOLD)));
-	bool possible_new = cheap_copy && __any_free_cblocks(a) && (e->hit_count >= DISCARDED_PROMOTE_THRESHOLD);
-	bool promote = arc_random_stream(a) && (possible_new || possible_migration);
+	if (!arc_random_stream(a))
+		return false;
 
-	return promote;
+	if (cheap_copy && __any_free_cblocks(a) && (e->hit_count >= DISCARDED_PROMOTE_THRESHOLD))
+		return true;
+
+	if (arc_queue_level(a, &e->list, NR_MQ_LEVELS) >= min(0U, mq_highest_level(&a->mq_pre_cache) - 2)) {
+		return can_migrate &&
+			(e->hit_count >= (data_dir == READ ?
+					  (a->promote_threshold + READ_PROMOTE_THRESHOLD) :
+					  (a->promote_threshold + WRITE_PROMOTE_THRESHOLD)));
+	}
+
+	return false;
 }
 
 // FIXME: rename origin_block to oblock
@@ -732,12 +770,6 @@ static void arc_tick(struct dm_cache_policy *p)
 	spin_lock_irqsave(&a->lock, flags);
 	a->tick++;
 	spin_unlock_irqrestore(&a->lock, flags);
-}
-
-static unsigned arc_queue_level(void *context, struct list_head *elt, unsigned nr_levels)
-{
-	struct entry *e = container_of(elt, struct entry, list);
-	return min((unsigned) ilog2(e->hit_count), nr_levels - 1);
 }
 
 static struct dm_cache_policy *arc_create(dm_block_t cache_size)
