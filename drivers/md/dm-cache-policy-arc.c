@@ -531,8 +531,8 @@ static dm_block_t demote_cblock(struct arc_policy *a, dm_block_t *oblock)
 }
 
 #define DISCARDED_PROMOTE_THRESHOLD 1
-#define READ_PROMOTE_THRESHOLD 3
-#define WRITE_PROMOTE_THRESHOLD 5
+#define READ_PROMOTE_THRESHOLD 4
+#define WRITE_PROMOTE_THRESHOLD 8
 
 static unsigned arc_queue_level(void *context, struct list_head *elt, unsigned nr_levels)
 {
