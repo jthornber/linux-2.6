@@ -134,7 +134,7 @@ struct entry {
 
 	// FIXME: pack these better
 	unsigned hit_count;
-	unsigned demote;
+	unsigned generation;
 	unsigned tick;
 };
 
@@ -148,16 +148,15 @@ struct arc_policy {
 
 	dm_block_t cache_size;
 	unsigned tick;
-	unsigned lookup_count;
 	unsigned hit_count;
 	unsigned promote_threshold;
-	unsigned demote;
+	unsigned generation;
+	unsigned generation_period_mask;
 
 	spinlock_t lock;
 
 	struct multiqueue mq_pre_cache;
 	struct multiqueue mq_cache;
-	unsigned demote_period_mask;
 
 	/*
 	 * We know exactly how many entries will be needed, so we can
@@ -456,15 +455,37 @@ static void __arc_hit(struct arc_policy *a, struct entry *e)
 		return;
 
 	__arc_del(a, e);
+
 	e->hit_count++;
 	a->hit_count++;
 
+	if (!(a->hit_count & a->generation_period_mask) &&
+	    (a->nr_cblocks_allocated == a->cache_size)) {
+		unsigned total = 0, nr = 0;
+		struct entry *e;
+
+		pr_alert("----  pre cache stats\n");
+		mq_stats(&a->mq_pre_cache);
+		pr_alert("----  cache stats\n");
+		mq_stats(&a->mq_cache);
+
+		a->hit_count = 0;
+		a->generation++;
+
 #if 0
-	if (e->demote < a->demote) {
-		e->hit_count -= min(e->hit_count, (a->demote - e->demote) * 2);
-		e->demote = a->demote;
-	}
+		list_for_each_entry (e, a->mq_cache.qs, list) {
+			nr++;
+			total += e->hit_count;
+		}
+
+		a->promote_threshold = nr ? total / nr : 1;
+
+		pr_alert("promote_threshold = %u\n", a->promote_threshold);
 #endif
+	}
+
+	e->hit_count -= min(e->hit_count - 1, a->generation - e->generation);
+	e->generation = a->generation;
 
 	__arc_push(a, e);
 }
@@ -493,7 +514,10 @@ static bool should_promote(struct arc_policy *a,
 			   bool cheap_copy,
 			   int data_dir)
 {
-	bool possible_migration = can_migrate && (e->hit_count >= (data_dir == READ ? READ_PROMOTE_THRESHOLD : WRITE_PROMOTE_THRESHOLD));
+	bool possible_migration = can_migrate &&
+		(e->hit_count >= (data_dir == READ ?
+				  (a->promote_threshold + READ_PROMOTE_THRESHOLD) :
+				  (a->promote_threshold + WRITE_PROMOTE_THRESHOLD)));
 	bool possible_new = cheap_copy && __any_free_cblocks(a) && (e->hit_count >= DISCARDED_PROMOTE_THRESHOLD);
 	bool promote = arc_random_stream(a) && (possible_new || possible_migration);
 
@@ -560,7 +584,7 @@ static void to_pre_cache(struct arc_policy *a,
 	e->in_cache = false;
 	e->oblock = oblock;
 	e->hit_count = 1;
-	e->demote = a->demote;
+	e->generation = a->generation;
 	__arc_push(a, e);
 }
 
@@ -577,7 +601,7 @@ static void straight_to_cache(struct arc_policy *a,
 
 	e->oblock = oblock;
 	e->hit_count = 1;
-	e->demote = a->demote;
+	e->generation = a->generation;
 
 	if (__find_free_cblock(a, &e->cblock) == -ENOSPC) {
 		DMWARN("straight_to_cache couldn't allocate cblock");
@@ -623,22 +647,6 @@ static int __arc_map(struct arc_policy *a,
 	}
 }
 
-static void __arc_stats(struct arc_policy *a)
-{
-	++a->lookup_count;
-
-	if (a->lookup_count & (1024 * 16 - 1)) {
-		pr_alert("----  pre cache stats\n");
-		mq_stats(&a->mq_pre_cache);
-		pr_alert("----  cache stats\n");
-		mq_stats(&a->mq_cache);
-
-		a->lookup_count = 0;
-		a->hit_count = 0;
-		a->demote++;
-	}
-}
-
 static int arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
 		   bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
 		   struct policy_result *result)
@@ -650,7 +658,6 @@ static int arc_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_
 	spin_lock_irqsave(&a->lock, flags);
 	__arc_update_io_stream_data(a, bio);
 	r = __arc_map(a, origin_block, can_migrate, cheap_copy, can_block, bio_data_dir(bio), result);
-	__arc_stats(a);
 	spin_unlock_irqrestore(&a->lock, flags);
 
 	return r;
@@ -750,14 +757,14 @@ static struct dm_cache_policy *arc_create(dm_block_t cache_size)
 
 	a->cache_size = cache_size;
 	a->tick = 0;
-	a->lookup_count = 0;
 	a->hit_count = 0;
-	a->demote = 0;
+	a->generation = 0;
+	a->promote_threshold = 0;
 	spin_lock_init(&a->lock);
 
 	mq_init(&a->mq_pre_cache, arc_queue_level, a);
 	mq_init(&a->mq_cache, arc_queue_level, a);
-	a->demote_period_mask = next_power(cache_size * 16, 1024) - 1;
+	a->generation_period_mask = next_power(cache_size, 1024) - 1;
 
 	a->last_lookup = NULL;
 
