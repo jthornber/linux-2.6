@@ -275,8 +275,8 @@ config DM_CACHE
        ---help---
          Use an SSD to speed up a slower device.
 
-config DM_CACHE_ARC
-       tristate "ARC Policy (EXPERIMENTAL)"
+config DM_CACHE_MQ
+       tristate "MQ Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
        default y
        ---help---
