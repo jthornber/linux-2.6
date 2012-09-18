@@ -141,44 +141,6 @@ struct dm_cache_policy {
 /*----------------------------------------------------------------*/
 
 /*
- * Little inline functions that simplify calling the policy methods.
- */
-static inline int policy_map(struct dm_cache_policy *p, dm_block_t origin_block,
-			      bool can_migrate, bool discarded_oblock, struct bio *bio,
-			      struct policy_result *result)
-{
-	return p->map(p, origin_block, can_migrate, discarded_oblock, bio, result);
-}
-
-static inline int policy_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
-{
-	return p->load_mapping(p, oblock, cblock);
-}
-
-static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
-{
-	return p->remove_mapping(p, oblock);
-}
-
-static inline void policy_force_mapping(struct dm_cache_policy *p,
-			dm_block_t current_oblock, dm_block_t new_oblock)
-{
-	return p->force_mapping(p, current_oblock, new_oblock);
-}
-
-static inline dm_block_t policy_residency(struct dm_cache_policy *p)
-{
-	return p->residency(p);
-}
-
-static inline void policy_tick(struct dm_cache_policy *p)
-{
-	return p->tick(p);
-}
-
-/*----------------------------------------------------------------*/
-
-/*
  * We maintain a little register of the different policy types.
  */
 #define CACHE_POLICY_NAME_MAX 16
@@ -198,29 +160,6 @@ struct dm_cache_policy_type {
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);
 void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
-
-/*----------------------------------------------------------------*/
-
-/*
- * Only used by the core target.
- */
-
-/*
- * Creates a new cache policy given a policy name, and cache size.
- */
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size);
-
-/*
- * Destroys the policy.  This drops references to the policy module as well
- * as calling it's destroy method.  So always use this rather than calling
- * the policy->destroy method directly.
- */
-void dm_cache_policy_destroy(struct dm_cache_policy *p);
-
-/*
- * In case you've forgotten.
- */
-const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
 
 /*----------------------------------------------------------------*/
 

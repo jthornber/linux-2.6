@@ -7,7 +7,7 @@
 #include "dm.h"
 #include "dm-bio-prison.h"
 #include "dm-cache-metadata.h"
-#include "dm-cache-policy.h"
+#include "dm-cache-policy-internal.h"
 
 #include <asm/div64.h>
 
@@ -19,9 +19,6 @@
 #include <linux/mempool.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-
-//#define debug(x...) pr_alert(x)
-#define debug(x...) ;
 
 /*----------------------------------------------------------------*/
 
@@ -531,12 +528,10 @@ static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 
 	if (mg->demote) {
 		/* demote */
-		debug("issuing copy for demotion %lu\n", (unsigned long) mg->old_oblock);
 		o_region.sector = mg->old_oblock * c->sectors_per_block;
 		r = dm_kcopyd_copy(c->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
 	} else {
 		/* promote */
-		debug("issuing copy for promotion %lu\n", (unsigned long) mg->new_oblock);
 		o_region.sector = mg->new_oblock * c->sectors_per_block;
 		r = dm_kcopyd_copy(c->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
 	}
@@ -858,9 +853,6 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	policy_map(c->policy, block, can_migrate, cheap_copy, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		debug("hit %lu -> %lu (process_bio)\n",
-		      (unsigned long) block,
-		      (unsigned long) lookup_result.cblock);
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
 		h->all_io_entry = ds_inc(c->all_io_ds);
 		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
@@ -868,8 +860,6 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		break;
 
 	case POLICY_MISS:
-		debug("miss %lu (process_bio)\n",
-		      (unsigned long) block);
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
 		h->all_io_entry = ds_inc(c->all_io_ds);
 		remap_to_origin_dirty(c, bio, block);
@@ -877,9 +867,6 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		break;
 
 	case POLICY_NEW:
-		debug("promote %lu -> %lu (process_bio)\n",
-		      (unsigned long) block,
-		      (unsigned long) lookup_result.cblock);
 		atomic_inc(&c->promotion);
 		promote(c, block, lookup_result.cblock, new_ocell);
 		release_cell = 0;
