@@ -427,15 +427,15 @@ static void __all_map(struct policy *l,
 	__all_add(l, e);
 }
 
-static int all_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-		    bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
+static int all_map(struct dm_cache_policy *p, dm_block_t origin_block,
+		    bool can_migrate, bool cheap_copy, struct bio *bio,
 		    struct policy_result *result)
 {
 	unsigned long flags;
 	struct policy *l = to_policy(p);
 
 	spin_lock_irqsave(&l->lock, flags);
-	__all_map(l, origin_block, data_dir, can_migrate, cheap_copy, result);
+	__all_map(l, origin_block, bio_data_dir(bio), can_migrate, cheap_copy, result);
 	spin_unlock_irqrestore(&l->lock, flags);
 
 	return 0;

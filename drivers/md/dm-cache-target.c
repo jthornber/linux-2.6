@@ -845,7 +845,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = test_bit(block, c->discard_bitset);
-	bool can_migrate = migrations_allowed(c);
+	bool can_migrate = true; // migrations_allowed(c);
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -855,7 +855,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	policy_map(c->policy, block, bio_data_dir(bio), can_migrate, cheap_copy, true, bio, &lookup_result);
+	policy_map(c->policy, block, can_migrate, cheap_copy, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		debug("hit %lu -> %lu (process_bio)\n",

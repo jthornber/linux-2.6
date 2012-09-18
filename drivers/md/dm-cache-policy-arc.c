@@ -234,10 +234,11 @@ struct mq_policy {
 	unsigned tick;
 
 	/*
-	 * A count of the number of times the map function has been called.
-	 * Currently used to calculate the generation.
+	 * A count of the number of times the map function has been called
+	 * and found an entry in the pre_cache or cache.  Currently used to
+	 * calculate the generation.
 	 */
-	unsigned lookup_count;
+	unsigned hit_count;
 
 	/*
 	 * A generation is a longish period that is used to trigger some
@@ -478,10 +479,11 @@ static void requeue_and_update_tick(struct mq_policy *mq, struct entry *e)
 		return;
 
 	e->hit_count++;
+	mq->hit_count++;
 
 	/* generation adjustment, to stop the counts increasing forever. */
 	/* FIXME: divide? */
-	e->hit_count = min(e->hit_count - 1, mq->generation - e->generation);
+	e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation);
 	e->generation = mq->generation;
 
 	del(mq, e);
@@ -528,8 +530,8 @@ static dm_block_t demote_cblock(struct mq_policy *mq, dm_block_t *oblock)
  * haven't been dirtied.
  */
 #define DISCARDED_PROMOTE_THRESHOLD 1
-#define READ_PROMOTE_THRESHOLD 1
-#define WRITE_PROMOTE_THRESHOLD 5
+#define READ_PROMOTE_THRESHOLD 2
+#define WRITE_PROMOTE_THRESHOLD 4
 
 static unsigned adjusted_promote_threshold(struct mq_policy *mq, bool discarded_oblock, int data_dir)
 {
@@ -598,7 +600,6 @@ static int pre_cache_entry_found(struct mq_policy *mq,
 				 struct entry *e,
 				 bool can_migrate,
 				 bool discarded_oblock,
-				 bool can_block,
 				 int data_dir,
 				 struct policy_result *result)
 {
@@ -610,7 +611,7 @@ static int pre_cache_entry_found(struct mq_policy *mq,
 	if (updated || !should_promote(mq, e, discarded_oblock, data_dir))
 		result->op = POLICY_MISS;
 
-	else if (!can_block)
+	else if (!can_migrate)
 		r = -EWOULDBLOCK;
 
 	else
@@ -675,12 +676,11 @@ static int no_entry_found(struct mq_policy *mq,
 			  dm_block_t oblock,
 			  bool can_migrate,
 			  bool discarded_oblock,
-			  bool can_block,
 			  int data_dir,
 			  struct policy_result *result)
 {
 	if (adjusted_promote_threshold(mq, discarded_oblock, data_dir) == 1) {
-		if (can_block) {
+		if (can_migrate) {
 			insert_in_cache(mq, oblock, result);
 			return 0;
 		} else
@@ -701,7 +701,6 @@ static int map(struct mq_policy *mq,
 	       dm_block_t oblock,
 	       bool can_migrate,
 	       bool discarded_oblock,
-	       bool can_block,
 	       int data_dir,
 	       struct policy_result *result)
 {
@@ -716,9 +715,9 @@ static int map(struct mq_policy *mq,
 
 	else if (e)
 		r = pre_cache_entry_found(mq, e, can_migrate, discarded_oblock,
-					  can_block, data_dir, result);
+					  data_dir, result);
 	else
-		r = no_entry_found(mq, oblock, can_migrate, discarded_oblock, can_block,
+		r = no_entry_found(mq, oblock, can_migrate, discarded_oblock,
 				   data_dir, result);
 
 	return r;
@@ -746,10 +745,10 @@ static void check_generation(struct mq_policy *mq)
 	struct list_head *head;
 	struct entry *e;
 
-	if ((++mq->lookup_count >= mq->generation_period) &&
+	if ((mq->hit_count >= mq->generation_period) &&
 	    (mq->nr_cblocks_allocated == mq->cache_size)) {
 
-		mq->lookup_count = 0;
+		mq->hit_count = 0;
 		mq->generation++;
 
 		head = mq->cache.qs + 1;
@@ -765,6 +764,7 @@ static void check_generation(struct mq_policy *mq)
 		}
 
 		mq->promote_threshold = nr ? total / nr : 1;
+		pr_alert("promote threshold = %u\n", mq->promote_threshold);
 	}
 }
 
@@ -790,8 +790,8 @@ static void mq_destroy(struct dm_cache_policy *p)
 	kfree(mq);
 }
 
-static int mq_map(struct dm_cache_policy *p, dm_block_t oblock, int data_dir,
-		  bool can_migrate, bool discarded_oblock, bool can_block, struct bio *bio,
+static int mq_map(struct dm_cache_policy *p, dm_block_t oblock,
+		  bool can_migrate, bool discarded_oblock, struct bio *bio,
 		  struct policy_result *result)
 {
 	int r;
@@ -801,7 +801,7 @@ static int mq_map(struct dm_cache_policy *p, dm_block_t oblock, int data_dir,
 	spin_lock_irqsave(&mq->lock, flags);
 	check_generation(mq);
 	iot_examine_bio(&mq->tracker, bio);
-	r = map(mq, oblock, can_migrate, discarded_oblock, can_block, bio_data_dir(bio), result);
+	r = map(mq, oblock, can_migrate, discarded_oblock, bio_data_dir(bio), result);
 	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;
@@ -884,14 +884,14 @@ static struct dm_cache_policy *mq_create(dm_block_t cache_size)
 
 	mq->cache_size = cache_size;
 	mq->tick = 0;
-	mq->lookup_count = 0;
+	mq->hit_count = 0;
 	mq->generation = 0;
 	mq->promote_threshold = 0;
 	spin_lock_init(&mq->lock);
 
 	queue_init(&mq->pre_cache);
 	queue_init(&mq->cache);
-	mq->generation_period = max((unsigned) cache_size, 1024U); /* FIXME: this should be related to the origin size I feel */
+	mq->generation_period = max((unsigned) cache_size, 1024U);
 
 	mq->nr_entries = 2 * cache_size;
 	mq->entries = vzalloc(sizeof(*mq->entries) * mq->nr_entries);
@@ -959,6 +959,6 @@ module_exit(mq_exit);
 
 MODULE_AUTHOR("Joe Thornber");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("multiqueue cache policy");
+MODULE_DESCRIPTION("mq cache policy");
 
 /*----------------------------------------------------------------*/
