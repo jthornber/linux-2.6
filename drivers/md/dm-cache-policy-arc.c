@@ -472,13 +472,16 @@ static bool updated_this_tick(struct mq_policy *mq, struct entry *e)
  * Whenever we use an entry we bump up it's hit counter, and push it to the
  * back to it's current level.
  */
-static void hit(struct mq_policy *mq, struct entry *e)
+static void requeue_and_update_tick(struct mq_policy *mq, struct entry *e)
 {
+	if (updated_this_tick(mq, e))
+		return;
+
 	e->hit_count++;
 
 	/* generation adjustment, to stop the counts increasing forever. */
 	/* FIXME: divide? */
-	e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation);
+	e->hit_count = min(e->hit_count - 1, mq->generation - e->generation);
 	e->generation = mq->generation;
 
 	del(mq, e);
@@ -551,19 +554,11 @@ static bool should_promote(struct mq_policy *mq,
 	return e->hit_count >= adjusted_promote_threshold(mq, discarded_oblock, data_dir);
 }
 
-static int map_found(struct mq_policy *mq,
-		     struct entry *e,
-		     bool can_migrate,
-		     bool discarded_oblock,
-		     bool can_block,
-		     int data_dir,
-		     struct policy_result *result)
+static int cache_entry_found(struct mq_policy *mq,
+			     struct entry *e,
+			     struct policy_result *result)
 {
-	dm_block_t cblock;
-	bool updated = updated_this_tick(mq, e); /* has to be done before __mq_hit */
-
-	if (!updated)
-		hit(mq, e);
+	requeue_and_update_tick(mq, e);
 
 	if (e->in_cache) {
 		result->op = POLICY_HIT;
@@ -571,16 +566,18 @@ static int map_found(struct mq_policy *mq,
 		return 0;
 	}
 
+	return 0;
+}
 
-	if (updated ||
-	    (iot_pattern(&mq->tracker) == PATTERN_SEQUENTIAL) ||
-	    !should_promote(mq, e, discarded_oblock, data_dir)) {
-		result->op = POLICY_MISS;
-		return 0;
-	}
-
-	if (!can_block)
-		return -EWOULDBLOCK;
+/*
+ * Moves and entry from the pre_cache to the cache.  The main work is
+ * finding which cache block to use.
+ */
+static int pre_cache_to_cache(struct mq_policy *mq,
+			      struct entry *e,
+			      struct policy_result *result)
+{
+	dm_block_t cblock;
 
 	if (find_free_cblock(mq, &cblock) == -ENOSPC) {
 		result->op = POLICY_REPLACE;
@@ -597,12 +594,41 @@ static int map_found(struct mq_policy *mq,
 	return 0;
 }
 
-static void to_pre_cache(struct mq_policy *mq,
-			 dm_block_t oblock)
+static int pre_cache_entry_found(struct mq_policy *mq,
+				 struct entry *e,
+				 bool can_migrate,
+				 bool discarded_oblock,
+				 bool can_block,
+				 int data_dir,
+				 struct policy_result *result)
+{
+	int r = 0;
+	bool updated = updated_this_tick(mq, e);
+
+	requeue_and_update_tick(mq, e);
+
+	if (updated || !should_promote(mq, e, discarded_oblock, data_dir))
+		result->op = POLICY_MISS;
+
+	else if (!can_block)
+		r = -EWOULDBLOCK;
+
+	else
+		r = pre_cache_to_cache(mq, e, result);
+
+	return r;
+}
+
+static void insert_in_pre_cache(struct mq_policy *mq,
+				dm_block_t oblock)
 {
 	struct entry *e = alloc_entry(mq);
 
 	if (!e)
+		/*
+		 * There's no spare entry structure, so we grab the least
+		 * used one from the pre_cache.
+		 */
 		e = pop(mq, &mq->pre_cache);
 
 	if (unlikely(!e)) {
@@ -617,9 +643,9 @@ static void to_pre_cache(struct mq_policy *mq,
 	push(mq, e);
 }
 
-static void straight_to_cache(struct mq_policy *mq,
-			      dm_block_t oblock,
-			      struct policy_result *result)
+static void insert_in_cache(struct mq_policy *mq,
+			    dm_block_t oblock,
+			    struct policy_result *result)
 {
 	struct entry *e = alloc_entry(mq);
 
@@ -645,6 +671,32 @@ static void straight_to_cache(struct mq_policy *mq,
 	push(mq, e);
 }
 
+static int no_entry_found(struct mq_policy *mq,
+			  dm_block_t oblock,
+			  bool can_migrate,
+			  bool discarded_oblock,
+			  bool can_block,
+			  int data_dir,
+			  struct policy_result *result)
+{
+	if (adjusted_promote_threshold(mq, discarded_oblock, data_dir) == 1) {
+		if (can_block) {
+			insert_in_cache(mq, oblock, result);
+			return 0;
+		} else
+			return -EWOULDBLOCK;
+
+	} else {
+		insert_in_pre_cache(mq, oblock);
+		result->op = POLICY_MISS;
+		return 0;
+	}
+}
+
+/*
+ * Looks the oblock up in the hash table, then decides whether to put in
+ * pre_cache, or cache etc.
+ */
 static int map(struct mq_policy *mq,
 	       dm_block_t oblock,
 	       bool can_migrate,
@@ -653,28 +705,38 @@ static int map(struct mq_policy *mq,
 	       int data_dir,
 	       struct policy_result *result)
 {
+	int r = 0;
 	struct entry *e = hash_lookup(mq, oblock);
-	if (e)
-		return map_found(mq, e, can_migrate, discarded_oblock, can_block, data_dir, result);
 
-	if (iot_pattern(&mq->tracker) == PATTERN_SEQUENTIAL) {
+	if (e && e->in_cache)
+		r = cache_entry_found(mq, e, result);
+
+	else if (iot_pattern(&mq->tracker) == PATTERN_SEQUENTIAL)
 		result->op = POLICY_MISS;
-		return 0;
-	}
 
-	if (discarded_oblock && any_free_cblocks(mq)) {
-		if (can_block) {
-			straight_to_cache(mq, oblock, result);
-			return 0;
-		} else
-			return -EWOULDBLOCK;
+	else if (e)
+		r = pre_cache_entry_found(mq, e, can_migrate, discarded_oblock,
+					  can_block, data_dir, result);
+	else
+		r = no_entry_found(mq, oblock, can_migrate, discarded_oblock, can_block,
+				   data_dir, result);
 
-	} else {
-		to_pre_cache(mq, oblock);
-		result->op = POLICY_MISS;
-		return 0;
-	}
+	return r;
 }
+
+/*----------------------------------------------------------------*/
+
+/*
+ * The promotion threshold is adjusted every generation.  As are the counts
+ * of the entries.
+ *
+ * At the moment the threshold is taken by averaging the hit counts of some
+ * of the entries in the cache (the first 20 entries of the second level).
+ *
+ * We can be much cleverer than this though.  For example, each promotion
+ * could bump up the threshold helping to prevent churn.  Much more to do
+ * here.
+ */
 
 #define MAX_TO_AVERAGE 20
 
@@ -704,11 +766,14 @@ static void check_generation(struct mq_policy *mq)
 
 		mq->promote_threshold = nr ? total / nr : 1;
 	}
-
-
 }
 
 /*----------------------------------------------------------------*/
+
+/*
+ * Public interface, via the policy struct.  See dm-cache-policy.h for a
+ * description of these.
+ */
 
 static struct mq_policy *to_mq_policy(struct dm_cache_policy *p)
 {
