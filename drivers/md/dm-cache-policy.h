@@ -31,7 +31,7 @@ struct dm_cache_policy {
 	 * May only return 0, or -EWOULDBLOCK
 	 */
 	int (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-		   bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
+		   bool can_migrate, bool discarded_oblock, bool can_block, struct bio *bio,
 		   struct policy_result *result);
 
 	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
@@ -42,8 +42,6 @@ struct dm_cache_policy {
 			      dm_block_t new_oblock);
 
 	dm_block_t (*residency)(struct dm_cache_policy *p);
-	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
-				     unsigned int seq_io_thresh);
 
 	void (*tick)(struct dm_cache_policy *p);
 
@@ -53,10 +51,10 @@ struct dm_cache_policy {
 /*----------------------------------------------------------------*/
 
 static inline int policy_map(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-			      bool can_migrate, bool cheap_copy, bool can_block, struct bio *bio,
+			      bool can_migrate, bool discarded_oblock, bool can_block, struct bio *bio,
 			      struct policy_result *result)
 {
-	return p->map(p, origin_block, data_dir, can_migrate, cheap_copy, can_block, bio, result);
+	return p->map(p, origin_block, data_dir, can_migrate, discarded_oblock, can_block, bio, result);
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
@@ -78,11 +76,6 @@ static inline void policy_force_mapping(struct dm_cache_policy *p,
 static inline dm_block_t policy_residency(struct dm_cache_policy *p)
 {
 	return p->residency(p);
-}
-
-static inline void policy_set_seq_io_threshold(struct dm_cache_policy *p, unsigned int seq_io_thresh)
-{
-	return p->set_seq_io_threshold(p, seq_io_thresh);
 }
 
 static inline void policy_tick(struct dm_cache_policy *p)

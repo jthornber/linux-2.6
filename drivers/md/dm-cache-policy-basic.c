@@ -499,11 +499,6 @@ static dm_block_t all_residency(struct dm_cache_policy *p)
 	return l->nr_allocated;
 }
 
-static void all_set_seq_io_threshold(struct dm_cache_policy *p,
-				     unsigned int seq_io_thresh)
-{
-}
-
 static void all_tick(struct dm_cache_policy *p)
 {
 	struct policy *l = to_policy(p);
@@ -541,7 +536,6 @@ static struct dm_cache_policy *__create(dm_block_t cache_size,
 	l->policy.remove_mapping = all_remove_mapping;
 	l->policy.force_mapping = all_force_mapping;
 	l->policy.residency = all_residency;
-	l->policy.set_seq_io_threshold = all_set_seq_io_threshold;
 	l->policy.tick = all_tick;
 
 	l->cache_size = cache_size;
