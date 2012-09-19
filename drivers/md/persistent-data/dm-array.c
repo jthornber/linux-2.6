@@ -80,8 +80,8 @@ static struct dm_block_validator array_validator = {
 /*
  * Functions for manipulating the array blocks.
  */
-static void *elt_at(struct dm_array_info *info, struct array_block *ab,
-		    unsigned index)
+static void *element_at(struct dm_array_info *info, struct array_block *ab,
+			unsigned index)
 {
 	unsigned char *entry = (unsigned char *) (ab + 1);
 	entry += index * info->value_type.size;
@@ -94,7 +94,7 @@ static void on_entries(struct dm_array_info *info, struct array_block *ab,
 	unsigned i, nr_entries = le32_to_cpu(ab->nr_entries);
 
 	for (i = 0; i < nr_entries; i++)
-		fn(info->value_type.context, elt_at(info, ab, i));
+		fn(info->value_type.context, element_at(info, ab, i));
 }
 
 static void inc_ablock_entries(struct dm_array_info *info, struct array_block *ab)
@@ -149,7 +149,7 @@ static void fill_ablock(struct dm_array_info *info, struct array_block *ab,
 	for (i = nr_entries; i < new_nr; i++) {
 		if (vt->inc)
 			vt->inc(vt->context, value);
-		memcpy(elt_at(info, ab, i), value, vt->size);
+		memcpy(element_at(info, ab, i), value, vt->size);
 	}
 	ab->nr_entries = cpu_to_le32(new_nr);
 }
@@ -166,7 +166,7 @@ static void trim_ablock(struct dm_array_info *info, struct array_block *ab,
 	nr_entries = le32_to_cpu(ab->nr_entries);
 	for (i = nr_entries; i > new_nr; i--)
 		if (vt->dec)
-			vt->dec(vt->context, elt_at(info, ab, i - 1));
+			vt->dec(vt->context, element_at(info, ab, i - 1));
 	ab->nr_entries = cpu_to_le32(new_nr);
 }
 
@@ -553,7 +553,7 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 	if (entry >= le32_to_cpu(ab->nr_entries))
 		r = -ENODATA;
 	else
-		memcpy(value_le, elt_at(info, ab, entry), sizeof(info->value_type.size));
+		memcpy(value_le, element_at(info, ab, entry), sizeof(info->value_type.size));
 
 	unlock_ablock(info, block);
 	return r;
@@ -586,7 +586,7 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 		goto out;
 	}
 
-	old_value = elt_at(info, ab, entry);
+	old_value = element_at(info, ab, entry);
 	if (vt->dec &&
 	    (!vt->equal || !vt->equal(vt->context, old_value, value))) {
 		vt->dec(vt->context, old_value);
@@ -594,7 +594,7 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 			vt->inc(vt->context, value);
 	}
 
-	memcpy(elt_at(info, ab, entry), value, sizeof(info->value_type.size));
+	memcpy(element_at(info, ab, entry), value, sizeof(info->value_type.size));
 
 out:
 	unlock_ablock(info, block);
