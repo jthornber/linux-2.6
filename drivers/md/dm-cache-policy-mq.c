@@ -230,7 +230,13 @@ struct mq_policy {
 	/*
 	 * Keeps track of time, incremented by the core.  We use this to
 	 * avoid attributing multiple hits within the same tick.
+	 *
+	 * Access to tick_protected should be done with the spin lock held.
+	 * It's copied to tick at the start of the map function (within the
+	 * mutex).
 	 */
+	spinlock_t tick_lock;
+	unsigned tick_protected;
 	unsigned tick;
 
 	/*
@@ -789,18 +795,34 @@ static void mq_destroy(struct dm_cache_policy *p)
 	kfree(mq);
 }
 
+static void copy_tick(struct mq_policy *mq)
+{
+	unsigned flags;
+
+	spin_lock_irqsave(&mq->tick_lock, flags);
+	mq->tick = mq->tick_protected;
+	spin_unlock_irqrestore(&mq->tick_lock, flags);
+}
+
 static int mq_map(struct dm_cache_policy *p, dm_block_t oblock,
 		  bool can_migrate, bool discarded_oblock, struct bio *bio,
 		  struct policy_result *result)
 {
 	int r;
-	unsigned long flags;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	spin_lock_irqsave(&mq->lock, flags);
+	if (can_migrate)
+		mutex_lock(&mq->lock);
+	else
+		if (!mutex_try_lock(&mq->lock))
+			return -EWOULDBLOCK;
+
+	copy_tick(mq);
+
 	iot_examine_bio(&mq->tracker, bio);
 	r = map(mq, oblock, can_migrate, discarded_oblock, bio_data_dir(bio), result);
-	spin_unlock_irqrestore(&mq->lock, flags);
+
+	mutex_unlock(&mq->lock);
 
 	return r;
 }
@@ -822,9 +844,8 @@ static int mq_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_bloc
 	return 0;
 }
 
-static void mq_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
+static void remove_mapping(struct mq_policy *mq, dm_block_t oblock)
 {
-	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e = hash_lookup(mq, oblock);
 
 	BUG_ON(!e || e->in_cache);
@@ -834,8 +855,17 @@ static void mq_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 	push(mq, e);
 }
 
-static void mq_force_mapping(struct dm_cache_policy *p,
-			     dm_block_t current_oblock, dm_block_t new_oblock)
+static void mq_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	remove_mapping(mq, oblock);
+	mutex_unlock(&mq->lock);
+}
+
+static void force_mapping(struct dm_cache_policy *p,
+			  dm_block_t current_oblock, dm_block_t new_oblock)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e = hash_lookup(mq, current_oblock);
@@ -848,9 +878,21 @@ static void mq_force_mapping(struct dm_cache_policy *p,
 	push(mq, e);
 }
 
+static void mq_force_mapping(struct dm_cache_policy *p,
+			     dm_block_t current_oblock, dm_block_t new_oblock)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	force_mapping(mq, current_oblock, new_oblock);
+	mutex_unlock(&mq->lock);
+}
+
 static dm_block_t mq_residency(struct dm_cache_policy *p)
 {
 	struct mq_policy *mq = to_mq_policy(p);
+
+	// FIXME: lock mutex, not sure we can block here
 	return mq->nr_cblocks_allocated;
 }
 
@@ -860,7 +902,7 @@ static void mq_tick(struct dm_cache_policy *p)
 	unsigned long flags;
 
 	spin_lock_irqsave(&mq->lock, flags);
-	mq->tick++;
+	mq->tick_protected++;
 	spin_unlock_irqrestore(&mq->lock, flags);
 }
 
@@ -881,11 +923,13 @@ static struct dm_cache_policy *mq_create(dm_block_t cache_size)
 	iot_init(&mq->tracker);
 
 	mq->cache_size = cache_size;
+	mq->tick_protected = 0;
 	mq->tick = 0;
 	mq->hit_count = 0;
 	mq->generation = 0;
 	mq->promote_threshold = 0;
-	spin_lock_init(&mq->lock);
+	mutex_init(&mq->lock);
+	spin_lock_init(&mq->tick_lock);
 
 	queue_init(&mq->pre_cache);
 	queue_init(&mq->cache);

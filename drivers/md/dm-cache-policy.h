@@ -52,8 +52,9 @@
  * core informing the policy when a migration is complete), and hence makes
  * it easier to write new policies.
  *
- * The policy methods should never block.  So be careful to implement using
- * bounded, preallocated memory.  Don't use mutexes etc.
+ * In general policy methods should never block, except in the case of the
+ * map function when can_migrate is set.  So be careful to implement using
+ * bounded, preallocated memory.
  */
 enum policy_operation {
 	POLICY_HIT,
@@ -97,7 +98,7 @@ struct dm_cache_policy {
 	 * bio         - the bio that triggered this call.
 	 * result      - gets filled in with the instruction.
 	 *
-	 * May only return 0, or -EWOULDBLOCK
+	 * May only return 0, or -EWOULDBLOCK (if !can_migrate)
 	 */
 	int (*map)(struct dm_cache_policy *p, dm_block_t oblock,
 		   bool can_migrate, bool discarded_oblock,

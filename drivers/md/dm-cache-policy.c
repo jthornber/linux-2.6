@@ -4,7 +4,7 @@
  * This file is released under the GPL.
  */
 
-#include "dm-cache-policy.h"
+#include "dm-cache-policy-internal.h"
 #include "dm.h"
 
 #include <linux/list.h>
