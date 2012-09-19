@@ -549,6 +549,7 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 	if (r)
 		return r;
 
+	// FIXME: compare with nr_entries
 	entry = index % max_entries;
 	memcpy(value_le, elt_at(info, ab, entry), sizeof(info->value_type.size));
 	unlock_ablock(info, block);
@@ -576,6 +577,7 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 		return r;
 	*new_root = root;
 
+	// FIXME: compare with nr_entries
 	entry = index % max_entries;
 
 	old_value = elt_at(info, ab, entry);

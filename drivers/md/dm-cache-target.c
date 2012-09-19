@@ -25,6 +25,18 @@
 
 /*----------------------------------------------------------------*/
 
+/*
+ * Glossary:
+ *
+ * oblock; index of an origin block
+ * cblock; index of a cache block
+ * migration; movement of a block between the origin and cache device, either direction
+ * promotion; movement of a block from origin to cache
+ * demotion; movement of a block from cache to origin
+ */
+
+/*----------------------------------------------------------------*/
+
 static unsigned long *alloc_and_set_bitset(unsigned nr_entries)
 {
 	size_t s = sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
@@ -42,8 +54,6 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-/* Mechanism */
-
 #define BLOCK_SIZE_MIN 64
 #define PRISON_CELLS 1024
 #define ENDIO_HOOK_POOL_SIZE 1024
@@ -53,11 +63,23 @@ static void free_bitset(unsigned long *bits)
 
 struct cache_c {
 	struct dm_target *ti;
-
-	struct dm_dev *metadata_dev;
-	struct dm_dev *origin_dev;
-	struct dm_dev *cache_dev;
 	struct dm_target_callbacks callbacks;
+
+	/*
+	 * Metadata is written to this device.
+	 */
+	struct dm_dev *metadata_dev;
+
+	/*
+	 * The slower of the two data devices.  Typically a spindle.
+	 */
+	struct dm_dev *origin_dev;
+
+	/*
+	 * The faster of the two data devices.  Typically an SSD.
+	 */
+	struct dm_dev *cache_dev;
+
 
 	dm_block_t origin_blocks;
 	dm_block_t cache_size;
@@ -75,15 +97,15 @@ struct cache_c {
 	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
 
-#if 0
-	struct rolling_average hit_volume;
-	struct rolling_average miss_volume;
-	struct rolling_average migration_time;
-	struct rolling_average migration_count;
-#endif
+	/*
+	 * cache_size entries, dirty if set
+	 */
+	unsigned long *dirty_bitset;
 
-	unsigned long *dirty_bitset; /* cache_size entries, dirty if set */
-	unsigned long *discard_bitset; /* origin_blocks entries, discarded if set */
+	/*
+	 * origin_blocks entries, discarded if set
+	 */
+	unsigned long *discard_bitset;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -116,7 +138,6 @@ struct cache_c {
 	unsigned int seq_io_threshold;
 };
 
-/* FIXME: can we lose this? */
 struct dm_cache_endio_hook {
 	bool tick;
 	unsigned req_nr;
@@ -205,7 +226,6 @@ static int bio_triggers_commit(struct cache_c *c, struct bio *bio)
 	return (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) &&
 		dm_cache_changed_this_transaction(c->cmd);
 }
-
 
 static void issue(struct cache_c *c, struct bio *bio)
 {
@@ -610,70 +630,6 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 #endif
 }
 
-/*
- * FIXME: this is just thinking out loud, tidy up later.
- *
- * Migrating a block to the cache has various costs associated with it:
- *
- * i) A read to the origin, followed by a write to the cache.  Reducing the
- * bandwidth of each.
- *
- * ii) A latency hit, io to the old _and_ new oblock get stalled until the
- * migration is complete.
- *
- * iii) Hits to the old_oblock now go to the origin.
- *
- * The benefits:
- *
- * iv) Hits to the new_oblock now got to the cache
- *
- * [Ignoring the latency aspect]
- *
- * In practise, blocks are only temporarily resident on the cache, let's
- * call this period t_resident (on average).
- *
- * The policy decides whether another block would be better in the cache.
- * Here we're trying to decide if now would be a good moment to actually do
- * the migration.  We also throttle migrations at this point; the policy
- * assumes they're instant.
- *
- * Let's address the throttling issue first:
- *
- * [Assuming uniform io access pattern, address changing ones later]
- *
- * t_resident should be long enough to have a payoff.
- * t_resident >= migration_io / (hit_rate * io_per_second)
- * hit_rate needs to take into account the size of the bios.
- */
-static bool migrations_allowed(struct cache_c *c)
-{
-#if 0
-#if 0
-	uint64_t migration_io = c->sectors_per_block * 2;
-	uint64_t expected_migrations = c->cache_size * migration_io *
-		(ra_average(&c->hit_volume) + ra_average(&c->miss_volume)) /
-		ra_average(&c->hit_volume);
-
-	// uint64_t actual_migrations = ra_total(&c->migrations);
-
-	pr_alert("hit_volume %llu, miss_volume %llu, expected_migrations = %llu\n",
-		 (unsigned long long) ra_average(&c->hit_volume),
-		 (unsigned long long) ra_average(&c->miss_volume),
-		 (unsigned long long) expected_migrations);
-	return true;
-#else
-	uint64_t target = MIGRATION_INC * c->cache_size / MIGRATION_FACTOR;
-	uint64_t migrations_per_second = ra_average_per_second(&c->migration_count);
-
-	if (target == 0)
-		target = 1;
-
-	return (atomic_read(&c->nr_migrations) < 30) && (migrations_per_second < target);
-#endif
-#endif
-	return atomic_read(&c->nr_migrations) < 100;
-}
-
 static void process_bio(struct cache_c *c, struct bio *bio)
 {
 	int r;
@@ -684,7 +640,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool cheap_copy = test_bit(block, c->discard_bitset);
-	bool can_migrate = true; // migrations_allowed(c);
+	bool can_migrate = true;
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -904,7 +860,7 @@ static void do_work(struct work_struct *ws)
 
 /*
  * We want to commit periodically so that not too much
- * unwritten data builds up.
+ * unwritten metadata builds up.
  */
 static void do_waker(struct work_struct *ws)
 {
