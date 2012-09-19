@@ -549,11 +549,14 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 	if (r)
 		return r;
 
-	// FIXME: compare with nr_entries
 	entry = index % max_entries;
-	memcpy(value_le, elt_at(info, ab, entry), sizeof(info->value_type.size));
+	if (entry >= le32_to_cpu(ab->nr_entries))
+		r = -ENODATA;
+	else
+		memcpy(value_le, elt_at(info, ab, entry), sizeof(info->value_type.size));
+
 	unlock_ablock(info, block);
-	return 0;
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_array_get);
 
@@ -579,6 +582,10 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 
 	// FIXME: compare with nr_entries
 	entry = index % max_entries;
+	if (entry >= le32_to_cpu(ab->nr_entries)) {
+		r = -ENODATA;
+		goto out;
+	}
 
 	old_value = elt_at(info, ab, entry);
 	if (vt->dec &&
@@ -589,8 +596,10 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 	}
 
 	memcpy(elt_at(info, ab, entry), value, sizeof(info->value_type.size));
+
+out:
 	unlock_ablock(info, block);
-	return 0;
+	return r;
 }
 
 int dm_array_set(struct dm_array_info *info, dm_block_t root,

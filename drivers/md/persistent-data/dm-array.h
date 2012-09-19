@@ -18,6 +18,11 @@
  *
  * The value type structure is reused from the btree type to support proper
  * reference counting of values.
+ *
+ * The arrays implicitly know their length, and bounds are checked for
+ * lookups and updates.  It doesn't store this in an accessible place
+ * because it would waste a whole metadata block.  Make sure you store the
+ * size along with the array root in your encompassing data.
  */
 
 /*
@@ -69,7 +74,8 @@ int dm_array_resize(struct dm_array_info *info, dm_block_t root,
 	__dm_written_to_disk(value);
 
 /*
- * Frees a whole array.  All values will be decremented.
+ * Frees a whole array.  The value_type's decrement operation will be called
+ * for all values in the array
  */
 int dm_array_del(struct dm_array_info *info, dm_block_t root);
 
@@ -79,12 +85,12 @@ int dm_array_del(struct dm_array_info *info, dm_block_t root);
  * info - describes the array
  * root - root block of the array
  * index - array index
- * value_le - the value to be read.  Will be in little-endian format of course.
+ * value - the value to be read.  Will be in on disk format of course.
  *
- * returns -ENOTFOUND if the index is out of bounds.
+ * -ENODATA will be returned if the index is out of bounds.
  */
 int dm_array_get(struct dm_array_info *info, dm_block_t root,
-		 uint32_t index, void *value_le);
+		 uint32_t index, void *value);
 
 /*
  * Set an entry in the array.
@@ -92,12 +98,14 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
  * info - describes the array
  * root - root block of the array
  * index - array index
- * value - little-endian value to be written to disk.  Make sure you bless
- *         this before calling.
+ * value - value to be written to disk.  Make sure you bless this before
+ *         calling.
  * new_root - the new root block
  *
  * The old value being overwritten will be decremented, the new value
  * incremented.
+ *
+ * -ENODATA will be returned if the index is out of bounds.
  */
 int dm_array_set(struct dm_array_info *info, dm_block_t root,
 		 uint32_t index, const void *value, dm_block_t *new_root)
