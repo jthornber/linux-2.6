@@ -1173,12 +1173,12 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
 	bool can_migrate = false;
-	bool discarded_block = test_bit(block, c->discard_bitset);
+	bool discarded_block;
 	struct dm_bio_prison_cell *cell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
 
-	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) {
+	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD)) {
 		defer_bio(c, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1190,6 +1190,9 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	r = bio_detain(c->prison, &key, bio, &cell);
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
+
+	// FIXME: we need some sync round this
+	discarded_block = test_bit(block, c->discard_bitset);
 
 	r = policy_map(c->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
