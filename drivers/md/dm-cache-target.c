@@ -20,13 +20,16 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
+#define DM_MSG_PREFIX "cache"
+#define DAEMON "cached"
+
 /*----------------------------------------------------------------*/
 
-static unsigned long *alloc_bitset(unsigned nr_entries, bool set_to_ones)
+static unsigned long *alloc_and_set_bitset(unsigned nr_entries)
 {
 	size_t s = sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
 	unsigned long *r = vzalloc(s);
-	if (r && set_to_ones)
+	if (r)
 		memset(r, ~0, s);
 
 	return r;
@@ -39,155 +42,9 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-struct rolling_average {
-	spinlock_t lock;
-	unsigned window;
-	unsigned nr_entries;
-	unsigned slot;
-	uint64_t total;
-	struct {
-		uint64_t sum;
-		unsigned long start;
-	} *values;
-};
-
-static int rolling_average_init(struct rolling_average *ra, unsigned window)
-{
-	spin_lock_init(&ra->lock);
-	ra->window = window;
-	ra->nr_entries = 0;
-	ra->slot = 0;
-	ra->total = 0;
-	ra->values = vzalloc(sizeof(*ra->values) * window);
-	ra->values[ra->slot].start = jiffies;
-
-	return ra->values ? 0 : -ENOMEM;
-}
-
-static void rolling_average_exit(struct rolling_average *ra)
-{
-	vfree(ra->values);
-}
-
-static unsigned calc_next_slot(struct rolling_average *ra, unsigned s)
-{
-	s = ra->slot + 1;
-	if (s == ra->window)
-		s = 0;
-
-	return s;
-}
-
-static void ra_next_slot(struct rolling_average *ra)
-{
-	spin_lock(&ra->lock);
-
-	/* we only add complete values into the total */
-	ra->total += ra->values[ra->slot].sum;
-	ra->slot = calc_next_slot(ra, ra->slot);
-	ra->total -= ra->values[ra->slot].sum;
-
-	if (ra->nr_entries < ra->window)
-		ra->nr_entries++;
-
-	ra->values[ra->slot].sum = 0;
-	ra->values[ra->slot].start = jiffies;
-
-	spin_unlock(&ra->lock);
-}
-
-static void ra_add_to_slot(struct rolling_average *ra, uint64_t value)
-{
-	spin_lock(&ra->lock);
-	ra->values[ra->slot].sum += value;
-	spin_unlock(&ra->lock);
-}
-
-static uint64_t ra_total(struct rolling_average *ra)
-{
-	uint64_t r;
-
-	spin_lock(&ra->lock);
-	r = ra->total + ra->values[ra->slot].sum;
-	spin_unlock(&ra->lock);
-
-	return r;
-}
-
-static uint64_t __ra_average(struct rolling_average *ra)
-{
-	uint64_t total = ra->total + ra->values[ra->slot].sum;
-	uint64_t nr = ra->nr_entries + 1;
-
-	return total / nr;
-}
-
-static uint64_t ra_average(struct rolling_average *ra)
-{
-	uint64_t r;
-
-	spin_lock(&ra->lock);
-	r = __ra_average(ra);
-	spin_unlock(&ra->lock);
-
-	return r;
-}
-
-static unsigned long elapsed(unsigned long start, unsigned long end)
-{
-	if (end < start)
-		return end + (ULONG_MAX - start);
-	else
-		return end - start;
-}
-
-static unsigned long __ra_duration(struct rolling_average *ra)
-{
-	unsigned start_slot;
-	unsigned long start;
-
-	if (ra->nr_entries == 0)
-		return 0;
-
-	if (ra->nr_entries < ra->window)
-		start_slot = 0;
-	else
-		start_slot = calc_next_slot(ra, ra->slot);
-
-	start = ra->values[start_slot].start;
-	return elapsed(start, jiffies);
-}
-
-static unsigned long ra_duration(struct rolling_average *ra)
-{
-	unsigned long r;
-
-	spin_lock(&ra->lock);
-	r = __ra_duration(ra);
-	spin_unlock(&ra->lock);
-
-	return r;
-}
-
-static uint64_t ra_average_per_second(struct rolling_average *ra)
-{
-	spin_lock(&ra->lock);
-	if (ra->nr_entries == 0) {
-		spin_unlock(&ra->lock);
-		return 0;
-	}
-	spin_unlock(&ra->lock);
-
-	return (ra_total(ra) * HZ) / ra_duration(ra);
-}
-
-/*----------------------------------------------------------------*/
-
 /* Mechanism */
 
 #define BLOCK_SIZE_MIN 64
-#define DM_MSG_PREFIX "cache"
-#define DAEMON "cached"
 #define PRISON_CELLS 1024
 #define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
@@ -218,10 +75,12 @@ struct cache_c {
 	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
 
+#if 0
 	struct rolling_average hit_volume;
 	struct rolling_average miss_volume;
 	struct rolling_average migration_time;
 	struct rolling_average migration_count;
+#endif
 
 	unsigned long *dirty_bitset; /* cache_size entries, dirty if set */
 	unsigned long *discard_bitset; /* origin_blocks entries, discarded if set */
@@ -321,8 +180,6 @@ static void remap_to_cache(struct cache_c *c, struct bio *bio,
 
 static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t oblock)
 {
-	ra_add_to_slot(&c->miss_volume, bio->bi_size);
-
 	remap_to_origin(c, bio);
 	if (bio_data_dir(bio) == WRITE)
 		clear_bit(oblock, c->discard_bitset);
@@ -331,8 +188,6 @@ static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t
 static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
 				 dm_block_t oblock, dm_block_t cblock)
 {
-	ra_add_to_slot(&c->hit_volume, bio->bi_size);
-
 	remap_to_cache(c, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
 		set_bit(cblock, c->dirty_bitset);
@@ -399,12 +254,6 @@ static void free_migration(struct cache_c *c, struct dm_cache_migration *mg)
 
 static void inc_nr_migrations(struct cache_c *c)
 {
-	ra_add_to_slot(&c->migration_count, MIGRATION_INC);
-#if 0
-	pr_alert("migrations per second * 1024 = %llu, total_migrations * 1024 = %llu\n",
-		 (unsigned long long) ra_average_per_second(&c->migration_count),
-		 (unsigned long long) ra_total(&c->migration_count));
-#endif
 	atomic_inc(&c->nr_migrations);
 	wake_up(&c->migration_wait);
 }
@@ -433,13 +282,8 @@ static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool 
 
 static void cleanup_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
-	unsigned long duration = elapsed(mg->start_jiffies, jiffies);
-
 	free_migration(c, mg);
 	dec_nr_migrations(c);
-
-	ra_add_to_slot(&c->migration_time, duration);
-	ra_next_slot(&c->migration_time);
 }
 
 static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
@@ -1053,9 +897,6 @@ static void do_work(struct work_struct *ws)
 			process_migrations(c, &c->quiesced_migrations, issue_copy);
 			process_migrations(c, &c->completed_migrations, complete_migration);
 			process_deferred_flush_bios(c);
-
-			ra_next_slot(&c->hit_volume);
-			ra_next_slot(&c->miss_volume);
 		}
 
 	} while (more_work(c));
@@ -1068,7 +909,6 @@ static void do_work(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct cache_c *c = container_of(to_delayed_work(ws), struct cache_c, waker);
-	ra_next_slot(&c->migration_count);
 	wake_worker(c);
 	queue_delayed_work(c->wq, &c->waker, COMMIT_PERIOD);
 }
@@ -1117,10 +957,6 @@ static void cache_dtr(struct dm_target *ti)
 	destroy_workqueue(c->wq);
 	free_bitset(c->dirty_bitset);
 	free_bitset(c->discard_bitset);
-	rolling_average_exit(&c->hit_volume);
-	rolling_average_exit(&c->miss_volume);
-	rolling_average_exit(&c->migration_time);
-	rolling_average_exit(&c->migration_count);
 	dm_kcopyd_client_destroy(c->copier);
 	dm_cache_metadata_close(c->cmd);
 	dm_put_device(ti, c->metadata_dev);
@@ -1231,22 +1067,17 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&c->completed_migrations);
 	atomic_set(&c->nr_migrations, 0);
 	init_waitqueue_head(&c->migration_wait);
-	rolling_average_init(&c->hit_volume, 2048); /* FIXME: magic number */
-	rolling_average_init(&c->miss_volume, 2048);
-	rolling_average_init(&c->migration_time, 2048);
-	rolling_average_init(&c->migration_count, MIGRATION_COUNT_WINDOW); /* one sample per second */
-
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);
 	c->cache_size = get_dev_size(c->cache_dev) >> c->block_shift;
 
-	c->dirty_bitset = alloc_bitset(c->cache_size, 1);
+	c->dirty_bitset = alloc_and_set_bitset(c->cache_size);
 	if (!c->dirty_bitset) {
 		ti->error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
 
-	c->discard_bitset = alloc_bitset(c->origin_blocks, 1);
+	c->discard_bitset = alloc_and_set_bitset(c->origin_blocks);
 	if (!c->discard_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
