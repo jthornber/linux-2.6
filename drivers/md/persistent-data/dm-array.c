@@ -580,7 +580,6 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 		return r;
 	*new_root = root;
 
-	// FIXME: compare with nr_entries
 	entry = index % max_entries;
 	if (entry >= le32_to_cpu(ab->nr_entries)) {
 		r = -ENODATA;
