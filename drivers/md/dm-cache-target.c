@@ -648,7 +648,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
-	bool cheap_copy = test_bit(block, c->discard_bitset);
+	bool discarded_block = test_bit(block, c->discard_bitset);
 	bool can_migrate = true;
 
 	/*
@@ -659,7 +659,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	if (r > 0)
 		return;
 
-	policy_map(c->policy, block, can_migrate, cheap_copy, bio, &lookup_result);
+	policy_map(c->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
@@ -1012,7 +1012,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	// FIXME: need round up too, also copying code needs to cope with partial end block.
-	c->origin_blocks = origin_size >> ilog2(block_size);
+	c->origin_size = origin_size >> ilog2(block_size);
 	c->sectors_per_block = block_size;
 	c->offset_mask = block_size - 1;
 	c->block_shift = ffs(block_size) - 1;
@@ -1167,18 +1167,13 @@ static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
-#if 0
-	/* deferring everything seems to perform better */
-       struct cache_c *c = ti->private;
-       map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
-       defer_bio(c, bio);
-       return DM_MAPIO_SUBMITTED;
-#else
 	struct cache_c *c = ti->private;
 
 	int r;
 	struct cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
+	bool can_migrate = false;
+	bool discarded_block = test_bit(block, c->discard_bitset);
 	struct dm_bio_prison_cell *cell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
@@ -1196,7 +1191,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
-	r = policy_map(c->policy, block, false, false, bio, &lookup_result);
+	r = policy_map(c->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
 		cell_defer(c, cell, true);
 		return DM_MAPIO_SUBMITTED;
@@ -1226,7 +1221,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	}
 
 	return DM_MAPIO_REMAPPED;
-#endif
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio,

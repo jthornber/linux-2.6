@@ -574,7 +574,7 @@ static dm_block_t demote_cblock(struct mq_policy *mq, dm_block_t *oblock)
  * haven't been dirtied.
  */
 #define DISCARDED_PROMOTE_THRESHOLD 1
-#define READ_PROMOTE_THRESHOLD 2
+#define READ_PROMOTE_THRESHOLD 1
 #define WRITE_PROMOTE_THRESHOLD 4
 
 static unsigned adjusted_promote_threshold(struct mq_policy *mq, bool discarded_oblock, int data_dir)
