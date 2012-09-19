@@ -182,6 +182,42 @@ static void wake_worker(struct cache_c *c)
 	queue_work(c->wq, &c->worker);
 }
 
+/*----------------------------------------------------------------*/
+
+/*
+ * The discard bitset is accessed from both the worker thread and the
+ * cache_map function, we need to protect it.
+ */
+static void set_discard(struct cache_c *c, dm_block_t b)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
+	set_bit(b, c->discard_bitset);
+	spin_unlock_irqrestore(&c->lock, flags);
+}
+
+static void clear_discard(struct cache_c *c, dm_block_t b)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
+	clear_bit(b, c->discard_bitset);
+	spin_unlock_irqrestore(&c->lock, flags);
+}
+
+static bool is_discarded(struct cache_c *c, dm_block_t b)
+{
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
+	r = test_bit(b, c->discard_bitset);
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	return r;
+}
+
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
@@ -212,7 +248,7 @@ static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t
 {
 	remap_to_origin(c, bio);
 	if (bio_data_dir(bio) == WRITE)
-		clear_bit(oblock, c->discard_bitset);
+		clear_discard(c, oblock);
 }
 
 static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
@@ -221,7 +257,7 @@ static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
 	remap_to_cache(c, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
 		set_bit(cblock, c->dirty_bitset);
-		clear_bit(oblock, c->discard_bitset);
+		clear_discard(c, oblock);
 	}
 }
 
@@ -425,9 +461,9 @@ static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
 
 	if (mg->demote)
 		avoid = !test_bit(mg->cblock, c->dirty_bitset) ||
-			test_bit(mg->old_oblock, c->discard_bitset);
+			is_discarded(c, mg->old_oblock);
 	else
-		avoid = test_bit(mg->new_oblock, c->discard_bitset);
+		avoid = is_discarded(c, mg->new_oblock);
 
 	avoid ? avoid_copy(c, mg) : issue_copy_real(c, mg);
 }
@@ -619,7 +655,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 	}
 
 	if (covers_block(c, bio))
-		set_bit(block, c->discard_bitset);
+		set_discard(c, block);
 #else
 	/*
 	 * No passdown.
@@ -632,7 +668,7 @@ static void process_discard_bio(struct cache_c *c, struct bio *bio)
 
 	for (b = start_block; b < end_block; b++) {
 		//pr_alert("discarding block %lu\n", (unsigned long) b);
-		set_bit(b, c->discard_bitset);
+		set_discard(c, b);
 	}
 
 	bio_endio(bio, 0);
@@ -648,7 +684,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
-	bool discarded_block = test_bit(block, c->discard_bitset);
+	bool discarded_block = is_discarded(c, block);
 	bool can_migrate = true;
 
 	/*
@@ -1191,8 +1227,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
-	// FIXME: we need some sync round this
-	discarded_block = test_bit(block, c->discard_bitset);
+	discarded_block = is_discarded(c, block);
 
 	r = policy_map(c->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
