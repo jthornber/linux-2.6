@@ -553,7 +553,8 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 	if (entry >= le32_to_cpu(ab->nr_entries))
 		r = -ENODATA;
 	else
-		memcpy(value_le, element_at(info, ab, entry), sizeof(info->value_type.size));
+		memcpy(value_le, element_at(info, ab, entry),
+		       sizeof(info->value_type.size));
 
 	unlock_ablock(info, block);
 	return r;
