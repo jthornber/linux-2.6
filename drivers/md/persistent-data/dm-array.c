@@ -17,7 +17,7 @@
 
 /*
  * The array is implemented as a fully populated btree, which points to
- * blocks which contain the packed values.  This is more space efficient
+ * blocks that contain the packed values.  This is more space efficient
  * than just using a btree since we don't store 1 key per value.
  */
 struct array_block {
@@ -80,14 +80,16 @@ static struct dm_block_validator array_validator = {
 /*
  * Functions for manipulating the array blocks.
  */
-static void *elt_at(struct dm_array_info *info, struct array_block *ab, unsigned index)
+static void *elt_at(struct dm_array_info *info, struct array_block *ab,
+		    unsigned index)
 {
 	unsigned char *entry = (unsigned char *) (ab + 1);
 	entry += index * info->value_type.size;
 	return entry;
 }
 
-static void on_entries(struct dm_array_info *info, struct array_block *ab, void (*fn)(void *, const void *))
+static void on_entries(struct dm_array_info *info, struct array_block *ab,
+		       void (*fn)(void *, const void *))
 {
 	unsigned i, nr_entries = le32_to_cpu(ab->nr_entries);
 
@@ -116,10 +118,8 @@ static uint32_t calc_max_entries(size_t value_size, size_t block_size)
 	return (block_size - sizeof(struct array_block)) / value_size;
 }
 
-static int alloc_ablock(struct dm_array_info *info,
-			size_t block_size,
-			struct dm_block **result,
-			struct array_block **ab)
+static int alloc_ablock(struct dm_array_info *info, size_t block_size,
+			struct dm_block **result, struct array_block **ab)
 {
 	int r;
 
@@ -128,7 +128,8 @@ static int alloc_ablock(struct dm_array_info *info,
 		return r;
 
 	(*ab) = dm_block_data(*result);
-	(*ab)->max_entries = cpu_to_le32(calc_max_entries(info->value_type.size, block_size));
+	(*ab)->max_entries =
+		cpu_to_le32(calc_max_entries(info->value_type.size, block_size));
 	(*ab)->nr_entries = cpu_to_le32(0);
 	(*ab)->value_size = cpu_to_le32(info->value_type.size);
 
@@ -153,8 +154,7 @@ static void fill_ablock(struct dm_array_info *info, struct array_block *ab,
 	ab->nr_entries = cpu_to_le32(new_nr);
 }
 
-static void trim_ablock(struct dm_array_info *info,
-			struct array_block *ab,
+static void trim_ablock(struct dm_array_info *info, struct array_block *ab,
 			unsigned new_nr)
 {
 	unsigned i;
@@ -170,16 +170,12 @@ static void trim_ablock(struct dm_array_info *info,
 	ab->nr_entries = cpu_to_le32(new_nr);
 }
 
-static int get_ablock(struct dm_array_info *info,
-		      dm_block_t b,
-		      struct dm_block **block,
-		      struct array_block **ab)
+static int get_ablock(struct dm_array_info *info, dm_block_t b,
+		      struct dm_block **block, struct array_block **ab)
 {
 	int r;
 
-	r = dm_tm_read_lock(info->btree_info.tm,
-			    b,
-			    &array_validator, block);
+	r = dm_tm_read_lock(info->btree_info.tm, b, &array_validator, block);
 	if (r)
 		return r;
 
@@ -197,10 +193,8 @@ static int unlock_ablock(struct dm_array_info *info, struct dm_block *block)
 /*
  * Btree manipulation.
  */
-static int lookup_ablock(struct dm_array_info *info,
-			 dm_block_t root,
-			 unsigned index,
-			 struct dm_block **block,
+static int lookup_ablock(struct dm_array_info *info, dm_block_t root,
+			 unsigned index, struct dm_block **block,
 			 struct array_block **ab)
 {
 	int r;
@@ -214,10 +208,8 @@ static int lookup_ablock(struct dm_array_info *info,
 	return get_ablock(info, le64_to_cpu(block_le), block, ab);
 }
 
-static int shadow_ablock(struct dm_array_info *info,
-			 dm_block_t *root,
-			 unsigned index,
-			 struct dm_block **block,
+static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
+			 unsigned index, struct dm_block **block,
 			 struct array_block **result)
 {
 	int r, inc;
@@ -228,8 +220,7 @@ static int shadow_ablock(struct dm_array_info *info,
 	if (r)
 		return r;
 
-	r = dm_tm_shadow_block(info->btree_info.tm,
-			       le64_to_cpu(block_le),
+	r = dm_tm_shadow_block(info->btree_info.tm, le64_to_cpu(block_le),
 			       &array_validator, block, &inc);
 	if (r)
 		return r;
@@ -242,18 +233,18 @@ static int shadow_ablock(struct dm_array_info *info,
 	new_block_le = cpu_to_le64(dm_block_location(*block));
 	if (new_block_le != block_le) {
 		__dm_bless_for_disk(&new_block_le);
-		r = dm_btree_insert(&info->btree_info, *root, &key, &block_le, root);
+		r = dm_btree_insert(&info->btree_info, *root, &key,
+				    &block_le, root);
 	}
 
 	return r;
 }
 
-static int insert_ablock(struct dm_array_info *info,
-			 uint64_t index,
-			 struct dm_block *block,
-			 dm_block_t *root)
+static int insert_ablock(struct dm_array_info *info, uint64_t index,
+			 struct dm_block *block, dm_block_t *root)
 {
 	__le64 block_le = cpu_to_le64(dm_block_location(block));
+
 	__dm_bless_for_disk(block_le);
 	return dm_btree_insert(&info->btree_info, *root, &index, &block_le, root);
 }
@@ -263,12 +254,9 @@ static int insert_ablock(struct dm_array_info *info,
  * have the same contents we can just share a single block.  Aren't
  * persistent data structures beautiful?
  */
-static int insert_full_ablocks(struct dm_array_info *info,
-			       size_t block_size,
-			       unsigned begin_block,
-			       unsigned end_block,
-			       unsigned max_entries,
-			       const void *value,
+static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
+			       unsigned begin_block, unsigned end_block,
+			       unsigned max_entries, const void *value,
 			       dm_block_t *root)
 {
 	int r;
@@ -299,12 +287,9 @@ out:
 	return 0;
 }
 
-static int insert_partial_ablock(struct dm_array_info *info,
-				 size_t block_size,
-				 unsigned block_index,
-				 unsigned nr,
-				 const void *value,
-				 dm_block_t *root)
+static int insert_partial_ablock(struct dm_array_info *info, size_t block_size,
+				 unsigned block_index, unsigned nr,
+				 const void *value, dm_block_t *root)
 {
 	int r;
 	struct dm_block *block;
@@ -331,13 +316,15 @@ struct resize {
 	const void *value;
 };
 
-static int drop_blocks(struct resize *resize, unsigned begin_index, unsigned end_index)
+static int drop_blocks(struct resize *resize, unsigned begin_index,
+		       unsigned end_index)
 {
 	int r;
 
 	while (begin_index != end_index) {
 		uint64_t key = begin_index++;
-		r = dm_btree_remove(&resize->info->btree_info, *resize->root, &key, resize->root);
+		r = dm_btree_remove(&resize->info->btree_info, *resize->root,
+				    &key, resize->root);
 		if (r)
 			return r;
 	}
@@ -366,7 +353,8 @@ static int shrink(struct resize *resize)
 		struct dm_block *block;
 		struct array_block *ab;
 
-		r = shadow_ablock(resize->info, resize->root, resize->new_nr_full_blocks, &block, &ab);
+		r = shadow_ablock(resize->info, resize->root,
+				  resize->new_nr_full_blocks, &block, &ab);
 		if (r)
 			return r;
 
@@ -386,27 +374,33 @@ static int grow(struct resize *resize)
 		struct dm_block *block;
 		struct array_block *ab;
 
-		r = shadow_ablock(resize->info, resize->root, resize->new_nr_full_blocks, &block, &ab);
+		r = shadow_ablock(resize->info, resize->root,
+				  resize->new_nr_full_blocks, &block, &ab);
 		if (r)
 			return r;
 
 		if (resize->old_nr_full_blocks < resize->new_nr_full_blocks)
-			fill_ablock(resize->info, ab, resize->value, resize->max_entries);
+			fill_ablock(resize->info, ab, resize->value,
+				    resize->max_entries);
 		else
-			fill_ablock(resize->info, ab, resize->value, resize->new_nr_entries_in_last_block);
+			fill_ablock(resize->info, ab, resize->value,
+				    resize->new_nr_entries_in_last_block);
 
 		unlock_ablock(resize->info, block);
 	}
 
 	/* add full entries */
-	r = insert_full_ablocks(resize->info, resize->block_size, resize->old_nr_full_blocks, resize->new_nr_full_blocks,
+	r = insert_full_ablocks(resize->info, resize->block_size,
+				resize->old_nr_full_blocks, resize->new_nr_full_blocks,
 				resize->max_entries, resize->value, resize->root);
 	if (r)
 		return r;
 
 	/* add new tail block */
-	return insert_partial_ablock(resize->info, resize->block_size, resize->new_nr_full_blocks,
-				     resize->new_nr_entries_in_last_block, resize->value, resize->root);
+	return insert_partial_ablock(resize->info, resize->block_size,
+				     resize->new_nr_full_blocks,
+				     resize->new_nr_entries_in_last_block,
+				     resize->value, resize->root);
 }
 
 /*----------------------------------------------------------------*/
@@ -493,10 +487,9 @@ int dm_array_empty(struct dm_array_info *info, dm_block_t *root)
 }
 EXPORT_SYMBOL_GPL(dm_array_empty);
 
-static int dm_array_resize_(struct dm_array_info *info, dm_block_t root,
-			    uint32_t old_size, uint32_t new_size,
-			    const void *value,
-			    dm_block_t *new_root)
+static int array_resize(struct dm_array_info *info, dm_block_t root,
+			uint32_t old_size, uint32_t new_size,
+			const void *value, dm_block_t *new_root)
 {
 	int r;
 	struct resize resize;
@@ -507,7 +500,8 @@ static int dm_array_resize_(struct dm_array_info *info, dm_block_t root,
 	resize.info = info;
 	resize.root = &root;
 	resize.block_size = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
-	resize.max_entries = calc_max_entries(info->value_type.size, resize.block_size);
+	resize.max_entries = calc_max_entries(info->value_type.size,
+					      resize.block_size);
 
 	resize.old_nr_full_blocks = old_size / resize.max_entries;
 	resize.old_nr_entries_in_last_block = old_size % resize.max_entries;
@@ -524,12 +518,11 @@ static int dm_array_resize_(struct dm_array_info *info, dm_block_t root,
 
 int dm_array_resize(struct dm_array_info *info, dm_block_t root,
 		    uint32_t old_size, uint32_t new_size,
-		    const void *default_value,
-		    dm_block_t *new_root)
-	__dm_written_to_disk(value)
+		    const void *value, dm_block_t *new_root)
+		    __dm_written_to_disk(value)
 {
-	int r = dm_array_resize_(info, root, old_size, new_size, default_value, new_root);
-	__dm_unbless_for_disk(default_value);
+	int r = array_resize(info, root, old_size, new_size, value, new_root);
+	__dm_unbless_for_disk(value);
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_array_resize);
@@ -540,10 +533,8 @@ int dm_array_del(struct dm_array_info *info, dm_block_t root)
 }
 EXPORT_SYMBOL_GPL(dm_array_del);
 
-int dm_array_get(struct dm_array_info *info,
-		 dm_block_t root,
-		 uint32_t index,
-		 void *value_le)
+int dm_array_get(struct dm_array_info *info, dm_block_t root,
+		 uint32_t index, void *value_le)
 {
 	int r;
 	struct dm_block *block;
@@ -565,8 +556,8 @@ int dm_array_get(struct dm_array_info *info,
 }
 EXPORT_SYMBOL_GPL(dm_array_get);
 
-static int dm_array_set_(struct dm_array_info *info, dm_block_t root,
-			 uint32_t index, const void *value, dm_block_t *new_root)
+static int array_set(struct dm_array_info *info, dm_block_t root,
+		     uint32_t index, const void *value, dm_block_t *new_root)
 {
 	int r;
 	struct dm_block *block;
@@ -602,13 +593,12 @@ static int dm_array_set_(struct dm_array_info *info, dm_block_t root,
 
 int dm_array_set(struct dm_array_info *info, dm_block_t root,
 		 uint32_t index, const void *value, dm_block_t *new_root)
-	__dm_written_to_disk(value)
+		 __dm_written_to_disk(value)
 {
-	int r = dm_array_set_(info, root, index, value, new_root);
+	int r = array_set(info, root, index, value, new_root);
 	__dm_unbless_for_disk(value);
 	return r;
 }
-
 EXPORT_SYMBOL_GPL(dm_array_set);
 
 /*----------------------------------------------------------------*/

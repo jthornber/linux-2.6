@@ -6,7 +6,7 @@
 #ifndef _LINUX_DM_ARRAY_H
 #define _LINUX_DM_ARRAY_H
 
-#include "./dm-btree.h"
+#include "dm-btree.h"
 
 /*----------------------------------------------------------------*/
 
@@ -34,16 +34,13 @@ int dm_array_empty(struct dm_array_info *info, dm_block_t *root);
  */
 int dm_array_resize(struct dm_array_info *info, dm_block_t root,
 		    uint32_t old_size, uint32_t new_size,
-		    const void *default_value,
-		    dm_block_t *new_root)
+		    const void *value, dm_block_t *new_root)
 	__dm_written_to_disk(value);
 
 int dm_array_del(struct dm_array_info *info, dm_block_t root);
 
-int dm_array_get(struct dm_array_info *info,
-		 dm_block_t root,
-		 uint32_t index,
-		 void *value_le);
+int dm_array_get(struct dm_array_info *info, dm_block_t root,
+		 uint32_t index, void *value_le);
 
 int dm_array_set(struct dm_array_info *info, dm_block_t root,
 		 uint32_t index, const void *value, dm_block_t *new_root)
