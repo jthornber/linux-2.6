@@ -470,6 +470,49 @@ static bool updated_this_tick(struct mq_policy *mq, struct entry *e)
 }
 
 /*
+ * The promotion threshold is adjusted every generation.  As are the counts
+ * of the entries.
+ *
+ * At the moment the threshold is taken by averaging the hit counts of some
+ * of the entries in the cache (the first 20 entries of the second level).
+ *
+ * We can be much cleverer than this though.  For example, each promotion
+ * could bump up the threshold helping to prevent churn.  Much more to do
+ * here.
+ */
+
+#define MAX_TO_AVERAGE 20
+
+static void check_generation(struct mq_policy *mq)
+{
+	unsigned total = 0, nr = 0, count = 0;
+	struct list_head *head;
+	struct entry *e;
+
+	if ((mq->hit_count >= mq->generation_period) &&
+	    (mq->nr_cblocks_allocated == mq->cache_size)) {
+
+		mq->hit_count = 0;
+		mq->generation++;
+
+		head = mq->cache.qs + 1;
+		if (list_empty(head))
+			head = mq->cache.qs;
+
+		list_for_each_entry (e, head, list) {
+			nr++;
+			total += e->hit_count;
+
+			if (++count > MAX_TO_AVERAGE)
+				break;
+		}
+
+		mq->promote_threshold = nr ? total / nr : 1;
+		pr_alert("promote threshold = %u\n", mq->promote_threshold);
+	}
+}
+
+/*
  * Whenever we use an entry we bump up it's hit counter, and push it to the
  * back to it's current level.
  */
@@ -480,6 +523,7 @@ static void requeue_and_update_tick(struct mq_policy *mq, struct entry *e)
 
 	e->hit_count++;
 	mq->hit_count++;
+	check_generation(mq);
 
 	/* generation adjustment, to stop the counts increasing forever. */
 	/* FIXME: divide? */
@@ -726,51 +770,6 @@ static int map(struct mq_policy *mq,
 /*----------------------------------------------------------------*/
 
 /*
- * The promotion threshold is adjusted every generation.  As are the counts
- * of the entries.
- *
- * At the moment the threshold is taken by averaging the hit counts of some
- * of the entries in the cache (the first 20 entries of the second level).
- *
- * We can be much cleverer than this though.  For example, each promotion
- * could bump up the threshold helping to prevent churn.  Much more to do
- * here.
- */
-
-#define MAX_TO_AVERAGE 20
-
-static void check_generation(struct mq_policy *mq)
-{
-	unsigned total = 0, nr = 0, count = 0;
-	struct list_head *head;
-	struct entry *e;
-
-	if ((mq->hit_count >= mq->generation_period) &&
-	    (mq->nr_cblocks_allocated == mq->cache_size)) {
-
-		mq->hit_count = 0;
-		mq->generation++;
-
-		head = mq->cache.qs + 1;
-		if (list_empty(head))
-			head = mq->cache.qs;
-
-		list_for_each_entry (e, head, list) {
-			nr++;
-			total += e->hit_count;
-
-			if (++count > MAX_TO_AVERAGE)
-				break;
-		}
-
-		mq->promote_threshold = nr ? total / nr : 1;
-		pr_alert("promote threshold = %u\n", mq->promote_threshold);
-	}
-}
-
-/*----------------------------------------------------------------*/
-
-/*
  * Public interface, via the policy struct.  See dm-cache-policy.h for a
  * description of these.
  */
@@ -799,7 +798,6 @@ static int mq_map(struct dm_cache_policy *p, dm_block_t oblock,
 	struct mq_policy *mq = to_mq_policy(p);
 
 	spin_lock_irqsave(&mq->lock, flags);
-	check_generation(mq);
 	iot_examine_bio(&mq->tracker, bio);
 	r = map(mq, oblock, can_migrate, discarded_oblock, bio_data_dir(bio), result);
 	spin_unlock_irqrestore(&mq->lock, flags);

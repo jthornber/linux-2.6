@@ -80,9 +80,19 @@ struct cache_c {
 	 */
 	struct dm_dev *cache_dev;
 
+	/*
+	 * Size of the origin device in blocks.
+	 */
+	dm_block_t origin_size;
 
-	dm_block_t origin_blocks;
+	/*
+	 * Size of the cache device in blocks.
+	 */
 	dm_block_t cache_size;
+
+	/*
+	 * Fields for converting from sectors to blocks.
+	 */
 	sector_t sectors_per_block;
 	sector_t offset_mask;
 	unsigned int block_shift;
@@ -103,7 +113,8 @@ struct cache_c {
 	unsigned long *dirty_bitset;
 
 	/*
-	 * origin_blocks entries, discarded if set
+	 * Origin_size entries, discarded if set.
+	 * FIXME: This is too big
 	 */
 	unsigned long *discard_bitset;
 
@@ -134,13 +145,11 @@ struct cache_c {
 	atomic_t promotion;
 	atomic_t copies_avoided;
 	atomic_t cache_cell_clash;
-
-	unsigned int seq_io_threshold;
 };
 
 struct dm_cache_endio_hook {
-	bool tick;
-	unsigned req_nr;
+	bool tick:1;
+	unsigned req_nr:2;
 	struct deferred_entry *all_io_entry;
 };
 
@@ -1002,7 +1011,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
-	c->origin_blocks = origin_size / block_size; /* FIXME: 64bit divide */
+	// FIXME: need round up too, also copying code needs to cope with partial end block.
+	c->origin_blocks = origin_size >> ilog2(block_size);
 	c->sectors_per_block = block_size;
 	c->offset_mask = block_size - 1;
 	c->block_shift = ffs(block_size) - 1;
@@ -1033,7 +1043,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_alloc_dirty_bitset;
 	}
 
-	c->discard_bitset = alloc_and_set_bitset(c->origin_blocks);
+	c->discard_bitset = alloc_and_set_bitset(c->origin_size);
 	if (!c->discard_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
@@ -1157,7 +1167,7 @@ static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
-#if 1
+#if 0
 	/* deferring everything seems to perform better */
        struct cache_c *c = ti->private;
        map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
@@ -1186,7 +1196,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
-	r = policy_map(c->policy, block, bio_data_dir(bio), true, true, false, bio, &lookup_result);
+	r = policy_map(c->policy, block, false, false, bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
 		cell_defer(c, cell, true);
 		return DM_MAPIO_SUBMITTED;
