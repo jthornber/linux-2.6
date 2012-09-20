@@ -696,27 +696,29 @@ static void insert_in_cache(struct mq_policy *mq,
 			    dm_block_t oblock,
 			    struct policy_result *result)
 {
-	struct entry *e = alloc_entry(mq);
+	struct entry *e;
+	dm_block_t cblock;
 
+	if (find_free_cblock(mq, &cblock) == -ENOSPC) {
+		result->op = POLICY_MISS;
+		insert_in_pre_cache(mq, oblock);
+		return;
+	}
+
+	e = alloc_entry(mq);
 	if (unlikely(!e)) {
 		result->op = POLICY_MISS;
 		return;
 	}
 
 	e->oblock = oblock;
+	e->cblock = cblock;
 	e->hit_count = 1;
 	e->generation = mq->generation;
 
-	if (find_free_cblock(mq, &e->cblock) == -ENOSPC) {
-		DMWARN("straight_to_cache couldn't allocate cblock");
-		result->op = POLICY_MISS;
-		e->in_cache = false;
-	} else {
-		result->op = POLICY_NEW;
-		result->cblock = e->cblock;
-		e->in_cache = true;
-	}
-
+	result->op = POLICY_NEW;
+	result->cblock = e->cblock;
+	e->in_cache = true;
 	push(mq, e);
 }
 
