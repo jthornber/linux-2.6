@@ -620,60 +620,31 @@ static bool covers_block(struct cache_c *c, struct bio *bio)
 }
 #endif
 
+/*
+ * People generally discard large parts of a device, eg, the whole device
+ * when formatting.  Splitting these large discards up into cache block
+ * sized ios and then quiescing (always neccessary for discard) takes too
+ * long.
+ *
+ * We keep it simple, and allow any size of discard to come in, and just
+ * mark off blocks on the discard bitset.  No passdown occurs!
+ *
+ * To implement passdown we need to change the bio_prison such that a cell
+ * can have a key that spans many blocks.  This change is planned for
+ * thin-provisioning.
+ */
 static void process_discard_bio(struct cache_c *c, struct bio *bio)
 {
-#if 0
-	int r;
-	struct cell_key key;
-	struct policy_result lookup_result;
-	dm_block_t block = get_bio_block(c, bio);
-	struct endio_hook *h = dm_get_mapinfo(bio)->ptr;
-
-	/*
-	 * Check to see if that block is currently migrating.
-	 */
-	build_key(block, &key);
-	r = bio_detain_if_occupied(c->prison, &key, bio);
-	if (r > 0)
-		return;
-
-	policy_map(c->policy, block, bio_data_dir(bio), 0, 0, bio, &lookup_result);
-	switch (lookup_result.op) {
-	case POLICY_HIT:
-		h->all_io_entry = ds_inc(c->all_io_ds);
-		remap_to_cache(c, bio, lookup_result.cblock);
-		issue(c, bio);
-		break;
-
-	case POLICY_MISS:
-		h->all_io_entry = ds_inc(c->all_io_ds);
-		remap_to_origin(c, bio);
-		issue(c, bio);
-		break;
-
-	default:
-		BUG();
-	}
-
-	if (covers_block(c, bio))
-		set_discard(c, block);
-#else
-	/*
-	 * No passdown.
-	 */
 	dm_block_t start_block = dm_div_up(bio->bi_sector, c->sectors_per_block);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
 	do_div(end_block, c->sectors_per_block);
 
-	for (b = start_block; b < end_block; b++) {
-		//pr_alert("discarding block %lu\n", (unsigned long) b);
+	for (b = start_block; b < end_block; b++)
 		set_discard(c, b);
-	}
 
 	bio_endio(bio, 0);
-#endif
 }
 
 static void process_bio(struct cache_c *c, struct bio *bio)
