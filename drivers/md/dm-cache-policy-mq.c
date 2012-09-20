@@ -10,6 +10,7 @@
 #include <linux/hash.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 
 #define DM_MSG_PREFIX "cache-policy-mq"
@@ -214,7 +215,7 @@ struct mq_policy {
 	struct dm_cache_policy policy;
 
 	/* protects everything */
-	spinlock_t lock;
+	struct mutex lock;
 	dm_block_t cache_size;
 	struct io_tracker tracker;
 
@@ -480,7 +481,7 @@ static bool updated_this_tick(struct mq_policy *mq, struct entry *e)
  * of the entries.
  *
  * At the moment the threshold is taken by averaging the hit counts of some
- * of the entries in the cache (the first 20 entries of the second level).
+ * of the entries in the cache (the first 20 entries of the first level).
  *
  * We can be much cleverer than this though.  For example, each promotion
  * could bump up the threshold helping to prevent churn.  Much more to do
@@ -501,10 +502,7 @@ static void check_generation(struct mq_policy *mq)
 		mq->hit_count = 0;
 		mq->generation++;
 
-		head = mq->cache.qs + 1;
-		if (list_empty(head))
-			head = mq->cache.qs;
-
+		head = mq->cache.qs;
 		list_for_each_entry (e, head, list) {
 			nr++;
 			total += e->hit_count;
@@ -797,7 +795,7 @@ static void mq_destroy(struct dm_cache_policy *p)
 
 static void copy_tick(struct mq_policy *mq)
 {
-	unsigned flags;
+	unsigned long flags;
 
 	spin_lock_irqsave(&mq->tick_lock, flags);
 	mq->tick = mq->tick_protected;
@@ -814,7 +812,7 @@ static int mq_map(struct dm_cache_policy *p, dm_block_t oblock,
 	if (can_migrate)
 		mutex_lock(&mq->lock);
 	else
-		if (!mutex_try_lock(&mq->lock))
+		if (!mutex_trylock(&mq->lock))
 			return -EWOULDBLOCK;
 
 	copy_tick(mq);
@@ -864,10 +862,9 @@ static void mq_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
 	mutex_unlock(&mq->lock);
 }
 
-static void force_mapping(struct dm_cache_policy *p,
+static void force_mapping(struct mq_policy *mq,
 			  dm_block_t current_oblock, dm_block_t new_oblock)
 {
-	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e = hash_lookup(mq, current_oblock);
 
 	BUG_ON(!e);
@@ -901,9 +898,9 @@ static void mq_tick(struct dm_cache_policy *p)
 	struct mq_policy *mq = to_mq_policy(p);
 	unsigned long flags;
 
-	spin_lock_irqsave(&mq->lock, flags);
+	spin_lock_irqsave(&mq->tick_lock, flags);
 	mq->tick_protected++;
-	spin_unlock_irqrestore(&mq->lock, flags);
+	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
 static struct dm_cache_policy *mq_create(dm_block_t cache_size)
