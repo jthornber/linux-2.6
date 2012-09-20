@@ -81,9 +81,10 @@ struct cache_c {
 	struct dm_dev *cache_dev;
 
 	/*
-	 * Size of the origin device in blocks.
+	 * Size of the origin device in rounded up blocks and native sectors.
 	 */
-	dm_block_t origin_size;
+	dm_block_t origin_blocks;
+	sector_t origin_sectors;
 
 	/*
 	 * Size of the cache device in blocks.
@@ -113,7 +114,7 @@ struct cache_c {
 	unsigned long *dirty_bitset;
 
 	/*
-	 * Origin_size entries, discarded if set.
+	 * origin_blocks entries, discarded if set.
 	 * FIXME: This is too big
 	 */
 	unsigned long *discard_bitset;
@@ -420,6 +421,12 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	wake_worker(c);
 }
 
+static void enforce_eod(struct cache_c *c, struct dm_io_region *o_region, struct dm_io_region *c_region)
+{
+	dm_block_t count = min(c->origin_sectors - o_region->sector, o_region->count);
+	o_region->count = c_region->count = count;
+}
+
 static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	int r;
@@ -435,10 +442,12 @@ static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 	if (mg->demote) {
 		/* demote */
 		o_region.sector = mg->old_oblock * c->sectors_per_block;
+		enforce_eod(c, &o_region, &c_region);
 		r = dm_kcopyd_copy(c->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
 	} else {
 		/* promote */
 		o_region.sector = mg->new_oblock * c->sectors_per_block;
+		enforce_eod(c, &o_region, &c_region);
 		r = dm_kcopyd_copy(c->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
 	}
 
@@ -1038,14 +1047,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_cache;
 	}
 
-	origin_size = get_dev_size(c->origin_dev);
+	c->origin_sectors = origin_size = get_dev_size(c->origin_dev);
 	if (ti->len > origin_size) {
 		ti->error = "Device size larger than cached device";
 		goto bad;
 	}
 
-	// FIXME: need round up too, also copying code needs to cope with partial end block.
-	c->origin_size = origin_size >> ilog2(block_size);
+	c->origin_blocks = dm_sector_div_up(origin_size, block_size);
 	c->sectors_per_block = block_size;
 	c->offset_mask = block_size - 1;
 	c->block_shift = ffs(block_size) - 1;
@@ -1076,7 +1084,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_alloc_dirty_bitset;
 	}
 
-	c->discard_bitset = alloc_and_set_bitset(c->origin_size);
+	c->discard_bitset = alloc_and_set_bitset(c->origin_blocks);
 	if (!c->discard_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
