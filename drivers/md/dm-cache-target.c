@@ -81,7 +81,7 @@ struct cache_c {
 	struct dm_dev *cache_dev;
 
 	/*
-	 * Size of the origin device in rounded up blocks and native sectors.
+	 * Size of the origin device in _complete_ blocks and native sectors.
 	 */
 	dm_block_t origin_blocks;
 	sector_t origin_sectors;
@@ -224,17 +224,6 @@ static bool is_discarded(struct cache_c *c, dm_block_t b)
  *--------------------------------------------------------------*/
 static void remap_to_origin(struct cache_c *c, struct bio *bio)
 {
-	unsigned long flags;
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
-
-	// FIXME: I don't like this side effect here
-	spin_lock_irqsave(&c->lock, flags);
-	if (c->need_tick_bio && !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
-		h->tick = true;
-		c->need_tick_bio = false;
-	}
-	spin_unlock_irqrestore(&c->lock, flags);
-
 	bio->bi_bdev = c->origin_dev->bdev;
 }
 
@@ -245,8 +234,22 @@ static void remap_to_cache(struct cache_c *c, struct bio *bio,
 	bio->bi_sector = (cblock << c->block_shift) + (bio->bi_sector & c->offset_mask);
 }
 
+static void check_if_tick_bio_needed(struct cache_c *c, struct bio *bio)
+{
+	unsigned long flags;
+	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+
+	spin_lock_irqsave(&c->lock, flags);
+	if (c->need_tick_bio && !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
+		h->tick = true;
+		c->need_tick_bio = false;
+	}
+	spin_unlock_irqrestore(&c->lock, flags);
+}
+
 static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t oblock)
 {
+	check_if_tick_bio_needed(c, bio);
 	remap_to_origin(c, bio);
 	if (bio_data_dir(bio) == WRITE)
 		clear_discard(c, oblock);
@@ -421,12 +424,6 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	wake_worker(c);
 }
 
-static void enforce_eod(struct cache_c *c, struct dm_io_region *o_region, struct dm_io_region *c_region)
-{
-	dm_block_t count = min(c->origin_sectors - o_region->sector, o_region->count);
-	o_region->count = c_region->count = count;
-}
-
 static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	int r;
@@ -442,12 +439,10 @@ static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 	if (mg->demote) {
 		/* demote */
 		o_region.sector = mg->old_oblock * c->sectors_per_block;
-		enforce_eod(c, &o_region, &c_region);
 		r = dm_kcopyd_copy(c->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
 	} else {
 		/* promote */
 		o_region.sector = mg->new_oblock * c->sectors_per_block;
-		enforce_eod(c, &o_region, &c_region);
 		r = dm_kcopyd_copy(c->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
 	}
 
@@ -1002,7 +997,7 @@ static struct kmem_cache *_endio_hook_cache;
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	sector_t block_size, origin_size;
+	sector_t block_size;
 	struct cache_c *c;
 	char *end;
 	struct dm_arg_set as;
@@ -1047,13 +1042,14 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_cache;
 	}
 
-	c->origin_sectors = origin_size = get_dev_size(c->origin_dev);
-	if (ti->len > origin_size) {
+	c->origin_sectors = get_dev_size(c->origin_dev);
+	if (ti->len > c->origin_sectors) {
 		ti->error = "Device size larger than cached device";
 		goto bad;
 	}
 
-	c->origin_blocks = dm_sector_div_up(origin_size, block_size);
+	c->origin_blocks = c->origin_sectors;
+	do_div(c->origin_blocks, block_size);
 	c->sectors_per_block = block_size;
 	c->offset_mask = block_size - 1;
 	c->block_shift = ffs(block_size) - 1;
@@ -1217,7 +1213,19 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	bool discarded_block;
 	struct dm_bio_prison_cell *cell;
 	struct policy_result lookup_result;
-	struct dm_cache_endio_hook *h = map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
+	struct dm_cache_endio_hook *h;
+
+	if (block > c->origin_blocks) {
+		/*
+		 * This can only occur if the io goes to a partial block at
+		 * the end of the origin device.  We don't cache these.
+		 * Just remap to the origin and carry on.
+		 */
+		remap_to_origin(c, bio);
+		return DM_MAPIO_REMAPPED;
+	}
+
+	h = map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD)) {
 		defer_bio(c, bio);
