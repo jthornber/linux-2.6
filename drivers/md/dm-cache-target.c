@@ -290,9 +290,6 @@ static void issue(struct cache_c *c, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
-#define MIGRATION_INC 1024
-#define MIGRATION_FACTOR 1024
-
 static int prealloc_migration(struct cache_c *c)
 {
 	if (c->next_migration)
@@ -320,7 +317,7 @@ static void free_migration(struct cache_c *c, struct dm_cache_migration *mg)
 static void inc_nr_migrations(struct cache_c *c)
 {
 	atomic_inc(&c->nr_migrations);
-	wake_up(&c->migration_wait);
+	wake_up(&c->migration_wait); /* FIXME: why is there a wakeup here? */
 }
 
 static void dec_nr_migrations(struct cache_c *c)
