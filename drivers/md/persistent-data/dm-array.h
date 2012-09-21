@@ -111,6 +111,18 @@ int dm_array_set(struct dm_array_info *info, dm_block_t root,
 		 uint32_t index, const void *value, dm_block_t *new_root)
 	__dm_written_to_disk(value);
 
+/*
+ * Walk through all the entries in an array.
+ *
+ * info - describes the array
+ * root - root block of the array
+ * fn - called back for every element
+ * context - passed to the callback
+ */
+int dm_array_walk(struct dm_array_info *info, dm_block_t root,
+		  int (*fn)(void *, uint64_t key, void *leaf),
+		  void *context);
+
 /*----------------------------------------------------------------*/
 
 #endif
