@@ -6,7 +6,7 @@
 
 #include "dm-cache-metadata.h"
 
-#include "persistent-data/dm-btree.h"
+#include "persistent-data/dm-array.h"
 #include "persistent-data/dm-space-map.h"
 #include "persistent-data/dm-space-map-disk.h"
 #include "persistent-data/dm-transaction-manager.h"
@@ -30,9 +30,23 @@
  *  2 for btree lookup used within space map
  */
 #define CACHE_MAX_CONCURRENT_LOCKS 5
-
-/* This should be plenty */
 #define SPACE_MAP_ROOT_SIZE 128
+
+/*
+ * Each mapping from cache block -> origin block carries a set of flags.
+ */
+enum mapping_bits {
+	/*
+	 * A valid mapping.  Because we're using an array we clear this
+	 * flag for an non existant mapping.
+	 */
+	M_VALID,
+
+	/*
+	 * The data on the cache is different from that on the origin.
+	 */
+	M_DIRTY
+};
 
 struct cache_disk_superblock {
 	__le32 csum;
@@ -60,11 +74,12 @@ struct dm_cache_metadata {
 	struct dm_space_map *metadata_sm;
 	struct dm_transaction_manager *tm;
 
-	struct dm_btree_info info;
+	struct dm_array_info info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
 	sector_t data_block_size;
+	dm_block_t cache_blocks;
 	bool changed;
 };
 
@@ -168,15 +183,17 @@ static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	return dm_bm_unlock(b);
 }
 
-static void __setup_btree_details(struct dm_cache_metadata *cmd)
+static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 {
-	cmd->info.tm = cmd->tm;
-	cmd->info.levels = 1;
-	cmd->info.value_type.context = NULL;
-	cmd->info.value_type.size = sizeof(__le64);
-	cmd->info.value_type.inc = NULL;
-	cmd->info.value_type.dec = NULL;
-	cmd->info.value_type.equal = NULL;
+	struct dm_btree_value_type vt;
+
+	vt.context = NULL;
+	vt.size = sizeof(__le64);
+	vt.inc = NULL;
+	vt.dec = NULL;
+	vt.equal = NULL;
+
+	dm_setup_array_info(&cmd->info, cmd->tm, &vt);
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -217,7 +234,6 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
-
 	return dm_tm_commit(cmd->tm, sblock);
 
 bad_locked:
@@ -237,9 +253,9 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 		return r;
 	}
 
-	__setup_btree_details(cmd);
+	__setup_mapping_info(cmd);
 
-	r = dm_btree_empty(&cmd->info, &cmd->root);
+	r = dm_array_empty(&cmd->info, &cmd->root);
 	if (r < 0)
 		goto bad;
 
@@ -312,7 +328,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 		goto bad;
 	}
 
-	__setup_btree_details(cmd);
+	__setup_mapping_info(cmd);
 	return dm_bm_unlock(sblock);
 
 bad:
@@ -424,6 +440,28 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * The mappings are held in a dm-array that has 64-bit values stored in
+ * little-endian format.  The index is the cblock, the high 48bits of the
+ * value are the oblock and the low 16 bit the flags.
+ */
+#define FLAGS_MASK ((1 << 16) - 1)
+
+static __le64 pack_value(dm_block_t block, unsigned flags)
+{
+	dm_block_t value = (block << 16) | (flags & FLAGS_MASK);
+	return cpu_to_le64(value);
+}
+
+static void unpack_value(__le64 value_le, dm_block_t *block, unsigned *flags)
+{
+	dm_block_t value = le64_to_cpu(value_le);
+	*block = value >> 16;
+	*flags = value & FLAGS_MASK;
+}
+
+/*----------------------------------------------------------------*/
+
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
 						 bool may_format_device)
@@ -440,6 +478,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	init_rwsem(&cmd->root_lock);
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
+	cmd->cache_blocks = 0;
 	cmd->changed = 1;
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
@@ -463,12 +502,41 @@ void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 	kfree(cmd);
 }
 
-static int __remove(struct dm_cache_metadata *cmd, dm_block_t oblock)
+int dm_cache_resize(struct dm_cache_metadata *cmd, dm_block_t new_cache_size)
 {
 	int r;
+	__le64 null_mapping = pack_value(0, 0);
+
+	down_write(&cmd->root_lock);
+	__dm_bless_for_disk(&null_mapping);
+	r = dm_array_resize(&cmd->info, cmd->root, cmd->cache_blocks, new_cache_size,
+			    &null_mapping, &cmd->root);
+	if (!r)
+		cmd->cache_blocks = new_cache_size;
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+dm_block_t dm_cache_size(struct dm_cache_metadata *cmd)
+{
+	dm_block_t r;
+
+	down_read(&cmd->root_lock);
+	r = cmd->cache_blocks;
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
+static int __remove(struct dm_cache_metadata *cmd, dm_block_t cblock)
+{
+	int r;
+	__le64 value = pack_value(0, 0);
 
 	debug("__remove %lu\n", (unsigned long) oblock);
-	r = dm_btree_remove(&cmd->info, cmd->root, &oblock, &cmd->root);
+	__dm_bless_for_disk(&value);
+	r = dm_array_set(&cmd->info, cmd->root, cblock, &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -488,14 +556,14 @@ int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock)
 }
 
 static int __insert(struct dm_cache_metadata *cmd,
-		    dm_block_t oblock, dm_block_t cblock)
+		    dm_block_t cblock, dm_block_t oblock)
 {
 	int r;
-	__le64 value = cpu_to_le64(cblock);
+	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
 	debug("__insert %lu -> %lu\n", (unsigned long) oblock, (unsigned long) cblock);
-	r = dm_btree_insert(&cmd->info, cmd->root, &oblock, &value, &cmd->root);
+	r = dm_array_set(&cmd->info, cmd->root, cblock, &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -503,12 +571,12 @@ static int __insert(struct dm_cache_metadata *cmd,
 	return 0;
 }
 
-int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock, dm_block_t cblock)
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm_block_t oblock)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __insert(cmd, oblock, cblock);
+	r = __insert(cmd, cblock, oblock);
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -519,16 +587,21 @@ struct thunk {
 	void *context;
 };
 
-static int __load_mapping(void *context, uint64_t *keys, void *leaf)
+static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 {
+	int r = 0;
 	__le64 value;
-	dm_block_t oblock = keys[0], cblock;
+	dm_block_t oblock;
+	unsigned flags;
 	struct thunk *thunk = context;
 
 	memcpy(&value, leaf, sizeof(value));
-	cblock = le64_to_cpu(value);
+	unpack_value(value, &oblock, &flags);
 
-	return thunk->fn(thunk->context, oblock, cblock);
+	if (flags & M_VALID)
+		r = thunk->fn(thunk->context, oblock, cblock);
+
+	return r;
 }
 
 static int __load_mappings(struct dm_cache_metadata *cmd,
@@ -539,7 +612,7 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 
 	thunk.fn = fn;
 	thunk.context = context;
-	return dm_btree_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
+	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,

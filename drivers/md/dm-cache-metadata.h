@@ -40,8 +40,16 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
-int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock);
-int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock, dm_block_t cblock);
+/*
+ * The metadata needs to know how many cache blocks there are.  We're dont
+ * care about the origin, assuming the core target is giving us valid
+ * origin blocks to map to.
+ */
+int dm_cache_resize(struct dm_cache_metadata *cmd, dm_block_t new_cache_size);
+dm_block_t dm_cache_size(struct dm_cache_metadata *cmd);
+
+int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock);
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm_block_t oblock);
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd);
 
 typedef int (*load_mapping_fn)(void *context, dm_block_t oblock, dm_block_t cblock);

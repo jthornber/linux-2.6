@@ -23,6 +23,12 @@
 #define DM_MSG_PREFIX "cache"
 #define DAEMON "cached"
 
+/*
+ * FIXME: we must commit after every migration in order to guarantee crash
+ * safety.  Thin works because we never recycle a data block within a
+ * transaction.
+ */
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -377,7 +383,7 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 	if (mg->demote) {
 		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
 
-		if (dm_cache_remove_mapping(c->cmd, mg->old_oblock)) {
+		if (dm_cache_remove_mapping(c->cmd, mg->cblock)) {
 			DMWARN("demotion failed; couldn't update on disk metadata");
 			policy_force_mapping(c->policy, mg->new_oblock,	mg->old_oblock);
 			if (mg->promote)
@@ -390,7 +396,7 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 			mg->demote = false;
 
 			spin_lock_irqsave(&c->lock, flags);
-			list_add(&mg->list, &c->quiesced_migrations);
+			list_add_tail(&mg->list, &c->quiesced_migrations);
 			spin_unlock_irqrestore(&c->lock, flags);
 		} else
 			cleanup_migration(c, mg);
@@ -398,7 +404,7 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 	} else {
 		cell_defer(c, mg->new_ocell, 1);
 
-		if (dm_cache_insert_mapping(c->cmd, mg->new_oblock, mg->cblock)) {
+		if (dm_cache_insert_mapping(c->cmd, mg->cblock, mg->new_oblock)) {
 			DMWARN("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(c->policy, mg->new_oblock);
 		}
@@ -418,7 +424,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 		mg->err = true;
 
 	spin_lock_irqsave(&c->lock, flags);
-	list_add(&mg->list, &c->completed_migrations);
+	list_add_tail(&mg->list, &c->completed_migrations);
 	spin_unlock_irqrestore(&c->lock, flags);
 
 	wake_worker(c);
@@ -1044,6 +1050,12 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);
 	c->cache_size = get_dev_size(c->cache_dev) >> c->block_shift;
+
+	r = dm_cache_resize(c->cmd, c->cache_size);
+	if (r) {
+		ti->error = "couldn't resize cache metadata";
+		goto bad_alloc_dirty_bitset;
+	}
 
 	c->dirty_bitset = alloc_and_set_bitset(c->cache_size);
 	if (!c->dirty_bitset) {
