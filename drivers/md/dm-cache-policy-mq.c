@@ -904,7 +904,7 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
-static struct dm_cache_policy *mq_create(dm_block_t cache_size)
+static struct dm_cache_policy *mq_create(dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
 	if (!mq)

@@ -156,7 +156,7 @@ struct dm_cache_policy_type {
 	 */
 	char name[CACHE_POLICY_NAME_MAX];
 	struct module *owner;
-	struct dm_cache_policy *(*create)(dm_block_t cache_size);
+	struct dm_cache_policy *(*create)(dm_block_t cache_size, sector_t origin_size, sector_t block_size);
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);

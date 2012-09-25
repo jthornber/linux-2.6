@@ -1109,7 +1109,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_migration_pool;
 	}
 
-	c->policy = dm_cache_policy_create(argv[4], c->cache_size);
+	c->policy = dm_cache_policy_create(argv[4], c->cache_size, c->origin_sectors, block_size);
 	if (!c->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad_cache_policy;
