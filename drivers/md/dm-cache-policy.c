@@ -89,14 +89,14 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type)
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size)
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	struct dm_cache_policy *p = NULL;
 	struct dm_cache_policy_type *type;
 
 	type = get_policy(name);
 	if (type) {
-		p = type->create(cache_size);
+		p = type->create(cache_size, origin_size, block_size);
 		if (p)
 			p->private = type;
 	} else

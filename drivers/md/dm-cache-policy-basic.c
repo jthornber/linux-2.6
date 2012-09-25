@@ -586,27 +586,27 @@ static struct dm_cache_policy *__create(dm_block_t cache_size,
 	return &l->policy;
 }
 
-static struct dm_cache_policy *fifo_create(dm_block_t cache_size)
+static struct dm_cache_policy *fifo_create(dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	return __create(cache_size, P_FIFO);
 }
 
-static struct dm_cache_policy *lru_create(dm_block_t cache_size)
+static struct dm_cache_policy *lru_create(dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	return __create(cache_size, P_LRU);
 }
 
-static struct dm_cache_policy *mru_create(dm_block_t cache_size)
+static struct dm_cache_policy *mru_create(dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	return __create(cache_size, P_MRU);
 }
 
-static struct dm_cache_policy *lfu_create(dm_block_t cache_size)
+static struct dm_cache_policy *lfu_create(dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	return __create(cache_size, P_LFU);
 }
 
-static struct dm_cache_policy *mfu_create(dm_block_t cache_size)
+static struct dm_cache_policy *mfu_create(dm_block_t cache_size, sector_t origin_size, sector_t block_size)
 {
 	return __create(cache_size, P_MFU);
 }
