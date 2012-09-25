@@ -61,6 +61,7 @@ struct cache_disk_superblock {
 	__le64 mapping_root;
 	__le32 data_block_size;
 	__le32 metadata_block_size;
+	__le32 cache_blocks;
 
 	__le32 compat_flags;
 	__le32 compat_ro_flags;
@@ -234,6 +235,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
+	disk_super->cache_blocks = cpu_to_le32(0);
 	return dm_tm_commit(cmd->tm, sblock);
 
 bad_locked:
@@ -393,7 +395,8 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	disk_super = dm_block_data(sblock);
 	cmd->root = le64_to_cpu(disk_super->mapping_root);
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
-	cmd->changed = 0;
+	cmd->cache_blocks = le32_to_cpu(disk_super->cache_blocks);
+	cmd->changed = false;
 
 	dm_bm_unlock(sblock);
 	return 0;
@@ -427,6 +430,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 	disk_super = dm_block_data(sblock);
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
+	disk_super->cache_blocks = cpu_to_le32(cmd->cache_blocks);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -479,7 +483,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
-	cmd->changed = 1;
+	cmd->changed = true;
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
 		kfree(cmd);
@@ -513,6 +517,7 @@ int dm_cache_resize(struct dm_cache_metadata *cmd, dm_block_t new_cache_size)
 			    &null_mapping, &cmd->root);
 	if (!r)
 		cmd->cache_blocks = new_cache_size;
+	cmd->changed = true;
 	up_write(&cmd->root_lock);
 
 	return r;
