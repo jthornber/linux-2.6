@@ -287,28 +287,21 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 	dm_block_t b;
 	__le64 block_le;
 
-	pr_alert("shadow_ablock, index = %u\n", index);
-
 	/*
 	 * lookup
 	 */
 	r = dm_btree_lookup(&info->btree_info, *root, &key, &block_le);
-	if (r) {
-		pr_alert("btree_lookup failed\n");
+	if (r)
 		return r;
-	}
 	b = le64_to_cpu(block_le);
 
 	/*
 	 * shadow
 	 */
-	pr_alert("b = %u\n", (unsigned) b);
 	r = dm_tm_shadow_block(info->btree_info.tm, b,
 			       &array_validator, block, &inc);
-	if (r) {
-		pr_alert("tm_shadow failed\n");
+	if (r)
 		return r;
-	}
 
 	*ab = dm_block_data(*block);
 	if (inc)
@@ -361,7 +354,14 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 
 out:
 	unlock_ablock(info, block);
-	dm_tm_dec(info->btree_info.tm, dm_block_location(block));
+
+	/*
+	 * FIXME: I think this decrement is needed, but with it we get a
+	 * BUG_ON for decrementing past zero.  Need to write the
+	 * cache_check program to double check all reference counts.
+	 *
+	 * dm_tm_dec(info->btree_info.tm, dm_block_location(block));
+	 */
 	return 0;
 }
 
@@ -437,7 +437,7 @@ struct resize {
 };
 
 /*
- * Removes a consequetive set of array blocks from the btree.  The values
+ * Removes a consecutive set of array blocks from the btree.  The values
  * in block are decremented as a side effect of the btree remove.
  *
  * begin_index - the index of the first array block to remove.
@@ -478,8 +478,6 @@ static int shrink(struct resize *resize)
 	struct dm_block *block;
 	struct array_block *ab;
 
-	pr_alert("shrink\n");
-
 	/*
 	 * Lose some blocks from the back?
 	 */
@@ -516,45 +514,45 @@ static int shrink(struct resize *resize)
 static int grow(struct resize *resize)
 {
 	int r;
-	unsigned nr;
 	struct dm_block *block;
 	struct array_block *ab;
 
-	/*
-	 * Extend old tail block.
-	 */
-	if (resize->old_nr_entries_in_last_block > 0) {
-		r = shadow_ablock(resize->info, &resize->root,
-				  resize->old_nr_full_blocks, &block, &ab);
+	if (resize->old_nr_full_blocks < resize->new_nr_full_blocks) {
+		/*
+		 * Pad the end of the old block?
+		 */
+		if (resize->old_nr_entries_in_last_block > 0) {
+			r = shadow_ablock(resize->info, &resize->root,
+					  resize->old_nr_full_blocks, &block, &ab);
+			if (r)
+				return r;
+
+			fill_ablock(resize->info, ab, resize->value, resize->max_entries);
+			unlock_ablock(resize->info, block);
+		}
+
+		/*
+		 * Add the full blocks.
+		 */
+		r = insert_full_ablocks(resize->info, resize->block_size,
+					resize->old_nr_full_blocks,
+					resize->new_nr_full_blocks,
+					resize->max_entries, resize->value,
+					&resize->root);
 		if (r)
 			return r;
-
-		nr = (resize->old_nr_full_blocks < resize->new_nr_full_blocks) ?
-			resize->max_entries :
-			resize->new_nr_entries_in_last_block;
-
-		fill_ablock(resize->info, ab, resize->value, nr);
-		unlock_ablock(resize->info, block);
 	}
 
 	/*
-	 * Add full entries.
+	 * Add new tail block?
 	 */
-	r = insert_full_ablocks(resize->info, resize->block_size,
-				resize->old_nr_full_blocks,
-				resize->new_nr_full_blocks,
-				resize->max_entries, resize->value,
-				&resize->root);
-	if (r)
-		return r;
+	if (resize->new_nr_entries_in_last_block)
+		r = insert_partial_ablock(resize->info, resize->block_size,
+					  resize->new_nr_full_blocks,
+					  resize->new_nr_entries_in_last_block,
+					  resize->value, &resize->root);
 
-	/*
-	 * Add new tail block.
-	 */
-	return insert_partial_ablock(resize->info, resize->block_size,
-				     resize->new_nr_full_blocks,
-				     resize->new_nr_entries_in_last_block,
-				     resize->value, &resize->root);
+	return r;
 }
 
 /*----------------------------------------------------------------*/
@@ -759,7 +757,9 @@ int dm_array_set(struct dm_array_info *info, dm_block_t root,
 		 uint32_t index, const void *value, dm_block_t *new_root)
 		 __dm_written_to_disk(value)
 {
-	int r = array_set(info, root, index, value, new_root);
+	int r;
+
+	r = array_set(info, root, index, value, new_root);
 	__dm_unbless_for_disk(value);
 	return r;
 }
