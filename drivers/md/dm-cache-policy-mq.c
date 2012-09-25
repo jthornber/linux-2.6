@@ -848,7 +848,7 @@ static void remove_mapping(struct mq_policy *mq, dm_block_t oblock)
 {
 	struct entry *e = hash_lookup(mq, oblock);
 
-	BUG_ON(!e || e->in_cache);
+	BUG_ON(!e || !e->in_cache);
 
 	del(mq, e);
 	e->in_cache = false;
@@ -869,8 +869,7 @@ static void force_mapping(struct mq_policy *mq,
 {
 	struct entry *e = hash_lookup(mq, current_oblock);
 
-	BUG_ON(!e);
-	BUG_ON(!e->in_cache);
+	BUG_ON(!e || !e->in_cache);
 
 	del(mq, e);
 	e->oblock = new_oblock;
