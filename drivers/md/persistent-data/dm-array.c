@@ -21,11 +21,11 @@
  * than just using a btree since we don't store 1 key per value.
  */
 struct array_block {
-	__le64 blocknr; /* Block this node is supposed to live in. */
 	__le32 csum;
 	__le32 max_entries;
 	__le32 nr_entries;
 	__le32 value_size;
+	__le64 blocknr; /* Block this node is supposed to live in. */
 } __packed;
 
 /*----------------------------------------------------------------*/
