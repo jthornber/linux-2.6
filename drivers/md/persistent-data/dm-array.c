@@ -517,7 +517,7 @@ static int grow(struct resize *resize)
 	struct dm_block *block;
 	struct array_block *ab;
 
-	if (resize->old_nr_full_blocks < resize->new_nr_full_blocks) {
+	if (resize->new_nr_full_blocks > resize->old_nr_full_blocks) {
 		/*
 		 * Pad the end of the old block?
 		 */
@@ -541,16 +541,24 @@ static int grow(struct resize *resize)
 					&resize->root);
 		if (r)
 			return r;
-	}
 
-	/*
-	 * Add new tail block?
-	 */
-	if (resize->new_nr_entries_in_last_block)
-		r = insert_partial_ablock(resize->info, resize->block_size,
-					  resize->new_nr_full_blocks,
-					  resize->new_nr_entries_in_last_block,
-					  resize->value, &resize->root);
+		/*
+		 * Add new tail block?
+		 */
+		if (resize->new_nr_entries_in_last_block)
+			r = insert_partial_ablock(resize->info, resize->block_size,
+						  resize->new_nr_full_blocks,
+						  resize->new_nr_entries_in_last_block,
+						  resize->value, &resize->root);
+	} else {
+		r = shadow_ablock(resize->info, &resize->root,
+				  resize->old_nr_full_blocks, &block, &ab);
+		if (r)
+			return r;
+
+		fill_ablock(resize->info, ab, resize->value, resize->new_nr_entries_in_last_block);
+		unlock_ablock(resize->info, block);
+	}
 
 	return r;
 }
@@ -705,7 +713,7 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 		r = -ENODATA;
 	else
 		memcpy(value_le, element_at(info, ab, entry),
-		       sizeof(info->value_type.size));
+		       info->value_type.size);
 
 	unlock_ablock(info, block);
 	return r;
@@ -746,7 +754,7 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 			vt->inc(vt->context, value);
 	}
 
-	memcpy(element_at(info, ab, entry), value, sizeof(info->value_type.size));
+	memcpy(old_value, value, info->value_type.size);
 
 out:
 	unlock_ablock(info, block);
@@ -786,6 +794,8 @@ static int walk_ablock(void *context, uint64_t *keys, void *leaf)
 	r = get_ablock(wi->info, le64_to_cpu(block_le), &block, &ab);
 	if (r)
 		return r;
+
+	pr_alert("walking block %u\n", (unsigned) le64_to_cpu(block_le));
 
 	max_entries = le32_to_cpu(ab->max_entries);
 	nr_entries = le32_to_cpu(ab->nr_entries);
