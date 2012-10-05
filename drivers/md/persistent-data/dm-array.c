@@ -319,11 +319,6 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 	return r;
 }
 
-/*
- * We don't need to create new blocks for every full block.  Since they all
- * have the same contents we can just share a single block.  Aren't
- * persistent data structures beautiful?
- */
 static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 			       unsigned begin_block, unsigned end_block,
 			       unsigned max_entries, const void *value,
@@ -333,35 +328,24 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 	struct dm_block *block;
 	struct array_block *ab;
 
-	if (begin_block == end_block)
-		return 0;
 
-	r = alloc_ablock(info, block_size, &block, &ab);
-	if (r)
-		return r;
-
-	fill_ablock(info, ab, value, le32_to_cpu(ab->max_entries));
-
-	/* insert the same block into the tree, in many different places */
 	while (begin_block != end_block) {
-		r = insert_ablock(info, begin_block, block, root);
+		r = alloc_ablock(info, block_size, &block, &ab);
 		if (r)
-			goto out;
+			return r;
 
-		dm_tm_inc(info->btree_info.tm, dm_block_location(block));
+		fill_ablock(info, ab, value, le32_to_cpu(ab->max_entries));
+
+		r = insert_ablock(info, begin_block, block, root);
+		if (r) {
+			unlock_ablock(info, block);
+			return r;
+		}
+
+		unlock_ablock(info, block);
 		begin_block++;
 	}
 
-out:
-	unlock_ablock(info, block);
-
-	/*
-	 * FIXME: I think this decrement is needed, but with it we get a
-	 * BUG_ON for decrementing past zero.  Need to write the
-	 * cache_check program to double check all reference counts.
-	 *
-	 * dm_tm_dec(info->btree_info.tm, dm_block_location(block));
-	 */
 	return 0;
 }
 
@@ -666,6 +650,7 @@ static int array_resize(struct dm_array_info *info, dm_block_t root,
 	resize.old_nr_entries_in_last_block = old_size % resize.max_entries;
 	resize.new_nr_full_blocks = new_size / resize.max_entries;
 	resize.new_nr_entries_in_last_block = new_size % resize.max_entries;
+	resize.value = value;
 
 	r = ((new_size > old_size) ? grow : shrink)(&resize);
 	if (r)
@@ -794,8 +779,6 @@ static int walk_ablock(void *context, uint64_t *keys, void *leaf)
 	r = get_ablock(wi->info, le64_to_cpu(block_le), &block, &ab);
 	if (r)
 		return r;
-
-	pr_alert("walking block %u\n", (unsigned) le64_to_cpu(block_le));
 
 	max_entries = le32_to_cpu(ab->max_entries);
 	nr_entries = le32_to_cpu(ab->nr_entries);
