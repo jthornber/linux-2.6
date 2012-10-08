@@ -108,8 +108,7 @@ struct cache {
 	 * Fields for converting from sectors to blocks.
 	 */
 	sector_t sectors_per_block;
-	sector_t offset_mask;
-	unsigned int block_shift;
+	int sectors_per_block_shift;
 
 	struct dm_cache_metadata *cmd;
 
@@ -272,8 +271,11 @@ static void remap_to_origin(struct cache *cache, struct bio *bio)
 static void remap_to_cache(struct cache *cache, struct bio *bio,
 			   dm_block_t cblock)
 {
+	sector_t bi_sector = bio->bi_sector;
+
 	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (cblock << cache->block_shift) + (bio->bi_sector & cache->offset_mask);
+	bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
+		        (bi_sector & (cache->sectors_per_block - 1));
 }
 
 static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
@@ -309,7 +311,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 
 static dm_block_t get_bio_block(struct cache *cache, struct bio *bio)
 {
-	return bio->bi_sector >> cache->block_shift;
+	return bio->bi_sector >> cache->sectors_per_block_shift;
 }
 
 static int bio_triggers_commit(struct cache *cache, struct bio *bio)
@@ -667,14 +669,6 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
 
 	issue(cache, bio);
 }
-
-#if 0
-static bool covers_block(struct cache *cache, struct bio *bio)
-{
-	return !(bio->bi_sector & cache->offset_mask) &&
-		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
-}
-#endif
 
 /*
  * People generally discard large parts of a device, eg, the whole device
@@ -1113,8 +1107,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	cache->origin_blocks = cache->origin_sectors;
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
-	cache->offset_mask = block_size - 1;
-	cache->block_shift = ffs(block_size) - 1;
+	cache->sectors_per_block_shift = __ffs(block_size);
+	cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
 
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad;
