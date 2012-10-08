@@ -74,6 +74,11 @@ static void free_bitset(unsigned long *bits)
 #define COMMIT_PERIOD HZ
 #define MIGRATION_COUNT_WINDOW 10
 
+/*
+ * The block size of the device holding cache data must be >= 32KB
+ */
+#define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (32 * 1024 >> SECTOR_SHIFT)
+
 struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -263,6 +268,11 @@ static void save_stats(struct cache *cache)
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
+static bool block_size_is_power_of_two(struct cache *cache)
+{
+	return cache->sectors_per_block_shift >= 0;
+}
+
 static void remap_to_origin(struct cache *cache, struct bio *bio)
 {
 	bio->bi_bdev = cache->origin_dev->bdev;
@@ -274,8 +284,12 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 	sector_t bi_sector = bio->bi_sector;
 
 	bio->bi_bdev = cache->cache_dev->bdev;
-	bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
-		        (bi_sector & (cache->sectors_per_block - 1));
+	if (!block_size_is_power_of_two(cache))
+		bio->bi_sector = (cblock * cache->sectors_per_block) +
+				sector_div(bi_sector, cache->sectors_per_block);
+	else
+		bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
+				(bi_sector & (cache->sectors_per_block - 1));
 }
 
 static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
@@ -311,7 +325,14 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 
 static dm_block_t get_bio_block(struct cache *cache, struct bio *bio)
 {
-	return bio->bi_sector >> cache->sectors_per_block_shift;
+	sector_t block_nr = bio->bi_sector;
+
+	if (!block_size_is_power_of_two(cache))
+		(void) sector_div(block_nr, cache->sectors_per_block);
+	else
+		block_nr >>= cache->sectors_per_block_shift;
+
+	return block_nr;
 }
 
 static int bio_triggers_commit(struct cache *cache, struct bio *bio)
@@ -1053,9 +1074,8 @@ static struct kmem_cache *_endio_hook_cache;
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
-	sector_t block_size;
+	sector_t block_size, cache_sectors;
 	struct cache *cache;
-	char *end;
 	struct dm_arg_set as;
 
 	if (argc < 5) {
@@ -1066,10 +1086,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argc = argc;
 	as.argv = argv;
 
-	block_size = simple_strtoul(argv[3], &end, 10);
-	if (block_size < BLOCK_SIZE_MIN ||
-	    !is_power_of_2(block_size) || *end) {
-		ti->error = "Invalid data block size argument";
+	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
+	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+		ti->error = "Invalid data block size";
 		return -EINVAL;
 	}
 
@@ -1097,6 +1117,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening cache device";
 		goto bad_cache;
 	}
+	cache_sectors = get_dev_size(cache->cache_dev);
 
 	cache->origin_sectors = get_dev_size(cache->origin_dev);
 	if (ti->len > cache->origin_sectors) {
@@ -1107,8 +1128,16 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	cache->origin_blocks = cache->origin_sectors;
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
-	cache->sectors_per_block_shift = __ffs(block_size);
-	cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
+	if (block_size & (block_size - 1)) {
+		dm_block_t cache_size = cache_sectors;
+
+		cache->sectors_per_block_shift = -1;
+		(void) sector_div(cache_size, block_size);
+		cache->cache_size = cache_size;
+	} else {
+		cache->sectors_per_block_shift = __ffs(block_size);
+		cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
+	}
 
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad;
@@ -1129,7 +1158,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	init_waitqueue_head(&cache->migration_wait);
 	cache->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
-	cache->cache_size = get_dev_size(cache->cache_dev) >> cache->block_shift;
 
 	r = dm_cache_resize(cache->cmd, cache->cache_size);
 	if (r) {
@@ -1485,7 +1513,15 @@ static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 	/*
 	 * discard_granularity is just a hint, and not enforced.
 	 */
-	limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
+	if (block_size_is_power_of_two(cache))
+		limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
+	else
+		/*
+		 * Use largest power of 2 that is a factor of sectors_per_block
+		 * but at least DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
+		 */
+		limits->discard_granularity = max(1 << __ffs(cache->sectors_per_block),
+						  DATA_DEV_BLOCK_SIZE_MIN_SECTORS) << SECTOR_SHIFT;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
