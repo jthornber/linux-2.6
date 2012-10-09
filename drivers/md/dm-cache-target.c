@@ -43,14 +43,27 @@
 
 /*----------------------------------------------------------------*/
 
-static unsigned long *alloc_and_set_bitset(unsigned nr_entries)
+static size_t bitset_size_in_bytes(unsigned nr_entries)
 {
-	size_t s = sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
-	unsigned long *r = vzalloc(s);
-	if (r)
-		memset(r, ~0, s);
+	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
+}
 
-	return r;
+static unsigned long *alloc_bitset(unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	return vzalloc(s);
+}
+
+static void clear_bitset(void *bitset, unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	memset(bitset, 0, s);
+}
+
+static void set_bitset(void *bitset, unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	memset(bitset, ~0, s);
 }
 
 static void free_bitset(unsigned long *bits)
@@ -1057,17 +1070,19 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_alloc_dirty_bitset;
 	}
 
-	c->dirty_bitset = alloc_and_set_bitset(c->cache_size);
+	c->dirty_bitset = alloc_bitset(c->cache_size);
 	if (!c->dirty_bitset) {
 		ti->error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
+	set_bitset(c->dirty_bitset, c->cache_size);
 
-	c->discard_bitset = alloc_and_set_bitset(c->origin_blocks);
+	c->discard_bitset = alloc_bitset(c->origin_blocks);
 	if (!c->discard_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
 	}
+	clear_bitset(c->discard_bitset, c->origin_blocks);
 
 	c->copier = dm_kcopyd_client_create();
 	if (IS_ERR(c->copier)) {
