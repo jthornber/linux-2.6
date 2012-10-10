@@ -23,12 +23,6 @@
 #define DM_MSG_PREFIX "cache"
 #define DAEMON "cached"
 
-/*
- * FIXME: we must commit after every migration in order to guarantee crash
- * safety.  Thin works because we never recycle a data block within a
- * transaction.
- */
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -124,6 +118,7 @@ struct cache_c {
 	struct bio_list deferred_flush_bios;
 	struct list_head quiesced_migrations;
 	struct list_head completed_migrations;
+	struct list_head need_commit_migrations;
 	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
 
@@ -156,6 +151,7 @@ struct cache_c {
 
 	struct dm_cache_policy *policy;
 	bool quiescing;
+	bool commit_requested;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -165,6 +161,7 @@ struct cache_c {
 	atomic_t promotion;
 	atomic_t copies_avoided;
 	atomic_t cache_cell_clash;
+	atomic_t commit_count;
 };
 
 struct dm_cache_endio_hook {
@@ -301,6 +298,7 @@ static void issue(struct cache_c *c, struct bio *bio)
 
 	if (bio_triggers_commit(c, bio)) {
 		spin_lock_irqsave(&c->lock, flags);
+		c->commit_requested = true;
 		bio_list_add(&c->deferred_flush_bios, bio);
 		spin_unlock_irqrestore(&c->lock, flags);
 	} else
@@ -389,13 +387,11 @@ static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
 	cleanup_migration(c, mg);
 }
 
-static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
+static void migration_success_pre_commit(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	unsigned long flags;
 
 	if (mg->demote) {
-		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
-
 		if (dm_cache_remove_mapping(c->cmd, mg->cblock)) {
 			DMWARN("demotion failed; couldn't update on disk metadata");
 			policy_force_mapping(c->policy, mg->new_oblock,	mg->old_oblock);
@@ -404,6 +400,27 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 			cleanup_migration(c, mg);
 			return;
 		}
+
+	} else {
+		if (dm_cache_insert_mapping(c->cmd, mg->cblock, mg->new_oblock)) {
+			DMWARN("promotion failed; couldn't update on disk metadata");
+			policy_remove_mapping(c->policy, mg->new_oblock);
+			cleanup_migration(c, mg);
+		}
+	}
+
+	spin_lock_irqsave(&c->lock, flags);
+	list_add_tail(&mg->list, &c->need_commit_migrations);
+	c->commit_requested = true;
+	spin_unlock_irqrestore(&c->lock, flags);
+}
+
+static void migration_success_post_commit(struct cache_c *c, struct dm_cache_migration *mg)
+{
+	unsigned long flags;
+
+	if (mg->demote) {
+		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
 
 		if (mg->promote) {
 			mg->demote = false;
@@ -416,12 +433,6 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 
 	} else {
 		cell_defer(c, mg->new_ocell, 1);
-
-		if (dm_cache_insert_mapping(c->cmd, mg->cblock, mg->new_oblock)) {
-			DMWARN("promotion failed; couldn't update on disk metadata");
-			policy_remove_mapping(c->policy, mg->new_oblock);
-		}
-
 		clear_bit(mg->cblock, c->dirty_bitset);
 		cleanup_migration(c, mg);
 	}
@@ -472,7 +483,7 @@ static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
 static void avoid_copy(struct cache_c *c, struct dm_cache_migration *mg)
 {
 	atomic_inc(&c->copies_avoided);
-	migration_success(c, mg);
+	migration_success_pre_commit(c, mg);
 }
 
 static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
@@ -493,7 +504,7 @@ static void complete_migration(struct cache_c *c, struct dm_cache_migration *mg)
 	if (mg->err)
 		migration_failure(c, mg);
 	else
-		migration_success(c, mg);
+		migration_success_pre_commit(c, mg);
 }
 
 static void process_migrations(struct cache_c *cache, struct list_head *head,
@@ -742,6 +753,18 @@ static int need_commit_due_to_time(struct cache_c *c)
 	       jiffies > c->last_commit_jiffies + COMMIT_PERIOD;
 }
 
+static int commit_if_needed(struct cache_c *c)
+{
+	if (c->commit_requested || need_commit_due_to_time(c)) {
+		atomic_inc(&c->commit_count);
+		c->last_commit_jiffies = jiffies;
+		c->commit_requested = false;
+		return dm_cache_commit(c->cmd);
+	}
+
+	return 0;
+}
+
 static void process_deferred_bios(struct cache_c *c)
 {
 	unsigned long flags;
@@ -780,7 +803,8 @@ static void process_deferred_bios(struct cache_c *c)
 	}
 }
 
-static void process_deferred_flush_bios(struct cache_c *c)
+/* FIXME: duplicate code */
+static void submit_deferred_flush_bios(struct cache_c *c)
 {
 	unsigned long flags;
 	struct bio_list bios;
@@ -793,18 +817,25 @@ static void process_deferred_flush_bios(struct cache_c *c)
 	bio_list_init(&c->deferred_flush_bios);
 	spin_unlock_irqrestore(&c->lock, flags);
 
-	if (bio_list_empty(&bios) && !need_commit_due_to_time(c))
-		return;
-
-	if (dm_cache_commit(c->cmd)) {
-		while ((bio = bio_list_pop(&bios)))
-			bio_io_error(bio);
-		return;
-	}
-	c->last_commit_jiffies = jiffies;
-
 	while ((bio = bio_list_pop(&bios)))
 		generic_make_request(bio);
+}
+
+static void error_deferred_flush_bios(struct cache_c *c)
+{
+	unsigned long flags;
+	struct bio_list bios;
+	struct bio *bio;
+
+	bio_list_init(&bios);
+
+	spin_lock_irqsave(&c->lock, flags);
+	bio_list_merge(&bios, &c->deferred_flush_bios);
+	bio_list_init(&c->deferred_flush_bios);
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	while ((bio = bio_list_pop(&bios)))
+		bio_io_error(bio);
 }
 
 /*----------------------------------------------------------------
@@ -868,12 +899,14 @@ static int more_work(struct cache_c *c)
 {
 	if (is_quiescing(c))
 		return !list_empty(&c->quiesced_migrations) ||
-			!list_empty(&c->completed_migrations);
+			!list_empty(&c->completed_migrations) ||
+			!list_empty(&c->need_commit_migrations);
 	else
 		return !bio_list_empty(&c->deferred_bios) ||
 			!bio_list_empty(&c->deferred_flush_bios) ||
 			!list_empty(&c->quiesced_migrations) ||
-			!list_empty(&c->completed_migrations);
+			!list_empty(&c->completed_migrations) ||
+			!list_empty(&c->need_commit_migrations);
 }
 
 static void do_work(struct work_struct *ws)
@@ -881,14 +914,22 @@ static void do_work(struct work_struct *ws)
 	struct cache_c *c = container_of(ws, struct cache_c, worker);
 
 	do {
-		if (is_quiescing(c)) {
-			process_migrations(c, &c->quiesced_migrations, issue_copy);
-			process_migrations(c, &c->completed_migrations, complete_migration);
-		} else {
+		if (!is_quiescing(c))
 			process_deferred_bios(c);
-			process_migrations(c, &c->quiesced_migrations, issue_copy);
-			process_migrations(c, &c->completed_migrations, complete_migration);
-			process_deferred_flush_bios(c);
+
+		process_migrations(c, &c->quiesced_migrations, issue_copy);
+		process_migrations(c, &c->completed_migrations, complete_migration);
+
+		if (commit_if_needed(c)) {
+			error_deferred_flush_bios(c);
+
+			/*
+			 * FIXME: rollback metadata or just go into a
+			 * failure mode and error everything
+			 */
+		} else {
+			submit_deferred_flush_bios(c);
+			process_migrations(c, &c->need_commit_migrations, migration_success_post_commit);
 		}
 
 	} while (more_work(c));
@@ -938,6 +979,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
 	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&c->copies_avoided));
 	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&c->cache_cell_clash));
+	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&c->commit_count));
 
 	if (c->next_migration)
 		mempool_free(c->next_migration, c->migration_pool);
@@ -1058,6 +1100,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	bio_list_init(&c->deferred_flush_bios);
 	INIT_LIST_HEAD(&c->quiesced_migrations);
 	INIT_LIST_HEAD(&c->completed_migrations);
+	INIT_LIST_HEAD(&c->need_commit_migrations);
 	atomic_set(&c->nr_migrations, 0);
 	init_waitqueue_head(&c->migration_wait);
 	c->callbacks.congested_fn = cache_is_congested;
@@ -1133,6 +1176,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	dm_consume_args(&as, 5);
 
 	c->quiescing = 0;
+	c->commit_requested = false;
 	c->last_commit_jiffies = jiffies;
 
 	atomic_set(&c->read_hit, 0);
@@ -1143,6 +1187,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&c->promotion, 0);
 	atomic_set(&c->copies_avoided, 0);
 	atomic_set(&c->cache_cell_clash, 0);
+	atomic_set(&c->commit_count, 0);
 
 	r = dm_cache_load_mappings(c->cmd, load_mapping, c);
 	if (r) {
