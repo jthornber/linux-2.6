@@ -242,7 +242,7 @@ ii) Status
 
     <transaction id> <used metadata blocks>/<total metadata blocks>
     <used data blocks>/<total data blocks> <held metadata root>
-    [no_]discard_passdown read_[only|write]
+    [no_]discard_passdown ro|rw
 
     transaction id:
 	A 64-bit number used by userspace to help synchronise with metadata
@@ -265,7 +265,7 @@ ii) Status
 	underlying device.  When this is enabled when loading the table,
 	it can get disabled if the underlying device doesn't support it.
 
-    read_only|read_write
+    ro|rw
 	If the pool encounters certain types of device failures it will
 	drop into a read-only metadata mode in which no changes to
 	the pool metadata (like allocating new blocks) are permitted.

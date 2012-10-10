@@ -59,6 +59,8 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 
 int dm_cache_commit(struct dm_cache_metadata *cmd);
 
+void dm_cache_dump(struct dm_cache_metadata *cmd);
+
 /*----------------------------------------------------------------*/
 
 #endif

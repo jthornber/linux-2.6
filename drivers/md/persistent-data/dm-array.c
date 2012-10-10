@@ -319,11 +319,6 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 	return r;
 }
 
-/*
- * We don't need to create new blocks for every full block.  Since they all
- * have the same contents we can just share a single block.  Aren't
- * persistent data structures beautiful?
- */
 static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 			       unsigned begin_block, unsigned end_block,
 			       unsigned max_entries, const void *value,
@@ -333,35 +328,24 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 	struct dm_block *block;
 	struct array_block *ab;
 
-	if (begin_block == end_block)
-		return 0;
 
-	r = alloc_ablock(info, block_size, &block, &ab);
-	if (r)
-		return r;
-
-	fill_ablock(info, ab, value, le32_to_cpu(ab->max_entries));
-
-	/* insert the same block into the tree, in many different places */
 	while (begin_block != end_block) {
-		r = insert_ablock(info, begin_block, block, root);
+		r = alloc_ablock(info, block_size, &block, &ab);
 		if (r)
-			goto out;
+			return r;
 
-		dm_tm_inc(info->btree_info.tm, dm_block_location(block));
+		fill_ablock(info, ab, value, le32_to_cpu(ab->max_entries));
+
+		r = insert_ablock(info, begin_block, block, root);
+		if (r) {
+			unlock_ablock(info, block);
+			return r;
+		}
+
+		unlock_ablock(info, block);
 		begin_block++;
 	}
 
-out:
-	unlock_ablock(info, block);
-
-	/*
-	 * FIXME: I think this decrement is needed, but with it we get a
-	 * BUG_ON for decrementing past zero.  Need to write the
-	 * cache_check program to double check all reference counts.
-	 *
-	 * dm_tm_dec(info->btree_info.tm, dm_block_location(block));
-	 */
 	return 0;
 }
 
@@ -517,7 +501,7 @@ static int grow(struct resize *resize)
 	struct dm_block *block;
 	struct array_block *ab;
 
-	if (resize->old_nr_full_blocks < resize->new_nr_full_blocks) {
+	if (resize->new_nr_full_blocks > resize->old_nr_full_blocks) {
 		/*
 		 * Pad the end of the old block?
 		 */
@@ -541,16 +525,24 @@ static int grow(struct resize *resize)
 					&resize->root);
 		if (r)
 			return r;
-	}
 
-	/*
-	 * Add new tail block?
-	 */
-	if (resize->new_nr_entries_in_last_block)
-		r = insert_partial_ablock(resize->info, resize->block_size,
-					  resize->new_nr_full_blocks,
-					  resize->new_nr_entries_in_last_block,
-					  resize->value, &resize->root);
+		/*
+		 * Add new tail block?
+		 */
+		if (resize->new_nr_entries_in_last_block)
+			r = insert_partial_ablock(resize->info, resize->block_size,
+						  resize->new_nr_full_blocks,
+						  resize->new_nr_entries_in_last_block,
+						  resize->value, &resize->root);
+	} else {
+		r = shadow_ablock(resize->info, &resize->root,
+				  resize->old_nr_full_blocks, &block, &ab);
+		if (r)
+			return r;
+
+		fill_ablock(resize->info, ab, resize->value, resize->new_nr_entries_in_last_block);
+		unlock_ablock(resize->info, block);
+	}
 
 	return r;
 }
@@ -658,6 +650,7 @@ static int array_resize(struct dm_array_info *info, dm_block_t root,
 	resize.old_nr_entries_in_last_block = old_size % resize.max_entries;
 	resize.new_nr_full_blocks = new_size / resize.max_entries;
 	resize.new_nr_entries_in_last_block = new_size % resize.max_entries;
+	resize.value = value;
 
 	r = ((new_size > old_size) ? grow : shrink)(&resize);
 	if (r)
@@ -705,7 +698,7 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 		r = -ENODATA;
 	else
 		memcpy(value_le, element_at(info, ab, entry),
-		       sizeof(info->value_type.size));
+		       info->value_type.size);
 
 	unlock_ablock(info, block);
 	return r;
@@ -746,7 +739,7 @@ static int array_set(struct dm_array_info *info, dm_block_t root,
 			vt->inc(vt->context, value);
 	}
 
-	memcpy(element_at(info, ab, entry), value, sizeof(info->value_type.size));
+	memcpy(old_value, value, info->value_type.size);
 
 out:
 	unlock_ablock(info, block);
