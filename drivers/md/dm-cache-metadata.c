@@ -34,8 +34,10 @@
 
 enum superblock_flag_bits {
 	/* for spotting crashes that would invalidate the dirty bitset */
-	CACHE_CLEAN_SHUTDOWN,
+	__CLEAN_SHUTDOWN,
 };
+
+#define CLEAN_SHUTDOWN (1 << __CLEAN_SHUTDOWN)
 
 /*
  * Each mapping from cache block -> origin block carries a set of flags.
@@ -167,6 +169,25 @@ static int superblock_lock(struct dm_cache_metadata *cmd,
 {
 	return dm_bm_write_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
 				&sb_validator, sblock);
+}
+
+/*----------------------------------------------------------------*/
+
+static int get_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flags)
+{
+	int r;
+	struct dm_block *sblock;
+	struct cache_disk_superblock *disk_super;
+
+	r = superblock_read_lock(cmd, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	*flags = le32_to_cpu(disk_super->flags);
+	dm_bm_unlock(sblock);
+
+	return 0;
 }
 
 static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
@@ -528,8 +549,6 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
-	__commit_transaction(cmd, NULL);
-	//dm_cache_dump(cmd);
 	__destroy_persistent_data_objects(cmd);
 	kfree(cmd);
 }
@@ -617,11 +636,13 @@ int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm
 struct thunk {
 	load_mapping_fn fn;
 	void *context;
+	bool respect_dirty_flags;
 };
 
 static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 {
 	int r = 0;
+	bool dirty;
 	__le64 value;
 	dm_block_t oblock;
 	unsigned flags;
@@ -630,8 +651,10 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 	memcpy(&value, leaf, sizeof(value));
 	unpack_value(value, &oblock, &flags);
 
-	if (flags & M_VALID)
-		r = thunk->fn(thunk->context, oblock, cblock, flags & M_DIRTY);
+	if (flags & M_VALID) {
+		dirty = thunk->respect_dirty_flags ? (flags & M_DIRTY) : true;
+		r = thunk->fn(thunk->context, oblock, cblock, dirty);
+	}
 
 	return r;
 }
@@ -640,10 +663,17 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 			   load_mapping_fn fn,
 			   void *context)
 {
+	int r;
 	struct thunk thunk;
+	unsigned flags;
+
+	r = get_superblock_flags(cmd, &flags);
+	if (r)
+		return r;
 
 	thunk.fn = fn;
 	thunk.context = context;
+	thunk.respect_dirty_flags = flags & (1 << CLEAN_SHUTDOWN);
 	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
@@ -743,12 +773,12 @@ int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool di
 
 static unsigned set_clean_shutdown(unsigned flags)
 {
-	return flags | (1 << CACHE_CLEAN_SHUTDOWN);
+	return flags | CLEAN_SHUTDOWN;
 }
 
 static unsigned clear_clean_shutdown(unsigned flags)
 {
-	return flags & ~(1 << CACHE_CLEAN_SHUTDOWN);
+	return flags & ~CLEAN_SHUTDOWN;
 }
 
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
