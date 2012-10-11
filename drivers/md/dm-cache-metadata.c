@@ -81,7 +81,7 @@ struct dm_cache_metadata {
 	dm_block_t root;
 	sector_t data_block_size;
 	dm_block_t cache_blocks;
-	bool changed;
+	bool changed:1;
 };
 
 /*-------------------------------------------------------------------
@@ -347,7 +347,8 @@ bad:
 	return r;
 }
 
-static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_device)
+static int __open_or_format_metadata(struct dm_cache_metadata *cmd,
+				     bool format_device)
 {
 	int r, unformatted;
 
@@ -361,7 +362,8 @@ static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_
 	return __open_metadata(cmd);
 }
 
-static int __create_persistent_data_objects(struct dm_cache_metadata *cmd, bool may_format_device)
+static int __create_persistent_data_objects(struct dm_cache_metadata *cmd,
+					    bool may_format_device)
 {
 	int r;
 	cmd->bm = dm_block_manager_create(cmd->bdev, CACHE_METADATA_BLOCK_SIZE,
@@ -419,7 +421,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 
 	debug("__commit_transaction\n");
 	/*
-	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
+	 * We need to know if the cache_disk_superblock exceeds a 512-byte sector.
 	 */
 	BUILD_BUG_ON(sizeof(struct cache_disk_superblock) > 512);
 
