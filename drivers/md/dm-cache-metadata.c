@@ -143,6 +143,15 @@ static struct dm_block_validator sb_validator = {
 
 /*----------------------------------------------------------------*/
 
+static int superblock_read_lock(struct dm_cache_metadata *cmd,
+				struct dm_block **sblock)
+{
+	return dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
+			       &sb_validator, sblock);
+}
+
+/*----------------------------------------------------------------*/
+
 static int superblock_lock_zero(struct dm_cache_metadata *cmd,
 				struct dm_block **sblock)
 {
@@ -309,8 +318,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	struct dm_block *sblock;
 	struct cache_disk_superblock *disk_super;
 
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r < 0) {
 		DMERR("couldn't read superblock");
 		return r;
@@ -388,8 +396,7 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	 * We re-read the superblock every time.  Shouldn't need to do this
 	 * really.
 	 */
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r)
 		return r;
 
