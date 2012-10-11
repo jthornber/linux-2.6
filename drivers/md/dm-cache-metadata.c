@@ -569,7 +569,6 @@ static int __insert(struct dm_cache_metadata *cmd,
 		    dm_block_t cblock, dm_block_t oblock)
 {
 	int r;
-	unsigned flags;
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
@@ -577,13 +576,6 @@ static int __insert(struct dm_cache_metadata *cmd,
 	if (r)
 		return r;
 
-	// FIXME: remove
-	value = cpu_to_le64(0);
-	r = dm_array_get(&cmd->info, cmd->root, cblock, &value);
-	if (r)
-		return r;
-
-	unpack_value(value, &oblock, &flags);
 	cmd->changed = 1;
 	return 0;
 }
@@ -616,7 +608,7 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 	unpack_value(value, &oblock, &flags);
 
 	if (flags & M_VALID)
-		r = thunk->fn(thunk->context, oblock, cblock);
+		r = thunk->fn(thunk->context, oblock, cblock, flags & M_DIRTY);
 
 	return r;
 }
@@ -686,7 +678,47 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 	return r;
 }
 
-int dm_cache_commit(struct dm_cache_metadata *cmd)
+static int __dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty)
+{
+	int r;
+	unsigned flags;
+	dm_block_t oblock;
+	__le64 value;
+
+	r = dm_array_get(&cmd->info, cmd->root, cblock, &value);
+	if (r)
+		return r;
+
+	unpack_value(value, &oblock, &flags);
+
+	if (((flags & M_DIRTY) && dirty) || (!(flags & M_DIRTY) && !dirty))
+		/* nothing to be done */
+		return 0;
+
+	value = pack_value(oblock, flags | (dirty ? M_DIRTY : 0));
+	__dm_bless_for_disk(&value);
+
+	r = dm_array_set(&cmd->info, cmd->root, cblock, &value, &cmd->root);
+	if (r)
+		return r;
+
+	cmd->changed = 1;
+	return 0;
+
+}
+
+int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = __dirty(cmd, cblock, dirty);
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
 {
 	int r;
 
@@ -703,4 +735,3 @@ out:
 }
 
 /*----------------------------------------------------------------*/
-

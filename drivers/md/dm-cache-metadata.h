@@ -52,12 +52,13 @@ int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock);
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm_block_t oblock);
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd);
 
-typedef int (*load_mapping_fn)(void *context, dm_block_t oblock, dm_block_t cblock);
+typedef int (*load_mapping_fn)(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty);
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 			   load_mapping_fn fn,
 			   void *context);
 
-int dm_cache_commit(struct dm_cache_metadata *cmd);
+int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty);
+int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
 
 void dm_cache_dump(struct dm_cache_metadata *cmd);
 
