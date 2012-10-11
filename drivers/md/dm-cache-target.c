@@ -152,6 +152,7 @@ struct cache_c {
 	struct dm_cache_policy *policy;
 	bool quiescing;
 	bool commit_requested;
+	bool loaded_mappings;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -1177,6 +1178,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	c->quiescing = 0;
 	c->commit_requested = false;
+	c->loaded_mappings = false;
 	c->last_commit_jiffies = jiffies;
 
 	atomic_set(&c->read_hit, 0);
@@ -1189,12 +1191,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&c->cache_cell_clash, 0);
 	atomic_set(&c->commit_count, 0);
 
-	r = dm_cache_load_mappings(c->cmd, load_mapping, c);
-	if (r) {
-		ti->error = "couldn't load cache mappings";
-		goto bad_load_mappings;
-	}
-
 	ti->num_flush_requests = 2;
 	ti->flush_supported = true;
 
@@ -1202,8 +1198,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->discards_supported = true;
 	return 0;
 
-bad_load_mappings:
-	dm_cache_policy_destroy(c->policy);
 bad_cache_policy:
 	mempool_destroy(c->migration_pool);
 bad_migration_pool:
@@ -1348,6 +1342,22 @@ static void cache_postsuspend(struct dm_target *ti)
 	stop_quiescing(c);
 }
 
+static int cache_preresume(struct dm_target *ti)
+{
+	int r = 0;
+	struct cache_c *c = ti->private;
+
+	if (!c->loaded_mappings) {
+		r = dm_cache_load_mappings(c->cmd, load_mapping, c);
+		if (r)
+			DMERR("couldn't load cache mappings");
+
+		c->loaded_mappings = true;
+	}
+
+	return r;
+}
+
 static void cache_resume(struct dm_target *ti)
 {
 	struct cache_c *c = ti->private;
@@ -1455,6 +1465,7 @@ static struct target_type cache_target = {
 	.map = cache_map,
 	.end_io = cache_end_io,
 	.postsuspend = cache_postsuspend,
+	.preresume = cache_preresume,
 	.resume = cache_resume,
 	.status = cache_status,
 	.iterate_devices = cache_iterate_devices,

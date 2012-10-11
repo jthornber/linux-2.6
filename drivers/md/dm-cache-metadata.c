@@ -506,7 +506,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
 	__commit_transaction(cmd);
-	dm_cache_dump(cmd);
+	//dm_cache_dump(cmd);
 	__destroy_persistent_data_objects(cmd);
 	kfree(cmd);
 }
