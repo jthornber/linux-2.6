@@ -32,6 +32,11 @@
 #define CACHE_MAX_CONCURRENT_LOCKS 5
 #define SPACE_MAP_ROOT_SIZE 128
 
+enum superblock_flag_bits {
+	/* for spotting crashes that would invalidate the dirty bitset */
+	CACHE_CLEAN_SHUTDOWN,
+};
+
 /*
  * Each mapping from cache block -> origin block carries a set of flags.
  */
@@ -149,8 +154,6 @@ static int superblock_read_lock(struct dm_cache_metadata *cmd,
 	return dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
 			       &sb_validator, sblock);
 }
-
-/*----------------------------------------------------------------*/
 
 static int superblock_lock_zero(struct dm_cache_metadata *cmd,
 				struct dm_block **sblock)
@@ -320,7 +323,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 
 	r = superblock_read_lock(cmd, &sblock);
 	if (r < 0) {
-		DMERR("couldn't read superblock");
+		DMERR("couldn't read lock superblock");
 		return r;
 	}
 
@@ -412,14 +415,19 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	return 0;
 }
 
-static int __commit_transaction(struct dm_cache_metadata *cmd)
+/*
+ * The mutator updates the superblock flags.  You may safely set this to
+ * NULL, in which case the flags are unchanged.
+ */
+static int __commit_transaction(struct dm_cache_metadata *cmd,
+				unsigned (*flags_mutator)(unsigned))
 {
 	int r;
 	size_t metadata_len;
+	unsigned sb_flags;
 	struct cache_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
-	debug("__commit_transaction\n");
 	/*
 	 * We need to know if the cache_disk_superblock exceeds a 512-byte sector.
 	 */
@@ -438,6 +446,12 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 		return r;
 
 	disk_super = dm_block_data(sblock);
+
+	if (flags_mutator) {
+		sb_flags = flags_mutator(le32_to_cpu(disk_super->flags));
+		disk_super->flags = cpu_to_le32((uint32_t) sb_flags);
+	}
+
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->cache_blocks = cpu_to_le32(cmd->cache_blocks);
@@ -514,7 +528,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
-	__commit_transaction(cmd);
+	__commit_transaction(cmd, NULL);
 	//dm_cache_dump(cmd);
 	__destroy_persistent_data_objects(cmd);
 	kfree(cmd);
@@ -727,12 +741,25 @@ int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool di
 	return r;
 }
 
+static unsigned set_clean_shutdown(unsigned flags)
+{
+	return flags | (1 << CACHE_CLEAN_SHUTDOWN);
+}
+
+static unsigned clear_clean_shutdown(unsigned flags)
+{
+	return flags & ~(1 << CACHE_CLEAN_SHUTDOWN);
+}
+
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
 {
 	int r;
+	unsigned (*mutator)(unsigned) = clean_shutdown ?
+		set_clean_shutdown :
+		clear_clean_shutdown;
 
 	down_write(&cmd->root_lock);
-	r = __commit_transaction(cmd);
+	r = __commit_transaction(cmd, mutator);
 	if (r)
 		goto out;
 
