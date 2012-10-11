@@ -310,7 +310,7 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_block_t cache_size)
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * cache_size);
 	if (p->cblocks) {
 		queue_init(&p->queues.free);
-	
+
 		while (cache_size--)
 			queue_add(&p->queues.free, &p->cblocks[cache_size].ce.list);
 
@@ -376,7 +376,7 @@ static int alloc_multiqueues(struct policy *p, unsigned mqueues)
 	return 0;
 }
 
-void free_multiqueues(struct policy *p)
+static void free_multiqueues(struct policy *p)
 {
 	vfree(p->queues.u.mq);
 }
@@ -585,7 +585,7 @@ static struct track_queue_entry *update_track_queue(struct policy *p, struct tra
 			queue_move_tail(&q->used, &r->ce.list);
 			r->ce.tick = p->tick.t_int;
 		}
- 
+
 	} else {
 		r = pop_add_and_insert_track_queue_entry(q, oblock);
 		BUG_ON(!r);
@@ -597,7 +597,7 @@ static struct track_queue_entry *update_track_queue(struct policy *p, struct tra
 
 	q->count[T_HITS][rw] += hits;
 	q->count[T_SECTORS][rw] += sectors;
- 
+
 	return r;
 }
 
@@ -1314,7 +1314,7 @@ static struct dm_cache_policy *basic_policy_create(dm_block_t cache_size,
 	r = alloc_cache_blocks_with_hash(p, cache_size);
 	if (r)
 		goto bad_free_policy;
-		
+
 	/* Cache allocation bitset. */
 	p->allocation_bitset = alloc_bitset(cache_size);
 	if (!p->allocation_bitset)
