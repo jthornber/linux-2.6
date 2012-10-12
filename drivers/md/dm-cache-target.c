@@ -1217,6 +1217,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->num_discard_requests = 1;
 	ti->discards_supported = true;
+	ti->discard_zeroes_data_unsupported = true;
+
 	return 0;
 
 bad_cache_policy:
@@ -1481,12 +1483,9 @@ static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 	limits->max_discard_sectors = cache->sectors_per_block * 1024;
 
 	/*
-	 * This is just a hint, and not enforced.  We have to cope with
-	 * bios that cover a block partially.  A discard that spans a block
-	 * boundary is not sent to this target.
+	 * discard_granularity is just a hint, and not enforced.
 	 */
 	limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
-	limits->discard_zeroes_data = 0;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
