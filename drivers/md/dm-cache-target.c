@@ -236,6 +236,31 @@ static bool is_discarded(struct cache_c *c, dm_block_t b)
 	return r;
 }
 
+/*----------------------------------------------------------------*/
+
+static void load_stats(struct cache_c *c)
+{
+	struct dm_cache_statistics stats;
+
+	dm_cache_get_stats(c->cmd, &stats);
+	atomic_set(&c->read_hit, stats.read_hits);
+	atomic_set(&c->read_miss, stats.read_misses);
+	atomic_set(&c->write_hit, stats.write_hits);
+	atomic_set(&c->write_miss, stats.write_misses);
+}
+
+static void save_stats(struct cache_c *c)
+{
+	struct dm_cache_statistics stats;
+
+	stats.read_hits = atomic_read(&c->read_hit);
+	stats.read_misses = atomic_read(&c->read_miss);
+	stats.write_hits = atomic_read(&c->write_hit);
+	stats.write_misses = atomic_read(&c->write_miss);
+
+	dm_cache_set_stats(c->cmd, &stats);
+}
+
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
@@ -760,7 +785,7 @@ static int commit_if_needed(struct cache_c *c)
 		atomic_inc(&c->commit_count);
 		c->last_commit_jiffies = jiffies;
 		c->commit_requested = false;
-		return dm_cache_commit(c->cmd);
+		return dm_cache_commit(c->cmd, false);
 	}
 
 	return 0;
@@ -1007,9 +1032,13 @@ static sector_t get_dev_size(struct dm_dev *dev)
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
 }
 
-static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
+static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty)
 {
 	struct cache_c *c = context;
+
+	dirty ? set_bit(cblock, c->dirty_bitset) :
+		clear_bit(cblock, c->dirty_bitset);
+
 	return policy_load_mapping(c->policy, oblock, cblock);
 }
 
@@ -1181,10 +1210,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	c->loaded_mappings = false;
 	c->last_commit_jiffies = jiffies;
 
-	atomic_set(&c->read_hit, 0);
-	atomic_set(&c->read_miss, 0);
-	atomic_set(&c->write_hit, 0);
-	atomic_set(&c->write_miss, 0);
+	load_stats(c);
+
 	atomic_set(&c->demotion, 0);
 	atomic_set(&c->promotion, 0);
 	atomic_set(&c->copies_avoided, 0);
@@ -1331,8 +1358,22 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 	return 0;
 }
 
+static int write_dirty_bitset(struct cache_c *c)
+{
+	unsigned i, r;
+
+	for (i = 0; i < c->cache_size; i++) {
+		r = dm_cache_set_dirty(c->cmd, i, test_bit(i, c->dirty_bitset));
+		if (r)
+			return r;
+	}
+
+	return 0;
+}
+
 static void cache_postsuspend(struct dm_target *ti)
 {
+	int r;
 	struct cache_c *c = ti->private;
 
 	start_quiescing(c);
@@ -1340,6 +1381,15 @@ static void cache_postsuspend(struct dm_target *ti)
 	stop_worker(c);
 	requeue_deferred_io(c);
 	stop_quiescing(c);
+
+	/*
+	 * If writing the bitset failed, we still commit, but don't set the
+	 * clean shutdown flag.  This will effectively force every dirty
+	 * bit to be set on reload.
+	 */
+	r = write_dirty_bitset(c);
+	save_stats(c);
+	dm_cache_commit(c->cmd, !r);
 }
 
 static int cache_preresume(struct dm_target *ti)

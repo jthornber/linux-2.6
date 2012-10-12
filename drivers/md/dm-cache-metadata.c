@@ -32,6 +32,11 @@
 #define CACHE_MAX_CONCURRENT_LOCKS 5
 #define SPACE_MAP_ROOT_SIZE 128
 
+enum superblock_flag_bits {
+	/* for spotting crashes that would invalidate the dirty bitset */
+	CLEAN_SHUTDOWN,
+};
+
 /*
  * Each mapping from cache block -> origin block carries a set of flags.
  */
@@ -67,6 +72,11 @@ struct cache_disk_superblock {
 	__le32 compat_ro_flags;
 	__le32 incompat_flags;
 
+	__le32 read_hits;
+	__le32 read_misses;
+	__le32 write_hits;
+	__le32 write_misses;
+
 } __packed;
 
 struct dm_cache_metadata {
@@ -81,7 +91,10 @@ struct dm_cache_metadata {
 	dm_block_t root;
 	sector_t data_block_size;
 	dm_block_t cache_blocks;
-	bool changed;
+	bool changed:1;
+	bool clean_when_opened:1;
+
+	struct dm_cache_statistics stats;
 };
 
 /*-------------------------------------------------------------------
@@ -143,6 +156,13 @@ static struct dm_block_validator sb_validator = {
 
 /*----------------------------------------------------------------*/
 
+static int superblock_read_lock(struct dm_cache_metadata *cmd,
+				struct dm_block **sblock)
+{
+	return dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
+			       &sb_validator, sblock);
+}
+
 static int superblock_lock_zero(struct dm_cache_metadata *cmd,
 				struct dm_block **sblock)
 {
@@ -155,6 +175,25 @@ static int superblock_lock(struct dm_cache_metadata *cmd,
 {
 	return dm_bm_write_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
 				&sb_validator, sblock);
+}
+
+/*----------------------------------------------------------------*/
+
+static int get_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flags)
+{
+	int r;
+	struct dm_block *sblock;
+	struct cache_disk_superblock *disk_super;
+
+	r = superblock_read_lock(cmd, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	*flags = le32_to_cpu(disk_super->flags);
+	dm_bm_unlock(sblock);
+
+	return 0;
 }
 
 static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
@@ -237,6 +276,11 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
 
+	disk_super->read_hits = cpu_to_le32(0);
+	disk_super->read_misses = cpu_to_le32(0);
+	disk_super->write_hits = cpu_to_le32(0);
+	disk_super->write_misses = cpu_to_le32(0);
+
 	return dm_tm_commit(cmd->tm, sblock);
 
 bad_locked:
@@ -266,6 +310,7 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r)
 		goto bad;
 
+	cmd->clean_when_opened = true;
 	return 0;
 
 bad:
@@ -308,11 +353,11 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	int r;
 	struct dm_block *sblock;
 	struct cache_disk_superblock *disk_super;
+	unsigned long sb_flags;
 
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r < 0) {
-		DMERR("couldn't read superblock");
+		DMERR("couldn't read lock superblock");
 		return r;
 	}
 
@@ -332,6 +377,8 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	}
 
 	__setup_mapping_info(cmd);
+	sb_flags = le32_to_cpu(disk_super->flags);
+	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
 	return dm_bm_unlock(sblock);
 
 bad:
@@ -339,7 +386,8 @@ bad:
 	return r;
 }
 
-static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_device)
+static int __open_or_format_metadata(struct dm_cache_metadata *cmd,
+				     bool format_device)
 {
 	int r, unformatted;
 
@@ -353,7 +401,8 @@ static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_
 	return __open_metadata(cmd);
 }
 
-static int __create_persistent_data_objects(struct dm_cache_metadata *cmd, bool may_format_device)
+static int __create_persistent_data_objects(struct dm_cache_metadata *cmd,
+					    bool may_format_device)
 {
 	int r;
 	cmd->bm = dm_block_manager_create(cmd->bdev, CACHE_METADATA_BLOCK_SIZE,
@@ -378,6 +427,62 @@ static void __destroy_persistent_data_objects(struct dm_cache_metadata *cmd)
 	dm_block_manager_destroy(cmd->bm);
 }
 
+typedef unsigned long (*flags_mutator)(unsigned long);
+
+static void update_flags(struct cache_disk_superblock *disk_super,
+			 flags_mutator mutator)
+{
+	uint32_t sb_flags = mutator(le32_to_cpu(disk_super->flags));
+	disk_super->flags = cpu_to_le32(sb_flags);
+}
+
+static unsigned long set_clean_shutdown(unsigned long flags)
+{
+	set_bit(CLEAN_SHUTDOWN, &flags);
+	return flags;
+}
+
+static unsigned long clear_clean_shutdown(unsigned long flags)
+{
+	clear_bit(CLEAN_SHUTDOWN, &flags);
+	return flags;
+}
+
+static void read_superblock_fields(struct dm_cache_metadata *cmd,
+				   struct cache_disk_superblock *disk_super)
+{
+	cmd->root = le64_to_cpu(disk_super->mapping_root);
+	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
+	cmd->cache_blocks = le32_to_cpu(disk_super->cache_blocks);
+
+	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
+	cmd->stats.read_misses = le32_to_cpu(disk_super->read_misses);
+	cmd->stats.write_hits = le32_to_cpu(disk_super->write_hits);
+	cmd->stats.write_misses = le32_to_cpu(disk_super->write_misses);
+
+	cmd->changed = false;
+}
+
+/*
+ * The mutator updates the superblock flags.
+ */
+static int __begin_transaction_flags(struct dm_cache_metadata *cmd, flags_mutator mutator)
+{
+	int r;
+	struct cache_disk_superblock *disk_super;
+	struct dm_block *sblock;
+
+	r = superblock_lock(cmd, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	update_flags(disk_super, mutator);
+	read_superblock_fields(cmd, disk_super);
+
+	return dm_bm_flush_and_unlock(cmd->bm, sblock);
+}
+
 static int __begin_transaction(struct dm_cache_metadata *cmd)
 {
 	int r;
@@ -388,31 +493,27 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	 * We re-read the superblock every time.  Shouldn't need to do this
 	 * really.
 	 */
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r)
 		return r;
 
 	disk_super = dm_block_data(sblock);
-	cmd->root = le64_to_cpu(disk_super->mapping_root);
-	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
-	cmd->cache_blocks = le32_to_cpu(disk_super->cache_blocks);
-	cmd->changed = false;
-
+	read_superblock_fields(cmd, disk_super);
 	dm_bm_unlock(sblock);
+
 	return 0;
 }
 
-static int __commit_transaction(struct dm_cache_metadata *cmd)
+static int __commit_transaction(struct dm_cache_metadata *cmd,
+				flags_mutator mutator)
 {
 	int r;
 	size_t metadata_len;
 	struct cache_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
-	debug("__commit_transaction\n");
 	/*
-	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
+	 * We need to know if the cache_disk_superblock exceeds a 512-byte sector.
 	 */
 	BUILD_BUG_ON(sizeof(struct cache_disk_superblock) > 512);
 
@@ -429,9 +530,18 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 		return r;
 
 	disk_super = dm_block_data(sblock);
+
+	if (mutator)
+		update_flags(disk_super, mutator);
+
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->cache_blocks = cpu_to_le32(cmd->cache_blocks);
+
+	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
+	disk_super->read_misses = cpu_to_le32(cmd->stats.read_misses);
+	disk_super->write_hits = cpu_to_le32(cmd->stats.write_hits);
+	disk_super->write_misses = cpu_to_le32(cmd->stats.write_misses);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -494,7 +604,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 		return NULL;
 	}
 
-	r = __begin_transaction(cmd);
+	r = __begin_transaction_flags(cmd, clear_clean_shutdown);
 	if (r < 0) {
 		dm_cache_metadata_close(cmd);
 		return NULL;
@@ -505,8 +615,6 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
-	__commit_transaction(cmd);
-	//dm_cache_dump(cmd);
 	__destroy_persistent_data_objects(cmd);
 	kfree(cmd);
 }
@@ -569,7 +677,6 @@ static int __insert(struct dm_cache_metadata *cmd,
 		    dm_block_t cblock, dm_block_t oblock)
 {
 	int r;
-	unsigned flags;
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
@@ -577,13 +684,6 @@ static int __insert(struct dm_cache_metadata *cmd,
 	if (r)
 		return r;
 
-	// FIXME: remove
-	value = cpu_to_le64(0);
-	r = dm_array_get(&cmd->info, cmd->root, cblock, &value);
-	if (r)
-		return r;
-
-	unpack_value(value, &oblock, &flags);
 	cmd->changed = 1;
 	return 0;
 }
@@ -602,11 +702,13 @@ int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm
 struct thunk {
 	load_mapping_fn fn;
 	void *context;
+	bool respect_dirty_flags;
 };
 
 static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 {
 	int r = 0;
+	bool dirty;
 	__le64 value;
 	dm_block_t oblock;
 	unsigned flags;
@@ -615,8 +717,10 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 	memcpy(&value, leaf, sizeof(value));
 	unpack_value(value, &oblock, &flags);
 
-	if (flags & M_VALID)
-		r = thunk->fn(thunk->context, oblock, cblock);
+	if (flags & M_VALID) {
+		dirty = thunk->respect_dirty_flags ? (flags & M_DIRTY) : true;
+		r = thunk->fn(thunk->context, oblock, cblock, dirty);
+	}
 
 	return r;
 }
@@ -625,10 +729,17 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 			   load_mapping_fn fn,
 			   void *context)
 {
+	int r;
 	struct thunk thunk;
+	unsigned flags;
+
+	r = get_superblock_flags(cmd, &flags);
+	if (r)
+		return r;
 
 	thunk.fn = fn;
 	thunk.context = context;
+	thunk.respect_dirty_flags = cmd->clean_when_opened;
 	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
@@ -686,12 +797,69 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 	return r;
 }
 
-int dm_cache_commit(struct dm_cache_metadata *cmd)
+static int __dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty)
+{
+	int r;
+	unsigned flags;
+	dm_block_t oblock;
+	__le64 value;
+
+	r = dm_array_get(&cmd->info, cmd->root, cblock, &value);
+	if (r)
+		return r;
+
+	unpack_value(value, &oblock, &flags);
+
+	if (((flags & M_DIRTY) && dirty) || (!(flags & M_DIRTY) && !dirty))
+		/* nothing to be done */
+		return 0;
+
+	value = pack_value(oblock, flags | (dirty ? M_DIRTY : 0));
+	__dm_bless_for_disk(&value);
+
+	r = dm_array_set(&cmd->info, cmd->root, cblock, &value, &cmd->root);
+	if (r)
+		return r;
+
+	cmd->changed = 1;
+	return 0;
+
+}
+
+int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __commit_transaction(cmd);
+	r = __dirty(cmd, cblock, dirty);
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+void dm_cache_get_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats)
+{
+	down_read(&cmd->root_lock);
+	memcpy(stats, &cmd->stats, sizeof(*stats));
+	up_read(&cmd->root_lock);
+}
+
+void dm_cache_set_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats)
+{
+	down_write(&cmd->root_lock);
+	memcpy(&cmd->stats, stats, sizeof(*stats));
+	up_write(&cmd->root_lock);
+}
+
+int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
+{
+	int r;
+	flags_mutator mutator = clean_shutdown ? set_clean_shutdown : clear_clean_shutdown;
+
+	down_write(&cmd->root_lock);
+	r = __commit_transaction(cmd, mutator);
 	if (r)
 		goto out;
 
@@ -703,4 +871,3 @@ out:
 }
 
 /*----------------------------------------------------------------*/
-
