@@ -30,9 +30,9 @@
 #define CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
 #define CACHE_FEATURE_INCOMPAT_SUPP	  0UL
 
-
 /*
- * Returns NULL on failure.
+ * Reopens or creates a new, empty metadata volume.
+ * Returns an ERR_PTR on failure.
  */
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,

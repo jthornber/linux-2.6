@@ -950,7 +950,7 @@ static int more_work(struct cache *cache)
 			!list_empty(&cache->need_commit_migrations);
 }
 
-static void do_work(struct work_struct *ws)
+static void do_worker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(ws, struct cache, worker);
 
@@ -1057,75 +1057,50 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, boo
 	return policy_load_mapping(cache->policy, oblock, cblock);
 }
 
+static int create_cache_policy(struct cache *cache,
+			       const char *policy_name, char **error)
+{
+	cache->policy =
+		dm_cache_policy_create(policy_name, cache->cache_size,
+				       cache->origin_sectors,
+				       cache->sectors_per_block);
+	if (!cache->policy) {
+		*error = "Error creating cache's policy";
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 static struct kmem_cache *_migration_cache;
 static struct kmem_cache *_endio_hook_cache;
 
-/*
- * Construct a hierarchical storage device mapping:
- *
- * cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
- *
- * metadata dev    : fast device holding the persistent metadata
- * origin dev	   : slow device holding original data blocks
- * cache dev	   : fast device holding cached data blocks
- * data block size : cache unit size in sectors
- * policy          : the replacement policy to use
- */
-static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static struct cache *cache_create(struct block_device *metadata_dev,
+				  sector_t block_size, sector_t origin_sectors,
+				  sector_t cache_sectors, const char *policy_name,
+				  bool read_only, char **error)
 {
 	int r;
-	sector_t block_size, cache_sectors;
+	void *err_p = ERR_PTR(-ENOMEM);
 	struct cache *cache;
-	struct dm_arg_set as;
+	struct dm_cache_metadata *cmd;
+	bool format_device = read_only ? false : true;
 
-	if (argc < 5) {
-		ti->error = "Invalid argument count";
-		return -EINVAL;
+	cmd = dm_cache_metadata_open(metadata_dev, block_size, format_device);
+	if (IS_ERR(cmd)) {
+		*error = "Error creating metadata object";
+		return (struct cache *)cmd;
 	}
 
-	as.argc = argc;
-	as.argv = argv;
-
-	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
-	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
-	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
-		ti->error = "Invalid data block size";
-		return -EINVAL;
-	}
-
-	cache = ti->private = kzalloc(sizeof(*cache), GFP_KERNEL);
+	cache = kzalloc(sizeof(*cache), GFP_KERNEL);
 	if (!cache) {
-		ti->error = "Error allocating cache context";
-		return -ENOMEM;
-	}
-	cache->ti = ti;
-
-	r = dm_get_device(cache->ti, argv[0], FMODE_READ | FMODE_WRITE, &cache->metadata_dev);
-	if (r) {
-		ti->error = "Error opening metadata device";
-		goto bad_metadata;
-	}
-
-	r = dm_get_device(cache->ti, argv[1], FMODE_READ | FMODE_WRITE, &cache->origin_dev);
-	if (r) {
-		ti->error = "Error opening origin device";
-		goto bad_origin;
-	}
-
-	r = dm_get_device(cache->ti, argv[2], FMODE_READ | FMODE_WRITE, &cache->cache_dev);
-	if (r) {
-		ti->error = "Error opening cache device";
+		*error = "Error allocating memory for cache";
 		goto bad_cache;
 	}
-	cache_sectors = get_dev_size(cache->cache_dev);
 
-	cache->origin_sectors = get_dev_size(cache->origin_dev);
-	if (ti->len > cache->origin_sectors) {
-		ti->error = "Device size larger than cached device";
-		goto bad;
-	}
+	cache->cmd = cmd;
 
-	cache->origin_blocks = cache->origin_sectors;
+	cache->origin_blocks = origin_sectors;
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
 	if (block_size & (block_size - 1)) {
@@ -1139,15 +1114,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
 	}
 
-	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
-		goto bad;
-
-	cache->cmd = dm_cache_metadata_open(cache->metadata_dev->bdev, block_size, 1);
-	if (!cache->cmd) {
-		ti->error = "couldn't create cache metadata object";
-		goto bad;
-	}
-
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
@@ -1156,78 +1122,70 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_LIST_HEAD(&cache->need_commit_migrations);
 	atomic_set(&cache->nr_migrations, 0);
 	init_waitqueue_head(&cache->migration_wait);
-	cache->callbacks.congested_fn = cache_is_congested;
-	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
 
-	r = dm_cache_resize(cache->cmd, cache->cache_size);
+	r = dm_cache_resize(cmd, cache->cache_size);
 	if (r) {
-		ti->error = "couldn't resize cache metadata";
+		*error = "Couldn't resize cache metadata";
+		err_p = ERR_PTR(r);
 		goto bad_alloc_dirty_bitset;
 	}
 
 	cache->dirty_bitset = alloc_bitset(cache->cache_size);
 	if (!cache->dirty_bitset) {
-		ti->error = "Couldn't allocate dirty_bitset";
+		*error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
 	set_bitset(cache->dirty_bitset, cache->cache_size);
 
 	cache->discard_bitset = alloc_bitset(cache->origin_blocks);
 	if (!cache->discard_bitset) {
-		ti->error = "Couldn't allocate discard bitset";
+		*error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
 	}
 	clear_bitset(cache->discard_bitset, cache->origin_blocks);
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
-		ti->error = "Couldn't create kcopyd client";
+		*error = "Couldn't create kcopyd client";
+		err_p = cache->copier;
 		goto bad_kcopyd_client;
 	}
 
 	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
 	if (!cache->wq) {
-		ti->error = "couldn't create workqueue for metadata object";
+		*error = "Couldn't create workqueue for metadata object";
 		goto bad_wq;
 	}
-	INIT_WORK(&cache->worker, do_work);
+	INIT_WORK(&cache->worker, do_worker);
 	INIT_DELAYED_WORK(&cache->waker, do_waker);
 
 	cache->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!cache->prison) {
-		ti->error = "couldn't create bio prison";
+		*error = "Couldn't create bio prison";
 		goto bad_prison;
 	}
 
 	cache->all_io_ds = dm_deferred_set_create();
 	if (!cache->all_io_ds) {
-		ti->error = "couldn't create all_io deferred set";
+		*error = "Couldn't create all_io deferred set";
 		goto bad_deferred_set;
 	}
 
 	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
-						      _endio_hook_cache);
+							  _endio_hook_cache);
 	if (!cache->endio_hook_pool) {
-		ti->error = "Error creating cache's endio_hook mempool";
+		*error = "Error creating cache's endio_hook mempool";
 		goto bad_endio_hook_pool;
 	}
 
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
-						     _migration_cache);
+							 _migration_cache);
 	if (!cache->migration_pool) {
-		ti->error = "Error creating cache's endio_hook mempool";
+		*error = "Error creating cache's endio_hook mempool";
 		goto bad_migration_pool;
 	}
 
-	cache->policy = dm_cache_policy_create(argv[4], cache->cache_size, cache->origin_sectors, block_size);
-	if (!cache->policy) {
-		ti->error = "Error creating cache's policy";
-		goto bad_cache_policy;
-	}
-
-	dm_consume_args(&as, 5);
-
-	cache->quiescing = 0;
+	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
 	cache->last_commit_jiffies = jiffies;
@@ -1240,17 +1198,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	atomic_set(&cache->cache_cell_clash, 0);
 	atomic_set(&cache->commit_count, 0);
 
-	ti->num_flush_requests = 2;
-	ti->flush_supported = true;
+	return cache;
 
-	ti->num_discard_requests = 1;
-	ti->discards_supported = true;
-	ti->discard_zeroes_data_unsupported = true;
-
-	return 0;
-
-bad_cache_policy:
-	mempool_destroy(cache->migration_pool);
 bad_migration_pool:
 	mempool_destroy(cache->endio_hook_pool);
 bad_endio_hook_pool:
@@ -1266,15 +1215,119 @@ bad_kcopyd_client:
 bad_alloc_discard_bitset:
 	free_bitset(cache->dirty_bitset);
 bad_alloc_dirty_bitset:
-	dm_cache_metadata_close(cache->cmd);
-bad:
-	dm_put_device(ti, cache->cache_dev);
-bad_cache:
-	dm_put_device(ti, cache->origin_dev);
-bad_origin:
-	dm_put_device(ti, cache->metadata_dev);
-bad_metadata:
 	kfree(cache);
+bad_cache:
+	dm_cache_metadata_close(cmd);
+
+	return err_p;
+}
+
+/*
+ * Construct a hierarchical storage device mapping:
+ *
+ * cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
+ *
+ * metadata dev    : fast device holding the persistent metadata
+ * origin dev	   : slow device holding original data blocks
+ * cache dev	   : fast device holding cached data blocks
+ * data block size : cache unit size in sectors
+ * policy          : the replacement policy to use
+ */
+static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
+{
+	int r;
+	struct cache *cache;
+	struct dm_arg_set as;
+	sector_t block_size, origin_sectors, cache_sectors;
+	struct dm_dev *metadata_dev, *origin_dev, *cache_dev;
+	const char *policy_name;
+
+	if (argc < 5) {
+		ti->error = "Invalid argument count";
+		return -EINVAL;
+	}
+	as.argc = argc;
+	as.argv = argv;
+
+	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
+	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+		ti->error = "Invalid data block size";
+		return -EINVAL;
+	}
+
+	policy_name = argv[4];
+
+	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
+	if (r) {
+		ti->error = "Error opening metadata device";
+		goto bad_metadata;
+	}
+
+	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &origin_dev);
+	if (r) {
+		ti->error = "Error opening origin device";
+		goto bad_origin;
+	}
+
+	r = dm_get_device(ti, argv[2], FMODE_READ | FMODE_WRITE, &cache_dev);
+	if (r) {
+		ti->error = "Error opening cache device";
+		goto bad_cache;
+	}
+	cache_sectors = get_dev_size(cache_dev);
+
+	origin_sectors = get_dev_size(origin_dev);
+	if (ti->len > origin_sectors) {
+		ti->error = "Device size larger than cached device";
+		goto bad;
+	}
+
+	dm_consume_args(&as, 5);
+
+	cache = cache_create(metadata_dev->bdev, block_size,
+			     origin_sectors, cache_sectors,
+			     policy_name, false, &ti->error);
+	if (IS_ERR(cache)) {
+		r = PTR_ERR(cache);
+		goto bad;
+	}
+
+	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
+		goto bad_max_io_len;
+
+	r = create_cache_policy(cache, policy_name, &ti->error);
+	if (r)
+		goto bad_max_io_len;
+
+	cache->ti = ti;
+	cache->metadata_dev = metadata_dev;
+	cache->origin_dev = origin_dev;
+	cache->cache_dev = cache_dev;
+
+	ti->private = cache;
+
+	ti->num_flush_requests = 2;
+	ti->flush_supported = true;
+
+	ti->num_discard_requests = 1;
+	ti->discards_supported = true;
+	ti->discard_zeroes_data_unsupported = true;
+
+	cache->callbacks.congested_fn = cache_is_congested;
+	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
+
+	return 0;
+
+bad_max_io_len:
+	kfree(cache);
+bad:
+	dm_put_device(ti, cache_dev);
+bad_cache:
+	dm_put_device(ti, origin_dev);
+bad_origin:
+	dm_put_device(ti, metadata_dev);
+bad_metadata:
 	return -EINVAL;
 }
 

@@ -601,13 +601,13 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
 		kfree(cmd);
-		return NULL;
+		return ERR_PTR(r);
 	}
 
 	r = __begin_transaction_flags(cmd, clear_clean_shutdown);
 	if (r < 0) {
 		dm_cache_metadata_close(cmd);
-		return NULL;
+		return ERR_PTR(r);
 	}
 
 	return cmd;
