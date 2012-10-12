@@ -1914,15 +1914,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_flags_changed;
 	}
 
-	/*
-	 * The block layer requires discard_granularity to be a power of 2.
-	 */
-	if (pf.discard_enabled && !is_power_of_2(block_size)) {
-		ti->error = "Discard support must be disabled when the block size is not a power of 2";
-		r = -EINVAL;
-		goto out_flags_changed;
-	}
-
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->metadata_dev = metadata_dev;
