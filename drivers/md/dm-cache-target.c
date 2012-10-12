@@ -74,7 +74,7 @@ static void free_bitset(unsigned long *bits)
 #define COMMIT_PERIOD HZ
 #define MIGRATION_COUNT_WINDOW 10
 
-struct cache_c {
+struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
 
@@ -177,7 +177,7 @@ struct dm_cache_migration {
 	bool promote:1;
 
 	struct list_head list;
-	struct cache_c *c;
+	struct cache *cache;
 
 	unsigned long start_jiffies;
 	dm_block_t old_oblock;
@@ -195,9 +195,9 @@ static void build_key(dm_block_t block, struct dm_cell_key *key)
 	key->block = block;
 }
 
-static void wake_worker(struct cache_c *c)
+static void wake_worker(struct cache *cache)
 {
-	queue_work(c->wq, &c->worker);
+	queue_work(cache->wq, &cache->worker);
 }
 
 /*----------------------------------------------------------------*/
@@ -206,127 +206,127 @@ static void wake_worker(struct cache_c *c)
  * The discard bitset is accessed from both the worker thread and the
  * cache_map function, we need to protect it.
  */
-static void set_discard(struct cache_c *c, dm_block_t b)
+static void set_discard(struct cache *cache, dm_block_t b)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	set_bit(b, c->discard_bitset);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	set_bit(b, cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void clear_discard(struct cache_c *c, dm_block_t b)
+static void clear_discard(struct cache *cache, dm_block_t b)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	clear_bit(b, c->discard_bitset);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	clear_bit(b, cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static bool is_discarded(struct cache_c *c, dm_block_t b)
+static bool is_discarded(struct cache *cache, dm_block_t b)
 {
 	int r;
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	r = test_bit(b, c->discard_bitset);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	r = test_bit(b, cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
 }
 
 /*----------------------------------------------------------------*/
 
-static void load_stats(struct cache_c *c)
+static void load_stats(struct cache *cache)
 {
 	struct dm_cache_statistics stats;
 
-	dm_cache_get_stats(c->cmd, &stats);
-	atomic_set(&c->read_hit, stats.read_hits);
-	atomic_set(&c->read_miss, stats.read_misses);
-	atomic_set(&c->write_hit, stats.write_hits);
-	atomic_set(&c->write_miss, stats.write_misses);
+	dm_cache_get_stats(cache->cmd, &stats);
+	atomic_set(&cache->read_hit, stats.read_hits);
+	atomic_set(&cache->read_miss, stats.read_misses);
+	atomic_set(&cache->write_hit, stats.write_hits);
+	atomic_set(&cache->write_miss, stats.write_misses);
 }
 
-static void save_stats(struct cache_c *c)
+static void save_stats(struct cache *cache)
 {
 	struct dm_cache_statistics stats;
 
-	stats.read_hits = atomic_read(&c->read_hit);
-	stats.read_misses = atomic_read(&c->read_miss);
-	stats.write_hits = atomic_read(&c->write_hit);
-	stats.write_misses = atomic_read(&c->write_miss);
+	stats.read_hits = atomic_read(&cache->read_hit);
+	stats.read_misses = atomic_read(&cache->read_miss);
+	stats.write_hits = atomic_read(&cache->write_hit);
+	stats.write_misses = atomic_read(&cache->write_miss);
 
-	dm_cache_set_stats(c->cmd, &stats);
+	dm_cache_set_stats(cache->cmd, &stats);
 }
 
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
-static void remap_to_origin(struct cache_c *c, struct bio *bio)
+static void remap_to_origin(struct cache *cache, struct bio *bio)
 {
-	bio->bi_bdev = c->origin_dev->bdev;
+	bio->bi_bdev = cache->origin_dev->bdev;
 }
 
-static void remap_to_cache(struct cache_c *c, struct bio *bio,
+static void remap_to_cache(struct cache *cache, struct bio *bio,
 			   dm_block_t cblock)
 {
-	bio->bi_bdev = c->cache_dev->bdev;
-	bio->bi_sector = (cblock << c->block_shift) + (bio->bi_sector & c->offset_mask);
+	bio->bi_bdev = cache->cache_dev->bdev;
+	bio->bi_sector = (cblock << cache->block_shift) + (bio->bi_sector & cache->offset_mask);
 }
 
-static void check_if_tick_bio_needed(struct cache_c *c, struct bio *bio)
+static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
-	spin_lock_irqsave(&c->lock, flags);
-	if (c->need_tick_bio && !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
+	spin_lock_irqsave(&cache->lock, flags);
+	if (cache->need_tick_bio && !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
 		h->tick = true;
-		c->need_tick_bio = false;
+		cache->need_tick_bio = false;
 	}
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void remap_to_origin_dirty(struct cache_c *c, struct bio *bio, dm_block_t oblock)
+static void remap_to_origin_dirty(struct cache *cache, struct bio *bio, dm_block_t oblock)
 {
-	check_if_tick_bio_needed(c, bio);
-	remap_to_origin(c, bio);
+	check_if_tick_bio_needed(cache, bio);
+	remap_to_origin(cache, bio);
 	if (bio_data_dir(bio) == WRITE)
-		clear_discard(c, oblock);
+		clear_discard(cache, oblock);
 }
 
-static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
+static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 				 dm_block_t oblock, dm_block_t cblock)
 {
-	remap_to_cache(c, bio, cblock);
+	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
-		set_bit(cblock, c->dirty_bitset);
-		clear_discard(c, oblock);
+		set_bit(cblock, cache->dirty_bitset);
+		clear_discard(cache, oblock);
 	}
 }
 
-static dm_block_t get_bio_block(struct cache_c *c, struct bio *bio)
+static dm_block_t get_bio_block(struct cache *cache, struct bio *bio)
 {
-	return bio->bi_sector >> c->block_shift;
+	return bio->bi_sector >> cache->block_shift;
 }
 
-static int bio_triggers_commit(struct cache_c *c, struct bio *bio)
+static int bio_triggers_commit(struct cache *cache, struct bio *bio)
 {
 	return (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) &&
-		dm_cache_changed_this_transaction(c->cmd);
+		dm_cache_changed_this_transaction(cache->cmd);
 }
 
-static void issue(struct cache_c *c, struct bio *bio)
+static void issue(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 
-	if (bio_triggers_commit(c, bio)) {
-		spin_lock_irqsave(&c->lock, flags);
-		c->commit_requested = true;
-		bio_list_add(&c->deferred_flush_bios, bio);
-		spin_unlock_irqrestore(&c->lock, flags);
+	if (bio_triggers_commit(cache, bio)) {
+		spin_lock_irqsave(&cache->lock, flags);
+		cache->commit_requested = true;
+		bio_list_add(&cache->deferred_flush_bios, bio);
+		spin_unlock_irqrestore(&cache->lock, flags);
 	} else
 		generic_make_request(bio);
 }
@@ -337,130 +337,130 @@ static void issue(struct cache_c *c, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
-static int prealloc_migration(struct cache_c *c)
+static int prealloc_migration(struct cache *cache)
 {
-	if (c->next_migration)
+	if (cache->next_migration)
 		return 0;
 
-	c->next_migration = mempool_alloc(c->migration_pool, GFP_ATOMIC);
-	return c->next_migration ? 0 : -ENOMEM;
+	cache->next_migration = mempool_alloc(cache->migration_pool, GFP_ATOMIC);
+	return cache->next_migration ? 0 : -ENOMEM;
 }
 
-static struct dm_cache_migration *alloc_migration(struct cache_c *c)
+static struct dm_cache_migration *alloc_migration(struct cache *cache)
 {
-	struct dm_cache_migration *r = c->next_migration;
+	struct dm_cache_migration *r = cache->next_migration;
 
 	BUG_ON(!r);
-	c->next_migration = NULL;
+	cache->next_migration = NULL;
 
 	return r;
 }
 
-static void free_migration(struct cache_c *c, struct dm_cache_migration *mg)
+static void free_migration(struct cache *cache, struct dm_cache_migration *mg)
 {
-	mempool_free(mg, c->migration_pool);
+	mempool_free(mg, cache->migration_pool);
 }
 
-static void inc_nr_migrations(struct cache_c *c)
+static void inc_nr_migrations(struct cache *cache)
 {
-	atomic_inc(&c->nr_migrations);
-	wake_up(&c->migration_wait); /* FIXME: why is there a wakeup here? */
+	atomic_inc(&cache->nr_migrations);
+	wake_up(&cache->migration_wait); /* FIXME: why is there a wakeup here? */
 }
 
-static void dec_nr_migrations(struct cache_c *c)
+static void dec_nr_migrations(struct cache *cache)
 {
-	atomic_dec(&c->nr_migrations);
-	wake_up(&c->migration_wait);
+	atomic_dec(&cache->nr_migrations);
+	wake_up(&cache->migration_wait);
 }
 
-static void __cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
+static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
-	(holder ? dm_cell_release : dm_cell_release_no_holder)(cell, &c->deferred_bios);
+	(holder ? dm_cell_release : dm_cell_release_no_holder)(cell, &cache->deferred_bios);
 }
 
-static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
+static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	__cell_defer(c, cell, holder);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	__cell_defer(cache, cell, holder);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(c);
+	wake_worker(cache);
 }
 
-static void cleanup_migration(struct cache_c *c, struct dm_cache_migration *mg)
+static void cleanup_migration(struct cache *cache, struct dm_cache_migration *mg)
 {
-	free_migration(c, mg);
-	dec_nr_migrations(c);
+	free_migration(cache, mg);
+	dec_nr_migrations(cache);
 }
 
-static void migration_failure(struct cache_c *c, struct dm_cache_migration *mg)
+static void migration_failure(struct cache *cache, struct dm_cache_migration *mg)
 {
 	if (mg->demote) {
 		DMWARN("demotion failed; couldn't copy block");
-		policy_force_mapping(c->policy, mg->new_oblock, mg->old_oblock);
+		policy_force_mapping(cache->policy, mg->new_oblock, mg->old_oblock);
 
-		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
+		cell_defer(cache, mg->old_ocell, mg->promote ? 0 : 1);
 		if (mg->promote)
-			cell_defer(c, mg->new_ocell, 1);
+			cell_defer(cache, mg->new_ocell, 1);
 	} else {
 		DMWARN("promotion failed; couldn't copy block");
-		policy_remove_mapping(c->policy, mg->new_oblock);
-		cell_defer(c, mg->new_ocell, 1);
+		policy_remove_mapping(cache->policy, mg->new_oblock);
+		cell_defer(cache, mg->new_ocell, 1);
 	}
 
-	cleanup_migration(c, mg);
+	cleanup_migration(cache, mg);
 }
 
-static void migration_success_pre_commit(struct cache_c *c, struct dm_cache_migration *mg)
+static void migration_success_pre_commit(struct cache *cache, struct dm_cache_migration *mg)
 {
 	unsigned long flags;
 
 	if (mg->demote) {
-		if (dm_cache_remove_mapping(c->cmd, mg->cblock)) {
+		if (dm_cache_remove_mapping(cache->cmd, mg->cblock)) {
 			DMWARN("demotion failed; couldn't update on disk metadata");
-			policy_force_mapping(c->policy, mg->new_oblock,	mg->old_oblock);
+			policy_force_mapping(cache->policy, mg->new_oblock, mg->old_oblock);
 			if (mg->promote)
-				cell_defer(c, mg->new_ocell, 1);
-			cleanup_migration(c, mg);
+				cell_defer(cache, mg->new_ocell, 1);
+			cleanup_migration(cache, mg);
 			return;
 		}
 
 	} else {
-		if (dm_cache_insert_mapping(c->cmd, mg->cblock, mg->new_oblock)) {
+		if (dm_cache_insert_mapping(cache->cmd, mg->cblock, mg->new_oblock)) {
 			DMWARN("promotion failed; couldn't update on disk metadata");
-			policy_remove_mapping(c->policy, mg->new_oblock);
-			cleanup_migration(c, mg);
+			policy_remove_mapping(cache->policy, mg->new_oblock);
+			cleanup_migration(cache, mg);
 		}
 	}
 
-	spin_lock_irqsave(&c->lock, flags);
-	list_add_tail(&mg->list, &c->need_commit_migrations);
-	c->commit_requested = true;
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	list_add_tail(&mg->list, &cache->need_commit_migrations);
+	cache->commit_requested = true;
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void migration_success_post_commit(struct cache_c *c, struct dm_cache_migration *mg)
+static void migration_success_post_commit(struct cache *cache, struct dm_cache_migration *mg)
 {
 	unsigned long flags;
 
 	if (mg->demote) {
-		cell_defer(c, mg->old_ocell, mg->promote ? 0 : 1);
+		cell_defer(cache, mg->old_ocell, mg->promote ? 0 : 1);
 
 		if (mg->promote) {
 			mg->demote = false;
 
-			spin_lock_irqsave(&c->lock, flags);
-			list_add_tail(&mg->list, &c->quiesced_migrations);
-			spin_unlock_irqrestore(&c->lock, flags);
+			spin_lock_irqsave(&cache->lock, flags);
+			list_add_tail(&mg->list, &cache->quiesced_migrations);
+			spin_unlock_irqrestore(&cache->lock, flags);
 		} else
-			cleanup_migration(c, mg);
+			cleanup_migration(cache, mg);
 
 	} else {
-		cell_defer(c, mg->new_ocell, 1);
-		clear_bit(mg->cblock, c->dirty_bitset);
-		cleanup_migration(c, mg);
+		cell_defer(cache, mg->new_ocell, 1);
+		clear_bit(mg->cblock, cache->dirty_bitset);
+		cleanup_migration(cache, mg);
 	}
 }
 
@@ -468,73 +468,73 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 {
 	unsigned long flags;
 	struct dm_cache_migration *mg = (struct dm_cache_migration *) context;
-	struct cache_c *c = mg->c;
+	struct cache *cache = mg->cache;
 
 	if (read_err || write_err)
 		mg->err = true;
 
-	spin_lock_irqsave(&c->lock, flags);
-	list_add_tail(&mg->list, &c->completed_migrations);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	list_add_tail(&mg->list, &cache->completed_migrations);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(c);
+	wake_worker(cache);
 }
 
-static void issue_copy_real(struct cache_c *c, struct dm_cache_migration *mg)
+static void issue_copy_real(struct cache *cache, struct dm_cache_migration *mg)
 {
 	int r;
 	struct dm_io_region o_region, c_region;
 
-	o_region.bdev = c->origin_dev->bdev;
-	o_region.count = c->sectors_per_block;
+	o_region.bdev = cache->origin_dev->bdev;
+	o_region.count = cache->sectors_per_block;
 
-	c_region.bdev = c->cache_dev->bdev;
-	c_region.sector = mg->cblock * c->sectors_per_block;
-	c_region.count = c->sectors_per_block;
+	c_region.bdev = cache->cache_dev->bdev;
+	c_region.sector = mg->cblock * cache->sectors_per_block;
+	c_region.count = cache->sectors_per_block;
 
 	if (mg->demote) {
 		/* demote */
-		o_region.sector = mg->old_oblock * c->sectors_per_block;
-		r = dm_kcopyd_copy(c->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
+		o_region.sector = mg->old_oblock * cache->sectors_per_block;
+		r = dm_kcopyd_copy(cache->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
 	} else {
 		/* promote */
-		o_region.sector = mg->new_oblock * c->sectors_per_block;
-		r = dm_kcopyd_copy(c->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
+		o_region.sector = mg->new_oblock * cache->sectors_per_block;
+		r = dm_kcopyd_copy(cache->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
 	}
 
 	if (r < 0)
-		migration_failure(c, mg);
+		migration_failure(cache, mg);
 }
 
-static void avoid_copy(struct cache_c *c, struct dm_cache_migration *mg)
+static void avoid_copy(struct cache *cache, struct dm_cache_migration *mg)
 {
-	atomic_inc(&c->copies_avoided);
-	migration_success_pre_commit(c, mg);
+	atomic_inc(&cache->copies_avoided);
+	migration_success_pre_commit(cache, mg);
 }
 
-static void issue_copy(struct cache_c *c, struct dm_cache_migration *mg)
+static void issue_copy(struct cache *cache, struct dm_cache_migration *mg)
 {
 	bool avoid;
 
 	if (mg->demote)
-		avoid = !test_bit(mg->cblock, c->dirty_bitset) ||
-			is_discarded(c, mg->old_oblock);
+		avoid = !test_bit(mg->cblock, cache->dirty_bitset) ||
+			is_discarded(cache, mg->old_oblock);
 	else
-		avoid = is_discarded(c, mg->new_oblock);
+		avoid = is_discarded(cache, mg->new_oblock);
 
-	avoid ? avoid_copy(c, mg) : issue_copy_real(c, mg);
+	avoid ? avoid_copy(cache, mg) : issue_copy_real(cache, mg);
 }
 
-static void complete_migration(struct cache_c *c, struct dm_cache_migration *mg)
+static void complete_migration(struct cache *cache, struct dm_cache_migration *mg)
 {
 	if (mg->err)
-		migration_failure(c, mg);
+		migration_failure(cache, mg);
 	else
-		migration_success_pre_commit(c, mg);
+		migration_success_pre_commit(cache, mg);
 }
 
-static void process_migrations(struct cache_c *cache, struct list_head *head,
-			       void (*fn)(struct cache_c *, struct dm_cache_migration *))
+static void process_migrations(struct cache *cache, struct list_head *head,
+			       void (*fn)(struct cache *, struct dm_cache_migration *))
 {
 	unsigned long flags;
 	struct list_head list;
@@ -549,36 +549,36 @@ static void process_migrations(struct cache_c *cache, struct list_head *head,
 		fn(cache, mg);
 }
 
-static void __queue_quiesced_migration(struct cache_c *c, struct dm_cache_migration *mg)
+static void __queue_quiesced_migration(struct cache *cache, struct dm_cache_migration *mg)
 {
-	list_add_tail(&mg->list, &c->quiesced_migrations);
+	list_add_tail(&mg->list, &cache->quiesced_migrations);
 }
 
-static void queue_quiesced_migration(struct cache_c *c, struct dm_cache_migration *mg)
+static void queue_quiesced_migration(struct cache *cache, struct dm_cache_migration *mg)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	__queue_quiesced_migration(c, mg);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	__queue_quiesced_migration(cache, mg);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(c);
+	wake_worker(cache);
 }
 
-static void queue_quiesced_migrations(struct cache_c *c, struct list_head *work)
+static void queue_quiesced_migrations(struct cache *cache, struct list_head *work)
 {
 	unsigned long flags;
 	struct dm_cache_migration *mg, *tmp;
 
-	spin_lock_irqsave(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
 	list_for_each_entry_safe(mg, tmp, work, list)
-		__queue_quiesced_migration(c, mg);
-	spin_unlock_irqrestore(&c->lock, flags);
+		__queue_quiesced_migration(cache, mg);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(c);
+	wake_worker(cache);
 }
 
-static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_endio_hook *h)
+static void check_for_quiesced_migrations(struct cache *cache, struct dm_cache_endio_hook *h)
 {
 	struct list_head work;
 
@@ -590,46 +590,46 @@ static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_end
 		dm_deferred_entry_dec(h->all_io_entry, &work);
 
 	if (!list_empty(&work))
-		queue_quiesced_migrations(c, &work);
+		queue_quiesced_migrations(cache, &work);
 }
 
-static void quiesce_migration(struct cache_c *c, struct dm_cache_migration *mg)
+static void quiesce_migration(struct cache *cache, struct dm_cache_migration *mg)
 {
-	if (!dm_deferred_set_add_work(c->all_io_ds, &mg->list))
-		queue_quiesced_migration(c, mg);
+	if (!dm_deferred_set_add_work(cache->all_io_ds, &mg->list))
+		queue_quiesced_migration(cache, mg);
 }
 
-static void promote(struct cache_c *c, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
+static void promote(struct cache *cache, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
 {
-	struct dm_cache_migration *mg = alloc_migration(c);
+	struct dm_cache_migration *mg = alloc_migration(cache);
 
 	mg->err = false;
 	mg->demote = false;
 	mg->promote = true;
-	mg->c = c;
+	mg->cache = cache;
 	mg->new_oblock = oblock;
 	mg->cblock = cblock;
 	mg->old_ocell = NULL;
 	mg->new_ocell = cell;
 	mg->start_jiffies = jiffies;
 
-	inc_nr_migrations(c);
-	quiesce_migration(c, mg);
+	inc_nr_migrations(cache);
+	quiesce_migration(cache, mg);
 }
 
-static void writeback_then_promote(struct cache_c *c,
+static void writeback_then_promote(struct cache *cache,
 				   dm_block_t old_oblock,
 				   dm_block_t new_oblock,
 				   dm_block_t cblock,
 				   struct dm_bio_prison_cell *old_ocell,
 				   struct dm_bio_prison_cell *new_ocell)
 {
-	struct dm_cache_migration *mg = alloc_migration(c);
+	struct dm_cache_migration *mg = alloc_migration(cache);
 
 	mg->err = false;
 	mg->demote = true;
 	mg->promote = true;
-	mg->c = c;
+	mg->cache = cache;
 	mg->old_oblock = old_oblock;
 	mg->new_oblock = new_oblock;
 	mg->cblock = cblock;
@@ -637,14 +637,14 @@ static void writeback_then_promote(struct cache_c *c,
 	mg->new_ocell = new_ocell;
 	mg->start_jiffies = jiffies;
 
-	inc_nr_migrations(c);
-	quiesce_migration(c, mg);
+	inc_nr_migrations(cache);
+	quiesce_migration(cache, mg);
 }
 
 /*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
-static void defer_bio(struct cache_c *cache, struct bio *bio)
+static void defer_bio(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 
@@ -655,24 +655,24 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 	wake_worker(cache);
 }
 
-static void process_flush_bio(struct cache_c *c, struct bio *bio)
+static void process_flush_bio(struct cache *cache, struct bio *bio)
 {
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
 	BUG_ON(bio->bi_size);
 	if (h->req_nr == 0)
-		remap_to_origin(c, bio);
+		remap_to_origin(cache, bio);
 	else
-		remap_to_cache(c, bio, 0);
+		remap_to_cache(cache, bio, 0);
 
-	issue(c, bio);
+	issue(cache, bio);
 }
 
 #if 0
-static bool covers_block(struct cache_c *c, struct bio *bio)
+static bool covers_block(struct cache *cache, struct bio *bio)
 {
-	return !(bio->bi_sector & c->offset_mask) &&
-		(bio->bi_size == (c->sectors_per_block << SECTOR_SHIFT));
+	return !(bio->bi_sector & cache->offset_mask) &&
+		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
 }
 #endif
 
@@ -689,80 +689,80 @@ static bool covers_block(struct cache_c *c, struct bio *bio)
  * can have a key that spans many blocks.  This change is planned for
  * thin-provisioning.
  */
-static void process_discard_bio(struct cache_c *c, struct bio *bio)
+static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = dm_div_up(bio->bi_sector, c->sectors_per_block);
+	dm_block_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
-	do_div(end_block, c->sectors_per_block);
+	do_div(end_block, cache->sectors_per_block);
 
 	for (b = start_block; b < end_block; b++)
-		set_discard(c, b);
+		set_discard(cache, b);
 
 	bio_endio(bio, 0);
 }
 
-static void process_bio(struct cache_c *c, struct bio *bio)
+static void process_bio(struct cache *cache, struct bio *bio)
 {
 	int r;
 	int release_cell = 1;
 	struct dm_cell_key key;
-	dm_block_t block = get_bio_block(c, bio);
+	dm_block_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
-	bool discarded_block = is_discarded(c, block);
+	bool discarded_block = is_discarded(cache, block);
 	bool can_migrate = true;
 
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
 	build_key(block, &key);
-	r = dm_bio_detain(c->prison, &key, bio, &new_ocell);
+	r = dm_bio_detain(cache->prison, &key, bio, &new_ocell);
 	if (r > 0)
 		return;
 
-	policy_map(c->policy, block, can_migrate, discarded_block, bio, &lookup_result);
+	policy_map(cache->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
-		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
-		issue(c, bio);
+		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
+		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+		issue(cache, bio);
 		break;
 
 	case POLICY_MISS:
-		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
-		remap_to_origin_dirty(c, bio, block);
-		issue(c, bio);
+		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_miss : &cache->write_miss);
+		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		remap_to_origin_dirty(cache, bio, block);
+		issue(cache, bio);
 		break;
 
 	case POLICY_NEW:
-		atomic_inc(&c->promotion);
-		promote(c, block, lookup_result.cblock, new_ocell);
+		atomic_inc(&cache->promotion);
+		promote(cache, block, lookup_result.cblock, new_ocell);
 		release_cell = 0;
 		break;
 
 	case POLICY_REPLACE:
 		build_key(lookup_result.old_oblock, &key);
-		r = dm_bio_detain(c->prison, &key, bio, &old_ocell);
+		r = dm_bio_detain(cache->prison, &key, bio, &old_ocell);
 		if (r > 0) {
 			/*
 			 * We have to be careful to avoid lock inversion of
 			 * the cells.  So we back off, and wait for the
 			 * old_ocell to become free.
 			 */
-			policy_force_mapping(c->policy, block,
+			policy_force_mapping(cache->policy, block,
 					     lookup_result.old_oblock);
-			atomic_inc(&c->cache_cell_clash);
+			atomic_inc(&cache->cache_cell_clash);
 			break;
 		}
-		atomic_inc(&c->demotion);
-		atomic_inc(&c->promotion);
+		atomic_inc(&cache->demotion);
+		atomic_inc(&cache->promotion);
 
-		writeback_then_promote(c, lookup_result.old_oblock, block,
+		writeback_then_promote(cache, lookup_result.old_oblock, block,
 				       lookup_result.cblock,
 				       old_ocell, new_ocell);
 		release_cell = 0;
@@ -770,28 +770,28 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	}
 
 	if (release_cell)
-		cell_defer(c, new_ocell, 0);
+		cell_defer(cache, new_ocell, 0);
 }
 
-static int need_commit_due_to_time(struct cache_c *c)
+static int need_commit_due_to_time(struct cache *cache)
 {
-	return jiffies < c->last_commit_jiffies ||
-	       jiffies > c->last_commit_jiffies + COMMIT_PERIOD;
+	return jiffies < cache->last_commit_jiffies ||
+	       jiffies > cache->last_commit_jiffies + COMMIT_PERIOD;
 }
 
-static int commit_if_needed(struct cache_c *c)
+static int commit_if_needed(struct cache *cache)
 {
-	if (c->commit_requested || need_commit_due_to_time(c)) {
-		atomic_inc(&c->commit_count);
-		c->last_commit_jiffies = jiffies;
-		c->commit_requested = false;
-		return dm_cache_commit(c->cmd, false);
+	if (cache->commit_requested || need_commit_due_to_time(cache)) {
+		atomic_inc(&cache->commit_count);
+		cache->last_commit_jiffies = jiffies;
+		cache->commit_requested = false;
+		return dm_cache_commit(cache->cmd, false);
 	}
 
 	return 0;
 }
 
-static void process_deferred_bios(struct cache_c *c)
+static void process_deferred_bios(struct cache *cache)
 {
 	unsigned long flags;
 	struct bio_list bios;
@@ -799,10 +799,10 @@ static void process_deferred_bios(struct cache_c *c)
 
 	bio_list_init(&bios);
 
-	spin_lock_irqsave(&c->lock, flags);
-	bio_list_merge(&bios, &c->deferred_bios);
-	bio_list_init(&c->deferred_bios);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->deferred_bios);
+	bio_list_init(&cache->deferred_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
 	while ((bio = bio_list_pop(&bios))) {
 		/*
@@ -810,27 +810,27 @@ static void process_deferred_bios(struct cache_c *c)
 		 * this bio might require one, we pause until there are some
 		 * prepared mappings to process.
 		 */
-		if (prealloc_migration(c)) {
-			spin_lock_irqsave(&c->lock, flags);
-			bio_list_merge(&c->deferred_bios, &bios);
-			spin_unlock_irqrestore(&c->lock, flags);
+		if (prealloc_migration(cache)) {
+			spin_lock_irqsave(&cache->lock, flags);
+			bio_list_merge(&cache->deferred_bios, &bios);
+			spin_unlock_irqrestore(&cache->lock, flags);
 
 			break;
 		}
 
 		if (bio->bi_rw & REQ_FLUSH)
-			process_flush_bio(c, bio);
+			process_flush_bio(cache, bio);
 
 		else if (bio->bi_rw & REQ_DISCARD)
-			process_discard_bio(c, bio);
+			process_discard_bio(cache, bio);
 
 		else
-			process_bio(c, bio);
+			process_bio(cache, bio);
 	}
 }
 
 /* FIXME: duplicate code */
-static void submit_deferred_flush_bios(struct cache_c *c)
+static void submit_deferred_flush_bios(struct cache *cache)
 {
 	unsigned long flags;
 	struct bio_list bios;
@@ -838,16 +838,16 @@ static void submit_deferred_flush_bios(struct cache_c *c)
 
 	bio_list_init(&bios);
 
-	spin_lock_irqsave(&c->lock, flags);
-	bio_list_merge(&bios, &c->deferred_flush_bios);
-	bio_list_init(&c->deferred_flush_bios);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->deferred_flush_bios);
+	bio_list_init(&cache->deferred_flush_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
 		generic_make_request(bio);
 }
 
-static void error_deferred_flush_bios(struct cache_c *c)
+static void error_deferred_flush_bios(struct cache *cache)
 {
 	unsigned long flags;
 	struct bio_list bios;
@@ -855,10 +855,10 @@ static void error_deferred_flush_bios(struct cache_c *c)
 
 	bio_list_init(&bios);
 
-	spin_lock_irqsave(&c->lock, flags);
-	bio_list_merge(&bios, &c->deferred_flush_bios);
-	bio_list_init(&c->deferred_flush_bios);
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->deferred_flush_bios);
+	bio_list_init(&cache->deferred_flush_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_io_error(bio);
@@ -867,98 +867,98 @@ static void error_deferred_flush_bios(struct cache_c *c)
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
-static void start_quiescing(struct cache_c *c)
+static void start_quiescing(struct cache *cache)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	c->quiescing = 1;
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->quiescing = 1;
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void stop_quiescing(struct cache_c *c)
+static void stop_quiescing(struct cache *cache)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	c->quiescing = 0;
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->quiescing = 0;
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static bool is_quiescing(struct cache_c *c)
+static bool is_quiescing(struct cache *cache)
 {
 	int r;
 	unsigned long flags;
 
-	spin_lock_irqsave(&c->lock, flags);
-	r = c->quiescing;
-	spin_unlock_irqrestore(&c->lock, flags);
+	spin_lock_irqsave(&cache->lock, flags);
+	r = cache->quiescing;
+	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
 }
 
-static void wait_for_migrations(struct cache_c *c)
+static void wait_for_migrations(struct cache *cache)
 {
-	wait_event(c->migration_wait, atomic_read(&c->nr_migrations) == 0);
+	wait_event(cache->migration_wait, atomic_read(&cache->nr_migrations) == 0);
 }
 
-static void stop_worker(struct cache_c *c)
+static void stop_worker(struct cache *cache)
 {
-	cancel_delayed_work(&c->waker);
-	flush_workqueue(c->wq);
+	cancel_delayed_work(&cache->waker);
+	flush_workqueue(cache->wq);
 }
 
-static void requeue_deferred_io(struct cache_c *c)
+static void requeue_deferred_io(struct cache *cache)
 {
 	struct bio *bio;
 	struct bio_list bios;
 
 	bio_list_init(&bios);
-	bio_list_merge(&bios, &c->deferred_bios);
-	bio_list_init(&c->deferred_bios);
+	bio_list_merge(&bios, &cache->deferred_bios);
+	bio_list_init(&cache->deferred_bios);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_endio(bio, DM_ENDIO_REQUEUE);
 }
 
-static int more_work(struct cache_c *c)
+static int more_work(struct cache *cache)
 {
-	if (is_quiescing(c))
-		return !list_empty(&c->quiesced_migrations) ||
-			!list_empty(&c->completed_migrations) ||
-			!list_empty(&c->need_commit_migrations);
+	if (is_quiescing(cache))
+		return !list_empty(&cache->quiesced_migrations) ||
+			!list_empty(&cache->completed_migrations) ||
+			!list_empty(&cache->need_commit_migrations);
 	else
-		return !bio_list_empty(&c->deferred_bios) ||
-			!bio_list_empty(&c->deferred_flush_bios) ||
-			!list_empty(&c->quiesced_migrations) ||
-			!list_empty(&c->completed_migrations) ||
-			!list_empty(&c->need_commit_migrations);
+		return !bio_list_empty(&cache->deferred_bios) ||
+			!bio_list_empty(&cache->deferred_flush_bios) ||
+			!list_empty(&cache->quiesced_migrations) ||
+			!list_empty(&cache->completed_migrations) ||
+			!list_empty(&cache->need_commit_migrations);
 }
 
 static void do_work(struct work_struct *ws)
 {
-	struct cache_c *c = container_of(ws, struct cache_c, worker);
+	struct cache *cache = container_of(ws, struct cache, worker);
 
 	do {
-		if (!is_quiescing(c))
-			process_deferred_bios(c);
+		if (!is_quiescing(cache))
+			process_deferred_bios(cache);
 
-		process_migrations(c, &c->quiesced_migrations, issue_copy);
-		process_migrations(c, &c->completed_migrations, complete_migration);
+		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
+		process_migrations(cache, &cache->completed_migrations, complete_migration);
 
-		if (commit_if_needed(c)) {
-			error_deferred_flush_bios(c);
+		if (commit_if_needed(cache)) {
+			error_deferred_flush_bios(cache);
 
 			/*
 			 * FIXME: rollback metadata or just go into a
 			 * failure mode and error everything
 			 */
 		} else {
-			submit_deferred_flush_bios(c);
-			process_migrations(c, &c->need_commit_migrations, migration_success_post_commit);
+			submit_deferred_flush_bios(cache);
+			process_migrations(cache, &cache->need_commit_migrations, migration_success_post_commit);
 		}
 
-	} while (more_work(c));
+	} while (more_work(cache));
 }
 
 /*
@@ -967,9 +967,9 @@ static void do_work(struct work_struct *ws)
  */
 static void do_waker(struct work_struct *ws)
 {
-	struct cache_c *c = container_of(to_delayed_work(ws), struct cache_c, waker);
-	wake_worker(c);
-	queue_delayed_work(c->wq, &c->waker, COMMIT_PERIOD);
+	struct cache *cache = container_of(to_delayed_work(ws), struct cache, waker);
+	wake_worker(cache);
+	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
 }
 
 /*----------------------------------------------------------------*/
@@ -982,7 +982,7 @@ static int is_congested(struct dm_dev *dev, int bdi_bits)
 
 static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 {
-	struct cache_c *cache = container_of(cb, struct cache_c, callbacks);
+	struct cache *cache = container_of(cb, struct cache, callbacks);
 
 	return is_congested(cache->origin_dev, bdi_bits) ||
 		is_congested(cache->cache_dev, bdi_bits);
@@ -994,37 +994,37 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 
 static void cache_dtr(struct dm_target *ti)
 {
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 
 	pr_alert("dm-cache statistics:\n");
-	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&c->read_hit));
-	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&c->read_miss));
-	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&c->write_hit));
-	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&c->write_miss));
-	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&c->demotion));
-	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&c->promotion));
-	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&c->copies_avoided));
-	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&c->cache_cell_clash));
-	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&c->commit_count));
+	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
+	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->read_miss));
+	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->write_hit));
+	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->write_miss));
+	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&cache->demotion));
+	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&cache->promotion));
+	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&cache->copies_avoided));
+	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->cache_cell_clash));
+	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->commit_count));
 
-	if (c->next_migration)
-		mempool_free(c->next_migration, c->migration_pool);
+	if (cache->next_migration)
+		mempool_free(cache->next_migration, cache->migration_pool);
 
-	mempool_destroy(c->migration_pool);
-	mempool_destroy(c->endio_hook_pool);
-	dm_deferred_set_destroy(c->all_io_ds);
-	dm_bio_prison_destroy(c->prison);
-	destroy_workqueue(c->wq);
-	free_bitset(c->dirty_bitset);
-	free_bitset(c->discard_bitset);
-	dm_kcopyd_client_destroy(c->copier);
-	dm_cache_metadata_close(c->cmd);
-	dm_put_device(ti, c->metadata_dev);
-	dm_put_device(ti, c->origin_dev);
-	dm_put_device(ti, c->cache_dev);
-	dm_cache_policy_destroy(c->policy);
+	mempool_destroy(cache->migration_pool);
+	mempool_destroy(cache->endio_hook_pool);
+	dm_deferred_set_destroy(cache->all_io_ds);
+	dm_bio_prison_destroy(cache->prison);
+	destroy_workqueue(cache->wq);
+	free_bitset(cache->dirty_bitset);
+	free_bitset(cache->discard_bitset);
+	dm_kcopyd_client_destroy(cache->copier);
+	dm_cache_metadata_close(cache->cmd);
+	dm_put_device(ti, cache->metadata_dev);
+	dm_put_device(ti, cache->origin_dev);
+	dm_put_device(ti, cache->cache_dev);
+	dm_cache_policy_destroy(cache->policy);
 
-	kfree(c);
+	kfree(cache);
 }
 
 static sector_t get_dev_size(struct dm_dev *dev)
@@ -1034,12 +1034,12 @@ static sector_t get_dev_size(struct dm_dev *dev)
 
 static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty)
 {
-	struct cache_c *c = context;
+	struct cache *cache = context;
 
-	dirty ? set_bit(cblock, c->dirty_bitset) :
-		clear_bit(cblock, c->dirty_bitset);
+	dirty ? set_bit(cblock, cache->dirty_bitset) :
+		clear_bit(cblock, cache->dirty_bitset);
 
-	return policy_load_mapping(c->policy, oblock, cblock);
+	return policy_load_mapping(cache->policy, oblock, cblock);
 }
 
 static struct kmem_cache *_migration_cache;
@@ -1060,7 +1060,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	sector_t block_size;
-	struct cache_c *c;
+	struct cache *cache;
 	char *end;
 	struct dm_arg_set as;
 
@@ -1079,144 +1079,144 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 
-	c = ti->private = kzalloc(sizeof(*c), GFP_KERNEL);
-	if (!c) {
+	cache = ti->private = kzalloc(sizeof(*cache), GFP_KERNEL);
+	if (!cache) {
 		ti->error = "Error allocating cache context";
 		return -ENOMEM;
 	}
-	c->ti = ti;
+	cache->ti = ti;
 
-	r = dm_get_device(c->ti, argv[0], FMODE_READ | FMODE_WRITE, &c->metadata_dev);
+	r = dm_get_device(cache->ti, argv[0], FMODE_READ | FMODE_WRITE, &cache->metadata_dev);
 	if (r) {
 		ti->error = "Error opening metadata device";
 		goto bad_metadata;
 	}
 
-	r = dm_get_device(c->ti, argv[1], FMODE_READ | FMODE_WRITE, &c->origin_dev);
+	r = dm_get_device(cache->ti, argv[1], FMODE_READ | FMODE_WRITE, &cache->origin_dev);
 	if (r) {
 		ti->error = "Error opening origin device";
 		goto bad_origin;
 	}
 
-	r = dm_get_device(c->ti, argv[2], FMODE_READ | FMODE_WRITE, &c->cache_dev);
+	r = dm_get_device(cache->ti, argv[2], FMODE_READ | FMODE_WRITE, &cache->cache_dev);
 	if (r) {
 		ti->error = "Error opening cache device";
 		goto bad_cache;
 	}
 
-	c->origin_sectors = get_dev_size(c->origin_dev);
-	if (ti->len > c->origin_sectors) {
+	cache->origin_sectors = get_dev_size(cache->origin_dev);
+	if (ti->len > cache->origin_sectors) {
 		ti->error = "Device size larger than cached device";
 		goto bad;
 	}
 
-	c->origin_blocks = c->origin_sectors;
-	do_div(c->origin_blocks, block_size);
-	c->sectors_per_block = block_size;
-	c->offset_mask = block_size - 1;
-	c->block_shift = ffs(block_size) - 1;
+	cache->origin_blocks = cache->origin_sectors;
+	do_div(cache->origin_blocks, block_size);
+	cache->sectors_per_block = block_size;
+	cache->offset_mask = block_size - 1;
+	cache->block_shift = ffs(block_size) - 1;
 
-	if (dm_set_target_max_io_len(ti, c->sectors_per_block))
+	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad;
 
-	c->cmd = dm_cache_metadata_open(c->metadata_dev->bdev, block_size, 1);
-	if (!c->cmd) {
+	cache->cmd = dm_cache_metadata_open(cache->metadata_dev->bdev, block_size, 1);
+	if (!cache->cmd) {
 		ti->error = "couldn't create cache metadata object";
 		goto bad;
 	}
 
-	spin_lock_init(&c->lock);
-	bio_list_init(&c->deferred_bios);
-	bio_list_init(&c->deferred_flush_bios);
-	INIT_LIST_HEAD(&c->quiesced_migrations);
-	INIT_LIST_HEAD(&c->completed_migrations);
-	INIT_LIST_HEAD(&c->need_commit_migrations);
-	atomic_set(&c->nr_migrations, 0);
-	init_waitqueue_head(&c->migration_wait);
-	c->callbacks.congested_fn = cache_is_congested;
-	dm_table_add_target_callbacks(ti->table, &c->callbacks);
-	c->cache_size = get_dev_size(c->cache_dev) >> c->block_shift;
+	spin_lock_init(&cache->lock);
+	bio_list_init(&cache->deferred_bios);
+	bio_list_init(&cache->deferred_flush_bios);
+	INIT_LIST_HEAD(&cache->quiesced_migrations);
+	INIT_LIST_HEAD(&cache->completed_migrations);
+	INIT_LIST_HEAD(&cache->need_commit_migrations);
+	atomic_set(&cache->nr_migrations, 0);
+	init_waitqueue_head(&cache->migration_wait);
+	cache->callbacks.congested_fn = cache_is_congested;
+	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
+	cache->cache_size = get_dev_size(cache->cache_dev) >> cache->block_shift;
 
-	r = dm_cache_resize(c->cmd, c->cache_size);
+	r = dm_cache_resize(cache->cmd, cache->cache_size);
 	if (r) {
 		ti->error = "couldn't resize cache metadata";
 		goto bad_alloc_dirty_bitset;
 	}
 
-	c->dirty_bitset = alloc_bitset(c->cache_size);
-	if (!c->dirty_bitset) {
+	cache->dirty_bitset = alloc_bitset(cache->cache_size);
+	if (!cache->dirty_bitset) {
 		ti->error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
-	set_bitset(c->dirty_bitset, c->cache_size);
+	set_bitset(cache->dirty_bitset, cache->cache_size);
 
-	c->discard_bitset = alloc_bitset(c->origin_blocks);
-	if (!c->discard_bitset) {
+	cache->discard_bitset = alloc_bitset(cache->origin_blocks);
+	if (!cache->discard_bitset) {
 		ti->error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
 	}
-	clear_bitset(c->discard_bitset, c->origin_blocks);
+	clear_bitset(cache->discard_bitset, cache->origin_blocks);
 
-	c->copier = dm_kcopyd_client_create();
-	if (IS_ERR(c->copier)) {
+	cache->copier = dm_kcopyd_client_create();
+	if (IS_ERR(cache->copier)) {
 		ti->error = "Couldn't create kcopyd client";
 		goto bad_kcopyd_client;
 	}
 
-	c->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
-	if (!c->wq) {
+	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
+	if (!cache->wq) {
 		ti->error = "couldn't create workqueue for metadata object";
 		goto bad_wq;
 	}
-	INIT_WORK(&c->worker, do_work);
-	INIT_DELAYED_WORK(&c->waker, do_waker);
+	INIT_WORK(&cache->worker, do_work);
+	INIT_DELAYED_WORK(&cache->waker, do_waker);
 
-	c->prison = dm_bio_prison_create(PRISON_CELLS);
-	if (!c->prison) {
+	cache->prison = dm_bio_prison_create(PRISON_CELLS);
+	if (!cache->prison) {
 		ti->error = "couldn't create bio prison";
 		goto bad_prison;
 	}
 
-	c->all_io_ds = dm_deferred_set_create();
-	if (!c->all_io_ds) {
+	cache->all_io_ds = dm_deferred_set_create();
+	if (!cache->all_io_ds) {
 		ti->error = "couldn't create all_io deferred set";
 		goto bad_deferred_set;
 	}
 
-	c->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
+	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
 						      _endio_hook_cache);
-	if (!c->endio_hook_pool) {
+	if (!cache->endio_hook_pool) {
 		ti->error = "Error creating cache's endio_hook mempool";
 		goto bad_endio_hook_pool;
 	}
 
-	c->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
+	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 						     _migration_cache);
-	if (!c->migration_pool) {
+	if (!cache->migration_pool) {
 		ti->error = "Error creating cache's endio_hook mempool";
 		goto bad_migration_pool;
 	}
 
-	c->policy = dm_cache_policy_create(argv[4], c->cache_size, c->origin_sectors, block_size);
-	if (!c->policy) {
+	cache->policy = dm_cache_policy_create(argv[4], cache->cache_size, cache->origin_sectors, block_size);
+	if (!cache->policy) {
 		ti->error = "Error creating cache's policy";
 		goto bad_cache_policy;
 	}
 
 	dm_consume_args(&as, 5);
 
-	c->quiescing = 0;
-	c->commit_requested = false;
-	c->loaded_mappings = false;
-	c->last_commit_jiffies = jiffies;
+	cache->quiescing = 0;
+	cache->commit_requested = false;
+	cache->loaded_mappings = false;
+	cache->last_commit_jiffies = jiffies;
 
-	load_stats(c);
+	load_stats(cache);
 
-	atomic_set(&c->demotion, 0);
-	atomic_set(&c->promotion, 0);
-	atomic_set(&c->copies_avoided, 0);
-	atomic_set(&c->cache_cell_clash, 0);
-	atomic_set(&c->commit_count, 0);
+	atomic_set(&cache->demotion, 0);
+	atomic_set(&cache->promotion, 0);
+	atomic_set(&cache->copies_avoided, 0);
+	atomic_set(&cache->cache_cell_clash, 0);
+	atomic_set(&cache->commit_count, 0);
 
 	ti->num_flush_requests = 2;
 	ti->flush_supported = true;
@@ -1226,37 +1226,37 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad_cache_policy:
-	mempool_destroy(c->migration_pool);
+	mempool_destroy(cache->migration_pool);
 bad_migration_pool:
-	mempool_destroy(c->endio_hook_pool);
+	mempool_destroy(cache->endio_hook_pool);
 bad_endio_hook_pool:
-	dm_deferred_set_destroy(c->all_io_ds);
+	dm_deferred_set_destroy(cache->all_io_ds);
 bad_deferred_set:
-	dm_bio_prison_destroy(c->prison);
+	dm_bio_prison_destroy(cache->prison);
 bad_prison:
-	destroy_workqueue(c->wq);
+	destroy_workqueue(cache->wq);
 bad_wq:
-	dm_kcopyd_client_destroy(c->copier);
+	dm_kcopyd_client_destroy(cache->copier);
 bad_kcopyd_client:
-	free_bitset(c->discard_bitset);
+	free_bitset(cache->discard_bitset);
 bad_alloc_discard_bitset:
-	free_bitset(c->dirty_bitset);
+	free_bitset(cache->dirty_bitset);
 bad_alloc_dirty_bitset:
-	dm_cache_metadata_close(c->cmd);
+	dm_cache_metadata_close(cache->cmd);
 bad:
-	dm_put_device(ti, c->cache_dev);
+	dm_put_device(ti, cache->cache_dev);
 bad_cache:
-	dm_put_device(ti, c->origin_dev);
+	dm_put_device(ti, cache->origin_dev);
 bad_origin:
-	dm_put_device(ti, c->metadata_dev);
+	dm_put_device(ti, cache->metadata_dev);
 bad_metadata:
-	kfree(c);
+	kfree(cache);
 	return -EINVAL;
 }
 
-static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio, unsigned req_nr)
+static struct dm_cache_endio_hook *hook_endio(struct cache *cache, struct bio *bio, unsigned req_nr)
 {
-	struct dm_cache_endio_hook *h = mempool_alloc(c->endio_hook_pool, GFP_NOIO);
+	struct dm_cache_endio_hook *h = mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
 
 	h->tick = false;
 	h->req_nr = req_nr;
@@ -1268,31 +1268,31 @@ static struct dm_cache_endio_hook *hook_endio(struct cache_c *c, struct bio *bio
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		   union map_info *map_context)
 {
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 
 	int r;
 	struct dm_cell_key key;
-	dm_block_t block = get_bio_block(c, bio);
+	dm_block_t block = get_bio_block(cache, bio);
 	bool can_migrate = false;
 	bool discarded_block;
 	struct dm_bio_prison_cell *cell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h;
 
-	if (block > c->origin_blocks) {
+	if (block > cache->origin_blocks) {
 		/*
 		 * This can only occur if the io goes to a partial block at
 		 * the end of the origin device.  We don't cache these.
 		 * Just remap to the origin and carry on.
 		 */
-		remap_to_origin(c, bio);
+		remap_to_origin(cache, bio);
 		return DM_MAPIO_REMAPPED;
 	}
 
-	h = map_context->ptr = hook_endio(c, bio, map_context->target_request_nr);
+	h = map_context->ptr = hook_endio(cache, bio, map_context->target_request_nr);
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD)) {
-		defer_bio(c, bio);
+		defer_bio(cache, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
@@ -1300,15 +1300,15 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	 * Check to see if that block is currently migrating.
 	 */
 	build_key(block, &key);
-	r = dm_bio_detain(c->prison, &key, bio, &cell);
+	r = dm_bio_detain(cache->prison, &key, bio, &cell);
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
-	discarded_block = is_discarded(c, block);
+	discarded_block = is_discarded(cache, block);
 
-	r = policy_map(c->policy, block, can_migrate, discarded_block, bio, &lookup_result);
+	r = policy_map(cache->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
-		cell_defer(c, cell, true);
+		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
 	}
 
@@ -1317,17 +1317,17 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
-		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
-		cell_defer(c, cell, false);
+		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
+		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+		cell_defer(cache, cell, false);
 		break;
 
 	case POLICY_MISS:
-		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
-		remap_to_origin_dirty(c, bio, block);
-		cell_defer(c, cell, false);
+		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_miss : &cache->write_miss);
+		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		remap_to_origin_dirty(cache, bio, block);
+		cell_defer(cache, cell, false);
 		break;
 
 	default:
@@ -1341,29 +1341,29 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 static int cache_end_io(struct dm_target *ti, struct bio *bio,
 			int error, union map_info *info)
 {
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 	unsigned long flags;
 	struct dm_cache_endio_hook *h = info->ptr;
 
 	if (h->tick) {
-		policy_tick(c->policy);
+		policy_tick(cache->policy);
 
-		spin_lock_irqsave(&c->lock, flags);
-		c->need_tick_bio = true;
-		spin_unlock_irqrestore(&c->lock, flags);
+		spin_lock_irqsave(&cache->lock, flags);
+		cache->need_tick_bio = true;
+		spin_unlock_irqrestore(&cache->lock, flags);
 	}
 
-	check_for_quiesced_migrations(c, h);
-	mempool_free(h, c->endio_hook_pool);
+	check_for_quiesced_migrations(cache, h);
+	mempool_free(h, cache->endio_hook_pool);
 	return 0;
 }
 
-static int write_dirty_bitset(struct cache_c *c)
+static int write_dirty_bitset(struct cache *cache)
 {
 	unsigned i, r;
 
-	for (i = 0; i < c->cache_size; i++) {
-		r = dm_cache_set_dirty(c->cmd, i, test_bit(i, c->dirty_bitset));
+	for (i = 0; i < cache->cache_size; i++) {
+		r = dm_cache_set_dirty(cache->cmd, i, test_bit(i, cache->dirty_bitset));
 		if (r)
 			return r;
 	}
@@ -1374,35 +1374,35 @@ static int write_dirty_bitset(struct cache_c *c)
 static void cache_postsuspend(struct dm_target *ti)
 {
 	int r;
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 
-	start_quiescing(c);
-	wait_for_migrations(c);
-	stop_worker(c);
-	requeue_deferred_io(c);
-	stop_quiescing(c);
+	start_quiescing(cache);
+	wait_for_migrations(cache);
+	stop_worker(cache);
+	requeue_deferred_io(cache);
+	stop_quiescing(cache);
 
 	/*
 	 * If writing the bitset failed, we still commit, but don't set the
 	 * clean shutdown flag.  This will effectively force every dirty
 	 * bit to be set on reload.
 	 */
-	r = write_dirty_bitset(c);
-	save_stats(c);
-	dm_cache_commit(c->cmd, !r);
+	r = write_dirty_bitset(cache);
+	save_stats(cache);
+	dm_cache_commit(cache->cmd, !r);
 }
 
 static int cache_preresume(struct dm_target *ti)
 {
 	int r = 0;
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 
-	if (!c->loaded_mappings) {
-		r = dm_cache_load_mappings(c->cmd, load_mapping, c);
+	if (!cache->loaded_mappings) {
+		r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
 		if (r)
 			DMERR("couldn't load cache mappings");
 
-		c->loaded_mappings = true;
+		cache->loaded_mappings = true;
 	}
 
 	return r;
@@ -1410,9 +1410,9 @@ static int cache_preresume(struct dm_target *ti)
 
 static void cache_resume(struct dm_target *ti)
 {
-	struct cache_c *c = ti->private;
-	c->need_tick_bio = true;
-	do_waker(&c->waker.work);
+	struct cache *cache = ti->private;
+	cache->need_tick_bio = true;
+	do_waker(&cache->waker.work);
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
@@ -1420,33 +1420,33 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 {
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 	dm_block_t residency;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		residency = policy_residency(c->policy);
+		residency = policy_residency(cache->policy);
 
 		DMEMIT("%u %u %u %u %u %u %llu %u",
-		       (unsigned) atomic_read(&c->read_hit),
-		       (unsigned) atomic_read(&c->read_miss),
-		       (unsigned) atomic_read(&c->write_hit),
-		       (unsigned) atomic_read(&c->write_miss),
-		       (unsigned) atomic_read(&c->demotion),
-		       (unsigned) atomic_read(&c->promotion),
+		       (unsigned) atomic_read(&cache->read_hit),
+		       (unsigned) atomic_read(&cache->read_miss),
+		       (unsigned) atomic_read(&cache->write_hit),
+		       (unsigned) atomic_read(&cache->write_miss),
+		       (unsigned) atomic_read(&cache->demotion),
+		       (unsigned) atomic_read(&cache->promotion),
 		       (unsigned long long) residency,
-		       (unsigned) atomic_read(&c->cache_cell_clash));
+		       (unsigned) atomic_read(&cache->cache_cell_clash));
 		break;
 
 	case STATUSTYPE_TABLE:
-		format_dev_t(buf, c->metadata_dev->bdev->bd_dev);
+		format_dev_t(buf, cache->metadata_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, c->origin_dev->bdev->bd_dev);
+		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
+		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		DMEMIT("%llu ", (unsigned long long) c->sectors_per_block);
-		DMEMIT("%s", dm_cache_policy_get_name(c->policy));
+		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
+		DMEMIT("%s", dm_cache_policy_get_name(cache->policy));
 	}
 
 	return 0;
@@ -1456,11 +1456,11 @@ static int cache_iterate_devices(struct dm_target *ti,
 				 iterate_devices_callout_fn fn, void *data)
 {
 	int r = 0;
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 
-	r = fn(ti, c->cache_dev, 0, get_dev_size(c->cache_dev), data);
+	r = fn(ti, cache->cache_dev, 0, get_dev_size(cache->cache_dev), data);
 	if (!r)
-		r = fn(ti, c->origin_dev, 0, ti->len, data);
+		r = fn(ti, cache->origin_dev, 0, ti->len, data);
 
 	return r;
 }
@@ -1469,39 +1469,39 @@ static int cache_bvec_merge(struct dm_target *ti,
 			  struct bvec_merge_data *bvm,
 			  struct bio_vec *biovec, int max_size)
 {
-	struct cache_c *c = ti->private;
-	struct request_queue *q = bdev_get_queue(c->origin_dev->bdev);
+	struct cache *cache = ti->private;
+	struct request_queue *q = bdev_get_queue(cache->origin_dev->bdev);
 
 	if (!q->merge_bvec_fn)
 		return max_size;
 
-	bvm->bi_bdev = c->origin_dev->bdev;
+	bvm->bi_bdev = cache->origin_dev->bdev;
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-static void set_discard_limits(struct cache_c *c, struct queue_limits *limits)
+static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 {
 	/*
 	 * FIXME: these limits may be incompatible with the cache's data device
 	 */
-	limits->max_discard_sectors = c->sectors_per_block * 1024;
+	limits->max_discard_sectors = cache->sectors_per_block * 1024;
 
 	/*
 	 * This is just a hint, and not enforced.  We have to cope with
 	 * bios that cover a block partially.  A discard that spans a block
 	 * boundary is not sent to this target.
 	 */
-	limits->discard_granularity = c->sectors_per_block << SECTOR_SHIFT;
+	limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
 	limits->discard_zeroes_data = 0;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
-	struct cache_c *c = ti->private;
+	struct cache *cache = ti->private;
 
 	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, c->sectors_per_block << SECTOR_SHIFT);
-	set_discard_limits(c, limits);
+	blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+	set_discard_limits(cache, limits);
 }
 
 /*----------------------------------------------------------------*/
