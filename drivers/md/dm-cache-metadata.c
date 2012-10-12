@@ -72,6 +72,11 @@ struct cache_disk_superblock {
 	__le32 compat_ro_flags;
 	__le32 incompat_flags;
 
+	__le32 read_hits;
+	__le32 read_misses;
+	__le32 write_hits;
+	__le32 write_misses;
+
 } __packed;
 
 struct dm_cache_metadata {
@@ -88,6 +93,8 @@ struct dm_cache_metadata {
 	dm_block_t cache_blocks;
 	bool changed:1;
 	bool clean_when_opened:1;
+
+	struct dm_cache_statistics stats;
 };
 
 /*-------------------------------------------------------------------
@@ -269,6 +276,11 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
 
+	disk_super->read_hits = cpu_to_le32(0);
+	disk_super->read_misses = cpu_to_le32(0);
+	disk_super->write_hits = cpu_to_le32(0);
+	disk_super->write_misses = cpu_to_le32(0);
+
 	return dm_tm_commit(cmd->tm, sblock);
 
 bad_locked:
@@ -442,6 +454,12 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->root = le64_to_cpu(disk_super->mapping_root);
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = le32_to_cpu(disk_super->cache_blocks);
+
+	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
+	cmd->stats.read_misses = le32_to_cpu(disk_super->read_misses);
+	cmd->stats.write_hits = le32_to_cpu(disk_super->write_hits);
+	cmd->stats.write_misses = le32_to_cpu(disk_super->write_misses);
+
 	cmd->changed = false;
 }
 
@@ -519,6 +537,11 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->cache_blocks = cpu_to_le32(cmd->cache_blocks);
+
+	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
+	disk_super->read_misses = cpu_to_le32(cmd->stats.read_misses);
+	disk_super->write_hits = cpu_to_le32(cmd->stats.write_hits);
+	disk_super->write_misses = cpu_to_le32(cmd->stats.write_misses);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -812,6 +835,22 @@ int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool di
 	up_write(&cmd->root_lock);
 
 	return r;
+}
+
+void dm_cache_get_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats)
+{
+	down_read(&cmd->root_lock);
+	memcpy(stats, &cmd->stats, sizeof(*stats));
+	up_read(&cmd->root_lock);
+}
+
+void dm_cache_set_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats)
+{
+	down_write(&cmd->root_lock);
+	memcpy(&cmd->stats, stats, sizeof(*stats));
+	up_write(&cmd->root_lock);
 }
 
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
