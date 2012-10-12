@@ -22,7 +22,6 @@
  * Tunable constants
  */
 #define ENDIO_HOOK_POOL_SIZE 1024
-#define DEFERRED_SET_SIZE 64
 #define MAPPING_POOL_SIZE 1024
 #define PRISON_CELLS 1024
 #define COMMIT_PERIOD HZ
@@ -59,7 +58,7 @@
  * i) plug io further to this physical block. (see bio_prison code).
  *
  * ii) quiesce any read io to that shared data block.  Obviously
- * including all devices that share this block.  (see deferred_set code)
+ * including all devices that share this block.  (see dm_deferred_set code)
  *
  * iii) copy the data block to a newly allocate block.  This step can be
  * missed out if the io covers the block. (schedule_copy).
@@ -103,7 +102,7 @@
  * Key building.
  */
 static void build_data_key(struct dm_thin_device *td,
-			   dm_block_t b, struct cell_key *key)
+			   dm_block_t b, struct dm_cell_key *key)
 {
 	key->virtual = 0;
 	key->dev = dm_thin_dev_id(td);
@@ -111,7 +110,7 @@ static void build_data_key(struct dm_thin_device *td,
 }
 
 static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
-			      struct cell_key *key)
+			      struct dm_cell_key *key)
 {
 	key->virtual = 1;
 	key->dev = dm_thin_dev_id(td);
@@ -164,7 +163,7 @@ struct pool {
 	unsigned low_water_triggered:1;	/* A dm event has been sent */
 	unsigned no_free_space:1;	/* A -ENOSPC warning has been issued */
 
-	struct bio_prison *prison;
+	struct dm_bio_prison *prison;
 	struct dm_kcopyd_client *copier;
 
 	struct workqueue_struct *wq;
@@ -182,8 +181,8 @@ struct pool {
 
 	struct bio_list retry_on_resume_list;
 
-	struct deferred_set *shared_read_ds;
-	struct deferred_set *all_io_ds;
+	struct dm_deferred_set *shared_read_ds;
+	struct dm_deferred_set *all_io_ds;
 
 	struct dm_thin_new_mapping *next_mapping;
 	mempool_t *mapping_pool;
@@ -290,8 +289,8 @@ static struct pool *__pool_table_lookup_metadata_dev(struct block_device *md_dev
 
 struct dm_thin_endio_hook {
 	struct thin_c *tc;
-	struct deferred_entry *shared_read_entry;
-	struct deferred_entry *all_io_entry;
+	struct dm_deferred_entry *shared_read_entry;
+	struct dm_deferred_entry *all_io_entry;
 	struct dm_thin_new_mapping *overwrite_mapping;
 };
 
@@ -507,7 +506,7 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
 	unsigned long flags;
 
 	spin_lock_irqsave(&pool->lock, flags);
-	cell_release(cell, &pool->deferred_bios);
+	dm_cell_release(cell, &pool->deferred_bios);
 	spin_unlock_irqrestore(&tc->pool->lock, flags);
 
 	wake_worker(pool);
@@ -526,7 +525,7 @@ static void cell_defer_except(struct thin_c *tc, struct dm_bio_prison_cell *cell
 	bio_list_init(&bios);
 
 	spin_lock_irqsave(&pool->lock, flags);
-	cell_release_no_holder(cell, &pool->deferred_bios);
+	dm_cell_release_no_holder(cell, &pool->deferred_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_worker(pool);
@@ -536,7 +535,7 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 {
 	if (m->bio)
 		m->bio->bi_end_io = m->saved_bi_end_io;
-	cell_error(m->cell);
+	dm_cell_error(m->cell);
 	list_del(&m->list);
 	mempool_free(m, m->tc->pool->mapping_pool);
 }
@@ -551,7 +550,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		bio->bi_end_io = m->saved_bi_end_io;
 
 	if (m->err) {
-		cell_error(m->cell);
+		dm_cell_error(m->cell);
 		goto out;
 	}
 
@@ -563,7 +562,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
 	if (r) {
 		DMERR("dm_thin_insert_block() failed");
-		cell_error(m->cell);
+		dm_cell_error(m->cell);
 		goto out;
 	}
 
@@ -697,7 +696,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	m->err = 0;
 	m->bio = NULL;
 
-	if (!ds_add_work(pool->shared_read_ds, &m->list))
+	if (!dm_deferred_set_add_work(pool->shared_read_ds, &m->list))
 		m->quiesced = 1;
 
 	/*
@@ -729,7 +728,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
 			DMERR("dm_kcopyd_copy() failed");
-			cell_error(cell);
+			dm_cell_error(cell);
 		}
 	}
 }
@@ -794,7 +793,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
 			DMERR("dm_kcopyd_zero() failed");
-			cell_error(cell);
+			dm_cell_error(cell);
 		}
 	}
 }
@@ -906,7 +905,7 @@ static void no_space(struct dm_bio_prison_cell *cell)
 	struct bio_list bios;
 
 	bio_list_init(&bios);
-	cell_release(cell, &bios);
+	dm_cell_release(cell, &bios);
 
 	while ((bio = bio_list_pop(&bios)))
 		retry_on_resume(bio);
@@ -918,13 +917,13 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 	struct dm_bio_prison_cell *cell, *cell2;
-	struct cell_key key, key2;
+	struct dm_cell_key key, key2;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
 	struct dm_thin_new_mapping *m;
 
 	build_virtual_key(tc->td, block, &key);
-	if (bio_detain(tc->pool->prison, &key, bio, &cell))
+	if (dm_bio_detain(tc->pool->prison, &key, bio, &cell))
 		return;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
@@ -936,8 +935,8 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		 * on this block.
 		 */
 		build_data_key(tc->td, lookup_result.block, &key2);
-		if (bio_detain(tc->pool->prison, &key2, bio, &cell2)) {
-			cell_release_singleton(cell, bio);
+		if (dm_bio_detain(tc->pool->prison, &key2, bio, &cell2)) {
+			dm_cell_release_singleton(cell, bio);
 			break;
 		}
 
@@ -956,7 +955,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			m->err = 0;
 			m->bio = bio;
 
-			if (!ds_add_work(pool->all_io_ds, &m->list)) {
+			if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list)) {
 				spin_lock_irqsave(&pool->lock, flags);
 				list_add(&m->list, &pool->prepared_discards);
 				spin_unlock_irqrestore(&pool->lock, flags);
@@ -968,8 +967,8 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			 * a block boundary.  So we submit the discard of a
 			 * partial block appropriately.
 			 */
-			cell_release_singleton(cell, bio);
-			cell_release_singleton(cell2, bio);
+			dm_cell_release_singleton(cell, bio);
+			dm_cell_release_singleton(cell2, bio);
 			if ((!lookup_result.shared) && pool->pf.discard_passdown)
 				remap_and_issue(tc, bio, lookup_result.block);
 			else
@@ -981,20 +980,20 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		/*
 		 * It isn't provisioned, just forget it.
 		 */
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 		bio_endio(bio, 0);
 		break;
 
 	default:
 		DMERR("discard: find block unexpectedly returned %d", r);
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 		bio_io_error(bio);
 		break;
 	}
 }
 
 static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
-			  struct cell_key *key,
+			  struct dm_cell_key *key,
 			  struct dm_thin_lookup_result *lookup_result,
 			  struct dm_bio_prison_cell *cell)
 {
@@ -1014,7 +1013,7 @@ static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
 
 	default:
 		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
-		cell_error(cell);
+		dm_cell_error(cell);
 		break;
 	}
 }
@@ -1025,14 +1024,14 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 {
 	struct dm_bio_prison_cell *cell;
 	struct pool *pool = tc->pool;
-	struct cell_key key;
+	struct dm_cell_key key;
 
 	/*
 	 * If cell is already occupied, then sharing is already in the process
 	 * of being broken so we have nothing further to do here.
 	 */
 	build_data_key(tc->td, lookup_result->block, &key);
-	if (bio_detain(pool->prison, &key, bio, &cell))
+	if (dm_bio_detain(pool->prison, &key, bio, &cell))
 		return;
 
 	if (bio_data_dir(bio) == WRITE && bio->bi_size)
@@ -1040,9 +1039,9 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	else {
 		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
-		h->shared_read_entry = ds_inc(pool->shared_read_ds);
+		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
 
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 		remap_and_issue(tc, bio, lookup_result->block);
 	}
 }
@@ -1057,7 +1056,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
 	if (!bio->bi_size) {
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 		remap_and_issue(tc, bio, 0);
 		return;
 	}
@@ -1067,7 +1066,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 */
 	if (bio_data_dir(bio) == READ) {
 		zero_fill_bio(bio);
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 		bio_endio(bio, 0);
 		return;
 	}
@@ -1088,7 +1087,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	default:
 		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
 		set_pool_mode(tc->pool, PM_READ_ONLY);
-		cell_error(cell);
+		dm_cell_error(cell);
 		break;
 	}
 }
@@ -1098,7 +1097,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	int r;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_bio_prison_cell *cell;
-	struct cell_key key;
+	struct dm_cell_key key;
 	struct dm_thin_lookup_result lookup_result;
 
 	/*
@@ -1106,7 +1105,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	 * being provisioned so we have nothing further to do here.
 	 */
 	build_virtual_key(tc->td, block, &key);
-	if (bio_detain(tc->pool->prison, &key, bio, &cell))
+	if (dm_bio_detain(tc->pool->prison, &key, bio, &cell))
 		return;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
@@ -1121,7 +1120,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		 * TODO: this will probably have to change when discard goes
 		 * back in.
 		 */
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 
 		if (lookup_result.shared)
 			process_shared_bio(tc, bio, block, &lookup_result);
@@ -1131,7 +1130,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	case -ENODATA:
 		if (bio_data_dir(bio) == READ && tc->origin_dev) {
-			cell_release_singleton(cell, bio);
+			dm_cell_release_singleton(cell, bio);
 			remap_to_origin_and_issue(tc, bio);
 		} else
 			provision_block(tc, bio, block, cell);
@@ -1139,7 +1138,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	default:
 		DMERR("dm_thin_find_block() failed, error = %d", r);
-		cell_release_singleton(cell, bio);
+		dm_cell_release_singleton(cell, bio);
 		bio_io_error(bio);
 		break;
 	}
@@ -1348,7 +1347,7 @@ static struct dm_thin_endio_hook *thin_hook_bio(struct thin_c *tc, struct bio *b
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
-	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : ds_inc(pool->all_io_ds);
+	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
 	h->overwrite_mapping = NULL;
 
 	return h;
@@ -1558,7 +1557,7 @@ static void __pool_destroy(struct pool *pool)
 	if (dm_pool_metadata_close(pool->pmd) < 0)
 		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
 
-	prison_destroy(pool->prison);
+	dm_bio_prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
 
 	if (pool->wq)
@@ -1568,8 +1567,8 @@ static void __pool_destroy(struct pool *pool)
 		mempool_free(pool->next_mapping, pool->mapping_pool);
 	mempool_destroy(pool->mapping_pool);
 	mempool_destroy(pool->endio_hook_pool);
-	ds_destroy(pool->shared_read_ds);
-	ds_destroy(pool->all_io_ds);
+	dm_deferred_set_destroy(pool->shared_read_ds);
+	dm_deferred_set_destroy(pool->all_io_ds);
 	kfree(pool);
 }
 
@@ -1608,7 +1607,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		pool->sectors_per_block_shift = __ffs(block_size);
 	pool->low_water_blocks = 0;
 	pool_features_init(&pool->pf);
-	pool->prison = prison_create(PRISON_CELLS);
+	pool->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!pool->prison) {
 		*error = "Error creating pool's bio prison";
 		err_p = ERR_PTR(-ENOMEM);
@@ -1645,13 +1644,19 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->no_free_space = 0;
 	bio_list_init(&pool->retry_on_resume_list);
 
-	pool->shared_read_ds = ds_create();
-	if (!pool->shared_read_ds)
-		goto bad_shared_ds;
+	pool->shared_read_ds = dm_deferred_set_create();
+	if (!pool->shared_read_ds) {
+		*error = "Error creating pool's shared read deferred set";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_shared_read_ds;
+	}
 
-	pool->all_io_ds = ds_create();
-	if (!pool->all_io_ds)
+	pool->all_io_ds = dm_deferred_set_create();
+	if (!pool->all_io_ds) {
+		*error = "Error creating pool's all io deferred set";
+		err_p = ERR_PTR(-ENOMEM);
 		goto bad_all_io_ds;
+	}
 
 	pool->next_mapping = NULL;
 	pool->mapping_pool = mempool_create_slab_pool(MAPPING_POOL_SIZE,
@@ -1680,15 +1685,15 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 bad_endio_hook_pool:
 	mempool_destroy(pool->mapping_pool);
 bad_mapping_pool:
-	ds_destroy(pool->all_io_ds);
+	dm_deferred_set_destroy(pool->all_io_ds);
 bad_all_io_ds:
-	ds_destroy(pool->shared_read_ds);
-bad_shared_ds:
+	dm_deferred_set_destroy(pool->shared_read_ds);
+bad_shared_read_ds:
 	destroy_workqueue(pool->wq);
 bad_wq:
 	dm_kcopyd_client_destroy(pool->copier);
 bad_kcopyd_client:
-	prison_destroy(pool->prison);
+	dm_bio_prison_destroy(pool->prison);
 bad_prison:
 	kfree(pool);
 bad_pool:
@@ -2358,10 +2363,6 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		else
 			DMEMIT("no_discard_passdown");
 
-		if (pool->pf.mode == PM_READ_ONLY)
-			DMEMIT("read_only");
-		else
-			DMEMIT("read_write");
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2417,10 +2418,8 @@ static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 	if (pt->adjusted_pf.discard_passdown) {
 		data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
 		limits->discard_granularity = data_limits->discard_granularity;
-
 	} else if (block_size_is_power_of_two(pool))
 		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-
 	else
 		/*
 		 * Use largest power of 2 that is a factor of sectors_per_block
@@ -2454,8 +2453,8 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
-		DM_TARGET_IMMUTABLE,
-	.version = {1, 4, 0},
+		    DM_TARGET_IMMUTABLE,
+	.version = {1, 5, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -2630,7 +2629,7 @@ static int thin_endio(struct dm_target *ti,
 
 	if (h->shared_read_entry) {
 		INIT_LIST_HEAD(&work);
-		ds_dec(h->shared_read_entry, &work);
+		dm_deferred_entry_dec(h->shared_read_entry, &work);
 
 		spin_lock_irqsave(&pool->lock, flags);
 		list_for_each_entry_safe(m, tmp, &work, list) {
@@ -2643,7 +2642,7 @@ static int thin_endio(struct dm_target *ti,
 
 	if (h->all_io_entry) {
 		INIT_LIST_HEAD(&work);
-		ds_dec(h->all_io_entry, &work);
+		dm_deferred_entry_dec(h->all_io_entry, &work);
 		spin_lock_irqsave(&pool->lock, flags);
 		list_for_each_entry_safe(m, tmp, &work, list)
 			list_add(&m->list, &pool->prepared_discards);
@@ -2746,7 +2745,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 4, 0},
+	.version = {1, 5, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,

@@ -140,8 +140,8 @@ struct cache_c {
 	struct delayed_work waker;
 	unsigned long last_commit_jiffies;
 
-	struct bio_prison *prison;
-	struct deferred_set *all_io_ds;
+	struct dm_bio_prison *prison;
+	struct dm_deferred_set *all_io_ds;
 
 	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
@@ -168,7 +168,7 @@ struct cache_c {
 struct dm_cache_endio_hook {
 	bool tick:1;
 	unsigned req_nr:2;
-	struct deferred_entry *all_io_entry;
+	struct dm_deferred_entry *all_io_entry;
 };
 
 struct dm_cache_migration {
@@ -188,7 +188,7 @@ struct dm_cache_migration {
 	struct dm_bio_prison_cell *new_ocell;
 };
 
-static void build_key(dm_block_t block, struct cell_key *key)
+static void build_key(dm_block_t block, struct dm_cell_key *key)
 {
 	key->virtual = 0;
 	key->dev = 0;
@@ -375,7 +375,7 @@ static void dec_nr_migrations(struct cache_c *c)
 
 static void __cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
 {
-	(holder ? cell_release : cell_release_no_holder)(cell, &c->deferred_bios);
+	(holder ? dm_cell_release : dm_cell_release_no_holder)(cell, &c->deferred_bios);
 }
 
 static void cell_defer(struct cache_c *c, struct dm_bio_prison_cell *cell, bool holder)
@@ -587,7 +587,7 @@ static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_end
 
 	INIT_LIST_HEAD(&work);
 	if (h->all_io_entry)
-		ds_dec(h->all_io_entry, &work);
+		dm_deferred_entry_dec(h->all_io_entry, &work);
 
 	if (!list_empty(&work))
 		queue_quiesced_migrations(c, &work);
@@ -595,7 +595,7 @@ static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_end
 
 static void quiesce_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
-	if (!ds_add_work(c->all_io_ds, &mg->list))
+	if (!dm_deferred_set_add_work(c->all_io_ds, &mg->list))
 		queue_quiesced_migration(c, mg);
 }
 
@@ -707,7 +707,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 {
 	int r;
 	int release_cell = 1;
-	struct cell_key key;
+	struct dm_cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
@@ -719,7 +719,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	 * Check to see if that block is currently migrating.
 	 */
 	build_key(block, &key);
-	r = bio_detain(c->prison, &key, bio, &new_ocell);
+	r = dm_bio_detain(c->prison, &key, bio, &new_ocell);
 	if (r > 0)
 		return;
 
@@ -727,14 +727,14 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
 		issue(c, bio);
 		break;
 
 	case POLICY_MISS:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_origin_dirty(c, bio, block);
 		issue(c, bio);
 		break;
@@ -747,7 +747,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 
 	case POLICY_REPLACE:
 		build_key(lookup_result.old_oblock, &key);
-		r = bio_detain(c->prison, &key, bio, &old_ocell);
+		r = dm_bio_detain(c->prison, &key, bio, &old_ocell);
 		if (r > 0) {
 			/*
 			 * We have to be careful to avoid lock inversion of
@@ -1012,8 +1012,8 @@ static void cache_dtr(struct dm_target *ti)
 
 	mempool_destroy(c->migration_pool);
 	mempool_destroy(c->endio_hook_pool);
-	ds_destroy(c->all_io_ds);
-	prison_destroy(c->prison);
+	dm_deferred_set_destroy(c->all_io_ds);
+	dm_bio_prison_destroy(c->prison);
 	destroy_workqueue(c->wq);
 	free_bitset(c->dirty_bitset);
 	free_bitset(c->discard_bitset);
@@ -1171,13 +1171,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	INIT_WORK(&c->worker, do_work);
 	INIT_DELAYED_WORK(&c->waker, do_waker);
 
-	c->prison = prison_create(PRISON_CELLS);
+	c->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!c->prison) {
 		ti->error = "couldn't create bio prison";
 		goto bad_prison;
 	}
 
-	c->all_io_ds = ds_create();
+	c->all_io_ds = dm_deferred_set_create();
 	if (!c->all_io_ds) {
 		ti->error = "couldn't create all_io deferred set";
 		goto bad_deferred_set;
@@ -1230,9 +1230,9 @@ bad_cache_policy:
 bad_migration_pool:
 	mempool_destroy(c->endio_hook_pool);
 bad_endio_hook_pool:
-	ds_destroy(c->all_io_ds);
+	dm_deferred_set_destroy(c->all_io_ds);
 bad_deferred_set:
-	prison_destroy(c->prison);
+	dm_bio_prison_destroy(c->prison);
 bad_prison:
 	destroy_workqueue(c->wq);
 bad_wq:
@@ -1271,7 +1271,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	struct cache_c *c = ti->private;
 
 	int r;
-	struct cell_key key;
+	struct dm_cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
 	bool can_migrate = false;
 	bool discarded_block;
@@ -1300,7 +1300,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	 * Check to see if that block is currently migrating.
 	 */
 	build_key(block, &key);
-	r = bio_detain(c->prison, &key, bio, &cell);
+	r = dm_bio_detain(c->prison, &key, bio, &cell);
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
 
@@ -1318,14 +1318,14 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
 		cell_defer(c, cell, false);
 		break;
 
 	case POLICY_MISS:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_origin_dirty(c, bio, block);
 		cell_defer(c, cell, false);
 		break;
