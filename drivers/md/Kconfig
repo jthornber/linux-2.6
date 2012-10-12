@@ -290,7 +290,7 @@ config DM_CACHE_MKFS
          Under development
 
 config DM_CACHE_BASIC
-       tristate "Basic (FIFO/LRU/MRU/LFU/MFU) Policies (EXPERIMENTAL)"
+       tristate "Basic (BASIC/FIFO/FILO/LRU/MRU/LFU/MFU/LFU_WS/MFU_WS/MULTIQUEUE/MULTIQUEUE_WS/Q2/TWOQUEUE/RANDOM) Cache Policies (EXPERIMENTAL)"
        depends on DM_CACHE
        select BTREE
        default y
