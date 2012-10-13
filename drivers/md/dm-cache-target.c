@@ -844,8 +844,7 @@ static void process_deferred_bios(struct cache *cache)
 	}
 }
 
-/* FIXME: duplicate code */
-static void submit_deferred_flush_bios(struct cache *cache)
+static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 {
 	unsigned long flags;
 	struct bio_list bios;
@@ -859,24 +858,7 @@ static void submit_deferred_flush_bios(struct cache *cache)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
-		generic_make_request(bio);
-}
-
-static void error_deferred_flush_bios(struct cache *cache)
-{
-	unsigned long flags;
-	struct bio_list bios;
-	struct bio *bio;
-
-	bio_list_init(&bios);
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_merge(&bios, &cache->deferred_flush_bios);
-	bio_list_init(&cache->deferred_flush_bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	while ((bio = bio_list_pop(&bios)))
-		bio_io_error(bio);
+		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
 }
 
 /*----------------------------------------------------------------
@@ -962,14 +944,14 @@ static void do_worker(struct work_struct *ws)
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
 
 		if (commit_if_needed(cache)) {
-			error_deferred_flush_bios(cache);
+			process_deferred_flush_bios(cache, false);
 
 			/*
 			 * FIXME: rollback metadata or just go into a
 			 * failure mode and error everything
 			 */
 		} else {
-			submit_deferred_flush_bios(cache);
+			process_deferred_flush_bios(cache, true);
 			process_migrations(cache, &cache->need_commit_migrations, migration_success_post_commit);
 		}
 
