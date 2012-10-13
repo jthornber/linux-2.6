@@ -1217,7 +1217,7 @@ bad_cache:
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r;
+	int r = -EINVAL;
 	struct cache *cache;
 	struct dm_arg_set as;
 	sector_t block_size, origin_sectors, cache_sectors;
@@ -1310,7 +1310,7 @@ bad_cache:
 bad_origin:
 	dm_put_device(ti, metadata_dev);
 bad_metadata:
-	return -EINVAL;
+	return r;
 }
 
 static struct dm_cache_endio_hook *hook_endio(struct cache *cache, struct bio *bio, unsigned req_nr)
