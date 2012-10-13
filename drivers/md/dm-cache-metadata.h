@@ -11,6 +11,7 @@
 
 /*----------------------------------------------------------------*/
 
+#define CACHE_POLICY_NAME_SIZE 16
 #define CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */
@@ -74,6 +75,11 @@ void dm_cache_set_stats(struct dm_cache_metadata *cmd,
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
 
 void dm_cache_dump(struct dm_cache_metadata *cmd);
+
+int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
+					const char *policy_name);
+
+const char *dm_cache_metadata_read_policy_name(struct dm_cache_metadata *cmd);
 
 /*----------------------------------------------------------------*/
 
