@@ -24,6 +24,13 @@
 #define CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
 /*
+ * A metadata device larger than 16GB triggers a warning.
+ */
+#define CACHE_METADATA_MAX_SECTORS_WARNING (16 * (1024 * 1024 * 1024 >> SECTOR_SHIFT))
+
+/*----------------------------------------------------------------*/
+
+/*
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the thin metadata.
  */

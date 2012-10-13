@@ -1222,6 +1222,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_arg_set as;
 	sector_t block_size, origin_sectors, cache_sectors;
 	struct dm_dev *metadata_dev, *origin_dev, *cache_dev;
+	sector_t metadata_dev_size;
+	char b[BDEVNAME_SIZE];
 	const char *policy_name;
 
 	if (argc < 5) {
@@ -1245,6 +1247,11 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata device";
 		goto bad_metadata;
 	}
+
+	metadata_dev_size = get_dev_size(metadata_dev);
+	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
+		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
+		       bdevname(metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &origin_dev);
 	if (r) {
