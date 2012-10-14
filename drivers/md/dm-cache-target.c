@@ -67,7 +67,6 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-#define BLOCK_SIZE_MIN 64
 #define PRISON_CELLS 1024
 #define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
