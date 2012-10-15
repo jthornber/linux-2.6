@@ -280,7 +280,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 	if (map_ret == -EWOULDBLOCK) {
 		if (result->op != POLICY_MISS) {
 			if (modparms.verbose & 0x2)
-				DMWARN("-EWOULDBLOCK: op != POLICY_MISS invalid!");
+				DMWARN("-EWOULDBLOCK: op=%u != POLICY_MISS invalid!", eo->op);
 
 			p->bad.miss++;
 
@@ -367,8 +367,12 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		if (eo) {
 			check_op("POLICY_MISS", eo->op);
 
-			if (eo->op != POLICY_MISS)
+			if (eo->op != POLICY_MISS) {
+				if (modparms.verbose & 0x2)
+					DMWARN("POLICY_MISS: op=%u != POLICY_MISS invalid!", eo->op);
+
 				p->bad.miss++;
+			}
 
 		} else
 			p->good.miss++;
