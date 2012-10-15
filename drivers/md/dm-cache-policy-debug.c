@@ -47,11 +47,11 @@ struct debug_entry {
 };
 
 struct good_state_counts {
-	unsigned hit, miss, new, replace, op, cblock, load, remove, force, residency;
+	unsigned hit, map_miss, miss, new, replace, op, cblock, load, remove, force, residency;
 };
 
 struct bad_state_counts {
-	unsigned hit, miss, new, replace, op, cblock, load, remove, force, residency_larger, residency_invalid;
+	unsigned hit, map_miss, miss, new, replace, op, cblock, load, remove, force, residency_larger, residency_invalid;
 };
 
 struct policy {
@@ -282,10 +282,10 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 			if (modparms.verbose & 0x2)
 				DMWARN("-EWOULDBLOCK: op=%u != POLICY_MISS invalid!", eo->op);
 
-			p->bad.miss++;
+			p->bad.map_miss++;
 
 		} else
-			p->good.miss++;
+			p->good.map_miss++;
 
 		return NULL;
 	}
@@ -400,10 +400,10 @@ static void log_stats(struct policy *p)
 {
 	if (++p->hit > (p->cache_blocks << 1)) {
 		p->hit = 0;
-		DMINFO("blocks nr_dblocks_allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
+		DMINFO("blocks nr_dblocks_allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,map_miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
 		       "cblock=%u/%u,load=%u/%u,remove=%u/%u,force=%u/%u residency ok/larger/invalid=%u/%u/%u",
 		       p->nr_dblocks_allocated, p->analysed,
-		       p->good.hit, p->bad.hit, p->good.miss, p->bad.miss, p->good.new, p->bad.new,
+		       p->good.hit, p->bad.hit, p->good.miss, p->bad.miss, p->good.map_miss, p->bad.map_miss, p->good.new, p->bad.new,
 		       p->good.replace, p->bad.replace, p->good.op, p->bad.op, p->good.cblock, p->bad.cblock,
 		       p->good.load, p->bad.load, p->good.remove, p->bad.remove, p->good.force, p->bad.force,
 		       p->good.residency, p->bad.residency_larger, p->bad.residency_invalid);
