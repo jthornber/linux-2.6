@@ -1081,7 +1081,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 
 	cache->cmd = cmd;
 
-	cache->origin_blocks = origin_sectors;
+	cache->origin_blocks = cache->origin_sectors = origin_sectors;
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
 	if (block_size & (block_size - 1)) {
