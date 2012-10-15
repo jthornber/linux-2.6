@@ -62,8 +62,8 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd);
 
 typedef int (*load_mapping_fn)(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty);
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
-			   load_mapping_fn fn,
-			   void *context);
+			    load_mapping_fn fn,
+			    void *context);
 
 int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty);
 
@@ -83,10 +83,26 @@ int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
 
 void dm_cache_dump(struct dm_cache_metadata *cmd);
 
-int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
-					const char *policy_name);
+/*
+ * The policy is invited to save a 32bit hint value for every cblock (eg,
+ * for a hit count).  These are stored against the policy name.  If
+ * policies are changed, then hints will be lost.  If the machine crashes,
+ * hints will be lost.
+ */
+typedef int (*hint_save_fn)(void *context, dm_block_t cblock, uint32_t *hint);
+typedef int (*hint_load_fn)(void *context, dm_block_t cblock, uint32_t hint);
 
-const char *dm_cache_metadata_read_policy_name(struct dm_cache_metadata *cmd);
+/*
+ * requests hints for every cblock and stores in the metdata device.
+ */
+int dm_cache_save_hints(struct dm_cache_metadata *cmd, const char *policy_name,
+			hint_save_fn fn, void *context);
+
+/*
+ * Loads any hints.  returns -ENODATA if there are no hints.
+ */
+int dm_cache_load_hints(struct dm_cache_metadata *cmd, const char *policy_name,
+			hint_load_fn fn, void *context);
 
 /*----------------------------------------------------------------*/
 
