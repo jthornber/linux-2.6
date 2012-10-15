@@ -276,7 +276,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 
 	p->good.op++;
 
-	/* target map thread may result in this. */
+	/* target map thread caller may result in this. */
 	if (map_ret == -EWOULDBLOCK) {
 		if (result->op != POLICY_MISS) {
 			if (modparms.verbose & 0x2)
@@ -366,7 +366,9 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_MISS FALSE. */
 		if (eo) {
 			check_op("POLICY_MISS", eo->op);
-			p->bad.miss++;
+
+			if (eo->op != POLICY_MISS)
+				p->bad.miss++;
 
 		} else
 			p->good.miss++;
