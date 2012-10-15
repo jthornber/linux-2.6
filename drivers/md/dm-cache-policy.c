@@ -67,6 +67,10 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type)
 {
 	int r;
 
+	/* One size fits all for now */
+	if (type->hint_size != 0 && type->hint_size != 4)
+		return -EINVAL;
+
 	spin_lock(&register_lock);
 	if (__find_policy(type->name)) {
 		DMWARN("attempt to register policy under duplicate name");
@@ -89,7 +93,8 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type)
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size, sector_t origin_size, sector_t block_size)
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size,
+					       sector_t origin_size, sector_t block_size)
 {
 	struct dm_cache_policy *p = NULL;
 	struct dm_cache_policy_type *type;
@@ -122,5 +127,13 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p)
 	return t->name;
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_get_name);
+
+size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p)
+{
+	struct dm_cache_policy_type *t = p->private;
+
+	return t->hint_size;
+}
+EXPORT_SYMBOL_GPL(dm_cache_policy_get_hint_size);
 
 /*----------------------------------------------------------------*/
