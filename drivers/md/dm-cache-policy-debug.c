@@ -62,7 +62,7 @@ struct policy {
 	struct list_head free, used;
 	struct hash ohash, chash;
 	dm_block_t origin_blocks, cache_blocks;
-	unsigned nr_allocated, analysed, hit;
+	unsigned nr_dblocks_allocated, analysed, hit;
 	struct good_state_counts good;
 	struct bad_state_counts bad;
 };
@@ -189,6 +189,8 @@ static int alloc_debug_blocks_and_hashs(struct policy *p, dm_block_t origin_bloc
 	INIT_LIST_HEAD(&p->free);
 	INIT_LIST_HEAD(&p->used);
 
+	p->nr_dblocks_allocated = 0;
+
 	/* FIXME: if we'ld avoid POLICY_MISS checks, we wouldn't need that many. */
 	u = origin_blocks;
 	while (u--) {
@@ -233,7 +235,7 @@ static void free_debug_entry(struct policy *p, struct debug_entry *e)
 	e->oblock = e->cblock = e->op = 0;
 	BUG_ON(list_empty(&e->list));
 	list_move_tail(&e->list, &p->free);
-	p->nr_allocated--;
+	p->nr_dblocks_allocated--;
 }
 
 static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_t oblock, dm_block_t cblock)
@@ -246,7 +248,7 @@ static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_
 	insert_ohash_entry(p, e);
 	insert_chash_entry(p, e);
 	list_add(&e->list, &p->used);
-	p->nr_allocated++;
+	p->nr_dblocks_allocated++;
 
 	return e;
 }
@@ -392,9 +394,9 @@ static void log_stats(struct policy *p)
 {
 	if (++p->hit > (p->cache_blocks << 1)) {
 		p->hit = 0;
-		DMINFO("blocks nr_allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
+		DMINFO("blocks nr_dblocks_allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
 		       "cblock=%u/%u,load=%u/%u,remove=%u/%u,force=%u/%u residency ok/larger/invalid=%u/%u/%u",
-		       p->nr_allocated, p->analysed,
+		       p->nr_dblocks_allocated, p->analysed,
 		       p->good.hit, p->bad.hit, p->good.miss, p->bad.miss, p->good.new, p->bad.new,
 		       p->good.replace, p->bad.replace, p->good.op, p->bad.op, p->good.cblock, p->bad.cblock,
 		       p->good.load, p->bad.load, p->good.remove, p->bad.remove, p->good.force, p->bad.force,
@@ -528,7 +530,7 @@ static dm_block_t debug_residency(struct dm_cache_policy *pe)
 
 	mutex_lock(&p->lock);
 	r = policy_residency(p->debug_policy);
-	if (r >= p->cache_blocks) {
+	if (r > p->cache_blocks) {
 		if (modparms.verbose)
 			DMWARN("Residency=%llu claimed larger than cache size=%llu!", (LLU) r, (LLU) p->cache_blocks);
 
@@ -536,9 +538,9 @@ static dm_block_t debug_residency(struct dm_cache_policy *pe)
 		ok = false;
 	}
 
-	if (r != p->nr_allocated) {
+	if (r != p->good.new) {
 		if (modparms.verbose)
-			DMWARN("Claimed residency=%llu invalid vs. %llu", (LLU) r, (LLU) p->nr_allocated);
+			DMWARN("Claimed residency=%llu invalid vs. %llu", (LLU) r, (LLU) p->nr_dblocks_allocated);
 
 		p->bad.residency_invalid++;
 		ok = false;
