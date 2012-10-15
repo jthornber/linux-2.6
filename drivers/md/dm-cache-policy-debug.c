@@ -46,6 +46,14 @@ struct debug_entry {
 	enum policy_operation op;
 };
 
+struct good_state_counts {
+	unsigned hit, miss, new, replace, op, cblock, load, remove, force, residency;
+};
+
+struct bad_state_counts {
+	unsigned hit, miss, new, replace, op, cblock, load, remove, force, residency_larger, residency_invalid;
+};
+
 struct policy {
 	struct dm_cache_policy policy;
 	struct mutex lock;
@@ -55,14 +63,8 @@ struct policy {
 	struct hash ohash, chash;
 	dm_block_t origin_blocks, cache_blocks;
 	unsigned nr_allocated, analysed, hit;
-
-	struct {
-		unsigned hit, miss, new, replace, op, cblock, load, remove, force, residency;
-	} good;
-
-	struct {
-		unsigned hit, miss, new, replace, op, cblock, load, remove, force, residency_larger, residency_invalid;
-	} bad;
+	struct good_state_counts good;
+	struct bad_state_counts bad;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -75,6 +77,13 @@ static struct policy *to_policy(struct dm_cache_policy *pe)
 static unsigned next_power(unsigned n, unsigned min)
 {
 	return roundup_pow_of_two(max(n, min));
+}
+
+static bool test_ok(struct policy *p)
+{
+	struct bad_state_counts *b = &p->bad;
+
+	return b->hit + b->miss + b->new + b->replace + b->op + b->cblock + b->load + b->remove + b->force + b->residency_larger + b->residency_invalid > 0 ? false : true;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -422,6 +431,12 @@ static void debug_destroy(struct dm_cache_policy *pe)
 
 	p->hit = ~0 - 1; /* - 1 due to ++ in log_stats() */
 	log_stats(p);
+
+	if (test_ok(p))
+		DMINFO("Test ok");
+	else
+		DMINFO("Test FAILED!");
+
 	dm_cache_policy_destroy(p->debug_policy);
 	free_debug_blocks_and_hashs(p);
 	kfree(p);
