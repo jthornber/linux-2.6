@@ -66,6 +66,7 @@ struct cache_disk_superblock {
 
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
+	__le64 hint_root;
 	__le32 data_block_size;
 	__le32 metadata_block_size;
 	__le32 cache_blocks;
@@ -88,14 +89,18 @@ struct dm_cache_metadata {
 	struct dm_transaction_manager *tm;
 
 	struct dm_array_info info;
+	struct dm_array_info hint_info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
+	dm_block_t hint_root;
+
 	sector_t data_block_size;
 	dm_block_t cache_blocks;
 	bool changed:1;
 	bool clean_when_opened:1;
 
+	char policy_name[CACHE_POLICY_NAME_SIZE];
 	struct dm_cache_statistics stats;
 };
 
@@ -234,8 +239,10 @@ static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 	vt.inc = NULL;
 	vt.dec = NULL;
 	vt.equal = NULL;
-
 	dm_setup_array_info(&cmd->info, cmd->tm, &vt);
+
+	vt.size = sizeof(__le32);
+	dm_setup_array_info(&cmd->hint_info, cmd->tm, &vt);
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -275,9 +282,11 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 		goto bad_locked;
 
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
+	disk_super->hint_root = cpu_to_le64(0);
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
+	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(0);
 	disk_super->read_misses = cpu_to_le32(0);
@@ -455,8 +464,10 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 				   struct cache_disk_superblock *disk_super)
 {
 	cmd->root = le64_to_cpu(disk_super->mapping_root);
+	cmd->hint_root = le64_to_cpu(disk_super->hint_root);
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = le32_to_cpu(disk_super->cache_blocks);
+	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
 
 	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
 	cmd->stats.read_misses = le32_to_cpu(disk_super->read_misses);
@@ -540,6 +551,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->cache_blocks = cpu_to_le32(cmd->cache_blocks);
+	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
 	disk_super->read_misses = cpu_to_le32(cmd->stats.read_misses);
@@ -601,6 +613,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
 	cmd->changed = true;
+
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
 		kfree(cmd);
@@ -875,69 +888,103 @@ out:
 
 /*----------------------------------------------------------------*/
 
-static void set_policy_name(struct cache_disk_superblock *disk_super,
-			    const char *policy_name)
+static bool hints_array_available(struct dm_cache_metadata *cmd,
+				  const char *policy_name)
 {
-	memcpy(disk_super->policy_name, policy_name, CACHE_POLICY_NAME_SIZE);
+	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
+					   sizeof(cmd->policy_name));
+
+	return cmd->clean_when_opened &&
+		policy_names_match &&
+		cmd->hint_root;
 }
 
-static const char *get_policy_name(struct cache_disk_superblock *disk_super)
+static int ensure_hints_array(struct dm_cache_metadata *cmd,
+			      const char *policy_name)
 {
-	int i;
-	bool policy_name_all_zeroes = true;
-
-	for (i = 0; i < CACHE_POLICY_NAME_SIZE; i++) {
-		if (disk_super->policy_name[i] != 0) {
-			policy_name_all_zeroes = false;
-			break;
-		}
-	}
-
-	return policy_name_all_zeroes ? NULL: disk_super->policy_name;
-}
-
-int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
-					const char *policy_name)
-{
-	struct cache_disk_superblock *disk_super;
-	struct dm_block *sblock;
 	int r;
 
-	down_write(&cmd->root_lock);
-	r = superblock_read_lock(cmd, &sblock);
-	if (r) {
-		up_write(&cmd->root_lock);
-		return r;
+	if (!policy_name[0] ||
+	    (strlen(policy_name) > sizeof(cmd->policy_name) - 1))
+		strncpy(cmd->policy_name, policy_name,
+			sizeof(cmd->policy_name));
+
+	if (!cmd->hint_root) {
+		r = dm_array_empty(&cmd->hint_info, &cmd->hint_root);
+		if (r)
+			return r;
 	}
-
-	disk_super = dm_block_data(sblock);
-	set_policy_name(disk_super, policy_name);
-
-	dm_bm_unlock(sblock);
-	up_write(&cmd->root_lock);
 
 	return 0;
 }
 
-const char *dm_cache_metadata_read_policy_name(struct dm_cache_metadata *cmd)
+static int save_hints(struct dm_cache_metadata *cmd, const char *policy_name,
+		      hint_save_fn fn, void *context)
 {
-	const char *policy_name;
-	struct cache_disk_superblock *disk_super;
-	struct dm_block *sblock;
+	int r = 0;
+	unsigned cblock;
+	uint32_t hint;
+	__le32 value;
+
+	ensure_hints_array(cmd, policy_name);
+
+	for (cblock = 0; cblock < cmd->cache_blocks; cblock++) {
+		fn(context, cblock, &hint);
+
+		value = cpu_to_le32(hint);
+		__dm_bless_for_disk(value);
+		r = dm_array_set(&cmd->hint_info, cmd->hint_root, cblock,
+				 &value, &cmd->hint_root);
+		if (r)
+			break;
+	}
+
+	return r;
+}
+
+int dm_cache_save_hints(struct dm_cache_metadata *cmd, const char *policy_name,
+			hint_save_fn fn, void *context)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = save_hints(cmd, policy_name, fn, context);
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+static int load_hints(struct dm_cache_metadata *cmd, const char *policy_name,
+		      hint_load_fn fn, void *context)
+{
+	int r = 0;
+	unsigned cblock;
+	uint32_t hint;
+	__le32 value;
+
+	if (hints_array_available(cmd, policy_name))
+		return -ENODATA;
+
+	for (cblock = 0; cblock < cmd->cache_blocks; cblock++) {
+		r = dm_array_get(&cmd->hint_info, cmd->hint_root, cblock, &value);
+		if (r)
+			break;
+
+		hint = __le32_to_cpu(value);
+		fn(context, cblock, hint);
+	}
+
+	return r;
+}
+
+int dm_cache_load_hints(struct dm_cache_metadata *cmd, const char *policy_name,
+			hint_load_fn fn, void *context)
+{
 	int r;
 
 	down_read(&cmd->root_lock);
-	r = superblock_read_lock(cmd, &sblock);
-	if (r) {
-		up_read(&cmd->root_lock);
-		return ERR_PTR(r);
-	}
-
-	disk_super = dm_block_data(sblock);
-	policy_name = get_policy_name(disk_super);
-
-	dm_bm_unlock(sblock);
+	r = load_hints(cmd, policy_name, fn, context);
 	up_read(&cmd->root_lock);
 
-	return policy_name;
+	return r;
 }
