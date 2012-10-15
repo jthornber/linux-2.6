@@ -93,9 +93,9 @@ static struct list_head *list_pop(struct list_head *lh)
 
 /* Hash functions (lookup, insert, remove). */
 
-/* To create lookup_debug_entry_by_cblock() and lookup_debug_entry_by_oblock() */
-#define LOOKUP(type) \
-static struct debug_entry *lookup_debug_entry_by_ ## type ## block(struct policy *p, dm_block_t type ## block) \
+/* To create lookup_debug_entry_by_cache_block() and lookup_debug_entry_by_origin_block() */
+#define LOOKUP(type, longtype) \
+static struct debug_entry *lookup_debug_entry_by_ ## longtype ## _block(struct policy *p, dm_block_t type ## block) \
 { \
 	unsigned h = hash_64(type ## block, p->type ## hash.hash_bits); \
 	struct debug_entry *cur; \
@@ -114,8 +114,8 @@ static struct debug_entry *lookup_debug_entry_by_ ## type ## block(struct policy
 	return NULL; \
 }
 
-LOOKUP(o);
-LOOKUP(c);
+LOOKUP(o, origin);
+LOOKUP(c, cache);
 #undef LOOKUP
 
 static void insert_ohash_entry(struct policy *p, struct debug_entry *e)
@@ -260,8 +260,8 @@ static void check_op(char *name, enum policy_operation op)
 static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t oblock, int map_ret, struct policy_result *result)
 {
 	bool cblock_ok = true;
-	struct debug_entry *ec = result->cblock < p->cache_blocks ? lookup_debug_entry_by_cblock(p, result->cblock) : NULL;
-	struct debug_entry *eo = lookup_debug_entry_by_oblock(p, oblock);
+	struct debug_entry *ec = result->cblock < p->cache_blocks ? lookup_debug_entry_by_cache_block(p, result->cblock) : NULL;
+	struct debug_entry *eo = lookup_debug_entry_by_origin_block(p, oblock);
 
 	p->good.op++;
 
@@ -402,7 +402,12 @@ static int debug_map(struct dm_cache_policy *pe, dm_block_t oblock,
 	struct policy *p = to_policy(pe);
 	struct debug_entry *e;
 
-	mutex_lock(&p->lock);
+	if (can_migrate)
+		mutex_lock(&p->lock);
+
+	else if (!mutex_trylock(&p->lock))
+		return -EWOULDBLOCK;
+
 	r = policy_map(p->debug_policy, oblock, can_migrate, discarded_oblock, bio, result);
 	e = analyse_map_result(p, oblock, r, result);
 	log_stats(p);
@@ -429,8 +434,8 @@ static int debug_load_mapping(struct dm_cache_policy *pe, dm_block_t oblock, dm_
 	struct debug_entry *eo, *ec;
 
 	mutex_lock(&p->lock);
-	eo = lookup_debug_entry_by_oblock(p, oblock);
-	ec = lookup_debug_entry_by_oblock(p, cblock);
+	eo = lookup_debug_entry_by_origin_block(p, oblock);
+	ec = lookup_debug_entry_by_cache_block(p, cblock);
 	if (eo || ec) {
 		if (modparms.verbose > 1)
 			DMWARN("Entry on load for oblock=%llu/cblock=%llu already existing invalid!", (LLU) oblock, (LLU) cblock);
@@ -455,7 +460,7 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_block_t oblock)
 	struct debug_entry *e;
 
 	mutex_lock(&p->lock);
-	e = lookup_debug_entry_by_oblock(p, oblock);
+	e = lookup_debug_entry_by_origin_block(p, oblock);
 	if (e) {
 		free_debug_entry(p, e);
 		p->good.remove++;
@@ -478,7 +483,7 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 	struct debug_entry *e;
 
 	mutex_lock(&p->lock);
-	e = lookup_debug_entry_by_oblock(p, current_oblock);
+	e = lookup_debug_entry_by_origin_block(p, current_oblock);
 	if (e) {
 		enum policy_operation op = e->op;
 		dm_block_t cblock = e->cblock;
