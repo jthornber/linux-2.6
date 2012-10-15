@@ -4,7 +4,7 @@
  *
  * Debug module for cache replacement policies.
  *
- * Load with "{policy=$Name {verbose=N}". Name=mq, fifo, ... verbose=0..3
+ * Load with "{policy=$Name {verbose=N}". Name=mq, fifo, ... verbose=0..7
  *
  * This file is released under the GPL.
  */
@@ -256,7 +256,7 @@ static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_
 
 static void check_op(char *name, enum policy_operation op)
 {
-	if (modparms.verbose > 2) {
+	if (modparms.verbose & 0x4) {
 		if (op == POLICY_HIT)
 			DMWARN("%s: previous op POLICY_HIT invalid!", name);
 
@@ -279,7 +279,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 	/* target map thread may result in this. */
 	if (map_ret == -EWOULDBLOCK) {
 		if (result->op != POLICY_MISS) {
-			if (modparms.verbose > 1)
+			if (modparms.verbose & 0x2)
 				DMWARN("-EWOULDBLOCK: op != POLICY_MISS invalid!");
 
 			p->bad.miss++;
@@ -296,7 +296,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_MISS -> POLICY_HIT FALSE. */
 		if (eo) {
 			if (eo->cblock != result->cblock) {
-				if (modparms.verbose > 1)
+				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_HIT: e->oblock=%llu e->cblock=%llu != result->cblock=%llu invalid!",
 						 (LLU) eo->oblock, (LLU) eo->cblock, (LLU) result->cblock);
 
@@ -306,7 +306,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 				p->good.cblock++;
 
 			if (eo->op == POLICY_MISS) {
-				if (modparms.verbose > 1)
+				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_HIT: following POLICY_MISS invalid!");
 
 				p->bad.hit++;
@@ -321,7 +321,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_MISS -> POLICY_NEW ok */
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_NEW FALSE. */
 		if (ec) {
-			if (modparms.verbose > 1)
+			if (modparms.verbose & 0x2)
 				DMWARN("POLICY_NEW: oblock=%llu e->cblock=%llu already existing invalid!", (LLU) oblock, (LLU) ec->cblock);
 
 			check_op("POLICY_NEW", ec->op);
@@ -345,7 +345,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_REPLACE FALSE. */
 		if (eo) {
 			if (result->old_oblock == oblock) {
-				if (modparms.verbose > 1)
+				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_REPLACE: e->cblock=%llu e->oblock=%llu = result->old_block=%llu invalid!",
 						 (LLU) eo->oblock, (LLU) eo->cblock, (LLU) result->old_oblock);
 
@@ -454,7 +454,7 @@ static int debug_load_mapping(struct dm_cache_policy *pe, dm_block_t oblock, dm_
 	eo = lookup_debug_entry_by_origin_block(p, oblock);
 	ec = lookup_debug_entry_by_cache_block(p, cblock);
 	if (eo || ec) {
-		if (modparms.verbose > 1)
+		if (modparms.verbose & 0x2)
 			DMWARN("Entry on load for oblock=%llu/cblock=%llu already existing invalid!", (LLU) oblock, (LLU) cblock);
 
 		free_debug_entry(p, eo ? eo : ec);
@@ -483,7 +483,7 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_block_t oblock)
 		p->good.remove++;
 
 	} else {
-		if (modparms.verbose > 1)
+		if (modparms.verbose & 0x2)
 			DMWARN("No entry on remove for oblock=%llu invalid!", (LLU) oblock);
 
 		p->bad.remove++;
@@ -512,7 +512,7 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 		p->good.force++;
 
 	} else {
-		if (modparms.verbose > 1)
+		if (modparms.verbose & 0x2)
 			DMWARN("No entry on force for current_oblock=%llu/oblock=%llu invalid!", (LLU) current_oblock, (LLU) oblock);
 
 		p->bad.force++;
@@ -531,7 +531,7 @@ static dm_block_t debug_residency(struct dm_cache_policy *pe)
 	mutex_lock(&p->lock);
 	r = policy_residency(p->debug_policy);
 	if (r > p->cache_blocks) {
-		if (modparms.verbose)
+		if (modparms.verbose & 0x1)
 			DMWARN("Residency=%llu claimed larger than cache size=%llu!", (LLU) r, (LLU) p->cache_blocks);
 
 		p->bad.residency_larger++;
@@ -539,7 +539,7 @@ static dm_block_t debug_residency(struct dm_cache_policy *pe)
 	}
 
 	if (r != p->good.new) {
-		if (modparms.verbose)
+		if (modparms.verbose & 0x1)
 			DMWARN("Claimed residency=%llu invalid vs. %llu", (LLU) r, (LLU) p->nr_dblocks_allocated);
 
 		p->bad.residency_invalid++;
