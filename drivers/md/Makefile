@@ -15,6 +15,7 @@ dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
 dm-cache-mq-y   += dm-cache-policy-mq.o
 dm-cache-mkfs-y += dm-cache-policy-mkfs.o
 dm-cache-basic-y += dm-cache-policy-basic.o
+dm-cache-debug-y += dm-cache-policy-debug.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -51,6 +52,7 @@ obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
 obj-$(CONFIG_DM_CACHE_MKFS)	+= dm-cache-mkfs.o
 obj-$(CONFIG_DM_CACHE_BASIC)	+= dm-cache-basic.o
+obj-$(CONFIG_DM_CACHE_DEBUG)	+= dm-cache-debug.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_FAKE_DISCARD)	+= dm-fake-discard.o
 
