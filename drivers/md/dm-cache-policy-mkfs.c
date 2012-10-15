@@ -967,6 +967,7 @@ static struct dm_cache_policy *mq_create(dm_block_t cache_size,
 
 static struct dm_cache_policy_type mkfs_policy_type = {
 	.name = "mkfs",
+	.hint_size = 0,
 	.owner = THIS_MODULE,
         .create = mq_create
 };

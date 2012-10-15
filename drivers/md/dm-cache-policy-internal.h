@@ -52,7 +52,8 @@ static inline void policy_tick(struct dm_cache_policy *p)
 /*
  * Creates a new cache policy given a policy name, a cache size, an origin size and the block size.
  */
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size, sector_t origin_size, sector_t block_size);
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size,
+					       sector_t origin_size, sector_t block_size);
 
 /*
  * Destroys the policy.  This drops references to the policy module as well
@@ -65,6 +66,8 @@ void dm_cache_policy_destroy(struct dm_cache_policy *p);
  * In case we've forgotten.
  */
 const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
+
+size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p);
 
 /*----------------------------------------------------------------*/
 

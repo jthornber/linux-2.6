@@ -970,12 +970,14 @@ static struct dm_cache_policy *mq_create(dm_block_t cache_size, sector_t origin_
 
 static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
+	.hint_size = 0,
 	.owner = THIS_MODULE,
         .create = mq_create
 };
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
+	.hint_size = 0,
 	.owner = THIS_MODULE,
         .create = mq_create
 };

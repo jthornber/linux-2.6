@@ -155,6 +155,7 @@ struct dm_cache_policy_type {
 	 * what gets passed on the target line to select your policy.
 	 */
 	char name[CACHE_POLICY_NAME_MAX];
+	size_t hint_size;	/* in bytes, must be 0 or 4 */
 	struct module *owner;
 	struct dm_cache_policy *(*create)(dm_block_t cache_size, sector_t origin_size, sector_t block_size);
 };
