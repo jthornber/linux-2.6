@@ -11,6 +11,7 @@
 
 /*----------------------------------------------------------------*/
 
+#define CACHE_POLICY_NAME_SIZE 16
 #define CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */
@@ -23,6 +24,13 @@
 #define CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
 /*
+ * A metadata device larger than 16GB triggers a warning.
+ */
+#define CACHE_METADATA_MAX_SECTORS_WARNING (16 * (1024 * 1024 * 1024 >> SECTOR_SHIFT))
+
+/*----------------------------------------------------------------*/
+
+/*
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the thin metadata.
  */
@@ -30,9 +38,9 @@
 #define CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
 #define CACHE_FEATURE_INCOMPAT_SUPP	  0UL
 
-
 /*
- * Returns NULL on failure.
+ * Reopens or creates a new, empty metadata volume.
+ * Returns an ERR_PTR on failure.
  */
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
@@ -74,6 +82,11 @@ void dm_cache_set_stats(struct dm_cache_metadata *cmd,
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
 
 void dm_cache_dump(struct dm_cache_metadata *cmd);
+
+int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
+					const char *policy_name);
+
+const char *dm_cache_metadata_read_policy_name(struct dm_cache_metadata *cmd);
 
 /*----------------------------------------------------------------*/
 

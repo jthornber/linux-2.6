@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Red Hat UK.  All rights reserved.
+ * Copyright (C) 2011-2012 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -15,26 +15,24 @@
 
 /*----------------------------------------------------------------*/
 
-/* FIXME: prefix everything */
-
 /*
  * Sometimes we can't deal with a bio straight away.  We put them in prison
  * where they can't cause any mischief.  Bios are put in a cell identified
  * by a key, multiple bios can be in the same cell.  When the cell is
  * subsequently unlocked the bios become available.
  */
-struct bio_prison;
+struct dm_bio_prison;
 struct dm_bio_prison_cell;
 
 /* FIXME: this needs to be more abstract */
-struct cell_key {
+struct dm_cell_key {
 	int virtual;
 	dm_thin_id dev;
 	dm_block_t block;
 };
 
-struct bio_prison *prison_create(unsigned nr_cells);
-void prison_destroy(struct bio_prison *prison);
+struct dm_bio_prison *dm_bio_prison_create(unsigned nr_cells);
+void dm_bio_prison_destroy(struct dm_bio_prison *prison);
 
 /*
  * This may block if a new cell needs allocating.  You must ensure that
@@ -42,15 +40,13 @@ void prison_destroy(struct bio_prison *prison);
  *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
-int bio_detain(struct bio_prison *prison, struct cell_key *key,
-	       struct bio *inmate, struct dm_bio_prison_cell **ref);
-int bio_detain_if_occupied(struct bio_prison *prison, struct cell_key *key,
-			   struct bio *inmate);
+int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
+		  struct bio *inmate, struct dm_bio_prison_cell **ref);
 
-void cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios);
-void cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio); // FIXME: bio arg not needed
-void cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates);
-void cell_error(struct dm_bio_prison_cell *cell);
+void dm_cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios);
+void dm_cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio); // FIXME: bio arg not needed
+void dm_cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates);
+void dm_cell_error(struct dm_bio_prison_cell *cell);
 
 /*----------------------------------------------------------------*/
 
@@ -61,15 +57,15 @@ void cell_error(struct dm_bio_prison_cell *cell);
  * new mapping could free the old block that the read bios are mapped to.
  */
 
-struct deferred_set;
-struct deferred_entry;
+struct dm_deferred_set;
+struct dm_deferred_entry;
 
-struct deferred_set *ds_create(void);
-void ds_destroy(struct deferred_set *ds);
+struct dm_deferred_set *dm_deferred_set_create(void);
+void dm_deferred_set_destroy(struct dm_deferred_set *ds);
 
-struct deferred_entry *ds_inc(struct deferred_set *ds);
-void ds_dec(struct deferred_entry *entry, struct list_head *head);
-int ds_add_work(struct deferred_set *ds, struct list_head *work);
+struct dm_deferred_entry *dm_deferred_entry_inc(struct dm_deferred_set *ds);
+void dm_deferred_entry_dec(struct dm_deferred_entry *entry, struct list_head *head);
+int dm_deferred_set_add_work(struct dm_deferred_set *ds, struct list_head *work);
 
 /*----------------------------------------------------------------*/
 

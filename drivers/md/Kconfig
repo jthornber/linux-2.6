@@ -216,11 +216,11 @@ config DM_BUFIO
 	 as a cache, holding recently-read blocks in memory and performing
 	 delayed writes.
 
-config DM_PRISON
+config DM_BIO_PRISON
        tristate
        depends on BLK_DEV_DM && EXPERIMENTAL
        ---help---
-         Some locking schemes use in a couple of the targets.
+         Some bio locking schemes used by device-mapper targets.
 
 source "drivers/md/persistent-data/Kconfig"
 
@@ -253,7 +253,7 @@ config DM_THIN_PROVISIONING
        tristate "Thin provisioning target (EXPERIMENTAL)"
        depends on BLK_DEV_DM && EXPERIMENTAL
        select DM_PERSISTENT_DATA
-       select DM_PRISON
+       select DM_BIO_PRISON
        ---help---
          Provides thin provisioning and snapshots that share a data store.
 
@@ -290,12 +290,14 @@ config DM_CACHE_MKFS
          Under development
 
 config DM_CACHE_BASIC
-       tristate "Basic (BASIC/FIFO/FILO/LRU/MRU/LFU/MFU/LFU_WS/MFU_WS/MULTIQUEUE/MULTIQUEUE_WS/Q2/TWOQUEUE/RANDOM) Cache Policies (EXPERIMENTAL)"
+       tristate "Basic Cache Policies - a list of replacement policies (EXPERIMENTAL)"
        depends on DM_CACHE
        select BTREE
        default y
        ---help---
          Under development
+         A cache replacement policy module providing
+         FIFO, FILO, LRU, MRU, LFU, MFU, LFU_WS, MFU_WS, MULTIQUEUE, MULTIQUEUE_WS, Q2, TWOQUEUE and RANDOM policies
 
 config DM_MIRROR
        tristate "Mirror target"
