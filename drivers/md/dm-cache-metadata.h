@@ -11,6 +11,36 @@
 
 /*----------------------------------------------------------------*/
 
+/*
+ * It's helpful to get sparse to differentiate between indexes into the
+ * origin device, and indexes into the cache device.
+ */
+
+typedef dm_block_t __bitwise dm_oblock_t;
+typedef dm_block_t __bitwise dm_cblock_t;
+
+static inline dm_oblock_t to_oblock(dm_block_t b)
+{
+	return (__force dm_oblock_t) b;
+}
+
+static inline dm_block_t from_oblock(dm_oblock_t b)
+{
+	return (__force dm_block_t) b;
+}
+
+static inline dm_cblock_t to_cblock(dm_block_t b)
+{
+	return (__force dm_cblock_t) b;
+}
+
+static inline dm_block_t from_cblock(dm_cblock_t b)
+{
+	return (__force dm_block_t) b;
+}
+
+/*----------------------------------------------------------------*/
+
 #define CACHE_POLICY_NAME_SIZE 16
 #define CACHE_METADATA_BLOCK_SIZE 4096
 
@@ -53,19 +83,19 @@ void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
  * care about the origin, assuming the core target is giving us valid
  * origin blocks to map to.
  */
-int dm_cache_resize(struct dm_cache_metadata *cmd, dm_block_t new_cache_size);
-dm_block_t dm_cache_size(struct dm_cache_metadata *cmd);
+int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size);
+dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd);
 
-int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock);
-int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm_block_t oblock);
+int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd);
 
-typedef int (*load_mapping_fn)(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty);
+typedef int (*load_mapping_fn)(void *context, dm_oblock_t oblock, dm_cblock_t cblock, bool dirty);
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 			    load_mapping_fn fn,
 			    void *context);
 
-int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty);
+int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty);
 
 struct dm_cache_statistics {
 	uint32_t read_hits;
@@ -89,8 +119,8 @@ void dm_cache_dump(struct dm_cache_metadata *cmd);
  * policies are changed, then hints will be lost.  If the machine crashes,
  * hints will be lost.
  */
-typedef int (*hint_save_fn)(void *context, dm_block_t cblock, uint32_t *hint);
-typedef int (*hint_load_fn)(void *context, dm_block_t cblock, uint32_t hint);
+typedef int (*hint_save_fn)(void *context, dm_cblock_t cblock, uint32_t *hint);
+typedef int (*hint_load_fn)(void *context, dm_cblock_t cblock, uint32_t hint);
 
 /*
  * requests hints for every cblock and stores in the metdata device.

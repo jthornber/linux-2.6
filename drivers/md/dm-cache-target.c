@@ -100,13 +100,13 @@ struct cache {
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
 	 */
-	dm_block_t origin_blocks;
+	dm_oblock_t origin_blocks;
 	sector_t origin_sectors;
 
 	/*
 	 * Size of the cache device in blocks.
 	 */
-	dm_block_t cache_size;
+	dm_cblock_t cache_size;
 
 	/*
 	 * Fields for converting from sectors to blocks.
@@ -183,9 +183,9 @@ struct dm_cache_migration {
 	struct cache *cache;
 
 	unsigned long start_jiffies;
-	dm_block_t old_oblock;
-	dm_block_t new_oblock;
-	dm_block_t cblock;
+	dm_oblock_t old_oblock;
+	dm_oblock_t new_oblock;
+	dm_cblock_t cblock;
 
 	struct dm_bio_prison_cell *old_ocell;
 	struct dm_bio_prison_cell *new_ocell;
@@ -209,31 +209,31 @@ static void wake_worker(struct cache *cache)
  * The discard bitset is accessed from both the worker thread and the
  * cache_map function, we need to protect it.
  */
-static void set_discard(struct cache *cache, dm_block_t b)
+static void set_discard(struct cache *cache, dm_oblock_t b)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	set_bit(b, cache->discard_bitset);
+	set_bit(from_oblock(b), cache->discard_bitset);
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void clear_discard(struct cache *cache, dm_block_t b)
+static void clear_discard(struct cache *cache, dm_oblock_t b)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	clear_bit(b, cache->discard_bitset);
+	clear_bit(from_oblock(b), cache->discard_bitset);
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static bool is_discarded(struct cache *cache, dm_block_t b)
+static bool is_discarded(struct cache *cache, dm_oblock_t b)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	r = test_bit(b, cache->discard_bitset);
+	r = test_bit(from_oblock(b), cache->discard_bitset);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
@@ -278,7 +278,7 @@ static void remap_to_origin(struct cache *cache, struct bio *bio)
 }
 
 static void remap_to_cache(struct cache *cache, struct bio *bio,
-			   dm_block_t cblock)
+			   dm_cblock_t cblock)
 {
 	sector_t bi_sector = bio->bi_sector;
 
@@ -304,7 +304,7 @@ static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void remap_to_origin_dirty(struct cache *cache, struct bio *bio, dm_block_t oblock)
+static void remap_to_origin_dirty(struct cache *cache, struct bio *bio, dm_oblock_t oblock)
 {
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_origin(cache, bio);
@@ -313,7 +313,7 @@ static void remap_to_origin_dirty(struct cache *cache, struct bio *bio, dm_block
 }
 
 static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
-				 dm_block_t oblock, dm_block_t cblock)
+				 dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
@@ -322,7 +322,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 	}
 }
 
-static dm_block_t get_bio_block(struct cache *cache, struct bio *bio)
+static dm_oblock_t get_bio_block(struct cache *cache, struct bio *bio)
 {
 	sector_t block_nr = bio->bi_sector;
 
@@ -621,7 +621,8 @@ static void quiesce_migration(struct cache *cache, struct dm_cache_migration *mg
 		queue_quiesced_migration(cache, mg);
 }
 
-static void promote(struct cache *cache, dm_block_t oblock, dm_block_t cblock, struct dm_bio_prison_cell *cell)
+static void promote(struct cache *cache, dm_oblock_t oblock,
+		    dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
 {
 	struct dm_cache_migration *mg = alloc_migration(cache);
 
@@ -640,9 +641,9 @@ static void promote(struct cache *cache, dm_block_t oblock, dm_block_t cblock, s
 }
 
 static void writeback_then_promote(struct cache *cache,
-				   dm_block_t old_oblock,
-				   dm_block_t new_oblock,
-				   dm_block_t cblock,
+				   dm_oblock_t old_oblock,
+				   dm_oblock_t new_oblock,
+				   dm_cblock_t cblock,
 				   struct dm_bio_prison_cell *old_ocell,
 				   struct dm_bio_prison_cell *new_ocell)
 {
@@ -705,9 +706,9 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
-	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
-	dm_block_t b;
+	dm_oblock_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
+	dm_oblock_t end_block = bio->bi_sector + bio_sectors(bio);
+	dm_oblock_t b;
 
 	do_div(end_block, cache->sectors_per_block);
 
@@ -722,7 +723,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	int r;
 	int release_cell = 1;
 	struct dm_cell_key key;
-	dm_block_t block = get_bio_block(cache, bio);
+	dm_oblock_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
@@ -1028,7 +1029,7 @@ static sector_t get_dev_size(struct dm_dev *dev)
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
 }
 
-static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty)
+static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, bool dirty)
 {
 	struct cache *cache = context;
 
@@ -1085,7 +1086,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
 	if (block_size & (block_size - 1)) {
-		dm_block_t cache_size = cache_sectors;
+		dm_cblock_t cache_size = cache_sectors;
 
 		cache->sectors_per_block_shift = -1;
 		(void) sector_div(cache_size, block_size);
@@ -1337,7 +1338,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 
 	int r;
 	struct dm_cell_key key;
-	dm_block_t block = get_bio_block(cache, bio);
+	dm_oblock_t block = get_bio_block(cache, bio);
 	bool can_migrate = false;
 	bool discarded_block;
 	struct dm_bio_prison_cell *cell;
@@ -1486,7 +1487,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
 	struct cache *cache = ti->private;
-	dm_block_t residency;
+	dm_cblock_t residency;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
