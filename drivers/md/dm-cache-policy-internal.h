@@ -14,30 +14,30 @@
 /*
  * Little inline functions that simplify calling the policy methods.
  */
-static inline int policy_map(struct dm_cache_policy *p, dm_block_t origin_block,
+static inline int policy_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 			      bool can_migrate, bool discarded_oblock, struct bio *bio,
 			      struct policy_result *result)
 {
-	return p->map(p, origin_block, can_migrate, discarded_oblock, bio, result);
+	return p->map(p, oblock, can_migrate, discarded_oblock, bio, result);
 }
 
-static inline int policy_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock)
+static inline int policy_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	return p->load_mapping(p, oblock, cblock);
 }
 
-static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_block_t oblock)
+static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	return p->remove_mapping(p, oblock);
 }
 
 static inline void policy_force_mapping(struct dm_cache_policy *p,
-			dm_block_t current_oblock, dm_block_t new_oblock)
+					dm_oblock_t current_oblock, dm_oblock_t new_oblock)
 {
 	return p->force_mapping(p, current_oblock, new_oblock);
 }
 
-static inline dm_block_t policy_residency(struct dm_cache_policy *p)
+static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)
 {
 	return p->residency(p);
 }
@@ -52,7 +52,7 @@ static inline void policy_tick(struct dm_cache_policy *p)
 /*
  * Creates a new cache policy given a policy name, a cache size, an origin size and the block size.
  */
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size,
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
 					       sector_t origin_size, sector_t block_size);
 
 /*

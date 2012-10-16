@@ -42,7 +42,8 @@ struct hash {
 struct debug_entry {
 	struct hlist_node ohlist, chlist;
 	struct list_head list;
-	dm_block_t oblock, cblock;
+	dm_oblock_t oblock;
+	dm_cblock_t cblock;
 	enum policy_operation op;
 };
 
@@ -271,7 +272,8 @@ static void check_op(char *name, enum policy_operation op)
 static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t oblock, int map_ret, struct policy_result *result)
 {
 	bool cblock_ok = true;
-	struct debug_entry *ec = result->cblock < p->cache_blocks ? lookup_debug_entry_by_cache_block(p, result->cblock) : NULL;
+	struct debug_entry *ec = from_cblock(result->cblock) < from_cblock(p->cache_blocks) ?
+		lookup_debug_entry_by_cache_block(p, from_cblock(result->cblock)) : NULL;
 	struct debug_entry *eo = lookup_debug_entry_by_origin_block(p, oblock);
 
 	p->good.op++;
@@ -298,7 +300,9 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 			if (eo->cblock != result->cblock) {
 				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_HIT: e->oblock=%llu e->cblock=%llu != result->cblock=%llu invalid!",
-						 (LLU) eo->oblock, (LLU) eo->cblock, (LLU) result->cblock);
+					       (LLU) from_oblock(eo->oblock),
+					       (LLU) from_cblock(eo->cblock),
+					       (LLU) from_cblock(result->cblock));
 
 				p->bad.cblock++;
 
@@ -344,10 +348,12 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_MISS -> POLICY_REPLACE ok */
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_REPLACE FALSE. */
 		if (eo) {
-			if (result->old_oblock == oblock) {
+			if (from_oblock(result->old_oblock) == from_oblock(oblock)) {
 				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_REPLACE: e->cblock=%llu e->oblock=%llu = result->old_block=%llu invalid!",
-						 (LLU) eo->oblock, (LLU) eo->cblock, (LLU) result->old_oblock);
+					       (LLU) from_oblock(eo->oblock),
+					       (LLU) from_cblock(eo->cblock),
+					       (LLU) from_oblock(result->old_oblock));
 
 				p->bad.replace++;
 
@@ -389,7 +395,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		p->bad.op++;
 	}
 
-	eo = eo ? eo : alloc_and_add_debug_entry(p, oblock, cblock_ok ? result->cblock : p->cache_blocks);
+	eo = eo ? eo : alloc_and_add_debug_entry(p, oblock, cblock_ok ? from_cblock(result->cblock) : from_cblock(p->cache_blocks));
 	eo->op = result->op; /* Memorize op for next analysis cycle. */
 	p->analysed++;
 
