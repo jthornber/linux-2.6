@@ -135,6 +135,13 @@ struct dm_cache_policy {
 	void (*tick)(struct dm_cache_policy *p);
 
 	/*
+	 * Fill these in if you wish to store some policy data on the
+	 * metadata device.
+	 */
+	int (*hint_get)(struct dm_cache_policy *p, dm_block_t cblock, uint32_t *hint);
+	int (*hint_set)(struct dm_cache_policy *p, dm_block_t cblock, uint32_t hint);
+
+	/*
 	 * Book keeping ptr for the policy register, not for general use.
 	 */
 	void *private;

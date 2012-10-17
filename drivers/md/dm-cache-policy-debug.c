@@ -62,7 +62,8 @@ struct policy {
 	struct dm_cache_policy *debug_policy;
 	struct list_head free, used;
 	struct hash ohash, chash;
-	dm_block_t origin_blocks, cache_blocks;
+	dm_oblock_t origin_blocks;
+	dm_cblock_t cache_blocks;
 	unsigned nr_dblocks_allocated, analysed, hit;
 	struct good_state_counts good;
 	struct bad_state_counts bad;
@@ -105,9 +106,9 @@ static struct list_head *list_pop(struct list_head *lh)
 
 /* To create lookup_debug_entry_by_cache_block() and lookup_debug_entry_by_origin_block() */
 #define LOOKUP(type, longtype) \
-static struct debug_entry *lookup_debug_entry_by_ ## longtype ## _block(struct policy *p, dm_block_t type ## block) \
+static struct debug_entry *lookup_debug_entry_by_ ## longtype ## _block(struct policy *p, dm_ ## type ## block_t type ## block) \
 { \
-	unsigned h = hash_64(type ## block, p->type ## hash.hash_bits); \
+	unsigned h = hash_64(from_ ## type ## block(type ## block), p->type ## hash.hash_bits); \
 	struct debug_entry *cur; \
 	struct hlist_node *tmp; \
 	struct hlist_head *bucket = p->type ## hash.table + h; \
@@ -130,15 +131,15 @@ LOOKUP(c, cache);
 
 static void insert_ohash_entry(struct policy *p, struct debug_entry *e)
 {
-	unsigned h = hash_64(e->oblock, p->ohash.hash_bits);
+	unsigned h = hash_64(from_oblock(e->oblock), p->ohash.hash_bits);
 
 	hlist_add_head(&e->ohlist, p->ohash.table + h);
 }
 
 static void insert_chash_entry(struct policy *p, struct debug_entry *e)
 {
-	if (e->cblock < p->cache_blocks) {
-		unsigned h = hash_64(e->cblock, p->chash.hash_bits);
+	if (from_cblock(e->cblock) < from_cblock(p->cache_blocks)) {
+		unsigned h = hash_64(from_cblock(e->cblock), p->chash.hash_bits);
 
 		hlist_add_head(&e->chlist, p->chash.table + h);
 	}
@@ -151,7 +152,7 @@ static void remove_ohash_entry(struct policy *p, struct debug_entry *e)
 
 static void remove_chash_entry(struct policy *p, struct debug_entry *e)
 {
-	if (e->cblock < p->cache_blocks)
+	if (from_cblock(e->cblock) < from_cblock(p->cache_blocks))
 		hlist_del(&e->chlist);
 }
 
@@ -181,7 +182,7 @@ static void free_dblocks(struct policy *p)
 		kfree(e);
 }
 
-static int alloc_debug_blocks_and_hashs(struct policy *p, dm_block_t origin_blocks, dm_block_t cache_blocks)
+static int alloc_debug_blocks_and_hashs(struct policy *p, dm_oblock_t origin_blocks, dm_cblock_t cache_blocks)
 {
 	int r = -ENOMEM;
 	dm_block_t u;
@@ -193,7 +194,7 @@ static int alloc_debug_blocks_and_hashs(struct policy *p, dm_block_t origin_bloc
 	p->nr_dblocks_allocated = 0;
 
 	/* FIXME: if we'ld avoid POLICY_MISS checks, we wouldn't need that many. */
-	u = origin_blocks;
+	u = from_oblock(origin_blocks);
 	while (u--) {
 		/* FIXME: use slab. */
 		e = kzalloc(sizeof(*e), GFP_KERNEL);
@@ -204,12 +205,12 @@ static int alloc_debug_blocks_and_hashs(struct policy *p, dm_block_t origin_bloc
 	}
 
 	/* Cache entries by oblock hash. */
-	r = alloc_hash(&p->ohash, origin_blocks);
+	r = alloc_hash(&p->ohash, from_oblock(origin_blocks));
 	if (r)
 		goto bad_alloc_origin_hash;
 
 	/* Cache entries by cblock hash. */
-	r = alloc_hash(&p->chash, cache_blocks);
+	r = alloc_hash(&p->chash, from_cblock(cache_blocks));
 	if (!r)
 		return 0;
 
@@ -233,13 +234,15 @@ static void free_debug_entry(struct policy *p, struct debug_entry *e)
 	BUG_ON(!e);
 	remove_ohash_entry(p, e);
 	remove_chash_entry(p, e);
-	e->oblock = e->cblock = e->op = 0;
+	e->oblock = 0;
+	e->cblock = 0;
+	e->op = 0;
 	BUG_ON(list_empty(&e->list));
 	list_move_tail(&e->list, &p->free);
 	p->nr_dblocks_allocated--;
 }
 
-static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_t oblock, dm_block_t cblock)
+static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	struct debug_entry *e = list_entry(list_pop(&p->free), struct debug_entry, list);
 
@@ -269,11 +272,12 @@ static void check_op(char *name, enum policy_operation op)
 	}
 }
 
-static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t oblock, int map_ret, struct policy_result *result)
+static struct debug_entry *analyse_map_result(struct policy *p, dm_oblock_t oblock,
+					      int map_ret, struct policy_result *result)
 {
 	bool cblock_ok = true;
 	struct debug_entry *ec = from_cblock(result->cblock) < from_cblock(p->cache_blocks) ?
-		lookup_debug_entry_by_cache_block(p, from_cblock(result->cblock)) : NULL;
+		lookup_debug_entry_by_cache_block(p, result->cblock) : NULL;
 	struct debug_entry *eo = lookup_debug_entry_by_origin_block(p, oblock);
 
 	p->good.op++;
@@ -326,7 +330,9 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_NEW FALSE. */
 		if (ec) {
 			if (modparms.verbose & 0x2)
-				DMWARN("POLICY_NEW: oblock=%llu e->cblock=%llu already existing invalid!", (LLU) oblock, (LLU) ec->cblock);
+				DMWARN("POLICY_NEW: oblock=%llu e->cblock=%llu already existing invalid!",
+				       (LLU) from_oblock(oblock),
+				       (LLU) from_cblock(ec->cblock));
 
 			check_op("POLICY_NEW", ec->op);
 			free_debug_entry(p, ec);
@@ -395,7 +401,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		p->bad.op++;
 	}
 
-	eo = eo ? eo : alloc_and_add_debug_entry(p, oblock, cblock_ok ? from_cblock(result->cblock) : from_cblock(p->cache_blocks));
+	eo = eo ? eo : alloc_and_add_debug_entry(p, oblock, cblock_ok ? result->cblock : p->cache_blocks);
 	eo->op = result->op; /* Memorize op for next analysis cycle. */
 	p->analysed++;
 
@@ -404,7 +410,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 
 static void log_stats(struct policy *p)
 {
-	if (++p->hit > (p->cache_blocks << 1)) {
+	if (++p->hit > (from_cblock(p->cache_blocks) << 1)) {
 		p->hit = 0;
 		DMINFO("blocks nr_dblocks_allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,map_miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
 		       "cblock=%u/%u,load=%u/%u,remove=%u/%u,force=%u/%u residency ok/larger/invalid=%u/%u/%u",
@@ -417,7 +423,7 @@ static void log_stats(struct policy *p)
 }
 
 /* Public interface (see dm-cache-policy.h */
-static int debug_map(struct dm_cache_policy *pe, dm_block_t oblock,
+static int debug_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 		     bool can_migrate, bool discarded_oblock,
 		     struct bio *bio, struct policy_result *result)
 {
@@ -456,7 +462,7 @@ static void debug_destroy(struct dm_cache_policy *pe)
 	kfree(p);
 }
 
-static int debug_load_mapping(struct dm_cache_policy *pe, dm_block_t oblock, dm_block_t cblock)
+static int debug_load_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	int r;
 	struct policy *p = to_policy(pe);
@@ -467,7 +473,9 @@ static int debug_load_mapping(struct dm_cache_policy *pe, dm_block_t oblock, dm_
 	ec = lookup_debug_entry_by_cache_block(p, cblock);
 	if (eo || ec) {
 		if (modparms.verbose & 0x2)
-			DMWARN("Entry on load for oblock=%llu/cblock=%llu already existing invalid!", (LLU) oblock, (LLU) cblock);
+			DMWARN("Entry on load for oblock=%llu/cblock=%llu already existing invalid!",
+			       (LLU) from_oblock(oblock),
+			       (LLU) from_cblock(cblock));
 
 		free_debug_entry(p, eo ? eo : ec);
 		p->bad.load++;
@@ -483,7 +491,7 @@ static int debug_load_mapping(struct dm_cache_policy *pe, dm_block_t oblock, dm_
 	return r;
 }
 
-static void debug_remove_mapping(struct dm_cache_policy *pe, dm_block_t oblock)
+static void debug_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
 	struct policy *p = to_policy(pe);
 	struct debug_entry *e;
@@ -496,7 +504,8 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_block_t oblock)
 
 	} else {
 		if (modparms.verbose & 0x2)
-			DMWARN("No entry on remove for oblock=%llu invalid!", (LLU) oblock);
+			DMWARN("No entry on remove for oblock=%llu invalid!",
+			       (LLU) from_oblock(oblock));
 
 		p->bad.remove++;
 	}
@@ -506,7 +515,7 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_block_t oblock)
 }
 
 static void debug_force_mapping(struct dm_cache_policy *pe,
-				dm_block_t current_oblock, dm_block_t oblock)
+				dm_oblock_t current_oblock, dm_oblock_t oblock)
 {
 	struct policy *p = to_policy(pe);
 	struct debug_entry *e;
@@ -515,7 +524,7 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 	e = lookup_debug_entry_by_origin_block(p, current_oblock);
 	if (e) {
 		enum policy_operation op = e->op;
-		dm_block_t cblock = e->cblock;
+		dm_cblock_t cblock = e->cblock;
 
 		/* Replace with new information .*/
 		free_debug_entry(p, e);
@@ -525,7 +534,9 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 
 	} else {
 		if (modparms.verbose & 0x2)
-			DMWARN("No entry on force for current_oblock=%llu/oblock=%llu invalid!", (LLU) current_oblock, (LLU) oblock);
+			DMWARN("No entry on force for current_oblock=%llu/oblock=%llu invalid!",
+			       (LLU) from_oblock(current_oblock),
+			       (LLU) from_oblock(oblock));
 
 		p->bad.force++;
 	}
@@ -534,25 +545,29 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 	mutex_unlock(&p->lock);
 }
 
-static dm_block_t debug_residency(struct dm_cache_policy *pe)
+static dm_cblock_t debug_residency(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
 	bool ok = true;
-	dm_block_t r;
+	dm_cblock_t r;
 
 	mutex_lock(&p->lock);
 	r = policy_residency(p->debug_policy);
-	if (r > p->cache_blocks) {
+	if (from_cblock(r) > from_cblock(p->cache_blocks)) {
 		if (modparms.verbose & 0x1)
-			DMWARN("Residency=%llu claimed larger than cache size=%llu!", (LLU) r, (LLU) p->cache_blocks);
+			DMWARN("Residency=%llu claimed larger than cache size=%llu!",
+			       (LLU) from_cblock(r),
+			       (LLU) from_cblock(p->cache_blocks));
 
 		p->bad.residency_larger++;
 		ok = false;
 	}
 
-	if (r != p->good.new) {
+	if (from_cblock(r) != p->good.new) {
 		if (modparms.verbose & 0x1)
-			DMWARN("Claimed residency=%llu invalid vs. %llu", (LLU) r, (LLU) p->nr_dblocks_allocated);
+			DMWARN("Claimed residency=%llu invalid vs. %llu",
+			       (LLU) from_cblock(r),
+			       (LLU) p->nr_dblocks_allocated);
 
 		p->bad.residency_invalid++;
 		ok = false;
@@ -583,7 +598,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.tick = debug_tick;
 }
 
-static struct dm_cache_policy *debug_create(dm_block_t cache_blocks, sector_t origin_sectors, sector_t block_sectors)
+static struct dm_cache_policy *debug_create(dm_cblock_t cache_blocks, sector_t origin_sectors, sector_t block_sectors)
 {
 	int r;
 	dm_block_t origin_blocks = origin_sectors;
@@ -596,7 +611,7 @@ static struct dm_cache_policy *debug_create(dm_block_t cache_blocks, sector_t or
 
 	do_div(origin_blocks, block_sectors);
 	p->cache_blocks = cache_blocks;
-	p->origin_blocks = origin_blocks;
+	p->origin_blocks = to_oblock(origin_blocks);
 	mutex_init(&p->lock);
 
 	DMWARN("debugging \"%s\" cache replacement policy", modparms.policy_name);
@@ -604,7 +619,7 @@ static struct dm_cache_policy *debug_create(dm_block_t cache_blocks, sector_t or
 	if (!p->debug_policy)
 		goto bad_dm_cache_policy_create;
 
-	r = alloc_debug_blocks_and_hashs(p, origin_blocks, cache_blocks);
+	r = alloc_debug_blocks_and_hashs(p, p->origin_blocks, p->cache_blocks);
 	if (r)
 		goto bad_alloc_debug_blocks_and_hash;
 
