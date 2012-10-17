@@ -7,6 +7,7 @@
 #ifndef DM_CACHE_POLICY_H
 #define DM_CACHE_POLICY_H
 
+#include "dm-cache-metadata.h"
 #include "persistent-data/dm-block-manager.h"
 
 /*----------------------------------------------------------------*/
@@ -68,8 +69,8 @@ enum policy_operation {
  */
 struct policy_result {
 	enum policy_operation op;
-	dm_block_t old_oblock;	/* POLICY_REPLACE */
-	dm_block_t cblock;	/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE */
+	dm_oblock_t old_oblock;	/* POLICY_REPLACE */
+	dm_cblock_t cblock;	/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE */
 };
 
 /*
@@ -100,7 +101,7 @@ struct dm_cache_policy {
 	 *
 	 * May only return 0, or -EWOULDBLOCK (if !can_migrate)
 	 */
-	int (*map)(struct dm_cache_policy *p, dm_block_t oblock,
+	int (*map)(struct dm_cache_policy *p, dm_oblock_t oblock,
 		   bool can_migrate, bool discarded_oblock,
 		   struct bio *bio,
 		   struct policy_result *result);
@@ -109,20 +110,20 @@ struct dm_cache_policy {
 	 * Called when a cache target is first created.  Used to load a
 	 * mapping from the metadata device into the policy.
 	 */
-	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
+	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
 
 	/*
 	 * Override functions used on the error paths of the core target.
 	 * They must succeed.
 	 */
-	void (*remove_mapping)(struct dm_cache_policy *p, dm_block_t oblock);
-	void (*force_mapping)(struct dm_cache_policy *p, dm_block_t current_oblock,
-			      dm_block_t new_oblock);
+	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
+			      dm_oblock_t new_oblock);
 
 	/*
 	 * How full is the cache?
 	 */
-	dm_block_t (*residency)(struct dm_cache_policy *p);
+	dm_cblock_t (*residency)(struct dm_cache_policy *p);
 
 	/*
 	 * Because of where we sit in the block layer, we can be asked to
@@ -157,7 +158,7 @@ struct dm_cache_policy_type {
 	char name[CACHE_POLICY_NAME_MAX];
 	size_t hint_size;	/* in bytes, must be 0 or 4 */
 	struct module *owner;
-	struct dm_cache_policy *(*create)(dm_block_t cache_size, sector_t origin_size, sector_t block_size);
+	struct dm_cache_policy *(*create)(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size);
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);

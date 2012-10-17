@@ -284,10 +284,10 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 
 	bio->bi_bdev = cache->cache_dev->bdev;
 	if (!block_size_is_power_of_two(cache))
-		bio->bi_sector = (cblock * cache->sectors_per_block) +
+		bio->bi_sector = (from_cblock(cblock) * cache->sectors_per_block) +
 				sector_div(bi_sector, cache->sectors_per_block);
 	else
-		bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
+		bio->bi_sector = (from_cblock(cblock) << cache->sectors_per_block_shift) |
 				(bi_sector & (cache->sectors_per_block - 1));
 }
 
@@ -317,7 +317,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 {
 	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
-		set_bit(cblock, cache->dirty_bitset);
+		set_bit(from_cblock(cblock), cache->dirty_bitset);
 		clear_discard(cache, oblock);
 	}
 }
@@ -331,7 +331,7 @@ static dm_oblock_t get_bio_block(struct cache *cache, struct bio *bio)
 	else
 		block_nr >>= cache->sectors_per_block_shift;
 
-	return block_nr;
+	return to_oblock(block_nr);
 }
 
 static int bio_triggers_commit(struct cache *cache, struct bio *bio)
@@ -481,7 +481,7 @@ static void migration_success_post_commit(struct cache *cache, struct dm_cache_m
 
 	} else {
 		cell_defer(cache, mg->new_ocell, 1);
-		clear_bit(mg->cblock, cache->dirty_bitset);
+		clear_bit(from_cblock(mg->cblock), cache->dirty_bitset);
 		cleanup_migration(cache, mg);
 	}
 }
@@ -511,16 +511,16 @@ static void issue_copy_real(struct cache *cache, struct dm_cache_migration *mg)
 	o_region.count = cache->sectors_per_block;
 
 	c_region.bdev = cache->cache_dev->bdev;
-	c_region.sector = mg->cblock * cache->sectors_per_block;
+	c_region.sector = from_cblock(mg->cblock) * cache->sectors_per_block;
 	c_region.count = cache->sectors_per_block;
 
 	if (mg->demote) {
 		/* demote */
-		o_region.sector = mg->old_oblock * cache->sectors_per_block;
+		o_region.sector = from_oblock(mg->old_oblock) * cache->sectors_per_block;
 		r = dm_kcopyd_copy(cache->copier, &c_region, 1, &o_region, 0, copy_complete, mg);
 	} else {
 		/* promote */
-		o_region.sector = mg->new_oblock * cache->sectors_per_block;
+		o_region.sector = from_oblock(mg->new_oblock) * cache->sectors_per_block;
 		r = dm_kcopyd_copy(cache->copier, &o_region, 1, &c_region, 0, copy_complete, mg);
 	}
 
@@ -539,7 +539,7 @@ static void issue_copy(struct cache *cache, struct dm_cache_migration *mg)
 	bool avoid;
 
 	if (mg->demote)
-		avoid = !test_bit(mg->cblock, cache->dirty_bitset) ||
+		avoid = !test_bit(from_cblock(mg->cblock), cache->dirty_bitset) ||
 			is_discarded(cache, mg->old_oblock);
 	else
 		avoid = is_discarded(cache, mg->new_oblock);
@@ -706,14 +706,14 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_oblock_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
-	dm_oblock_t end_block = bio->bi_sector + bio_sectors(bio);
-	dm_oblock_t b;
+	dm_block_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
+	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
+	dm_block_t b;
 
 	do_div(end_block, cache->sectors_per_block);
 
 	for (b = start_block; b < end_block; b++)
-		set_discard(cache, b);
+		set_discard(cache, to_oblock(b));
 
 	bio_endio(bio, 0);
 }
@@ -733,7 +733,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	build_key(block, &key);
+	build_key(from_oblock(block), &key);
 	r = dm_bio_detain(cache->prison, &key, bio, &new_ocell);
 	if (r > 0)
 		return;
@@ -761,7 +761,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		break;
 
 	case POLICY_REPLACE:
-		build_key(lookup_result.old_oblock, &key);
+		build_key(from_oblock(lookup_result.old_oblock), &key);
 		r = dm_bio_detain(cache->prison, &key, bio, &old_ocell);
 		if (r > 0) {
 			/*
@@ -1033,8 +1033,8 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, b
 {
 	struct cache *cache = context;
 
-	dirty ? set_bit(cblock, cache->dirty_bitset) :
-		clear_bit(cblock, cache->dirty_bitset);
+	dirty ? set_bit(from_cblock(cblock), cache->dirty_bitset) :
+		clear_bit(from_cblock(cblock), cache->dirty_bitset);
 
 	return policy_load_mapping(cache->policy, oblock, cblock);
 }
@@ -1067,6 +1067,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	struct cache *cache;
 	struct dm_cache_metadata *cmd;
 	bool format_device = read_only ? false : true;
+	dm_block_t origin_blocks;
 
 	cmd = dm_cache_metadata_open(metadata_dev, block_size, format_device);
 	if (IS_ERR(cmd)) {
@@ -1082,18 +1083,19 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 
 	cache->cmd = cmd;
 
-	cache->origin_blocks = cache->origin_sectors = origin_sectors;
-	do_div(cache->origin_blocks, block_size);
+	origin_blocks = cache->origin_sectors = origin_sectors;
+	do_div(origin_blocks, block_size);
+	cache->origin_blocks = to_oblock(origin_blocks);
 	cache->sectors_per_block = block_size;
 	if (block_size & (block_size - 1)) {
-		dm_cblock_t cache_size = cache_sectors;
+		dm_block_t cache_size = cache_sectors;
 
 		cache->sectors_per_block_shift = -1;
 		(void) sector_div(cache_size, block_size);
-		cache->cache_size = cache_size;
+		cache->cache_size = to_cblock(cache_size);
 	} else {
 		cache->sectors_per_block_shift = __ffs(block_size);
-		cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
+		cache->cache_size = to_cblock(cache_sectors >> cache->sectors_per_block_shift);
 	}
 
 	spin_lock_init(&cache->lock);
@@ -1112,19 +1114,19 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 		goto bad_alloc_dirty_bitset;
 	}
 
-	cache->dirty_bitset = alloc_bitset(cache->cache_size);
+	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
 		*error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
-	set_bitset(cache->dirty_bitset, cache->cache_size);
+	set_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
-	cache->discard_bitset = alloc_bitset(cache->origin_blocks);
+	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {
 		*error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
 	}
-	clear_bitset(cache->discard_bitset, cache->origin_blocks);
+	clear_bitset(cache->discard_bitset, from_oblock(cache->origin_blocks));
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
@@ -1345,7 +1347,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h;
 
-	if (block > cache->origin_blocks) {
+	if (from_oblock(block) > from_oblock(cache->origin_blocks)) {
 		/*
 		 * This can only occur if the io goes to a partial block at
 		 * the end of the origin device.  We don't cache these.
@@ -1365,7 +1367,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	build_key(block, &key);
+	build_key(from_oblock(block), &key);
 	r = dm_bio_detain(cache->prison, &key, bio, &cell);
 	if (r > 0)
 		return DM_MAPIO_SUBMITTED;
@@ -1428,8 +1430,9 @@ static int write_dirty_bitset(struct cache *cache)
 {
 	unsigned i, r;
 
-	for (i = 0; i < cache->cache_size; i++) {
-		r = dm_cache_set_dirty(cache->cmd, i, test_bit(i, cache->dirty_bitset));
+	for (i = 0; i < from_cblock(cache->cache_size); i++) {
+		r = dm_cache_set_dirty(cache->cmd, to_cblock(i),
+				       test_bit(i, cache->dirty_bitset));
 		if (r)
 			return r;
 	}
@@ -1500,7 +1503,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->write_miss),
 		       (unsigned) atomic_read(&cache->demotion),
 		       (unsigned) atomic_read(&cache->promotion),
-		       (unsigned long long) residency,
+		       (unsigned long long) from_cblock(residency),
 		       (unsigned) atomic_read(&cache->cache_cell_clash));
 		break;
 

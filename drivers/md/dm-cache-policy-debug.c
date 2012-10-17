@@ -4,7 +4,7 @@
  *
  * Debug module for cache replacement policies.
  *
- * Load with "{policy=$Name {verbose=N}". Name=mq, fifo, ... verbose=0..2
+ * Load with "{policy=$Name {verbose=N}". Name=mq, fifo, ... verbose=0..7
  *
  * This file is released under the GPL.
  */
@@ -42,8 +42,17 @@ struct hash {
 struct debug_entry {
 	struct hlist_node ohlist, chlist;
 	struct list_head list;
-	dm_block_t oblock, cblock;
+	dm_oblock_t oblock;
+	dm_cblock_t cblock;
 	enum policy_operation op;
+};
+
+struct good_state_counts {
+	unsigned hit, map_miss, miss, new, replace, op, cblock, load, remove, force, residency;
+};
+
+struct bad_state_counts {
+	unsigned hit, map_miss, miss, new, replace, op, cblock, load, remove, force, residency_larger, residency_invalid;
 };
 
 struct policy {
@@ -54,15 +63,9 @@ struct policy {
 	struct list_head free, used;
 	struct hash ohash, chash;
 	dm_block_t origin_blocks, cache_blocks;
-	unsigned allocated, nr_allocated, analysed, hit;
-
-	struct {
-		unsigned hit, miss, new, replace, op, cblock, load, remove, force;
-	} good;
-
-	struct {
-		unsigned hit, miss, new, replace, op, cblock, load, remove, force;
-	} bad;
+	unsigned nr_dblocks_allocated, analysed, hit;
+	struct good_state_counts good;
+	struct bad_state_counts bad;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -75,6 +78,13 @@ static struct policy *to_policy(struct dm_cache_policy *pe)
 static unsigned next_power(unsigned n, unsigned min)
 {
 	return roundup_pow_of_two(max(n, min));
+}
+
+static bool test_ok(struct policy *p)
+{
+	struct bad_state_counts *b = &p->bad;
+
+	return b->hit + b->miss + b->new + b->replace + b->op + b->cblock + b->load + b->remove + b->force + b->residency_larger + b->residency_invalid > 0 ? false : true;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -93,9 +103,9 @@ static struct list_head *list_pop(struct list_head *lh)
 
 /* Hash functions (lookup, insert, remove). */
 
-/* To create lookup_debug_entry_by_cblock() and lookup_debug_entry_by_oblock() */
-#define LOOKUP(type) \
-static struct debug_entry *lookup_debug_entry_by_ ## type ## block(struct policy *p, dm_block_t type ## block) \
+/* To create lookup_debug_entry_by_cache_block() and lookup_debug_entry_by_origin_block() */
+#define LOOKUP(type, longtype) \
+static struct debug_entry *lookup_debug_entry_by_ ## longtype ## _block(struct policy *p, dm_block_t type ## block) \
 { \
 	unsigned h = hash_64(type ## block, p->type ## hash.hash_bits); \
 	struct debug_entry *cur; \
@@ -114,8 +124,8 @@ static struct debug_entry *lookup_debug_entry_by_ ## type ## block(struct policy
 	return NULL; \
 }
 
-LOOKUP(o);
-LOOKUP(c);
+LOOKUP(o, origin);
+LOOKUP(c, cache);
 #undef LOOKUP
 
 static void insert_ohash_entry(struct policy *p, struct debug_entry *e)
@@ -180,6 +190,9 @@ static int alloc_debug_blocks_and_hashs(struct policy *p, dm_block_t origin_bloc
 	INIT_LIST_HEAD(&p->free);
 	INIT_LIST_HEAD(&p->used);
 
+	p->nr_dblocks_allocated = 0;
+
+	/* FIXME: if we'ld avoid POLICY_MISS checks, we wouldn't need that many. */
 	u = origin_blocks;
 	while (u--) {
 		/* FIXME: use slab. */
@@ -223,7 +236,7 @@ static void free_debug_entry(struct policy *p, struct debug_entry *e)
 	e->oblock = e->cblock = e->op = 0;
 	BUG_ON(list_empty(&e->list));
 	list_move_tail(&e->list, &p->free);
-	p->allocated--;
+	p->nr_dblocks_allocated--;
 }
 
 static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_t oblock, dm_block_t cblock)
@@ -236,7 +249,7 @@ static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_
 	insert_ohash_entry(p, e);
 	insert_chash_entry(p, e);
 	list_add(&e->list, &p->used);
-	p->allocated++;
+	p->nr_dblocks_allocated++;
 
 	return e;
 }
@@ -244,7 +257,7 @@ static struct debug_entry *alloc_and_add_debug_entry(struct policy *p, dm_block_
 
 static void check_op(char *name, enum policy_operation op)
 {
-	if (modparms.verbose > 1) {
+	if (modparms.verbose & 0x4) {
 		if (op == POLICY_HIT)
 			DMWARN("%s: previous op POLICY_HIT invalid!", name);
 
@@ -259,21 +272,22 @@ static void check_op(char *name, enum policy_operation op)
 static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t oblock, int map_ret, struct policy_result *result)
 {
 	bool cblock_ok = true;
-	struct debug_entry *ec = result->cblock < p->cache_blocks ? lookup_debug_entry_by_cblock(p, result->cblock) : NULL;
-	struct debug_entry *eo = lookup_debug_entry_by_oblock(p, oblock);
+	struct debug_entry *ec = from_cblock(result->cblock) < from_cblock(p->cache_blocks) ?
+		lookup_debug_entry_by_cache_block(p, from_cblock(result->cblock)) : NULL;
+	struct debug_entry *eo = lookup_debug_entry_by_origin_block(p, oblock);
 
 	p->good.op++;
 
-	/* target map thread may result in this. */
+	/* target map thread caller may result in this. */
 	if (map_ret == -EWOULDBLOCK) {
 		if (result->op != POLICY_MISS) {
-			if (modparms.verbose)
-				DMWARN("-EWOULDBLOCK: op != POLICY_MISS invalid!");
+			if (modparms.verbose & 0x2)
+				DMWARN("-EWOULDBLOCK: op=%u != POLICY_MISS invalid!", eo->op);
 
-			p->bad.miss++;
+			p->bad.map_miss++;
 
 		} else
-			p->good.miss++;
+			p->good.map_miss++;
 
 		return NULL;
 	}
@@ -284,9 +298,11 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_MISS -> POLICY_HIT FALSE. */
 		if (eo) {
 			if (eo->cblock != result->cblock) {
-				if (modparms.verbose)
+				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_HIT: e->oblock=%llu e->cblock=%llu != result->cblock=%llu invalid!",
-						 (LLU) eo->oblock, (LLU) eo->cblock, (LLU) result->cblock);
+					       (LLU) from_oblock(eo->oblock),
+					       (LLU) from_cblock(eo->cblock),
+					       (LLU) from_cblock(result->cblock));
 
 				p->bad.cblock++;
 
@@ -294,7 +310,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 				p->good.cblock++;
 
 			if (eo->op == POLICY_MISS) {
-				if (modparms.verbose)
+				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_HIT: following POLICY_MISS invalid!");
 
 				p->bad.hit++;
@@ -309,7 +325,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_MISS -> POLICY_NEW ok */
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_NEW FALSE. */
 		if (ec) {
-			if (modparms.verbose)
+			if (modparms.verbose & 0x2)
 				DMWARN("POLICY_NEW: oblock=%llu e->cblock=%llu already existing invalid!", (LLU) oblock, (LLU) ec->cblock);
 
 			check_op("POLICY_NEW", ec->op);
@@ -326,17 +342,18 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 			ec = eo = NULL;
 		}
 
-		p->nr_allocated++;
 		break;
 
 	case POLICY_REPLACE:
 		/* POLICY_MISS -> POLICY_REPLACE ok */
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_REPLACE FALSE. */
 		if (eo) {
-			if (result->old_oblock == oblock) {
-				if (modparms.verbose)
+			if (from_oblock(result->old_oblock) == from_oblock(oblock)) {
+				if (modparms.verbose & 0x2)
 					DMWARN("POLICY_REPLACE: e->cblock=%llu e->oblock=%llu = result->old_block=%llu invalid!",
-						 (LLU) eo->oblock, (LLU) eo->cblock, (LLU) result->old_oblock);
+					       (LLU) from_oblock(eo->oblock),
+					       (LLU) from_cblock(eo->cblock),
+					       (LLU) from_oblock(result->old_oblock));
 
 				p->bad.replace++;
 
@@ -355,7 +372,13 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_MISS FALSE. */
 		if (eo) {
 			check_op("POLICY_MISS", eo->op);
-			p->bad.miss++;
+
+			if (eo->op != POLICY_MISS) {
+				if (modparms.verbose & 0x2)
+					DMWARN("POLICY_MISS: op=%u != POLICY_MISS invalid!", eo->op);
+
+				p->bad.miss++;
+			}
 
 		} else
 			p->good.miss++;
@@ -364,7 +387,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		break;
 
 	default:
-		if (modparms.verbose)
+		if (modparms.verbose > 1)
 			DMWARN("Invalid op code %u", result->op);
 
 		cblock_ok = false;
@@ -372,7 +395,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_block_t obloc
 		p->bad.op++;
 	}
 
-	eo = eo ? eo : alloc_and_add_debug_entry(p, oblock, cblock_ok ? result->cblock : p->cache_blocks);
+	eo = eo ? eo : alloc_and_add_debug_entry(p, oblock, cblock_ok ? from_cblock(result->cblock) : from_cblock(p->cache_blocks));
 	eo->op = result->op; /* Memorize op for next analysis cycle. */
 	p->analysed++;
 
@@ -383,12 +406,13 @@ static void log_stats(struct policy *p)
 {
 	if (++p->hit > (p->cache_blocks << 1)) {
 		p->hit = 0;
-		DMINFO("blocks allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
-		       "cblock=%u/%u,load=%u/%u,remove=%u/%u,force=%u/%u",
-		       p->allocated, p->analysed,
-		       p->good.hit, p->bad.hit, p->good.miss, p->bad.miss, p->good.new, p->bad.new,
+		DMINFO("blocks nr_dblocks_allocated/analysed = %u/%u good/bad hit=%u/%u,miss=%u/%u,map_miss=%u/%u,new=%u/%u,replace=%u/%u,op=%u/%u,"
+		       "cblock=%u/%u,load=%u/%u,remove=%u/%u,force=%u/%u residency ok/larger/invalid=%u/%u/%u",
+		       p->nr_dblocks_allocated, p->analysed,
+		       p->good.hit, p->bad.hit, p->good.miss, p->bad.miss, p->good.map_miss, p->bad.map_miss, p->good.new, p->bad.new,
 		       p->good.replace, p->bad.replace, p->good.op, p->bad.op, p->good.cblock, p->bad.cblock,
-		       p->good.load, p->bad.load, p->good.remove, p->bad.remove, p->good.force, p->bad.force);
+		       p->good.load, p->bad.load, p->good.remove, p->bad.remove, p->good.force, p->bad.force,
+		       p->good.residency, p->bad.residency_larger, p->bad.residency_invalid);
 	}
 }
 
@@ -401,7 +425,12 @@ static int debug_map(struct dm_cache_policy *pe, dm_block_t oblock,
 	struct policy *p = to_policy(pe);
 	struct debug_entry *e;
 
-	mutex_lock(&p->lock);
+	if (can_migrate)
+		mutex_lock(&p->lock);
+
+	else if (!mutex_trylock(&p->lock))
+		return -EWOULDBLOCK;
+
 	r = policy_map(p->debug_policy, oblock, can_migrate, discarded_oblock, bio, result);
 	e = analyse_map_result(p, oblock, r, result);
 	log_stats(p);
@@ -416,6 +445,12 @@ static void debug_destroy(struct dm_cache_policy *pe)
 
 	p->hit = ~0 - 1; /* - 1 due to ++ in log_stats() */
 	log_stats(p);
+
+	if (test_ok(p))
+		DMINFO("Test ok");
+	else
+		DMINFO("Test FAILED!");
+
 	dm_cache_policy_destroy(p->debug_policy);
 	free_debug_blocks_and_hashs(p);
 	kfree(p);
@@ -428,10 +463,10 @@ static int debug_load_mapping(struct dm_cache_policy *pe, dm_block_t oblock, dm_
 	struct debug_entry *eo, *ec;
 
 	mutex_lock(&p->lock);
-	eo = lookup_debug_entry_by_oblock(p, oblock);
-	ec = lookup_debug_entry_by_oblock(p, cblock);
+	eo = lookup_debug_entry_by_origin_block(p, oblock);
+	ec = lookup_debug_entry_by_cache_block(p, cblock);
 	if (eo || ec) {
-		if (modparms.verbose)
+		if (modparms.verbose & 0x2)
 			DMWARN("Entry on load for oblock=%llu/cblock=%llu already existing invalid!", (LLU) oblock, (LLU) cblock);
 
 		free_debug_entry(p, eo ? eo : ec);
@@ -454,13 +489,13 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_block_t oblock)
 	struct debug_entry *e;
 
 	mutex_lock(&p->lock);
-	e = lookup_debug_entry_by_oblock(p, oblock);
+	e = lookup_debug_entry_by_origin_block(p, oblock);
 	if (e) {
 		free_debug_entry(p, e);
 		p->good.remove++;
 
 	} else {
-		if (modparms.verbose)
+		if (modparms.verbose & 0x2)
 			DMWARN("No entry on remove for oblock=%llu invalid!", (LLU) oblock);
 
 		p->bad.remove++;
@@ -477,7 +512,7 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 	struct debug_entry *e;
 
 	mutex_lock(&p->lock);
-	e = lookup_debug_entry_by_oblock(p, current_oblock);
+	e = lookup_debug_entry_by_origin_block(p, current_oblock);
 	if (e) {
 		enum policy_operation op = e->op;
 		dm_block_t cblock = e->cblock;
@@ -489,7 +524,7 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 		p->good.force++;
 
 	} else {
-		if (modparms.verbose)
+		if (modparms.verbose & 0x2)
 			DMWARN("No entry on force for current_oblock=%llu/oblock=%llu invalid!", (LLU) current_oblock, (LLU) oblock);
 
 		p->bad.force++;
@@ -502,17 +537,31 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 static dm_block_t debug_residency(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
+	bool ok = true;
 	dm_block_t r;
 
 	mutex_lock(&p->lock);
 	r = policy_residency(p->debug_policy);
+	if (r > p->cache_blocks) {
+		if (modparms.verbose & 0x1)
+			DMWARN("Residency=%llu claimed larger than cache size=%llu!", (LLU) r, (LLU) p->cache_blocks);
+
+		p->bad.residency_larger++;
+		ok = false;
+	}
+
+	if (r != p->good.new) {
+		if (modparms.verbose & 0x1)
+			DMWARN("Claimed residency=%llu invalid vs. %llu", (LLU) r, (LLU) p->nr_dblocks_allocated);
+
+		p->bad.residency_invalid++;
+		ok = false;
+	}
+
+	if (ok)
+		p->good.residency++;
+
 	mutex_unlock(&p->lock);
-
-	if (r >= p->cache_blocks)
-		DMWARN("Residency claimed larger than cache size!");
-
-	if (r != p->nr_allocated)
-		DMWARN("Claimed residency invalid");
 
 	return r;
 }
