@@ -827,7 +827,9 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return r;
 }
 
-static int mq_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+static int mq_load_mapping(struct dm_cache_policy *p,
+			   dm_oblock_t oblock, dm_cblock_t cblock,
+			   uint32_t hint, bool hint_valid)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
@@ -836,16 +838,34 @@ static int mq_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cbl
 	if (!e)
 		return -ENOMEM;
 
-	pr_alert("loading mapping o(%u) -> c(%u)\n", (unsigned) from_oblock(oblock),
-		 (unsigned) from_cblock(cblock));
 	e->cblock = cblock;
 	e->oblock = oblock;
 	e->in_cache = true;
-	e->hit_count = 1;
+	e->hit_count = hint_valid ? hint : 1;
 	e->generation = mq->generation;
 	push(mq, e);
 
 	return 0;
+}
+
+static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+	int r;
+	struct entry *e;
+	unsigned level;
+
+	mutex_lock(&mq->lock);
+	for (level = 0; level < NR_QUEUE_LEVELS; level++)
+		list_for_each_entry(e, &mq->cache.qs[level], list) {
+			r = fn(context, e->cblock, e->oblock, e->hit_count);
+			if (r)
+				goto out;
+		}
+
+out:
+	mutex_unlock(&mq->lock);
+	return r;
 }
 
 static void remove_mapping(struct mq_policy *mq, dm_oblock_t oblock)
@@ -908,14 +928,6 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
-static int mq_hint_get(struct dm_cache_policy *p, dm_block_t cblock, uint32_t *hint)
-{
-	struct mq_policy *mq = to_mq_policy(p);
-
-//	*hint = ;
-	return -EINVAL;
-}
-
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size, sector_t block_size)
 {
@@ -926,12 +938,11 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.load_mapping = mq_load_mapping;
+	mq->policy.walk_mappings = mq_walk_mappings;
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
-	mq->policy.hint_get = mq_hint_get;
-//	mq->policy.hint_set = mq_hint_set;
 
 	iot_init(&mq->tracker);
 

@@ -462,7 +462,9 @@ static void debug_destroy(struct dm_cache_policy *pe)
 	kfree(p);
 }
 
-static int debug_load_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t cblock)
+static int debug_load_mapping(struct dm_cache_policy *pe,
+			      dm_oblock_t oblock, dm_cblock_t cblock,
+			      uint32_t hint, bool hint_valid)
 {
 	int r;
 	struct policy *p = to_policy(pe);
@@ -485,7 +487,7 @@ static int debug_load_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock, dm
 		p->good.load++;
 	}
 
-	r = policy_load_mapping(p->debug_policy, oblock, cblock);
+	r = policy_load_mapping(p->debug_policy, oblock, cblock, hint, hint_valid);
 	mutex_unlock(&p->lock);
 
 	return r;
@@ -592,6 +594,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = debug_destroy;
 	p->policy.map = debug_map;
 	p->policy.load_mapping = debug_load_mapping;
+	p->policy.walk_mappings = NULL;
 	p->policy.remove_mapping = debug_remove_mapping;
 	p->policy.force_mapping = debug_force_mapping;
 	p->policy.residency = debug_residency;

@@ -90,10 +90,13 @@ int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd);
 
-typedef int (*load_mapping_fn)(void *context, dm_oblock_t oblock, dm_cblock_t cblock, bool dirty);
+typedef int (*load_mapping_fn)(void *context, dm_oblock_t oblock,
+			       dm_cblock_t cblock, bool dirty,
+			       uint32_t hint, bool hint_valid);
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
-			    load_mapping_fn fn,
-			    void *context);
+			   const char *policy_name,
+			   load_mapping_fn fn,
+			   void *context);
 
 int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty);
 
@@ -118,21 +121,20 @@ void dm_cache_dump(struct dm_cache_metadata *cmd);
  * for a hit count).  These are stored against the policy name.  If
  * policies are changed, then hints will be lost.  If the machine crashes,
  * hints will be lost.
+ *
+ * The hints are indexed by the cblock, but many policies will not
+ * neccessarily have a fast way of accessing efficiently via cblock.  So
+ * rather than querying the policy for each cblock, we let it walk its data
+ * structures and fill in the hints in whatever order it wishes.
  */
-typedef int (*hint_save_fn)(void *context, dm_cblock_t cblock, uint32_t *hint);
-typedef int (*hint_load_fn)(void *context, dm_cblock_t cblock, uint32_t hint);
+
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name);
 
 /*
- * requests hints for every cblock and stores in the metdata device.
+ * requests hints for every cblock and stores in the metadata device.
  */
-int dm_cache_save_hints(struct dm_cache_metadata *cmd, const char *policy_name,
-			hint_save_fn fn, void *context);
-
-/*
- * Loads any hints.  returns -ENODATA if there are no hints.
- */
-int dm_cache_load_hints(struct dm_cache_metadata *cmd, const char *policy_name,
-			hint_load_fn fn, void *context);
+int dm_cache_save_hint(struct dm_cache_metadata *cmd,
+		       dm_cblock_t cblock, uint32_t hint);
 
 /*----------------------------------------------------------------*/
 

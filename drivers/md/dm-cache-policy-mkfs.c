@@ -825,7 +825,9 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return r;
 }
 
-static int mq_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+static int mq_load_mapping(struct dm_cache_policy *p,
+			   dm_oblock_t oblock, dm_cblock_t cblock,
+			   uint32_t hint, bool hint_valid)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
@@ -913,6 +915,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.load_mapping = mq_load_mapping;
+	mq->policy.walk_mappings = NULL;
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;

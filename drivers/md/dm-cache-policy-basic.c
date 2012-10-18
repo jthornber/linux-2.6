@@ -1170,7 +1170,9 @@ static void basic_destroy(struct dm_cache_policy *pe)
 	kfree(p);
 }
 
-static int basic_load_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t cblock)
+static int basic_load_mapping(struct dm_cache_policy *pe,
+			      dm_oblock_t oblock, dm_cblock_t cblock,
+			      uint32_t hint, bool hint_valid)
 {
 	int r = 0;
 	struct policy *p = to_policy(pe);
@@ -1258,6 +1260,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = basic_destroy;
 	p->policy.map = basic_map;
 	p->policy.load_mapping = basic_load_mapping;
+	p->policy.walk_mappings = NULL;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.force_mapping = basic_force_mapping;
 	p->policy.residency = basic_residency;

@@ -1029,14 +1029,15 @@ static sector_t get_dev_size(struct dm_dev *dev)
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
 }
 
-static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, bool dirty)
+static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, bool dirty,
+			uint32_t hint, bool hint_valid)
 {
 	struct cache *cache = context;
 
 	dirty ? set_bit(from_cblock(cblock), cache->dirty_bitset) :
 		clear_bit(from_cblock(cblock), cache->dirty_bitset);
 
-	return policy_load_mapping(cache->policy, oblock, cblock);
+	return policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
 }
 
 static int create_cache_policy(struct cache *cache,
@@ -1440,9 +1441,52 @@ static int write_dirty_bitset(struct cache *cache)
 	return 0;
 }
 
-static void cache_postsuspend(struct dm_target *ti)
+static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock, uint32_t hint)
+{
+	struct cache *cache = context;
+	return dm_cache_save_hint(cache->cmd, cblock, hint);
+}
+
+static int write_hints(struct cache *cache)
 {
 	int r;
+
+	r = dm_cache_begin_hints(cache->cmd, dm_cache_policy_get_name(cache->policy));
+	if (r) {
+		DMERR("dm_cache_begin_hints failed\n");
+		return r;
+	}
+
+	r = policy_walk_mappings(cache->policy, save_hint, cache);
+	if (r)
+		DMERR("policy_walk_mappings failed\n");
+
+	return r;
+}
+
+/*
+ * FIXME: also write the discard bitset.
+ */
+static int sync_metadata(struct cache *cache)
+{
+	int r1, r2, r3;
+
+	r1 = write_dirty_bitset(cache);
+	save_stats(cache);
+
+	r2 = write_hints(cache);
+
+	/*
+	 * If writing the above metadata failed, we still commit, but don't
+	 * set the clean shutdown flag.  This will effectively force every
+	 * dirty bit to be set on reload.
+	 */
+	r3 = dm_cache_commit(cache->cmd, !r1 && !r2);
+	return !r1 && !r2 && !r3;
+}
+
+static void cache_postsuspend(struct dm_target *ti)
+{
 	struct cache *cache = ti->private;
 
 	start_quiescing(cache);
@@ -1451,14 +1495,8 @@ static void cache_postsuspend(struct dm_target *ti)
 	requeue_deferred_io(cache);
 	stop_quiescing(cache);
 
-	/*
-	 * If writing the bitset failed, we still commit, but don't set the
-	 * clean shutdown flag.  This will effectively force every dirty
-	 * bit to be set on reload.
-	 */
-	r = write_dirty_bitset(cache);
-	save_stats(cache);
-	dm_cache_commit(cache->cmd, !r);
+	if (sync_metadata(cache))
+		DMERR("Couldn't write cache metadata.  Data loss may occur.");
 }
 
 static int cache_preresume(struct dm_target *ti)
@@ -1467,9 +1505,13 @@ static int cache_preresume(struct dm_target *ti)
 	struct cache *cache = ti->private;
 
 	if (!cache->loaded_mappings) {
-		r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
-		if (r)
+		r = dm_cache_load_mappings(cache->cmd,
+					   dm_cache_policy_get_name(cache->policy),
+					   load_mapping, cache);
+		if (r) {
 			DMERR("couldn't load cache mappings");
+			return r;
+		}
 
 		cache->loaded_mappings = true;
 	}
