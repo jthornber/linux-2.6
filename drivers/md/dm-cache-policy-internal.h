@@ -31,7 +31,7 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 static inline int policy_walk_mappings(struct dm_cache_policy *p,
 				      policy_walk_fn fn, void *context)
 {
-	return p->walk_mappings(p, fn, context);
+	return p->walk_mappings ? p->walk_mappings(p, fn, context) : 0;
 }
 
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)

@@ -1453,13 +1453,13 @@ static int write_hints(struct cache *cache)
 
 	r = dm_cache_begin_hints(cache->cmd, dm_cache_policy_get_name(cache->policy));
 	if (r) {
-		DMERR("dm_cache_begin_hints failed\n");
+		DMERR("dm_cache_begin_hints failed");
 		return r;
 	}
 
 	r = policy_walk_mappings(cache->policy, save_hint, cache);
 	if (r)
-		DMERR("policy_walk_mappings failed\n");
+		DMERR("policy_walk_mappings failed");
 
 	return r;
 }
