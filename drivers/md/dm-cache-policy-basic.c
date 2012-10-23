@@ -1264,7 +1264,7 @@ bad:
 	return r;
 }
 
-/* Walk queues for lru, mru, lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
+/* Walk queues for lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
 static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
 {
 	int r = 0;
