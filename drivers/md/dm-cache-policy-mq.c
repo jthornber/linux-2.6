@@ -851,7 +851,7 @@ static int mq_load_mapping(struct dm_cache_policy *p,
 static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
 {
 	struct mq_policy *mq = to_mq_policy(p);
-	int r;
+	int r = 0;
 	struct entry *e;
 	unsigned level;
 
