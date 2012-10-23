@@ -490,6 +490,13 @@ static int debug_load_mapping(struct dm_cache_policy *pe,
 	return r;
 }
 
+static int debug_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
+{
+	struct policy *p = to_policy(pe);
+
+	return policy_walk_mappings(p->debug_policy, fn, context);
+}
+
 static void debug_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
 	struct policy *p = to_policy(pe);
@@ -584,6 +591,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = debug_destroy;
 	p->policy.map = debug_map;
 	p->policy.load_mapping = debug_load_mapping;
+	p->policy.walk_mappings = debug_walk_mappings;
 	p->policy.remove_mapping = debug_remove_mapping;
 	p->policy.force_mapping = debug_force_mapping;
 	p->policy.residency = debug_residency;
