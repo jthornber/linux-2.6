@@ -1495,7 +1495,7 @@ static void cache_postsuspend(struct dm_target *ti)
 	requeue_deferred_io(cache);
 	stop_quiescing(cache);
 
-	if (sync_metadata(cache))
+	if (!sync_metadata(cache))
 		DMERR("Couldn't write cache metadata.  Data loss may occur.");
 }
 
