@@ -21,9 +21,17 @@ static inline int policy_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return p->map(p, oblock, can_migrate, discarded_oblock, bio, result);
 }
 
-static inline int policy_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+static inline int policy_load_mapping(struct dm_cache_policy *p,
+				      dm_oblock_t oblock, dm_cblock_t cblock,
+				      uint32_t hint, bool hint_valid)
 {
-	return p->load_mapping(p, oblock, cblock);
+	return p->load_mapping(p, oblock, cblock, hint, hint_valid);
+}
+
+static inline int policy_walk_mappings(struct dm_cache_policy *p,
+				      policy_walk_fn fn, void *context)
+{
+	return p->walk_mappings ? p->walk_mappings(p, fn, context) : 0;
 }
 
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)

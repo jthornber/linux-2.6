@@ -550,6 +550,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
+	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
 	disk_super->cache_blocks = cpu_to_le32(from_cblock(cmd->cache_blocks));
 	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
 
@@ -721,30 +722,55 @@ int dm_cache_insert_mapping(struct dm_cache_metadata *cmd,
 struct thunk {
 	load_mapping_fn fn;
 	void *context;
+
+	struct dm_cache_metadata *cmd;
 	bool respect_dirty_flags;
+	bool hints_valid;
 };
+
+static bool hints_array_available(struct dm_cache_metadata *cmd,
+				  const char *policy_name)
+{
+	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
+					   sizeof(cmd->policy_name));
+
+	return cmd->clean_when_opened &&
+		policy_names_match &&
+		cmd->hint_root;
+}
 
 static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 {
 	int r = 0;
 	bool dirty;
 	__le64 value;
+	__le32 hint_value = 0;
 	dm_oblock_t oblock;
 	unsigned flags;
 	struct thunk *thunk = context;
+	struct dm_cache_metadata *cmd = thunk->cmd;
 
 	memcpy(&value, leaf, sizeof(value));
 	unpack_value(value, &oblock, &flags);
 
 	if (flags & M_VALID) {
+		if (thunk->hints_valid) {
+			r = dm_array_get(&cmd->hint_info, cmd->hint_root,
+					 cblock, &hint_value);
+			if (r && r != -ENODATA)
+				return r;
+		}
+
 		dirty = thunk->respect_dirty_flags ? (flags & M_DIRTY) : true;
-		r = thunk->fn(thunk->context, oblock, to_cblock(cblock), dirty);
+		r = thunk->fn(thunk->context, oblock, to_cblock(cblock),
+			      dirty, le32_to_cpu(hint_value), thunk->hints_valid);
 	}
 
 	return r;
 }
 
 static int __load_mappings(struct dm_cache_metadata *cmd,
+			   const char *policy_name,
 			   load_mapping_fn fn,
 			   void *context)
 {
@@ -758,11 +784,16 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 
 	thunk.fn = fn;
 	thunk.context = context;
+
+	thunk.cmd = cmd;
 	thunk.respect_dirty_flags = cmd->clean_when_opened;
+	thunk.hints_valid = hints_array_available(cmd, policy_name);
+
 	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
+			   const char *policy_name,
 			   load_mapping_fn fn,
 			   void *context)
 {
@@ -770,7 +801,7 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 
 	debug("> dm_cache_load_mappings\n");
 	down_read(&cmd->root_lock);
-	r = __load_mappings(cmd, fn, context);
+	r = __load_mappings(cmd, policy_name, fn, context);
 	up_read(&cmd->root_lock);
 	debug("< dm_cache_load_mappings\n");
 
@@ -894,29 +925,32 @@ out:
 
 /*----------------------------------------------------------------*/
 
-static bool hints_array_available(struct dm_cache_metadata *cmd,
-				  const char *policy_name)
-{
-	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
-					   sizeof(cmd->policy_name));
-
-	return cmd->clean_when_opened &&
-		policy_names_match &&
-		cmd->hint_root;
-}
-
-static int ensure_hints_array(struct dm_cache_metadata *cmd,
-			      const char *policy_name)
+static int begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
 {
 	int r;
+	__le32 value;
 
 	if (!policy_name[0] ||
 	    (strlen(policy_name) > sizeof(cmd->policy_name) - 1))
-		strncpy(cmd->policy_name, policy_name,
-			sizeof(cmd->policy_name));
+		return -EINVAL;
 
-	if (!cmd->hint_root) {
+	if (strcmp(cmd->policy_name, policy_name)) {
+		strncpy(cmd->policy_name, policy_name, sizeof(cmd->policy_name));
+
+		if (cmd->hint_root) {
+			r = dm_array_del(&cmd->hint_info, cmd->hint_root);
+			if (r)
+				return r;
+		}
+
 		r = dm_array_empty(&cmd->hint_info, &cmd->hint_root);
+		if (r)
+			return r;
+
+		value = cpu_to_le32(0);
+		__dm_bless_for_disk(&value);
+		r = dm_array_resize(&cmd->hint_info, cmd->hint_root, 0,
+				    from_cblock(cmd->cache_blocks), &value, &cmd->hint_root);
 		if (r)
 			return r;
 	}
@@ -924,73 +958,37 @@ static int ensure_hints_array(struct dm_cache_metadata *cmd,
 	return 0;
 }
 
-static int save_hints(struct dm_cache_metadata *cmd, const char *policy_name,
-		      hint_save_fn fn, void *context)
-{
-	int r = 0;
-	dm_block_t cblock;
-	uint32_t hint;
-	__le32 value;
-
-	ensure_hints_array(cmd, policy_name);
-
-	for (cblock = 0; cblock < from_cblock(cmd->cache_blocks); cblock++) {
-		fn(context, to_cblock(cblock), &hint);
-
-		value = cpu_to_le32(hint);
-		__dm_bless_for_disk(value);
-		r = dm_array_set(&cmd->hint_info, cmd->hint_root, cblock,
-				 &value, &cmd->hint_root);
-		if (r)
-			break;
-	}
-
-	return r;
-}
-
-int dm_cache_save_hints(struct dm_cache_metadata *cmd, const char *policy_name,
-			hint_save_fn fn, void *context)
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = save_hints(cmd, policy_name, fn, context);
+	r = begin_hints(cmd, policy_name);
 	up_write(&cmd->root_lock);
 
 	return r;
 }
 
-static int load_hints(struct dm_cache_metadata *cmd, const char *policy_name,
-		      hint_load_fn fn, void *context)
+static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t hint)
 {
-	int r = 0;
-	unsigned cblock;
-	uint32_t hint;
-	__le32 value;
+	int r;
+	__le32 value = cpu_to_le32(hint);
+	__dm_bless_for_disk(&value);
 
-	if (hints_array_available(cmd, policy_name))
-		return -ENODATA;
-
-	for (cblock = 0; cblock < from_cblock(cmd->cache_blocks); cblock++) {
-		r = dm_array_get(&cmd->hint_info, cmd->hint_root, cblock, &value);
-		if (r)
-			break;
-
-		hint = __le32_to_cpu(value);
-		fn(context, to_cblock(cblock), hint);
-	}
+	r = dm_array_set(&cmd->hint_info, cmd->hint_root,
+			 from_cblock(cblock), &value, &cmd->hint_root);
+	cmd->changed = 1;
 
 	return r;
 }
 
-int dm_cache_load_hints(struct dm_cache_metadata *cmd, const char *policy_name,
-			hint_load_fn fn, void *context)
+int dm_cache_save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t hint)
 {
 	int r;
 
-	down_read(&cmd->root_lock);
-	r = load_hints(cmd, policy_name, fn, context);
-	up_read(&cmd->root_lock);
+	down_write(&cmd->root_lock);
+	r = save_hint(cmd, cblock, hint);
+	up_write(&cmd->root_lock);
 
 	return r;
 }

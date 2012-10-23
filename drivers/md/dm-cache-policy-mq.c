@@ -353,22 +353,22 @@ static struct entry *alloc_entry(struct mq_policy *mq)
 static void alloc_cblock(struct mq_policy *mq, dm_cblock_t cblock)
 {
 	BUG_ON(from_cblock(cblock) > from_cblock(mq->cache_size));
-	BUG_ON(test_bit(cblock, mq->allocation_bitset));
-	set_bit(cblock, mq->allocation_bitset);
+	BUG_ON(test_bit(from_cblock(cblock), mq->allocation_bitset));
+	set_bit(from_cblock(cblock), mq->allocation_bitset);
 	mq->nr_cblocks_allocated++;
 }
 
 static void free_cblock(struct mq_policy *mq, dm_cblock_t cblock)
 {
-	BUG_ON(cblock > mq->cache_size);
-	BUG_ON(!test_bit(cblock, mq->allocation_bitset));
-	clear_bit(cblock, mq->allocation_bitset);
+	BUG_ON(from_cblock(cblock) > from_cblock(mq->cache_size));
+	BUG_ON(!test_bit(from_cblock(cblock), mq->allocation_bitset));
+	clear_bit(from_cblock(cblock), mq->allocation_bitset);
 	mq->nr_cblocks_allocated--;
 }
 
 static bool any_free_cblocks(struct mq_policy *mq)
 {
-	return mq->nr_cblocks_allocated < mq->cache_size;
+	return mq->nr_cblocks_allocated < from_cblock(mq->cache_size);
 }
 
 /*
@@ -381,7 +381,7 @@ static bool any_free_cblocks(struct mq_policy *mq)
 static int find_free_cblock(struct mq_policy *mq, dm_cblock_t *result)
 {
 	int r = -ENOSPC;
-	unsigned nr_words = dm_div_up(mq->cache_size, BITS_PER_LONG);
+	unsigned nr_words = dm_div_up(from_cblock(mq->cache_size), BITS_PER_LONG);
 	unsigned w, b;
 
 	if (!any_free_cblocks(mq))
@@ -394,8 +394,8 @@ static int find_free_cblock(struct mq_policy *mq, dm_cblock_t *result)
 		if (mq->allocation_bitset[w] != ~0UL) {
 			b = ffz(mq->allocation_bitset[w]);
 
-			*result = (w * BITS_PER_LONG) + b;
-			if (*result < mq->cache_size)
+			*result = to_cblock((w * BITS_PER_LONG) + b);
+			if (from_cblock(*result) < from_cblock(mq->cache_size))
 				r = 0;
 
 			break;
@@ -497,7 +497,7 @@ static void check_generation(struct mq_policy *mq)
 	struct entry *e;
 
 	if ((mq->hit_count >= mq->generation_period) &&
-	    (mq->nr_cblocks_allocated == mq->cache_size)) {
+	    (mq->nr_cblocks_allocated == from_cblock(mq->cache_size))) {
 
 		mq->hit_count = 0;
 		mq->generation++;
@@ -827,7 +827,9 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return r;
 }
 
-static int mq_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+static int mq_load_mapping(struct dm_cache_policy *p,
+			   dm_oblock_t oblock, dm_cblock_t cblock,
+			   uint32_t hint, bool hint_valid)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
@@ -836,15 +838,34 @@ static int mq_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cbl
 	if (!e)
 		return -ENOMEM;
 
-	pr_alert("loading mapping o(%u) -> c(%u)\n", (unsigned) oblock, (unsigned) cblock);
 	e->cblock = cblock;
 	e->oblock = oblock;
 	e->in_cache = true;
-	e->hit_count = 1;
+	e->hit_count = hint_valid ? hint : 1;
 	e->generation = mq->generation;
 	push(mq, e);
 
 	return 0;
+}
+
+static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+	int r;
+	struct entry *e;
+	unsigned level;
+
+	mutex_lock(&mq->lock);
+	for (level = 0; level < NR_QUEUE_LEVELS; level++)
+		list_for_each_entry(e, &mq->cache.qs[level], list) {
+			r = fn(context, e->cblock, e->oblock, e->hit_count);
+			if (r)
+				goto out;
+		}
+
+out:
+	mutex_unlock(&mq->lock);
+	return r;
 }
 
 static void remove_mapping(struct mq_policy *mq, dm_oblock_t oblock)
@@ -889,12 +910,12 @@ static void mq_force_mapping(struct dm_cache_policy *p,
 	mutex_unlock(&mq->lock);
 }
 
-static dm_oblock_t mq_residency(struct dm_cache_policy *p)
+static dm_cblock_t mq_residency(struct dm_cache_policy *p)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 
 	// FIXME: lock mutex, not sure we can block here
-	return mq->nr_cblocks_allocated;
+	return to_cblock(mq->nr_cblocks_allocated);
 }
 
 static void mq_tick(struct dm_cache_policy *p)
@@ -907,7 +928,8 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
-static struct dm_cache_policy *mq_create(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size)
+static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
+					 sector_t origin_size, sector_t block_size)
 {
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
 	if (!mq)
@@ -916,6 +938,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size, sector_t origin
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.load_mapping = mq_load_mapping;
+	mq->policy.walk_mappings = mq_walk_mappings;
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
@@ -934,9 +957,9 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size, sector_t origin
 
 	queue_init(&mq->pre_cache);
 	queue_init(&mq->cache);
-	mq->generation_period = max((unsigned) cache_size, 1024U);
+	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024U);
 
-	mq->nr_entries = 2 * cache_size;
+	mq->nr_entries = 2 * from_cblock(cache_size);
 	mq->entries = vzalloc(sizeof(*mq->entries) * mq->nr_entries);
 	if (!mq->entries) {
 		kfree(mq);
@@ -946,7 +969,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size, sector_t origin
 	mq->nr_entries_allocated = 0;
 	mq->nr_cblocks_allocated = 0;
 
-	mq->nr_buckets = next_power(cache_size / 2, 16);
+	mq->nr_buckets = next_power(from_cblock(cache_size) / 2, 16);
 	mq->hash_bits = ffs(mq->nr_buckets) - 1;
 	mq->table = kzalloc(sizeof(*mq->table) * mq->nr_buckets, GFP_KERNEL);
 	if (!mq->table) {
@@ -955,7 +978,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size, sector_t origin
 		return NULL;
 	}
 
-	mq->allocation_bitset = alloc_bitset(cache_size);
+	mq->allocation_bitset = alloc_bitset(from_cblock(cache_size));
 	if (!mq->allocation_bitset) {
 		kfree(mq->table);
 		vfree(mq->entries);

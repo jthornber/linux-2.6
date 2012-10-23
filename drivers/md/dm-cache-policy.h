@@ -73,6 +73,9 @@ struct policy_result {
 	dm_cblock_t cblock;	/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE */
 };
 
+typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
+			      dm_oblock_t oblock, uint32_t hint);
+
 /*
  * The cache policy object.  Just a bunch of methods.  It is envisaged that
  * this structure will be embedded in a bigger, policy specific structure
@@ -110,7 +113,10 @@ struct dm_cache_policy {
 	 * Called when a cache target is first created.  Used to load a
 	 * mapping from the metadata device into the policy.
 	 */
-	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
+	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock,
+			    uint32_t hint, bool hint_valid);
+
+	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn, void *context);
 
 	/*
 	 * Override functions used on the error paths of the core target.
