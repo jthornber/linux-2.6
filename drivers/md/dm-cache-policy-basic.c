@@ -1,4 +1,4 @@
-/*
+/*, 
  *
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
@@ -103,6 +103,7 @@ struct common_entry {
 /* Cache entry struct. */
 struct basic_cache_entry {
 	struct common_entry ce;
+	struct list_head used;
 
 	dm_cblock_t cblock;
 	unsigned long access, expire;
@@ -184,12 +185,11 @@ struct policy {
 	unsigned calc_threshold_hits, promote_threshold[2], hits;
 
 	struct {
+		/* add/del/evict entry abstractions. */
 		struct queue_fns *fns;
 
-		union {
-			struct list_head *mq;
-			struct list_head used;
-		} u;
+		/* Multiqueue policies. */
+		struct list_head *mq;
 
 		/* Pre- and post-cache queues. */
 		struct track_queue pre, post;
@@ -206,8 +206,9 @@ struct policy {
 		struct btree_head32 fu_head;
 		mempool_t *fu_pool;
 
-		unsigned mqueues, q0_size, twoqueue_q0_max_elts;
-		struct list_head free; /* Free cache entry list; used for all policies. */
+		unsigned nr_mqueues, q0_size, twoqueue_q0_max_elts;
+		struct list_head free; /* Free cache entry list */
+		struct list_head used; /* Used cache entry list; walk_mappings uses this list */
 	} queues;
 
 	/* MINORME: allocate only for multiqueue? */
@@ -367,20 +368,20 @@ static void free_track_queue(struct track_queue *q)
 static int alloc_multiqueues(struct policy *p, unsigned mqueues)
 {
 	/* Multiqueue heads. */
-	p->queues.mqueues = mqueues;
-	p->queues.u.mq = vzalloc(sizeof(*p->queues.u.mq) * mqueues);
-	if (!p->queues.u.mq)
+	p->queues.nr_mqueues = mqueues;
+	p->queues.mq = vzalloc(sizeof(*p->queues.mq) * mqueues);
+	if (!p->queues.mq)
 		return -ENOMEM;
 
 	while (mqueues--)
-		queue_init(&p->queues.u.mq[mqueues]);
+		queue_init(&p->queues.mq[mqueues]);
 
 	return 0;
 }
 
 static void free_multiqueues(struct policy *p)
 {
-	vfree(p->queues.u.mq);
+	vfree(p->queues.mq);
 }
 
 static struct basic_cache_entry *alloc_cache_entry(struct policy *p)
@@ -636,7 +637,7 @@ static unsigned sum_count(struct common_entry *ce, enum count_type t)
 /* queue_add_.*() functions. */
 static void __queue_add_default(struct policy *p, struct list_head *elt, bool to_head)
 {
-	struct list_head *q = &p->queues.u.used;
+	struct list_head *q = &p->queues.used;
 
 	to_head ? queue_add(q, elt) : queue_add_tail(q, elt);
 }
@@ -692,6 +693,9 @@ static void __queue_add_lfu_mfu(struct policy *p, struct list_head *elt, bool is
 		BUG_ON(r);
 		INIT_LIST_HEAD(elt);
 	}
+
+	/* FIXME: needed to allow for walk_mappings lagging btree_walk() */
+	queue_add_tail(&p->queues.used, &e->used);
 }
 
 static void queue_add_lfu(struct policy *p, struct list_head *elt)
@@ -718,7 +722,7 @@ static unsigned __select_multiqueue(struct policy *p, struct basic_cache_entry *
 {
 	unsigned val = sum_count(&e->ce, ctype);
 
-	return min((unsigned) ilog2(val * val * val), p->queues.mqueues - 1U);
+	return min((unsigned) ilog2(val * val * val), p->queues.nr_mqueues - 1U);
 }
 
 static unsigned __get_twoqueue(struct policy *p, struct basic_cache_entry *e)
@@ -763,7 +767,7 @@ static void adjust_entry_counters(struct policy *p, struct common_entry *ce, uns
 
 static void demote_multiqueues(struct policy *p)
 {
-	struct list_head *cur = p->queues.u.mq, *end = cur + p->queues.mqueues;
+	struct list_head *cur = p->queues.mq, *end = cur + p->queues.nr_mqueues;
 
 	if (!queue_empty(&p->queues.free) || !queue_empty(cur))
 		return;
@@ -778,7 +782,7 @@ static void demote_multiqueues(struct policy *p)
 			if (time_after_eq(p->jiffies, e->expire)) {
 				queue_move_tail(cur - 1, &e->ce.list);
 				e->expire = __queue_tmo_multiqueue(p);
-				adjust_entry_counters(p, &e->ce, cur - 1 - p->queues.u.mq);
+				adjust_entry_counters(p, &e->ce, cur - 1 - p->queues.mq);
 
 			} else
 				break;
@@ -792,7 +796,8 @@ static void __queue_add_multiqueue(struct policy *p, struct list_head *elt, enum
 	unsigned queue = __select_multiqueue(p, e, ctype);
 
 	e->expire = __queue_tmo_multiqueue(p);
-	queue_add_tail(&p->queues.u.mq[queue], &e->ce.list);
+	queue_add_tail(&p->queues.mq[queue], &e->ce.list);
+	queue_add_tail(&p->queues.used, &e->used);
 }
 
 static void queue_add_multiqueue(struct policy *p, struct list_head *elt)
@@ -809,7 +814,8 @@ static void queue_add_q2(struct policy *p, struct list_head *elt)
 {
 	struct basic_cache_entry *e = list_entry(elt, struct basic_cache_entry, ce.list);
 
-	queue_add_tail(&p->queues.u.mq[0], &e->ce.list);
+	queue_add_tail(&p->queues.mq[0], &e->ce.list);
+	queue_add_tail(&p->queues.used, &e->used);
 }
 
 static void queue_add_twoqueue(struct policy *p, struct list_head *elt)
@@ -821,19 +827,23 @@ static void queue_add_twoqueue(struct policy *p, struct list_head *elt)
 	if (!queue)
 		p->queues.q0_size++;
 
-	queue_add_tail(&p->queues.u.mq[queue], &e->ce.list);
+	queue_add_tail(&p->queues.mq[queue], &e->ce.list);
+	queue_add_tail(&p->queues.used, &e->used);
 }
 /*----------------------------------------------------------------------------*/
 
 /* queue_del_.*() functions. */
 static void queue_del_default(struct policy *p, struct list_head *elt)
 {
+	struct basic_cache_entry *e = list_entry(elt, struct basic_cache_entry, ce.list);
+
 	queue_del(elt);
+	queue_del(&e->used);
 }
 
 static void queue_del_fifo_filo(struct policy *p, struct list_head *elt)
 {
-	queue_del(elt);
+	queue_del_default(p, elt);
 }
 
 static void queue_del_lfu_mfu(struct policy *p, struct list_head *elt)
@@ -863,12 +873,15 @@ static void queue_del_lfu_mfu(struct policy *p, struct list_head *elt)
 
 	} else
 		list_del(elt); /* If not head, we can simply remove the element from the list. */
+
+	queue_del(&e->used);
 }
 
 static void queue_del_multiqueue(struct policy *p, struct list_head *elt)
 {
+	struct basic_cache_entry *e = list_entry(elt, struct basic_cache_entry, ce.list);
+
 	if (IS_TWOQUEUE(p)) {
-		struct basic_cache_entry *e = list_entry(elt, struct basic_cache_entry, ce.list);
 		unsigned queue = e->saved;
 
 		if (!queue)
@@ -876,13 +889,14 @@ static void queue_del_multiqueue(struct policy *p, struct list_head *elt)
 	}
 
 	queue_del(elt);
+	queue_del(&e->used);
 }
 /*----------------------------------------------------------------------------*/
 
 /* queue_evict_.*() functions. */
 static struct list_head *queue_evict_default(struct policy *p)
 {
-	return queue_pop(&p->queues.u.used);
+	return queue_pop(&p->queues.used);
 }
 
 static struct list_head *queue_evict_lfu_mfu(struct policy *p)
@@ -908,6 +922,7 @@ static struct list_head *queue_evict_lfu_mfu(struct policy *p)
 	e = list_entry(r, struct basic_cache_entry, ce.list);
 	e->saved = 0;
 	memset(&e->ce.count, 0, sizeof(e->ce.count));
+	queue_del(&e->used);
 
 	return r;
 }
@@ -925,20 +940,26 @@ static struct list_head *queue_evict_random(struct policy *p)
 	e = p->cblocks + do_div(off, from_cblock(p->cache_size));
 	r = &e->ce.list;
 	queue_del(r);
+	queue_del(&e->used);
 
 	return r;
 }
 
 static struct list_head *queue_evict_multiqueue(struct policy *p)
 {
-	struct list_head *cur = p->queues.u.mq - 1;	/* -1 because of ++cur below. */
+	struct list_head *cur = p->queues.mq - 1;	/* -1 because of ++cur below. */
 
-	while (++cur < p->queues.u.mq + p->queues.mqueues) {
+	while (++cur < p->queues.mq + p->queues.nr_mqueues) {
 		if (!queue_empty(cur)) {
-			if (IS_TWOQUEUE(p) && cur == p->queues.u.mq)
+			struct basic_cache_entry *e;
+			struct list_head *r;
+
+			if (IS_TWOQUEUE(p) && cur == p->queues.mq)
 				p->queues.q0_size--;
 
-			return queue_pop(cur);
+			r = queue_pop(cur);
+			e = list_entry(r, struct basic_cache_entry, ce.list);
+			queue_del(&e->used);
 		}
 
 		if (IS_MULTIQUEUE(p))
@@ -1170,6 +1191,45 @@ static void basic_destroy(struct dm_cache_policy *pe)
 	kfree(p);
 }
 
+/* FIXME: converters can disappear in case of larger hint cast in metadata. */
+static const uint16_t high_flag = 0x8000;
+static const uint32_t hint_lmask = 0xFFFF;
+static const uint32_t hint_hmask = 0xFFFF0000;
+static uint16_t count_to_hint(unsigned val)
+{
+	uint16_t vh, vl;
+
+	vl = val & hint_lmask;
+	vh = (val & hint_hmask) >> 16;
+
+	if (vh)
+		return vh |= high_flag;
+	else
+		return vl &= ~high_flag;
+}
+
+static uint32_t counts_to_hint(unsigned read, unsigned write)
+{
+	return count_to_hint(read) & (count_to_hint(write) << 16);
+}
+
+static unsigned check_high(uint16_t v)
+{
+	unsigned r = v;
+
+	if (r & high_flag)
+		r = (r & ~high_flag) << 16;
+
+	return r;
+}
+
+static void hint_to_counts(uint32_t val, unsigned *read, unsigned *write)
+{
+	*read  = check_high(val & hint_lmask);
+	*write = check_high((val & hint_hmask) >> 16);
+
+}
+
 static int basic_load_mapping(struct dm_cache_policy *pe,
 			      dm_oblock_t oblock, dm_cblock_t cblock,
 			      uint32_t hint, bool hint_valid)
@@ -1187,12 +1247,43 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 
 	e->cblock = cblock;
 	e->ce.oblock = oblock;
-	e->ce.count[T_HITS][0]++; /* Count as a read. */
+
+	if (hint_valid) {
+		hint_to_counts(hint, &e->ce.count[T_HITS][0], &e->ce.count[T_HITS][1]);
+
+		/* FIXME: store also in larger hints rather than making up. */
+		e->ce.count[T_SECTORS][0] = e->ce.count[T_HITS][0] * p->block_size;
+		e->ce.count[T_SECTORS][1] = e->ce.count[T_HITS][1] * p->block_size;
+	}
+
 	add_cache_entry(p, e);
 
 bad:
 	mutex_unlock(&p->lock);
 
+	return r;
+}
+
+/* Walk queues for lru, mru, lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
+static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
+{
+	int r = 0;
+	struct policy *p = to_policy(pe);
+
+	mutex_lock(&p->lock);
+
+	if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
+		struct basic_cache_entry *e;
+
+		list_for_each_entry(e, &p->queues.used, used) {
+			r = fn(context, e->cblock, e->ce.oblock, counts_to_hint(e->ce.count[T_HITS][0], e->ce.count[T_HITS][1]));
+			if (r)
+				goto out;
+		}
+	}
+
+out:
+	mutex_unlock(&p->lock);
 	return r;
 }
 
@@ -1260,7 +1351,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = basic_destroy;
 	p->policy.map = basic_map;
 	p->policy.load_mapping = basic_load_mapping;
-	p->policy.walk_mappings = NULL;
+	p->policy.walk_mappings = basic_walk_mappings;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.force_mapping = basic_force_mapping;
 	p->policy.residency = basic_residency;
@@ -1369,8 +1460,9 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		if (r)
 			goto bad_free_track_queue_post;
 
-	} else
-		queue_init(&p->queues.u.used);
+	}
+
+	queue_init(&p->queues.used);
 
 	return &p->policy;
 
