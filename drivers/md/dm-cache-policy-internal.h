@@ -28,6 +28,11 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 	return p->load_mapping(p, oblock, cblock, hint, hint_valid);
 }
 
+static inline void policy_load_mappings_completed(struct dm_cache_policy *p)
+{
+	return p->load_mappings_completed ? p->load_mappings_completed(p) : 0;
+}
+
 static inline int policy_walk_mappings(struct dm_cache_policy *p,
 				      policy_walk_fn fn, void *context)
 {
@@ -37,6 +42,11 @@ static inline int policy_walk_mappings(struct dm_cache_policy *p,
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	return p->remove_mapping(p, oblock);
+}
+
+static inline int policy_remove_any(struct dm_cache_policy *p, struct policy_result *result)
+{
+	return p->remove_any(p, result) ? p->remove_any(p, result) : -ENOENT;
 }
 
 static inline void policy_force_mapping(struct dm_cache_policy *p,
