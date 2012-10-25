@@ -315,10 +315,6 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 	return r;
 }
 
-static void wb_tick(struct dm_cache_policy *pe)
-{
-}
-
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
@@ -331,7 +327,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.remove_any = wb_remove_any;
 	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
-	p->policy.tick = wb_tick;
+	p->policy.tick = NULL;
 }
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,

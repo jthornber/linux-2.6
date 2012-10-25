@@ -62,7 +62,8 @@ static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)
 
 static inline void policy_tick(struct dm_cache_policy *p)
 {
-	return p->tick(p);
+	if (p->tick)
+		return p->tick(p);
 }
 
 /*----------------------------------------------------------------*/
