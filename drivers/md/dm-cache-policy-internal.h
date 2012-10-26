@@ -30,7 +30,8 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 
 static inline void policy_load_mappings_completed(struct dm_cache_policy *p)
 {
-	return p->load_mappings_completed ? p->load_mappings_completed(p) : 0;
+	if (p->load_mappings_completed)
+		p->load_mappings_completed(p);
 }
 
 static inline int policy_walk_mappings(struct dm_cache_policy *p,
