@@ -1,5 +1,4 @@
-/*, 
- *
+/*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
  * writeback cache policy supporting flushing out dirty cache blocks.
