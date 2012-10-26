@@ -221,7 +221,8 @@ static void set_dirty(struct cache *cache, dm_cblock_t b)
 static void clear_dirty(struct cache *cache, dm_cblock_t b)
 {
 	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset))
-		cache->nr_dirty--;
+		if (!--cache->nr_dirty)
+			dm_table_event(cache->ti->table);
 }
 
 /*----------------------------------------------------------------*/
@@ -916,7 +917,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 			struct dm_bio_prison_cell *old_ocell;
 
 			build_key(from_oblock(lookup_result.old_oblock), &key);
-			dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
+			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
 				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
 				return;
