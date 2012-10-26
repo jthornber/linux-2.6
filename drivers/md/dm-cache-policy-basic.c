@@ -1427,13 +1427,13 @@ static void basic_tick(struct dm_cache_policy *pe)
 
 static int process_config_option(struct policy *p, int *args, char **argv)
 {
-	bool seq = false;
 	unsigned long tmp;
+	enum io_pattern pattern;
 
 	if (strcmp(argv[0], "sequential_threshold"))
-		seq = true;
+		pattern = PATTERN_SEQUENTIAL;
 	else if (strcmp(argv[0], "random_threshold"))
-		;
+		pattern = PATTERN_RANDOM;
 	else
 		return -EINVAL;
 
@@ -1441,7 +1441,7 @@ static int process_config_option(struct policy *p, int *args, char **argv)
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+	args[pattern] = tmp;
 
 	return 0;
 }
@@ -1495,7 +1495,7 @@ static int process_policy_args(struct policy *p, int argc, char **argv)
 
 	p->threshold_args[0] = p->threshold_args[1] = -1;
 
-	for (u = 0; u < argc; u += 2) {  
+	for (u = 0; u < argc; u += 2) {
 		int r = process_config_option(p, p->threshold_args, argv + u);
 
 		if (r)

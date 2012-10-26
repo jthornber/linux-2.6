@@ -315,7 +315,7 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 	dm_cblock_t r;
 
 	mutex_lock(&p->lock);
-	r = p->nr_cblocks_allocated;
+	r = from_cblocks(p->nr_cblocks_allocated);
 	mutex_unlock(&p->lock);
 
 	return r;

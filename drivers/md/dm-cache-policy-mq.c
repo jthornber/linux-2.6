@@ -946,13 +946,13 @@ static void mq_tick(struct dm_cache_policy *p)
 
 static int process_config_option(struct mq_policy *mq, int *args, char **argv)
 {
-	bool seq = false;
 	unsigned long tmp;
+	enum io_pattern pattern;
 
 	if (strcmp(argv[0], "sequential_threshold"))
-		seq = true;
+		pattern = PATTERN_SEQUENTIAL;
 	else if (strcmp(argv[0], "random_threshold"))
-		;
+		pattern = PATTERN_RANDOM;
 	else
 		return -EINVAL;
 
@@ -960,7 +960,7 @@ static int process_config_option(struct mq_policy *mq, int *args, char **argv)
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+	args[pattern] = tmp;
 
 	return 0;
 }
@@ -1053,7 +1053,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	if (r)
 		goto bad_free_policy;
 
-	iot_init(&mq->tracker, mq->threshold_args[PATTERN_RANDOM], mq->threshold_args[PATTERN_SEQUENTIAL]);
+	iot_init(&mq->tracker, mq->threshold_args[PATTERN_SEQUENTIAL], mq->threshold_args[PATTERN_RANDOM]);
 
 	mq->cache_size = cache_size;
 	mq->tick_protected = 0;
