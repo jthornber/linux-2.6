@@ -422,13 +422,15 @@ static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, b
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
-	unsigned long flags;
+	if (cell) {
+		unsigned long flags;
 
-	spin_lock_irqsave(&cache->lock, flags);
-	__cell_defer(cache, cell, holder);
-	spin_unlock_irqrestore(&cache->lock, flags);
+		spin_lock_irqsave(&cache->lock, flags);
+		__cell_defer(cache, cell, holder);
+		spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(cache);
+		wake_worker(cache);
+	}
 }
 
 static void cleanup_migration(struct cache *cache, struct dm_cache_migration *mg)
@@ -660,6 +662,25 @@ static void promote(struct cache *cache, dm_oblock_t oblock,
 	quiesce_migration(cache, mg);
 }
 
+static void demote(struct cache *cache, dm_oblock_t oblock,
+		   dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+
+	mg->err = false;
+	mg->demote = true;
+	mg->promote = false;
+	mg->cache = cache;
+	mg->old_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = cell;
+	mg->new_ocell = NULL;
+	mg->start_jiffies = jiffies;
+
+	inc_nr_migrations(cache);
+	quiesce_migration(cache, mg);
+}
+
 static void writeback_then_promote(struct cache *cache,
 				   dm_oblock_t old_oblock,
 				   dm_oblock_t new_oblock,
@@ -881,6 +902,31 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
 }
 
+static void writeback_all_dirty_blocks(struct cache *cache)
+{
+	int r = 0;
+
+	while (!r) {
+		struct policy_result lookup_result;
+
+		r = policy_remove_any(cache->policy, &lookup_result);
+		if (!r) {
+			struct dm_cell_key key;
+			struct dm_bio_prison_cell *old_ocell;
+
+			build_key(from_oblock(lookup_result.old_oblock), &key);
+			dm_bio_detain(cache->prison, &key, NULL, &old_ocell);
+			if (r) {
+				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
+				return;
+			}
+
+			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
+		}
+	}
+}
+
+
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -962,6 +1008,9 @@ static void do_worker(struct work_struct *ws)
 
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
+
+		writeback_all_dirty_blocks(cache);
+
 
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);

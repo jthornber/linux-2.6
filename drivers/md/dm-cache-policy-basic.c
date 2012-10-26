@@ -1255,8 +1255,6 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 			return -ENOMEM;
 	}
 
-	mutex_lock(&p->lock);
-
 	e = alloc_cache_entry(p);
 	if (!e) {
 		r = -ENOMEM;
@@ -1285,10 +1283,28 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 	}
 
 bad:
-	mutex_unlock(&p->lock);
-
 	return r;
 }
+
+static void basic_reload_mapping(struct dm_cache_policy *pe,
+				 dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct policy *p = to_policy(pe);
+	struct basic_cache_entry *e;
+
+	mutex_lock(&p->lock);
+	e = alloc_cache_entry(p);
+	if (!e)
+		goto bad;
+
+	e->cblock = cblock;
+	e->ce.oblock = oblock;
+	add_cache_entry(p, e);
+
+bad:
+	mutex_unlock(&p->lock);
+}
+
 
 static void basic_load_mappings_completed(struct dm_cache_policy *pe)
 {
@@ -1410,6 +1426,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = basic_load_mapping;
 	p->policy.load_mappings_completed = basic_load_mappings_completed;
 	p->policy.walk_mappings = basic_walk_mappings;
+	p->policy.reload_mapping = basic_reload_mapping;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.remove_any = NULL;
 	p->policy.force_mapping = basic_force_mapping;
