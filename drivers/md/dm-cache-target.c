@@ -220,7 +220,8 @@ static void set_dirty(struct cache *cache, dm_cblock_t b)
 static void clear_dirty(struct cache *cache, dm_cblock_t b)
 {
 	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset))
-		cache->nr_dirty--;
+		if (!--cache->nr_dirty)
+			dm_table_event(cache->ti->table);
 }
 
 /*----------------------------------------------------------------*/
@@ -1609,7 +1610,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_INFO:
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%u %u %u %u %u %u %llu %u %u",
+		DMEMIT("%u %u %u %u %u %u %llu %u",
 		       (unsigned) atomic_read(&cache->read_hit),
 		       (unsigned) atomic_read(&cache->read_miss),
 		       (unsigned) atomic_read(&cache->write_hit),
@@ -1617,7 +1618,6 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->demotion),
 		       (unsigned) atomic_read(&cache->promotion),
 		       (unsigned long long) from_cblock(residency),
-		       (unsigned) atomic_read(&cache->cache_cell_clash),
 		       cache->nr_dirty);
 		break;
 
