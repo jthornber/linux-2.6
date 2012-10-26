@@ -706,7 +706,7 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
+	dm_block_t start_block = dm_sector_div_up(bio->bi_sector, cache->sectors_per_block);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
@@ -1228,6 +1228,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
 	const char *policy_name;
+	unsigned long tmp;
 
 	if (argc < 5) {
 		ti->error = "Invalid argument count";
@@ -1236,12 +1237,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argc = argc;
 	as.argv = argv;
 
-	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
-	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
-	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+	if (kstrtoul(argv[3], 10, &tmp) || !tmp ||
+	    tmp < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    tmp & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		ti->error = "Invalid data block size";
 		return -EINVAL;
 	}
+	block_size = tmp;
 
 	policy_name = argv[4];
 
