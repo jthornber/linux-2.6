@@ -154,6 +154,7 @@ struct cache {
 	bool need_tick_bio;
 
 	struct dm_cache_policy *policy;
+	bool writethrough;
 	bool quiescing;
 	bool commit_requested;
 	bool loaded_mappings;
@@ -171,8 +172,13 @@ struct cache {
 
 struct dm_cache_endio_hook {
 	bool tick:1;
+	bool error:1;
 	unsigned req_nr:2;
 	struct dm_deferred_entry *all_io_entry;
+
+	atomic_t nr_pending;
+	bio_end_io_t *bi_endio;
+	void *bi_private;
 };
 
 struct dm_cache_migration {
@@ -707,6 +713,53 @@ static void writeback_then_promote(struct cache *cache,
 }
 
 /*----------------------------------------------------------------
+ * Write through
+ *--------------------------------------------------------------*/
+static void complete_writethrough(struct bio *bio, int error)
+{
+	struct dm_cache_endio_hook *h = bio->bi_private;
+
+	if (error)
+		h->error = true;
+
+	if (atomic_dec_and_test(&h->nr_pending)) {
+		bio->bi_end_io = h->bi_endio;
+		bio->bi_private = h->bi_private;
+		bio_endio(bio, h->error);
+	}
+}
+
+static bool issue_writethrough(struct cache *cache, struct bio *bio,
+			       dm_cblock_t cblock, gfp_t gfp_mask)
+{
+	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct bio *clone = bio_clone(bio, gfp_mask);
+
+	if (!clone)
+		return false;
+
+	h->error = 0;
+	atomic_set(&h->nr_pending, 2);
+	h->bi_endio = bio->bi_end_io;
+	h->bi_private = bio->bi_private;
+
+	bio->bi_end_io = clone->bi_end_io = complete_writethrough;
+	bio->bi_private = clone->bi_private = h;
+
+	/*
+	 * No, need to use the dirty variants since the cache and origin
+	 * are always in sync in writethrough mode.
+	 */
+	remap_to_cache(cache, bio, cblock);
+	issue(cache, bio);
+
+	remap_to_origin(cache, bio);
+	issue(cache, bio);
+
+	return true;
+}
+
+/*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
 static void defer_bio(struct cache *cache, struct bio *bio)
@@ -785,8 +838,13 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-		remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
-		issue(cache, bio);
+
+		if (cache->writethrough)
+			issue_writethrough(cache, bio, lookup_result.cblock, GFP_KERNEL);
+		else {
+			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+			issue(cache, bio);
+		}
 		break;
 
 	case POLICY_MISS:
@@ -1239,6 +1297,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 		goto bad_migration_pool;
 	}
 
+	cache->writethrough = false;
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
@@ -1406,7 +1465,7 @@ static struct dm_cache_endio_hook *hook_endio(struct cache *cache, struct bio *b
 }
 
 static int cache_map(struct dm_target *ti, struct bio *bio,
-		   union map_info *map_context)
+		     union map_info *map_context)
 {
 	struct cache *cache = ti->private;
 
@@ -1459,8 +1518,15 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-		remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
-		cell_defer(cache, cell, false);
+
+		if (cache->writethrough &&
+		    !issue_writethrough(cache, bio, lookup_result.cblock, GFP_NOIO)) {
+			cell_defer(cache, cell, true);
+			return DM_MAPIO_SUBMITTED;
+		} else {
+			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+			cell_defer(cache, cell, false);
+		}
 		break;
 
 	case POLICY_MISS:
