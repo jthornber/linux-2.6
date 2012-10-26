@@ -402,13 +402,15 @@ static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, b
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
-	unsigned long flags;
+	if (cell) {
+		unsigned long flags;
 
-	spin_lock_irqsave(&cache->lock, flags);
-	__cell_defer(cache, cell, holder);
-	spin_unlock_irqrestore(&cache->lock, flags);
+		spin_lock_irqsave(&cache->lock, flags);
+		__cell_defer(cache, cell, holder);
+		spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(cache);
+		wake_worker(cache);
+	}
 }
 
 static void cleanup_migration(struct cache *cache, struct dm_cache_migration *mg)
@@ -634,6 +636,25 @@ static void promote(struct cache *cache, dm_oblock_t oblock,
 	mg->cblock = cblock;
 	mg->old_ocell = NULL;
 	mg->new_ocell = cell;
+	mg->start_jiffies = jiffies;
+
+	inc_nr_migrations(cache);
+	quiesce_migration(cache, mg);
+}
+
+static void demote(struct cache *cache, dm_oblock_t oblock,
+		   dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+
+	mg->err = false;
+	mg->demote = true;
+	mg->promote = false;
+	mg->cache = cache;
+	mg->old_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = cell;
+	mg->new_ocell = NULL;
 	mg->start_jiffies = jiffies;
 
 	inc_nr_migrations(cache);
@@ -985,6 +1006,22 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 		is_congested(cache->cache_dev, bdi_bits);
 }
 
+/* FIXME: this is flushing all dirty blocks out on dtr. */
+static void writeback_all_dirty_blocks(struct cache *cache)
+{
+	int r = 0;
+
+	while (!r) {
+		struct policy_result lookup_result;
+
+		r = policy_remove_any(cache->policy, &lookup_result);
+		if (!r && test_bit(from_cblock(lookup_result.cblock), cache->dirty_bitset)) {
+			demote(cache, from_oblock(lookup_result.old_oblock), from_cblock(lookup_result.cblock), NULL);
+			wake_worker(cache);
+		}
+	}
+}
+
 /*----------------------------------------------------------------
  * Target methods
  *--------------------------------------------------------------*/
@@ -992,6 +1029,8 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
+
+	writeback_all_dirty_blocks(cache);
 
 	pr_alert("dm-cache statistics:\n");
 	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
