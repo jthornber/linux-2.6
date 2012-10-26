@@ -92,8 +92,8 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
 	if (p->cblocks) {
 		while (cache_size != to_cblock(0)) {
-			list_add(&p->cblocks[from_cblock(cache_size)].list, &p->free);
 			cache_size = to_cblock(from_cblock(cache_size) - 1);
+			list_add(&p->cblocks[from_cblock(cache_size)].list, &p->free);
 		}
 
 		p->nr_cblocks_allocated = 0;
@@ -202,7 +202,6 @@ static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
 {
 	insert_cache_hash_entry(p, e);
 	list_add(&e->list, &p->used);
-	p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
 }
 
 static struct wb_cache_entry *del_cache_entry(struct policy *p)
