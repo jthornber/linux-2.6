@@ -598,7 +598,9 @@ static void init_policy_functions(struct policy *p)
 	p->policy.tick = debug_tick;
 }
 
-static struct dm_cache_policy *debug_create(dm_cblock_t cache_blocks, sector_t origin_sectors, sector_t block_sectors)
+static struct dm_cache_policy *debug_create(dm_cblock_t cache_blocks,
+					    sector_t origin_sectors, sector_t block_sectors,
+					    int argc, char **argv)
 {
 	int r;
 	dm_oblock_t origin_blocks = origin_sectors;
@@ -615,7 +617,7 @@ static struct dm_cache_policy *debug_create(dm_cblock_t cache_blocks, sector_t o
 	mutex_init(&p->lock);
 
 	DMWARN("debugging \"%s\" cache replacement policy", modparms.policy_name);
-	p->debug_policy = dm_cache_policy_create(modparms.policy_name, cache_blocks, origin_sectors, block_sectors);
+	p->debug_policy = dm_cache_policy_create(modparms.policy_name, cache_blocks, origin_sectors, block_sectors, argc, argv);
 	if (!p->debug_policy)
 		goto bad_dm_cache_policy_create;
 

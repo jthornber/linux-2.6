@@ -7,6 +7,8 @@
 #ifndef DM_CACHE_POLICY_H
 #define DM_CACHE_POLICY_H
 
+#include <linux/device-mapper.h>
+
 #include "dm-cache-metadata.h"
 #include "persistent-data/dm-block-manager.h"
 
@@ -155,7 +157,7 @@ struct dm_cache_policy {
 	 * Status and message.
 	 */
 	int (*status) (struct dm_cache_policy *p, status_type_t type, unsigned status_flags, char *result, unsigned maxlen);
-	int (*message) (struct dm_cache_policy *p, unsigned argc, char **argv)
+	int (*message) (struct dm_cache_policy *p, unsigned argc, char **argv);
 
 	/*
 	 * Book keeping ptr for the policy register, not for general use.

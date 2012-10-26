@@ -53,7 +53,7 @@ static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t 
 
 static inline int policy_remove_any(struct dm_cache_policy *p, struct policy_result *result)
 {
-	return p->remove_any(p, result) ? p->remove_any(p, result) : -ENOENT;
+	return p->remove_any ? p->remove_any(p, result) : -ENOENT;
 }
 
 static inline void policy_force_mapping(struct dm_cache_policy *p,

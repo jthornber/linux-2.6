@@ -920,7 +920,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
 				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
-				return;
+				break;
 			}
 
 			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
@@ -1111,7 +1111,7 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, b
 
 static int create_cache_policy(struct cache *cache,
 			       const char *policy_name, char **error,
-			       struct dm_args_set *as)
+			       struct dm_arg_set *as)
 {
 	cache->policy =
 		dm_cache_policy_create(policy_name, cache->cache_size,
@@ -1603,6 +1603,7 @@ static void cache_resume(struct dm_target *ti)
 	do_waker(&cache->waker.work);
 }
 
+#define	MAXLEN	256
 static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
@@ -1667,7 +1668,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 	int r = 0;
 	struct cache *cache = ti->private;
 
-	if (arc != 3)
+	if (argc != 3)
 		return -EINVAL;
 
 	if (strcmp(argv[0], "set_config")) {
