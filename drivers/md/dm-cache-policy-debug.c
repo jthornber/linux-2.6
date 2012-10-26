@@ -519,6 +519,27 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 	mutex_unlock(&p->lock);
 }
 
+static int debug_remove_any(struct dm_cache_policy *pe, struct policy_result *result)
+{
+	int r;
+	struct policy *p = to_policy(pe);
+
+	r = policy_remove_any(p->debug_policy, result);
+	if (r) {
+		if (r != -ENOENT)
+			DMWARN("remove_any return code %d invalid!", r);
+
+	} else {
+		if (result->cblock >= p->cache_blocks)
+			DMWARN("remove_any cbock=%llu invalid!", (LLU) result->cblock);
+
+		if (result->old_oblock >= p->origin_blocks)
+			DMWARN("remove_any cbock=%llu invalid!", (LLU) result->old_oblock);
+	}
+
+	return r;
+}
+
 static void debug_force_mapping(struct dm_cache_policy *pe,
 				dm_oblock_t current_oblock, dm_oblock_t oblock)
 {
@@ -585,6 +606,17 @@ static void debug_tick(struct dm_cache_policy *pe)
 	policy_tick(to_policy(pe)->debug_policy);
 }
 
+static int debug_status(struct dm_cache_policy *pe, status_type_t type,
+			unsigned status_flags, char *result, unsigned maxlen)
+{
+	return policy_status(to_policy(pe)->debug_policy, type, status_flags, result, maxlen);
+}
+
+static int debug_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
+{
+	return policy_message(to_policy(pe)->debug_policy, argc, argv);
+}
+
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
@@ -593,9 +625,12 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = debug_load_mapping;
 	p->policy.walk_mappings = debug_walk_mappings;
 	p->policy.remove_mapping = debug_remove_mapping;
+	p->policy.remove_any = debug_remove_any;
 	p->policy.force_mapping = debug_force_mapping;
 	p->policy.residency = debug_residency;
 	p->policy.tick = debug_tick;
+	p->policy.status = debug_status;
+	p->policy.message = debug_message;
 }
 
 static struct dm_cache_policy *debug_create(dm_cblock_t cache_blocks,

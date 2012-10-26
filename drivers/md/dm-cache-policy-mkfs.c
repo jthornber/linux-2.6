@@ -906,7 +906,8 @@ static void mq_tick(struct dm_cache_policy *p)
 }
 
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
-					 sector_t origin_size, sector_t block_size)
+					 sector_t origin_size, sector_t block_size,
+					 int argc, char **argv)
 {
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
 	if (!mq)
@@ -917,9 +918,12 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.load_mapping = mq_load_mapping;
 	mq->policy.walk_mappings = NULL;
 	mq->policy.remove_mapping = mq_remove_mapping;
+	mq->policy.remove_any = NULL;
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
+	mq->policy.status = NULL;
+	mq->policy.message = NULL;
 
 	iot_init(&mq->tracker);
 

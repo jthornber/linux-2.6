@@ -1603,13 +1603,12 @@ static void cache_resume(struct dm_target *ti)
 	do_waker(&cache->waker.work);
 }
 
-#define	MAXLEN	256
 static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
-	int r;
+	int r = 0;
 	ssize_t sz = 0;
-	char buf[BDEVNAME_SIZE], res[MAXLEN];
+	char buf[BDEVNAME_SIZE];
 	struct cache *cache = ti->private;
 	dm_cblock_t residency;
 
@@ -1617,7 +1616,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_INFO:
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%u %u %u %u %u %u %llu %u %u",
+		DMEMIT("%u %u %u %u %u %u %llu %u %u ",
 		       (unsigned) atomic_read(&cache->read_hit),
 		       (unsigned) atomic_read(&cache->read_miss),
 		       (unsigned) atomic_read(&cache->write_hit),
@@ -1640,25 +1639,24 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
 	}
 
-	r = policy_status(cache->policy, type, status_flags, res, MAXLEN);
-	if (!r)
-		DMEMIT("%s", res);
+	if (sz < maxlen)
+		r = policy_status(cache->policy, type, status_flags, result + sz, maxlen - sz);
 
 	return r;
 }
 
-static int process_set_config(struct cache *cache, char **argv)
+static int process_config_option(struct cache *cache, char **argv)
 {
 	if (strcmp(argv[1], "migration_threshold")) {
 		unsigned long tmp;
 
-		if (kstrtoul(argv[2], 10, &tmp))
+		if (kstrtoul(argv[2], 10, &tmp) || !tmp)
 			return -EINVAL;
 
 		cache->migration_threshold = tmp;
 
 	} else
-		return 1;
+		return 1; /* Inform caller it's not our option. */
 
 	return 0;
 }
@@ -1672,7 +1670,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 
 	if (strcmp(argv[0], "set_config")) {
-		r = process_set_config(cache, argv);
+		r = process_config_option(cache, argv);
 		if (r < 0)
 			goto bad;
 	}

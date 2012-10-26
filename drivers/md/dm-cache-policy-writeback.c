@@ -92,10 +92,10 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size
 
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
 	if (p->cblocks) {
-		while (cache_size != to_cblock(0)) {
-			cache_size = to_cblock(from_cblock(cache_size) - 1);
-			list_add(&p->cblocks[from_cblock(cache_size)].list, &p->free);
-		}
+		unsigned u = from_cblock(cache_size);
+
+		while (u--)
+			list_add(&p->cblocks[u].list, &p->free);
 
 		p->nr_cblocks_allocated = 0;
 
@@ -335,6 +335,8 @@ static void init_policy_functions(struct policy *p)
 	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
+	p->policy.status = NULL;
+	p->policy.message = NULL;
 }
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,

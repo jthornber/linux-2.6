@@ -75,12 +75,12 @@ static inline void policy_tick(struct dm_cache_policy *p)
 
 static inline int policy_status(struct dm_cache_policy *p, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
 {
-	return p->status(p, type, status_flags, result, maxlen);
+	return p->status ? p->status(p, type, status_flags, result, maxlen) : 0;
 }
 
 static inline int policy_message(struct dm_cache_policy *p, unsigned argc, char **argv)
 {
-	return p->message(p, argc, argv);
+	return p->message ? p->message(p, argc, argv) : 0;
 }
 
 /*----------------------------------------------------------------*/
