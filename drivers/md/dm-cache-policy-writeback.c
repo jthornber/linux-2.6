@@ -228,7 +228,6 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 
-	mutex_lock(&p->lock);
 	e = alloc_cache_entry(p);
 	if (e) {
 		e->cblock = cblock;
@@ -239,9 +238,17 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	} else
 		r = -ENOMEM;
 
-	mutex_unlock(&p->lock);
-
 	return r;
+}
+
+static void wb_reload_mapping(struct dm_cache_policy *pe,
+			      dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct policy *p = to_policy(pe);
+
+	mutex_lock(&p->lock);
+	wb_load_mapping(pe, oblock, cblock, 0, false);
+	mutex_unlock(&p->lock);
 }
 
 static struct wb_cache_entry *__wb_force_remove_mapping(struct policy *p, dm_oblock_t oblock)
@@ -323,6 +330,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = wb_load_mapping;
 	p->policy.load_mappings_completed = NULL;
 	p->policy.walk_mappings = NULL;
+	p->policy.reload_mapping = wb_reload_mapping;
 	p->policy.remove_mapping = wb_remove_mapping;
 	p->policy.remove_any = wb_remove_any;
 	p->policy.force_mapping = wb_force_mapping;

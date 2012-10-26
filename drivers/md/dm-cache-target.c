@@ -882,6 +882,31 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
 }
 
+static void writeback_all_dirty_blocks(struct cache *cache)
+{
+	int r = 0;
+
+	while (!r) {
+		struct policy_result lookup_result;
+
+		r = policy_remove_any(cache->policy, &lookup_result);
+		if (!r) {
+			struct dm_cell_key key;
+			struct dm_bio_prison_cell *old_ocell;
+
+			build_key(from_oblock(lookup_result.old_oblock), &key);
+			dm_bio_detain(cache->prison, &key, NULL, &old_ocell);
+			if (r) {
+				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
+				return;
+			}
+
+			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
+		}
+	}
+}
+
+
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -964,6 +989,9 @@ static void do_worker(struct work_struct *ws)
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
 
+		writeback_all_dirty_blocks(cache);
+
+
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
 
@@ -1006,22 +1034,6 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 		is_congested(cache->cache_dev, bdi_bits);
 }
 
-/* FIXME: this is flushing all dirty blocks out on dtr. */
-static void writeback_all_dirty_blocks(struct cache *cache)
-{
-	int r = 0;
-
-	while (!r) {
-		struct policy_result lookup_result;
-
-		r = policy_remove_any(cache->policy, &lookup_result);
-		if (!r && test_bit(from_cblock(lookup_result.cblock), cache->dirty_bitset)) {
-			demote(cache, from_oblock(lookup_result.old_oblock), from_cblock(lookup_result.cblock), NULL);
-			wake_worker(cache);
-		}
-	}
-}
-
 /*----------------------------------------------------------------
  * Target methods
  *--------------------------------------------------------------*/
@@ -1029,8 +1041,6 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
-
-	writeback_all_dirty_blocks(cache);
 
 	pr_alert("dm-cache statistics:\n");
 	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
