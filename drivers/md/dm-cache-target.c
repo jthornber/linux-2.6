@@ -501,9 +501,10 @@ static void migration_success_post_commit(struct cache *cache, struct dm_cache_m
 
 	} else {
 		cell_defer(cache, mg->new_ocell, 1);
-		clear_dirty(cache, mg->cblock);
 		cleanup_migration(cache, mg);
 	}
+
+	clear_dirty(cache, mg->cblock);
 }
 
 static void copy_complete(int read_err, unsigned long write_err, void *context)
