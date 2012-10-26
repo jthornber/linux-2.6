@@ -42,6 +42,8 @@ void dm_bio_prison_destroy(struct dm_bio_prison *prison);
  */
 int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 		  struct bio *inmate, struct dm_bio_prison_cell **ref);
+int dm_bio_detain_no_holder(struct dm_bio_prison *prison, struct dm_cell_key *key,
+			    struct dm_bio_prison_cell **ref);
 
 void dm_cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios);
 void dm_cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio); // FIXME: bio arg not needed

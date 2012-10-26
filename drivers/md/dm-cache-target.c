@@ -974,7 +974,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 			struct dm_bio_prison_cell *old_ocell;
 
 			build_key(from_oblock(lookup_result.old_oblock), &key);
-			dm_bio_detain(cache->prison, &key, NULL, &old_ocell);
+			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
 				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
 				return;
