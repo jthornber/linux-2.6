@@ -1244,93 +1244,6 @@ static void hint_to_counts(uint32_t val, unsigned *read, unsigned *write)
 
 }
 
-static int basic_load_mapping(struct dm_cache_policy *pe,
-			      dm_oblock_t oblock, dm_cblock_t cblock,
-			      uint32_t hint, bool hint_valid)
-{
-	int r = 0;
-	struct policy *p = to_policy(pe);
-	struct basic_cache_entry *e;
-	bool is_multiqueue = (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p));
-
-	/* FIXME: if we can't allocate the array, just add the mapping? */
-	if (!is_multiqueue &&
-	    !p->tmp_entries) {
-		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * p->cache_size);
-		if (!p->tmp_entries)
-			return -ENOMEM;
-	}
-
-	e = alloc_cache_entry(p);
-	if (!e) {
-		r = -ENOMEM;
-		goto bad;
-	}
-
-	e->cblock = cblock;
-	e->ce.oblock = oblock;
-
-	if (hint_valid) {
-		unsigned reads, writes;
-
-		hint_to_counts(hint, &reads, &writes);
-
-		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
-			/* FIXME: store also in larger hints rather than making up. */
-			e->ce.count[T_HITS][0] = reads;
-			e->ce.count[T_HITS][1] = writes;
-			e->ce.count[T_SECTORS][0] = reads * p->block_size;
-			e->ce.count[T_SECTORS][1] = writes * p->block_size;
-			add_cache_entry(p, e);
-			p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-
-		} else
-			p->tmp_entries[reads] = e;
-	}
-
-bad:
-	return r;
-}
-
-static void basic_reload_mapping(struct dm_cache_policy *pe,
-				 dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	struct policy *p = to_policy(pe);
-	struct basic_cache_entry *e;
-
-	mutex_lock(&p->lock);
-	e = alloc_cache_entry(p);
-	if (!e)
-		goto bad;
-
-	e->cblock = cblock;
-	e->ce.oblock = oblock;
-	add_cache_entry(p, e);
-
-bad:
-	mutex_unlock(&p->lock);
-}
-
-
-static void basic_load_mappings_completed(struct dm_cache_policy *pe)
-{
-	struct policy *p = to_policy(pe);
-
-	if (p->tmp_entries) {
-		unsigned u;
-
-		for (u = 0; u < p->cache_size; p++) {
-			if (p->tmp_entries[u]) {
-				add_cache_entry(p, p->tmp_entries[u]);
-				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-			}
-		}
-
-		vfree(p->tmp_entries);
-		p->tmp_entries = NULL;
-	}
-}
-
 /* Walk queues for lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
 static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
 {
@@ -1405,6 +1318,73 @@ static void basic_force_mapping(struct dm_cache_policy *pe,
 	e->ce.oblock = oblock;
 	add_cache_entry(p, e);
 	mutex_unlock(&p->lock);
+}
+
+static int basic_load_mapping(struct dm_cache_policy *pe,
+			      dm_oblock_t oblock, dm_cblock_t cblock,
+			      uint32_t hint, bool hint_valid)
+{
+	int r = 0;
+	struct policy *p = to_policy(pe);
+	struct basic_cache_entry *e;
+	bool is_multiqueue = (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p));
+
+	/* FIXME: if we can't allocate the array, just add the mapping? */
+	if (!is_multiqueue &&
+	    !p->tmp_entries) {
+		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * p->cache_size);
+		if (!p->tmp_entries)
+			return -ENOMEM;
+	}
+
+	e = alloc_cache_entry(p);
+	if (!e) {
+		r = -ENOMEM;
+		goto bad;
+	}
+
+	e->cblock = cblock;
+	e->ce.oblock = oblock;
+
+	if (hint_valid) {
+		unsigned reads, writes;
+
+		hint_to_counts(hint, &reads, &writes);
+
+		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
+			/* FIXME: store also in larger hints rather than making up. */
+			e->ce.count[T_HITS][0] = reads;
+			e->ce.count[T_HITS][1] = writes;
+			e->ce.count[T_SECTORS][0] = reads * p->block_size;
+			e->ce.count[T_SECTORS][1] = writes * p->block_size;
+			add_cache_entry(p, e);
+			p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
+
+		} else
+			p->tmp_entries[reads] = e;
+	}
+
+bad:
+	return r;
+}
+
+static void basic_load_mappings_completed(struct dm_cache_policy *pe)
+{
+	struct policy *p = to_policy(pe);
+
+	if (p->tmp_entries) {
+		unsigned u;
+
+		for (u = 0; u < p->cache_size; p++) {
+			if (p->tmp_entries[u]) {
+				add_cache_entry(p, p->tmp_entries[u]);
+				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
+			}
+		}
+
+		vfree(p->tmp_entries);
+		p->tmp_entries = NULL;
+	}
 }
 
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
@@ -1513,10 +1493,10 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = basic_load_mapping;
 	p->policy.load_mappings_completed = basic_load_mappings_completed;
 	p->policy.walk_mappings = basic_walk_mappings;
-	p->policy.reload_mapping = basic_reload_mapping;
 	p->policy.remove_mapping = basic_remove_mapping;
-	p->policy.remove_any = NULL;
 	p->policy.force_mapping = basic_force_mapping;
+	p->policy.remove_any = NULL;
+	p->policy.reload_mapping = NULL;
 	p->policy.residency = basic_residency;
 	p->policy.tick = basic_tick;
 	p->policy.status = basic_status;

@@ -191,14 +191,6 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return 0;
 }
 
-static void wb_destroy(struct dm_cache_policy *pe)
-{
-	struct policy *p = to_policy(pe);
-
-	free_cache_blocks_and_hash(p);
-	kfree(p);
-}
-
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
 {
 	insert_cache_hash_entry(p, e);
@@ -240,14 +232,12 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	return r;
 }
 
-static void wb_reload_mapping(struct dm_cache_policy *pe,
-			      dm_oblock_t oblock, dm_cblock_t cblock)
+static void wb_destroy(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
 
-	mutex_lock(&p->lock);
-	wb_load_mapping(pe, oblock, cblock, 0, false);
-	mutex_unlock(&p->lock);
+	free_cache_blocks_and_hash(p);
+	kfree(p);
 }
 
 static struct wb_cache_entry *__wb_force_remove_mapping(struct policy *p, dm_oblock_t oblock)
@@ -275,6 +265,19 @@ static void wb_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 	mutex_unlock(&p->lock);
 }
 
+static void wb_force_mapping(struct dm_cache_policy *pe,
+				dm_oblock_t current_oblock, dm_oblock_t oblock)
+{
+	struct policy *p = to_policy(pe);
+	struct wb_cache_entry *e;
+
+	mutex_lock(&p->lock);
+	e = __wb_force_remove_mapping(p, current_oblock);
+	e->oblock = oblock;
+	add_cache_entry(p, e);
+	mutex_unlock(&p->lock);
+}
+
 static int wb_remove_any(struct dm_cache_policy *pe, struct policy_result *result)
 {
 	int r;
@@ -296,16 +299,13 @@ static int wb_remove_any(struct dm_cache_policy *pe, struct policy_result *resul
 	return r;
 }
 
-static void wb_force_mapping(struct dm_cache_policy *pe,
-				dm_oblock_t current_oblock, dm_oblock_t oblock)
+static void wb_reload_mapping(struct dm_cache_policy *pe,
+			      dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	struct policy *p = to_policy(pe);
-	struct wb_cache_entry *e;
 
 	mutex_lock(&p->lock);
-	e = __wb_force_remove_mapping(p, current_oblock);
-	e->oblock = oblock;
-	add_cache_entry(p, e);
+	wb_load_mapping(pe, oblock, cblock, 0, false);
 	mutex_unlock(&p->lock);
 }
 
@@ -315,7 +315,7 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 	dm_cblock_t r;
 
 	mutex_lock(&p->lock);
-	r = from_cblocks(p->nr_cblocks_allocated);
+	r = from_cblock(p->nr_cblocks_allocated);
 	mutex_unlock(&p->lock);
 
 	return r;
@@ -329,10 +329,10 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = wb_load_mapping;
 	p->policy.load_mappings_completed = NULL;
 	p->policy.walk_mappings = NULL;
-	p->policy.reload_mapping = wb_reload_mapping;
 	p->policy.remove_mapping = wb_remove_mapping;
-	p->policy.remove_any = wb_remove_any;
 	p->policy.force_mapping = wb_force_mapping;
+	p->policy.remove_any = wb_remove_any;
+	p->policy.reload_mapping = wb_reload_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
 	p->policy.status = NULL;

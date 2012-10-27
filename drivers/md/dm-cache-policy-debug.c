@@ -519,27 +519,6 @@ static void debug_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 	mutex_unlock(&p->lock);
 }
 
-static int debug_remove_any(struct dm_cache_policy *pe, struct policy_result *result)
-{
-	int r;
-	struct policy *p = to_policy(pe);
-
-	r = policy_remove_any(p->debug_policy, result);
-	if (r) {
-		if (r != -ENOENT)
-			DMWARN("remove_any return code %d invalid!", r);
-
-	} else {
-		if (result->cblock >= p->cache_blocks)
-			DMWARN("remove_any cbock=%llu invalid!", (LLU) result->cblock);
-
-		if (result->old_oblock >= p->origin_blocks)
-			DMWARN("remove_any cbock=%llu invalid!", (LLU) result->old_oblock);
-	}
-
-	return r;
-}
-
 static void debug_force_mapping(struct dm_cache_policy *pe,
 				dm_oblock_t current_oblock, dm_oblock_t oblock)
 {
@@ -566,6 +545,37 @@ static void debug_force_mapping(struct dm_cache_policy *pe,
 	}
 
 	policy_force_mapping(p->debug_policy, current_oblock, oblock);
+	mutex_unlock(&p->lock);
+}
+
+static int debug_remove_any(struct dm_cache_policy *pe, struct policy_result *result)
+{
+	int r;
+	struct policy *p = to_policy(pe);
+
+	r = policy_remove_any(p->debug_policy, result);
+	if (r) {
+		if (r != -ENOENT)
+			DMWARN("remove_any return code %d invalid!", r);
+
+	} else {
+		if (result->cblock >= p->cache_blocks)
+			DMWARN("remove_any cbock=%llu invalid!", (LLU) result->cblock);
+
+		if (result->old_oblock >= p->origin_blocks)
+			DMWARN("remove_any cbock=%llu invalid!", (LLU) result->old_oblock);
+	}
+
+	return r;
+}
+
+static void debug_reload_mapping(struct dm_cache_policy *pe,
+				 dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct policy *p = to_policy(pe);
+
+	mutex_lock(&p->lock);
+	policy_reload_mapping(p->debug_policy, oblock, cblock);
 	mutex_unlock(&p->lock);
 }
 
@@ -625,8 +635,9 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = debug_load_mapping;
 	p->policy.walk_mappings = debug_walk_mappings;
 	p->policy.remove_mapping = debug_remove_mapping;
-	p->policy.remove_any = debug_remove_any;
 	p->policy.force_mapping = debug_force_mapping;
+	p->policy.remove_any = debug_remove_any;
+	p->policy.reload_mapping = debug_reload_mapping;
 	p->policy.residency = debug_residency;
 	p->policy.tick = debug_tick;
 	p->policy.status = debug_status;
