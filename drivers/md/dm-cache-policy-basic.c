@@ -1,5 +1,4 @@
-/* 
- *
+/*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
  * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue cache replacement policies.
@@ -1495,8 +1494,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.walk_mappings = basic_walk_mappings;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.force_mapping = basic_force_mapping;
-	p->policy.remove_any = NULL;
-	p->policy.reload_mapping = NULL;
+	p->policy.writeback_work = NULL;
 	p->policy.residency = basic_residency;
 	p->policy.tick = basic_tick;
 	p->policy.status = basic_status;

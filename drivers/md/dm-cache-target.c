@@ -973,21 +973,22 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 	int r = 0;
 
 	while (!r && may_migrate(cache)) {
-		struct policy_result lookup_result;
+		dm_oblock_t oblock;
+		dm_cblock_t cblock;
 
-		r = policy_remove_any(cache->policy, &lookup_result);
+		r = policy_writeback_work(cache->policy, &oblock, &cblock);
 		if (!r) {
 			struct dm_cell_key key;
 			struct dm_bio_prison_cell *old_ocell;
 
-			build_key(from_oblock(lookup_result.old_oblock), &key);
+			build_key(from_oblock(oblock), &key);
 			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
-				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
+				policy_set_dirty(cache->policy, oblock);
 				break;
 			}
 
-			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
+			demote(cache, oblock, cblock, old_ocell);
 		}
 	}
 }
