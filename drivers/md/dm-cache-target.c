@@ -1513,7 +1513,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	origin_sectors = get_dev_size(origin_dev);
 	if (ti->len > origin_sectors) {
 		ti->error = "Device size larger than cached device";
-		goto bad;
+		goto bad_target_length;
 	}
 
 	policy_name = dm_shift_arg(&as);
@@ -1529,7 +1529,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 			     policy_name, false, &ti->error);
 	if (IS_ERR(cache)) {
 		r = PTR_ERR(cache);
-		goto bad;
+		goto bad_cache_create;
 	}
 
 	cache->policy_nr_args = tmp;
@@ -1563,7 +1563,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 bad_max_io_len:
 	kfree(cache);
-bad:
+bad_target_length:
+bad_cache_create:
 	dm_put_device(ti, origin_dev);
 bad_origin:
 bad_policy_argc:
