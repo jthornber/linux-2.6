@@ -1534,6 +1534,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	cache->policy_nr_args = tmp;
 	cache->cf = cf;
+
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad_max_io_len;
 
@@ -1543,8 +1544,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	cache->ti = ti;
 	cache->metadata_dev = metadata_dev;
-	cache->origin_dev = origin_dev;
 	cache->cache_dev = cache_dev;
+	cache->origin_dev = origin_dev;
 
 	ti->private = cache;
 
