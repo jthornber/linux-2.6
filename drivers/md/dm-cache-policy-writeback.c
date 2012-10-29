@@ -23,6 +23,7 @@ struct wb_cache_entry {
 
 	dm_cblock_t cblock;
 	dm_oblock_t oblock;
+	bool dirty;
 };
 
 struct hash {
@@ -44,6 +45,8 @@ struct policy {
 	dm_cblock_t cache_size, nr_cblocks_allocated;
 	struct wb_cache_entry *cblocks;
 	struct hash chash;
+
+	dm_block_t nr_dirty;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -190,24 +193,43 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return 0;
 }
 
+static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool dirty)
+{
+	struct policy *p = to_policy(pe);
+	struct wb_cache_entry *e;
+
+	e = lookup_cache_entry(p, oblock);
+	BUG_ON(!e);
+
+	if (dirty) {
+		if (!e->dirty) {
+			e->dirty = true;
+			p->nr_dirty++;
+		}
+
+	} else {
+		if (e->dirty) {
+			e->dirty = false;
+			BUG_ON(!p->nr_dirty);
+			p->nr_dirty--;
+		}
+	}
+}
+
+static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+{
+	__set_clear_dirty(pe, oblock, true);
+}
+
+static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+{
+	__set_clear_dirty(pe, oblock, false);
+}
+
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
 {
 	insert_cache_hash_entry(p, e);
 	list_add(&e->list, &p->used);
-}
-
-static struct wb_cache_entry *del_cache_entry(struct policy *p)
-{
-	if (!list_empty(&p->used)) {
-		struct wb_cache_entry *e = list_entry(list_pop(&p->used), struct wb_cache_entry, list);
-
-		remove_cache_hash_entry(e);
-		list_add(&e->list, &p->free);
-		p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) - 1);
-		return e;
-	}
-
-	return NULL;
 }
 
 static int wb_load_mapping(struct dm_cache_policy *pe,
@@ -277,6 +299,29 @@ static void wb_force_mapping(struct dm_cache_policy *pe,
 	mutex_unlock(&p->lock);
 }
 
+static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
+{
+	struct wb_cache_entry *e;
+
+	BUG_ON(p->nr_dirty >= p->cache_size);
+
+	if (!p->nr_dirty)
+		return NULL;
+
+	list_for_each_entry(e, &p->used, list) {
+		if (e->dirty) {
+			list_del_init(&p->used);
+			list_splice(&e->list, &p->used);
+			break;
+		}
+	}
+
+	BUG_ON(!e->dirty);
+	e->dirty = false;
+	p->nr_dirty--;
+	return e;
+}
+
 static int wb_writeback_work(struct dm_cache_policy *pe,
 			     dm_oblock_t *oblock,
 			     dm_cblock_t *cblock)
@@ -287,8 +332,7 @@ static int wb_writeback_work(struct dm_cache_policy *pe,
 
 	mutex_lock(&p->lock);
 
-	// FIXME: don't delete
-	e = del_cache_entry(p);
+	e = get_next_dirty_entry(p);
 	if (e) {
 		*oblock = e->oblock;
 		*cblock = e->cblock;
@@ -314,11 +358,30 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 	return r;
 }
 
+static int wb_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+{
+	ssize_t sz = 0;
+	struct policy *p = to_policy(pe);
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%llu", (long long unsigned) p->nr_dirty);
+		break;
+
+	case STATUSTYPE_TABLE:
+		break;
+	}
+
+	return 0;
+}
+
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
 	p->policy.destroy = wb_destroy;
 	p->policy.map = wb_map;
+	p->policy.set_dirty = wb_set_dirty;
+	p->policy.clear_dirty = wb_clear_dirty;
 	p->policy.load_mapping = wb_load_mapping;
 	p->policy.load_mappings_completed = NULL;
 	p->policy.walk_mappings = NULL;
@@ -327,7 +390,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.writeback_work = wb_writeback_work;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
-	p->policy.status = NULL;
+	p->policy.status = wb_status;
 	p->policy.message = NULL;
 }
 
