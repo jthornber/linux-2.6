@@ -1006,12 +1006,17 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 		dm_oblock_t oblock;
 		dm_cblock_t cblock;
 
+		if (prealloc_migration(cache))
+			break;
+
 		r = policy_writeback_work(cache->policy, &oblock, &cblock);
 		if (!r) {
 			struct dm_cell_key key;
 			struct dm_bio_prison_cell *old_ocell;
 
 			build_key(from_oblock(oblock), &key);
+
+			// FIXME: doesn't this alloc from a mempool, and so is liable to a deadlock?
 			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
 				policy_set_dirty(cache->policy, oblock);
