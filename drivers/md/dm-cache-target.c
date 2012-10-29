@@ -123,7 +123,7 @@ struct cache {
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
 	atomic_t nr_migrations;
-	unsigned migration_threshold;
+	sector_t migration_threshold;
 	wait_queue_head_t migration_wait;
 
 	/*
@@ -814,6 +814,12 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 	bio_endio(bio, 0);
 }
 
+static bool may_migrate(struct cache *cache)
+{
+	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
+	return current_volume < cache->migration_threshold;
+}
+
 static void process_bio(struct cache *cache, struct bio *bio)
 {
 	int r;
@@ -824,7 +830,6 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool discarded_block = is_discarded(cache, block);
-	bool can_migrate = true;
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -834,7 +839,8 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	if (r > 0)
 		return;
 
-	policy_map(cache->policy, block, can_migrate, discarded_block, bio, &lookup_result);
+	policy_map(cache->policy, block, may_migrate(cache),
+		   discarded_block, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
@@ -966,7 +972,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 {
 	int r = 0;
 
-	while (!r) {
+	while (!r && may_migrate(cache)) {
 		struct policy_result lookup_result;
 
 		r = policy_remove_any(cache->policy, &lookup_result);
@@ -1715,7 +1721,7 @@ static int process_config_option(struct cache *cache, char **argv)
 	if (strcmp(argv[1], "migration_threshold")) {
 		unsigned long tmp;
 
-		if (kstrtoul(argv[2], 10, &tmp) || !tmp)
+		if (kstrtoul(argv[2], 10, &tmp))
 			return -EINVAL;
 
 		cache->migration_threshold = tmp;
