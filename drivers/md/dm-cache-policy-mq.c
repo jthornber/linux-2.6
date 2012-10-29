@@ -937,20 +937,16 @@ static void mq_tick(struct dm_cache_policy *p)
 static int process_config_option(struct mq_policy *mq, int *args, char **argv)
 {
 	unsigned long tmp;
-	enum io_pattern pattern;
-
-	if (strcasecmp(argv[0], "sequential_threshold"))
-		pattern = PATTERN_SEQUENTIAL;
-	else if (strcasecmp(argv[0], "random_threshold"))
-		pattern = PATTERN_RANDOM;
-	else
-		return -EINVAL;
-
 
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	args[pattern] = tmp;
+	if (strcasecmp(argv[0], "sequential_threshold"))
+		args[PATTERN_SEQUENTIAL] = tmp;
+	else if (strcasecmp(argv[0], "random_threshold"))
+		args[PATTERN_RANDOM] = tmp;
+	else
+		return -EINVAL;
 
 	return 0;
 }

@@ -1407,20 +1407,19 @@ static void basic_tick(struct dm_cache_policy *pe)
 static int process_config_option(struct policy *p, int *args, char **argv)
 {
 	unsigned long tmp;
-	enum io_pattern pattern;
-
-	if (strcasecmp(argv[0], "sequential_threshold"))
-		pattern = PATTERN_SEQUENTIAL;
-	else if (strcasecmp(argv[0], "random_threshold"))
-		pattern = PATTERN_RANDOM;
-	else
-		return -EINVAL;
-
 
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	args[pattern] = tmp;
+	if (strcasecmp(argv[0], "sequential_threshold"))
+		args[PATTERN_SEQUENTIAL] = tmp;
+	else if (strcasecmp(argv[0], "random_threshold"))
+		args[PATTERN_RANDOM] = tmp;
+	else if (strcasecmp(argv[0], "working_set")) {
+		if (tmp)
+			p->queues.ctype = T_SECTORS;
+	} else
+		return -EINVAL;
 
 	return 0;
 }
@@ -1472,6 +1471,7 @@ static int process_policy_args(struct policy *p, int argc, char **argv)
 	if (argc != 2 && argc != 4)
 		return -EINVAL;
 
+	p->queues.ctype = T_HITS;
 	p->threshold_args[0] = p->threshold_args[1] = -1;
 
 	for (u = 0; u < argc; u += 2) {
@@ -1551,7 +1551,6 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	p->block_size = block_size;
 	p->origin_size = origin_size;
 	p->calc_threshold_hits = max(from_cblock(cache_size) >> 2, (dm_block_t) 128);
-	p->queues.ctype = T_HITS; /* FIXME: call argument to select T_HITS/T_SECTORS? */
 	p->promote_threshold[0] = ctype_threshold(p, READ_PROMOTE_THRESHOLD);
 	p->promote_threshold[1] = ctype_threshold(p, WRITE_PROMOTE_THRESHOLD);
 	atomic_set(&p->tick.t_ext, 0);
