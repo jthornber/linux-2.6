@@ -173,6 +173,7 @@ struct cache {
 	struct dm_cache_migration *next_migration;
 
 	struct dm_cache_policy *policy;
+	unsigned policy_nr_args;
 
 	bool need_tick_bio:1;
 
@@ -1461,7 +1462,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct cache_features cf;
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
-	const char *policy_name;
+	const char *policy_name, *policy_argc;
 	unsigned long tmp;
 
 	if (argc < 6) {
@@ -1516,6 +1517,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	policy_name = dm_shift_arg(&as);
+	policy_argc = dm_shift_arg(&as);
+
+	if (kstrtoul(policy_argc, 10, &tmp) || tmp != as.argc) {
+		ti->error = "Invalid policy argument count";
+		goto bad_policy_argc;
+	}
+
 	cache = cache_create(metadata_dev->bdev, block_size,
 			     origin_sectors, cache_sectors,
 			     policy_name, false, &ti->error);
@@ -1524,6 +1532,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
+	cache->policy_nr_args = tmp;
 	cache->cf = cf;
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad_max_io_len;
@@ -1556,6 +1565,7 @@ bad_max_io_len:
 bad:
 	dm_put_device(ti, origin_dev);
 bad_origin:
+bad_policy_argc:
 	dm_put_device(ti, cache_dev);
 bad_cache:
 	dm_put_device(ti, metadata_dev);
@@ -1813,7 +1823,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		else
 			DMEMIT("0 ");
 
-		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
+		DMEMIT("%s %u ", dm_cache_policy_get_name(cache->policy), cache->policy_nr_args);
 	}
 
 	if (sz < maxlen)
