@@ -126,13 +126,13 @@ struct cache {
 	 */
 	dm_cblock_t cache_size;
 
+	struct dm_cache_metadata *cmd;
+
 	/*
 	 * Fields for converting from sectors to blocks.
 	 */
 	sector_t sectors_per_block;
 	int sectors_per_block_shift;
-
-	struct dm_cache_metadata *cmd;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -140,9 +140,9 @@ struct cache {
 	struct list_head quiesced_migrations;
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
-	atomic_t nr_migrations;
 	sector_t migration_threshold;
 	wait_queue_head_t migration_wait;
+	atomic_t nr_migrations;
 
 	/*
 	 * cache_size entries, dirty if set
@@ -170,12 +170,13 @@ struct cache {
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
-	bool need_tick_bio;
-
 	struct dm_cache_policy *policy;
-	bool quiescing;
-	bool commit_requested;
-	bool loaded_mappings;
+
+	bool need_tick_bio:1;
+
+	bool quiescing:1;
+	bool commit_requested:1;
+	bool loaded_mappings:1;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -428,9 +429,9 @@ static struct dm_cache_migration *alloc_migration(struct cache *cache)
 	return r;
 }
 
-static void free_migration(struct cache *cache, struct dm_cache_migration *mg)
+static void free_migration(struct dm_cache_migration *mg)
 {
-	mempool_free(mg, cache->migration_pool);
+	mempool_free(mg, mg->cache->migration_pool);
 }
 
 static void inc_nr_migrations(struct cache *cache)
@@ -463,14 +464,18 @@ static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, boo
 	}
 }
 
-static void cleanup_migration(struct cache *cache, struct dm_cache_migration *mg)
+static void cleanup_migration(struct dm_cache_migration *mg)
 {
-	free_migration(cache, mg);
+	struct cache *cache = mg->cache;
+
+	free_migration(mg);
 	dec_nr_migrations(cache);
 }
 
-static void migration_failure(struct cache *cache, struct dm_cache_migration *mg)
+static void migration_failure(struct dm_cache_migration *mg)
 {
+	struct cache *cache = mg->cache;
+
 	if (mg->demote) {
 		DMWARN("demotion failed; couldn't copy block");
 		policy_force_mapping(cache->policy, mg->new_oblock, mg->old_oblock);
@@ -484,12 +489,13 @@ static void migration_failure(struct cache *cache, struct dm_cache_migration *mg
 		cell_defer(cache, mg->new_ocell, 1);
 	}
 
-	cleanup_migration(cache, mg);
+	cleanup_migration(mg);
 }
 
-static void migration_success_pre_commit(struct cache *cache, struct dm_cache_migration *mg)
+static void migration_success_pre_commit(struct dm_cache_migration *mg)
 {
 	unsigned long flags;
+	struct cache *cache = mg->cache;
 
 	if (mg->demote) {
 		if (dm_cache_remove_mapping(cache->cmd, mg->cblock)) {
@@ -497,15 +503,14 @@ static void migration_success_pre_commit(struct cache *cache, struct dm_cache_mi
 			policy_force_mapping(cache->policy, mg->new_oblock, mg->old_oblock);
 			if (mg->promote)
 				cell_defer(cache, mg->new_ocell, 1);
-			cleanup_migration(cache, mg);
+			cleanup_migration(mg);
 			return;
 		}
-
 	} else {
 		if (dm_cache_insert_mapping(cache->cmd, mg->cblock, mg->new_oblock)) {
 			DMWARN("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(cache->policy, mg->new_oblock);
-			cleanup_migration(cache, mg);
+			cleanup_migration(mg);
 		}
 	}
 
@@ -515,9 +520,10 @@ static void migration_success_pre_commit(struct cache *cache, struct dm_cache_mi
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void migration_success_post_commit(struct cache *cache, struct dm_cache_migration *mg)
+static void migration_success_post_commit(struct dm_cache_migration *mg)
 {
 	unsigned long flags;
+	struct cache *cache = mg->cache;
 
 	if (mg->demote) {
 		cell_defer(cache, mg->old_ocell, mg->promote ? 0 : 1);
@@ -529,11 +535,10 @@ static void migration_success_post_commit(struct cache *cache, struct dm_cache_m
 			list_add_tail(&mg->list, &cache->quiesced_migrations);
 			spin_unlock_irqrestore(&cache->lock, flags);
 		} else
-			cleanup_migration(cache, mg);
-
+			cleanup_migration(mg);
 	} else {
 		cell_defer(cache, mg->new_ocell, 1);
-		cleanup_migration(cache, mg);
+		cleanup_migration(mg);
 	}
 
 	clear_dirty(cache, mg->cblock);
@@ -555,10 +560,11 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 	wake_worker(cache);
 }
 
-static void issue_copy_real(struct cache *cache, struct dm_cache_migration *mg)
+static void issue_copy_real(struct dm_cache_migration *mg)
 {
 	int r;
 	struct dm_io_region o_region, c_region;
+	struct cache *cache = mg->cache;
 
 	o_region.bdev = cache->origin_dev->bdev;
 	o_region.count = cache->sectors_per_block;
@@ -578,37 +584,38 @@ static void issue_copy_real(struct cache *cache, struct dm_cache_migration *mg)
 	}
 
 	if (r < 0)
-		migration_failure(cache, mg);
+		migration_failure(mg);
 }
 
-static void avoid_copy(struct cache *cache, struct dm_cache_migration *mg)
+static void avoid_copy(struct dm_cache_migration *mg)
 {
-	atomic_inc(&cache->copies_avoided);
-	migration_success_pre_commit(cache, mg);
+	atomic_inc(&mg->cache->copies_avoided);
+	migration_success_pre_commit(mg);
 }
 
-static void issue_copy(struct cache *cache, struct dm_cache_migration *mg)
+static void issue_copy(struct dm_cache_migration *mg)
 {
 	bool avoid;
+	struct cache *cache = mg->cache;
 
 	if (mg->demote)
 		avoid = !is_dirty(cache, mg->cblock) || is_discarded(cache, mg->old_oblock);
 	else
 		avoid = is_discarded(cache, mg->new_oblock);
 
-	avoid ? avoid_copy(cache, mg) : issue_copy_real(cache, mg);
+	avoid ? avoid_copy(mg) : issue_copy_real(mg);
 }
 
-static void complete_migration(struct cache *cache, struct dm_cache_migration *mg)
+static void complete_migration(struct dm_cache_migration *mg)
 {
 	if (mg->err)
-		migration_failure(cache, mg);
+		migration_failure(mg);
 	else
-		migration_success_pre_commit(cache, mg);
+		migration_success_pre_commit(mg);
 }
 
 static void process_migrations(struct cache *cache, struct list_head *head,
-			       void (*fn)(struct cache *, struct dm_cache_migration *))
+			       void (*fn)(struct dm_cache_migration *))
 {
 	unsigned long flags;
 	struct list_head list;
@@ -620,20 +627,21 @@ static void process_migrations(struct cache *cache, struct list_head *head,
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	list_for_each_entry_safe(mg, tmp, &list, list)
-		fn(cache, mg);
+		fn(mg);
 }
 
-static void __queue_quiesced_migration(struct cache *cache, struct dm_cache_migration *mg)
+static void __queue_quiesced_migration(struct dm_cache_migration *mg)
 {
-	list_add_tail(&mg->list, &cache->quiesced_migrations);
+	list_add_tail(&mg->list, &mg->cache->quiesced_migrations);
 }
 
-static void queue_quiesced_migration(struct cache *cache, struct dm_cache_migration *mg)
+static void queue_quiesced_migration(struct dm_cache_migration *mg)
 {
 	unsigned long flags;
+	struct cache *cache = mg->cache;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	__queue_quiesced_migration(cache, mg);
+	__queue_quiesced_migration(mg);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	wake_worker(cache);
@@ -646,13 +654,14 @@ static void queue_quiesced_migrations(struct cache *cache, struct list_head *wor
 
 	spin_lock_irqsave(&cache->lock, flags);
 	list_for_each_entry_safe(mg, tmp, work, list)
-		__queue_quiesced_migration(cache, mg);
+		__queue_quiesced_migration(mg);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	wake_worker(cache);
 }
 
-static void check_for_quiesced_migrations(struct cache *cache, struct dm_cache_endio_hook *h)
+static void check_for_quiesced_migrations(struct cache *cache,
+					  struct dm_cache_endio_hook *h)
 {
 	struct list_head work;
 
@@ -667,10 +676,10 @@ static void check_for_quiesced_migrations(struct cache *cache, struct dm_cache_e
 		queue_quiesced_migrations(cache, &work);
 }
 
-static void quiesce_migration(struct cache *cache, struct dm_cache_migration *mg)
+static void quiesce_migration(struct dm_cache_migration *mg)
 {
-	if (!dm_deferred_set_add_work(cache->all_io_ds, &mg->list))
-		queue_quiesced_migration(cache, mg);
+	if (!dm_deferred_set_add_work(mg->cache->all_io_ds, &mg->list))
+		queue_quiesced_migration(mg);
 }
 
 static void promote(struct cache *cache, dm_oblock_t oblock,
@@ -689,7 +698,7 @@ static void promote(struct cache *cache, dm_oblock_t oblock,
 	mg->start_jiffies = jiffies;
 
 	inc_nr_migrations(cache);
-	quiesce_migration(cache, mg);
+	quiesce_migration(mg);
 }
 
 static void demote(struct cache *cache, dm_oblock_t oblock,
@@ -708,15 +717,15 @@ static void demote(struct cache *cache, dm_oblock_t oblock,
 	mg->start_jiffies = jiffies;
 
 	inc_nr_migrations(cache);
-	quiesce_migration(cache, mg);
+	quiesce_migration(mg);
 }
 
-static void writeback_then_promote(struct cache *cache,
-				   dm_oblock_t old_oblock,
-				   dm_oblock_t new_oblock,
-				   dm_cblock_t cblock,
-				   struct dm_bio_prison_cell *old_ocell,
-				   struct dm_bio_prison_cell *new_ocell)
+static void demote_then_promote(struct cache *cache,
+				dm_oblock_t old_oblock,
+				dm_oblock_t new_oblock,
+				dm_cblock_t cblock,
+				struct dm_bio_prison_cell *old_ocell,
+				struct dm_bio_prison_cell *new_ocell)
 {
 	struct dm_cache_migration *mg = alloc_migration(cache);
 
@@ -732,7 +741,7 @@ static void writeback_then_promote(struct cache *cache,
 	mg->start_jiffies = jiffies;
 
 	inc_nr_migrations(cache);
-	quiesce_migration(cache, mg);
+	quiesce_migration(mg);
 }
 
 /*----------------------------------------------------------------
@@ -906,9 +915,8 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		atomic_inc(&cache->demotion);
 		atomic_inc(&cache->promotion);
 
-		writeback_then_promote(cache, lookup_result.old_oblock, block,
-				       lookup_result.cblock,
-				       old_ocell, new_ocell);
+		demote_then_promote(cache, lookup_result.old_oblock, block,
+				    lookup_result.cblock, old_ocell, new_ocell);
 		release_cell = 0;
 		break;
 	}
@@ -1110,7 +1118,8 @@ static void do_worker(struct work_struct *ws)
 			 */
 		} else {
 			process_deferred_flush_bios(cache, true);
-			process_migrations(cache, &cache->need_commit_migrations, migration_success_post_commit);
+			process_migrations(cache, &cache->need_commit_migrations,
+					   migration_success_post_commit);
 		}
 
 	} while (more_work(cache));
