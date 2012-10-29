@@ -1792,15 +1792,34 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 {
 	int r = 0;
 	ssize_t sz = 0;
+	dm_block_t nr_free_blocks_metadata = 0;
+	dm_block_t nr_blocks_metadata = 0;
 	char buf[BDEVNAME_SIZE];
 	struct cache *cache = ti->private;
 	dm_cblock_t residency;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
+		/* Commit to ensure statistics aren't out-of-date */
+		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti)) {
+			r = dm_cache_commit(cache->cmd, false);
+			if (r)
+				DMERR("could not commit metadata for accurate status");
+		}
+
+		r = dm_cache_get_free_metadata_block_count(cache->cmd, &nr_free_blocks_metadata);
+		if (r)
+			DMERR("could not get metadata free block count");
+
+		r = dm_cache_get_metadata_dev_size(cache->cmd, &nr_blocks_metadata);
+		if (r)
+			DMERR("could not get metadata device size");
+
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%u %u %u %u %u %u %llu %u",
+		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u",
+		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
+		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->read_hit),
 		       (unsigned) atomic_read(&cache->read_miss),
 		       (unsigned) atomic_read(&cache->write_hit),
