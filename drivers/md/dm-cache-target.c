@@ -1366,14 +1366,14 @@ bad_cache:
 	return err_p;
 }
 
-/* Initialize pool features. */
+/* Initialize cache features. */
 static void cache_features_init(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
 	cf->write_through = false;
 }
 
-static int parse_cache_features(struct dm_arg_set *as, struct cache_features *pf,
+static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf,
 				struct dm_target *ti)
 {
 	int r;
@@ -1399,10 +1399,10 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *pf
 		argc--;
 
 		if (!strcasecmp(arg_name, "write-back"))
-			pf->write_through = false;
+			cf->write_through = false;
 
 		else if (!strcasecmp(arg_name, "write-through"))
-			pf->write_through = true;
+			cf->write_through = true;
 
 		else {
 			ti->error = "Unrecognised pool feature requested";
