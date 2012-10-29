@@ -1156,7 +1156,7 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 	struct cache *cache = container_of(cb, struct cache, callbacks);
 
 	return is_congested(cache->origin_dev, bdi_bits) ||
-		is_congested(cache->cache_dev, bdi_bits);
+	       is_congested(cache->cache_dev, bdi_bits);
 }
 
 /*----------------------------------------------------------------
