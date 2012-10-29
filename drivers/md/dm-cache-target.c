@@ -78,6 +78,19 @@ static void free_bitset(unsigned long *bits)
  */
 #define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (32 * 1024 >> SECTOR_SHIFT)
 
+/*
+ * FIXME: the cache is read/write for the time being.
+ */
+enum cache_mode {
+	CM_WRITE,		/* metadata may be changed */
+};
+
+struct cache_features {
+	enum cache_mode mode;
+
+	bool write_through:1;
+};
+
 struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -96,6 +109,11 @@ struct cache {
 	 * The faster of the two data devices.  Typically an SSD.
 	 */
 	struct dm_dev *cache_dev;
+
+	/*
+	 * Cache features such as write-through.
+	 */
+	struct cache_features cf;
 
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
@@ -155,7 +173,6 @@ struct cache {
 	bool need_tick_bio;
 
 	struct dm_cache_policy *policy;
-	bool writethrough;
 	bool quiescing;
 	bool commit_requested;
 	bool loaded_mappings;
@@ -220,15 +237,20 @@ static bool is_dirty(struct cache *cache, dm_cblock_t b)
 
 static void set_dirty(struct cache *cache, dm_cblock_t b)
 {
-	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset))
+	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset)) {
 		cache->nr_dirty++;
+		policy_set_dirty(cache->policy, b);
+	}
 }
 
 static void clear_dirty(struct cache *cache, dm_cblock_t b)
 {
-	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset))
+	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset)) {
+		policy_clear_dirty(cache->policy, b);
+
 		if (!--cache->nr_dirty)
 			dm_table_event(cache->ti->table);
+	}
 }
 
 /*----------------------------------------------------------------*/
@@ -854,7 +876,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (cache->writethrough)
+		if (cache->cf.write_through && !is_dirty(cache, lookup_result.cblock))
 			issue_writethrough(cache, bio, lookup_result.cblock, GFP_KERNEL);
 		else {
 			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
@@ -980,21 +1002,22 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 	int r = 0;
 
 	while (!r && may_migrate(cache)) {
-		struct policy_result lookup_result;
+		dm_oblock_t oblock;
+		dm_cblock_t cblock;
 
-		r = policy_remove_any(cache->policy, &lookup_result);
+		r = policy_writeback_work(cache->policy, &oblock, &cblock);
 		if (!r) {
 			struct dm_cell_key key;
 			struct dm_bio_prison_cell *old_ocell;
 
-			build_key(from_oblock(lookup_result.old_oblock), &key);
+			build_key(from_oblock(oblock), &key);
 			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
-				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
+				policy_set_dirty(cache->policy, oblock);
 				break;
 			}
 
-			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
+			demote(cache, oblock, cblock, old_ocell);
 		}
 	}
 }
@@ -1314,7 +1337,6 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 		goto bad_migration_pool;
 	}
 
-	cache->writethrough = false;
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
@@ -1352,18 +1374,71 @@ bad_cache:
 	return err_p;
 }
 
+/* Initialize pool features. */
+static void cache_features_init(struct cache_features *cf)
+{
+	cf->mode = CM_WRITE;
+	cf->write_through = false;
+}
+
+static int parse_cache_features(struct dm_arg_set *as, struct cache_features *pf,
+				struct dm_target *ti)
+{
+	int r;
+	unsigned argc;
+	const char *arg_name;
+
+	static struct dm_arg _args[] = {
+		{0, 1, "Invalid number of cache feature arguments"},
+	};
+
+	/*
+	 * No feature arguments supplied.
+	 */
+	if (!as->argc)
+		return 0;
+
+	r = dm_read_arg_group(_args, as, &argc, &ti->error);
+	if (r)
+		return -EINVAL;
+
+	while (argc && !r) {
+		arg_name = dm_shift_arg(as);
+		argc--;
+
+		if (!strcasecmp(arg_name, "write-back"))
+			pf->write_through = false;
+
+		else if (!strcasecmp(arg_name, "write-through"))
+			pf->write_through = true;
+
+		else {
+			ti->error = "Unrecognised pool feature requested";
+			r = -EINVAL;
+			break;
+		}
+	}
+
+	return r;
+}
+
 /*
- * Construct a hierarchical storage device mapping:
+ * Construct a cache device mapping:
  *
- * cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
+ * cache <metadata dev> <cache dev> <origin dev> <block size> <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
  *
- * metadata dev    : fast device holding the persistent metadata
- * origin dev	   : slow device holding original data blocks
- * cache dev	   : fast device holding cached data blocks
- * data block size : cache unit size in sectors
- * policy          : the replacement policy to use
- * #policy_args    : number of policy arguments (key value pairs count as 2; delimiter is space)
- * {policy_args}   : the policy arguments as key value pairs
+ * metadata dev		  : fast device holding the persistent metadata
+ * cache dev		  : fast device holding cached data blocks
+ * origin dev		  : slow device holding original data blocks
+ * block size		  : cache unit size in sectors
+ * #feature args [<arg>]* : number of feature arguments followed by optional arguments
+ * policy		  : the replacement policy to use
+ * #policy_args  [<arg>]* : number of policy arguments followed by optional arguments; see policy plugin for instances
+ *			    (key value pairs count as 2; delimiter is space)
+ *
+ * Optional feature arguments are:
+ *	     write-back: write back cache allowing cache block contents to differ from origin blocks for performance reasons
+ *	     write-through: write through caching prohibiting cache block content from being distinct from origin block content
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1372,6 +1447,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_arg_set as;
 	sector_t block_size, origin_sectors, cache_sectors;
 	struct dm_dev *metadata_dev, *origin_dev, *cache_dev;
+	struct cache_features cf;
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
 	const char *policy_name;
@@ -1392,7 +1468,11 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	block_size = tmp;
 
-	policy_name = argv[4];
+	cache_features_init(&cf);
+	dm_consume_args(&as, 4);
+	r = parse_cache_features(&as, &cf, ti);
+	if (r)
+		goto bad_features;
 
 	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
 	if (r) {
@@ -1405,18 +1485,18 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
 		       bdevname(metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
 
-	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &origin_dev);
-	if (r) {
-		ti->error = "Error opening origin device";
-		goto bad_origin;
-	}
-
-	r = dm_get_device(ti, argv[2], FMODE_READ | FMODE_WRITE, &cache_dev);
+	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &cache_dev);
 	if (r) {
 		ti->error = "Error opening cache device";
 		goto bad_cache;
 	}
 	cache_sectors = get_dev_size(cache_dev);
+
+	r = dm_get_device(ti, argv[2], FMODE_READ | FMODE_WRITE, &origin_dev);
+	if (r) {
+		ti->error = "Error opening origin device";
+		goto bad_origin;
+	}
 
 	origin_sectors = get_dev_size(origin_dev);
 	if (ti->len > origin_sectors) {
@@ -1424,8 +1504,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
-	dm_consume_args(&as, 5);
-
+	policy_name = dm_shift_arg(&as);
 	cache = cache_create(metadata_dev->bdev, block_size,
 			     origin_sectors, cache_sectors,
 			     policy_name, false, &ti->error);
@@ -1434,6 +1513,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
+	cache->cf = cf;
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad_max_io_len;
 
@@ -1463,11 +1543,12 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 bad_max_io_len:
 	kfree(cache);
 bad:
-	dm_put_device(ti, cache_dev);
-bad_cache:
 	dm_put_device(ti, origin_dev);
 bad_origin:
+	dm_put_device(ti, cache_dev);
+bad_cache:
 	dm_put_device(ti, metadata_dev);
+bad_features:
 bad_metadata:
 	return r;
 }
@@ -1538,7 +1619,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (cache->writethrough &&
+		if (cache->cf.write_through && !is_dirty(cache, lookup_result.cblock) &&
 		    !issue_writethrough(cache, bio, lookup_result.cblock, GFP_NOIO)) {
 			cell_defer(cache, cell, true);
 			return DM_MAPIO_SUBMITTED;

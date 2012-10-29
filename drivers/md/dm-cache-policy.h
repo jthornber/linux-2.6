@@ -14,6 +14,10 @@
 
 /*----------------------------------------------------------------*/
 
+/* FIXME: make it clear which methods are optional.  Get debug policy to
+ * double check this at start.
+ */
+
 /*
  * The cache policy makes the important decisions about which blocks get to
  * live on the faster cache device.
@@ -111,6 +115,9 @@ struct dm_cache_policy {
 		   struct bio *bio,
 		   struct policy_result *result);
 
+	void (*set_dirty)(struct dm_cache_policy *p, dm_cblock_t cblock);
+	void (*clear_dirty)(struct dm_cache_policy *p, dm_cblock_t cblock);
+
 	/*
 	 * Called when a cache target is first created.  Used to load a
 	 * mapping from the metadata device into the policy.
@@ -131,12 +138,7 @@ struct dm_cache_policy {
 			      dm_oblock_t new_oblock);
 
 	/* Remove any entry (e.g. for writeback purpose) */
-	int (*remove_any)(struct dm_cache_policy *p, struct policy_result *result);
-
-	/*
-	 * Called when a cache target needs to reload a cleared out mapping on a failure.
-	 */
-	void (*reload_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
+	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
 
 	/*
 	 * How full is the cache?
