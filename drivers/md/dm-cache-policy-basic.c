@@ -1409,9 +1409,9 @@ static int process_config_option(struct policy *p, int *args, char **argv)
 	unsigned long tmp;
 	enum io_pattern pattern;
 
-	if (strcmp(argv[0], "sequential_threshold"))
+	if (strcasecmp(argv[0], "sequential_threshold"))
 		pattern = PATTERN_SEQUENTIAL;
-	else if (strcmp(argv[0], "random_threshold"))
+	else if (strcasecmp(argv[0], "random_threshold"))
 		pattern = PATTERN_RANDOM;
 	else
 		return -EINVAL;
@@ -1432,7 +1432,7 @@ static int basic_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
 	if (argc != 3)
 		return -EINVAL;
 
-	if (strcmp(argv[0], "set_config")) {
+	if (strcasecmp(argv[0], "set_config")) {
 		int r = process_config_option(p, p->tracker.thresholds, argv + 1);
 
 		if (r < 0)
