@@ -1,4 +1,4 @@
-/*, 
+/* 
  *
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
@@ -33,8 +33,8 @@
  * The io_tracker tries to spot when the io is in
  * one of these sequential modes.
  */
-#define RANDOM_THRESHOLD 1
-#define SEQUENTIAL_THRESHOLD 2
+#define RANDOM_THRESHOLD_DEFAULT 1
+#define SEQUENTIAL_THRESHOLD_DEFAULT 2
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -46,12 +46,16 @@ struct io_tracker {
 
 	unsigned nr_rand_samples;
 	enum io_pattern pattern;
+
+	int thresholds[2];
 };
 
-static void iot_init(struct io_tracker *t)
+static void iot_init(struct io_tracker *t, int sequential_threshold, int random_threshold)
 {
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_sectors = t->nr_rand_samples = t->next_start_osector = 0;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
 }
 
 static bool iot_sequential_pattern(struct io_tracker *t)
@@ -82,8 +86,8 @@ static void iot_update_stats(struct io_tracker *t, struct bio *bio)
 
 static void iot_check_for_pattern_switch(struct io_tracker *t, sector_t block_size)
 {
-	bool reset = iot_sequential_pattern(t) ? (t->nr_rand_samples >= RANDOM_THRESHOLD) :
-		                                 (t->nr_seq_sectors >= SEQUENTIAL_THRESHOLD * block_size);
+	bool reset = iot_sequential_pattern(t) ? (t->nr_rand_samples >= t->thresholds[PATTERN_RANDOM]) :
+		                                 (t->nr_seq_sectors >= t->thresholds[PATTERN_SEQUENTIAL] * block_size);
 	if (reset)
 		t->nr_seq_sectors = t->nr_rand_samples = 0;
 }
@@ -236,6 +240,8 @@ struct policy {
 	dm_cblock_t nr_cblocks_allocated;
 
 	struct basic_cache_entry **tmp_entries;
+
+	int threshold_args[2];
 };
 
 /*----------------------------------------------------------------------------*/
@@ -313,12 +319,12 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size
 
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
 	if (p->cblocks) {
+		unsigned u = from_cblock(cache_size);
+
 		queue_init(&p->queues.free);
 
-		while (cache_size != to_cblock(0)) {
-			queue_add(&p->queues.free, &p->cblocks[from_cblock(cache_size)].ce.list);
-			cache_size = to_cblock(from_cblock(cache_size) - 1);
-		}
+		while (u--)
+			queue_add(&p->queues.free, &p->cblocks[u].ce.list);
 
 		p->nr_cblocks_allocated = to_cblock(0);
 
@@ -1238,93 +1244,6 @@ static void hint_to_counts(uint32_t val, unsigned *read, unsigned *write)
 
 }
 
-static int basic_load_mapping(struct dm_cache_policy *pe,
-			      dm_oblock_t oblock, dm_cblock_t cblock,
-			      uint32_t hint, bool hint_valid)
-{
-	int r = 0;
-	struct policy *p = to_policy(pe);
-	struct basic_cache_entry *e;
-	bool is_multiqueue = (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p));
-
-	/* FIXME: if we can't allocate the array, just add the mapping? */
-	if (!is_multiqueue &&
-	    !p->tmp_entries) {
-		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * p->cache_size);
-		if (!p->tmp_entries)
-			return -ENOMEM;
-	}
-
-	e = alloc_cache_entry(p);
-	if (!e) {
-		r = -ENOMEM;
-		goto bad;
-	}
-
-	e->cblock = cblock;
-	e->ce.oblock = oblock;
-
-	if (hint_valid) {
-		unsigned reads, writes;
-
-		hint_to_counts(hint, &reads, &writes);
-
-		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
-			/* FIXME: store also in larger hints rather than making up. */
-			e->ce.count[T_HITS][0] = reads;
-			e->ce.count[T_HITS][1] = writes;
-			e->ce.count[T_SECTORS][0] = reads * p->block_size;
-			e->ce.count[T_SECTORS][1] = writes * p->block_size;
-			add_cache_entry(p, e);
-			p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-
-		} else
-			p->tmp_entries[reads] = e;
-	}
-
-bad:
-	return r;
-}
-
-static void basic_reload_mapping(struct dm_cache_policy *pe,
-				 dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	struct policy *p = to_policy(pe);
-	struct basic_cache_entry *e;
-
-	mutex_lock(&p->lock);
-	e = alloc_cache_entry(p);
-	if (!e)
-		goto bad;
-
-	e->cblock = cblock;
-	e->ce.oblock = oblock;
-	add_cache_entry(p, e);
-
-bad:
-	mutex_unlock(&p->lock);
-}
-
-
-static void basic_load_mappings_completed(struct dm_cache_policy *pe)
-{
-	struct policy *p = to_policy(pe);
-
-	if (p->tmp_entries) {
-		unsigned u;
-
-		for (u = 0; u < p->cache_size; p++) {
-			if (p->tmp_entries[u]) {
-				add_cache_entry(p, p->tmp_entries[u]);
-				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-			}
-		}
-
-		vfree(p->tmp_entries);
-		p->tmp_entries = NULL;
-	}
-}
-
 /* Walk queues for lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
 static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
 {
@@ -1401,6 +1320,73 @@ static void basic_force_mapping(struct dm_cache_policy *pe,
 	mutex_unlock(&p->lock);
 }
 
+static int basic_load_mapping(struct dm_cache_policy *pe,
+			      dm_oblock_t oblock, dm_cblock_t cblock,
+			      uint32_t hint, bool hint_valid)
+{
+	int r = 0;
+	struct policy *p = to_policy(pe);
+	struct basic_cache_entry *e;
+	bool is_multiqueue = (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p));
+
+	/* FIXME: if we can't allocate the array, just add the mapping? */
+	if (!is_multiqueue &&
+	    !p->tmp_entries) {
+		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * p->cache_size);
+		if (!p->tmp_entries)
+			return -ENOMEM;
+	}
+
+	e = alloc_cache_entry(p);
+	if (!e) {
+		r = -ENOMEM;
+		goto bad;
+	}
+
+	e->cblock = cblock;
+	e->ce.oblock = oblock;
+
+	if (hint_valid) {
+		unsigned reads, writes;
+
+		hint_to_counts(hint, &reads, &writes);
+
+		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
+			/* FIXME: store also in larger hints rather than making up. */
+			e->ce.count[T_HITS][0] = reads;
+			e->ce.count[T_HITS][1] = writes;
+			e->ce.count[T_SECTORS][0] = reads * p->block_size;
+			e->ce.count[T_SECTORS][1] = writes * p->block_size;
+			add_cache_entry(p, e);
+			p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
+
+		} else
+			p->tmp_entries[reads] = e;
+	}
+
+bad:
+	return r;
+}
+
+static void basic_load_mappings_completed(struct dm_cache_policy *pe)
+{
+	struct policy *p = to_policy(pe);
+
+	if (p->tmp_entries) {
+		unsigned u;
+
+		for (u = 0; u < p->cache_size; p++) {
+			if (p->tmp_entries[u]) {
+				add_cache_entry(p, p->tmp_entries[u]);
+				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
+			}
+		}
+
+		vfree(p->tmp_entries);
+		p->tmp_entries = NULL;
+	}
+}
+
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
@@ -1418,6 +1404,87 @@ static void basic_tick(struct dm_cache_policy *pe)
 	atomic_inc(&to_policy(pe)->tick.t_ext);
 }
 
+
+static int process_config_option(struct policy *p, int *args, char **argv)
+{
+	unsigned long tmp;
+	enum io_pattern pattern;
+
+	if (strcmp(argv[0], "sequential_threshold"))
+		pattern = PATTERN_SEQUENTIAL;
+	else if (strcmp(argv[0], "random_threshold"))
+		pattern = PATTERN_RANDOM;
+	else
+		return -EINVAL;
+
+
+	if (kstrtoul(argv[1], 10, &tmp))
+		return -EINVAL;
+
+	args[pattern] = tmp;
+
+	return 0;
+}
+
+static int basic_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
+{
+	struct policy *p = to_policy(pe);
+
+	if (argc != 3)
+		return -EINVAL;
+
+	if (strcmp(argv[0], "set_config")) {
+		int r = process_config_option(p, p->tracker.thresholds, argv + 1);
+
+		if (r < 0)
+			return r;
+	}
+
+	return 0;
+}
+
+static int basic_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+{
+	ssize_t sz = 0;
+	struct policy *p = to_policy(pe);
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%u %u",
+		       p->tracker.thresholds[PATTERN_SEQUENTIAL],
+		       p->tracker.thresholds[PATTERN_RANDOM]);
+		break;
+
+	case STATUSTYPE_TABLE:
+		if (p->threshold_args[PATTERN_SEQUENTIAL] > -1)
+			DMEMIT("sequential_threshold %u ", p->threshold_args[PATTERN_SEQUENTIAL]);
+
+		if (p->threshold_args[PATTERN_RANDOM] > -1)
+			DMEMIT("random_threshold %u ", p->threshold_args[PATTERN_RANDOM]);
+	}
+
+	return 0;
+}
+
+static int process_policy_args(struct policy *p, int argc, char **argv)
+{
+	unsigned u;
+
+	if (argc != 2 && argc != 4)
+		return -EINVAL;
+
+	p->threshold_args[0] = p->threshold_args[1] = -1;
+
+	for (u = 0; u < argc; u += 2) {
+		int r = process_config_option(p, p->threshold_args, argv + u);
+
+		if (r)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
@@ -1426,18 +1493,21 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = basic_load_mapping;
 	p->policy.load_mappings_completed = basic_load_mappings_completed;
 	p->policy.walk_mappings = basic_walk_mappings;
-	p->policy.reload_mapping = basic_reload_mapping;
 	p->policy.remove_mapping = basic_remove_mapping;
-	p->policy.remove_any = NULL;
 	p->policy.force_mapping = basic_force_mapping;
+	p->policy.remove_any = NULL;
+	p->policy.reload_mapping = NULL;
 	p->policy.residency = basic_residency;
 	p->policy.tick = basic_tick;
+	p->policy.status = basic_status;
+	p->policy.message = basic_message;
 }
 
 static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 						   sector_t origin_size,
 						   sector_t block_size,
-						   enum policy_type type)
+						   enum policy_type type,
+						   int argc, char **argv)
 {
 	int r;
 	unsigned mqueues = 0;
@@ -1470,7 +1540,13 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	p->queues.fns = queue_fns + type;
 
 	init_policy_functions(p);
-	iot_init(&p->tracker);
+
+	/* Need to do that before iot_init(). */
+	r = process_policy_args(p, argc, argv);
+	if (r)
+		goto bad_free_policy;
+
+	iot_init(&p->tracker, p->threshold_args[PATTERN_SEQUENTIAL], p->threshold_args[PATTERN_SEQUENTIAL]);
 
 	p->cache_size = cache_size;
 	p->cache_nr_words = dm_sector_div_up(from_cblock(cache_size), BITS_PER_LONG);
@@ -1559,9 +1635,9 @@ bad_free_policy:
 
 /* Policy type creation magic. */
 #define __CREATE_POLICY(policy) \
-static struct dm_cache_policy * policy ## _create(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size) \
+static struct dm_cache_policy * policy ## _create(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size, int argc, char **argv) \
 { \
-	return basic_policy_create(cache_size, origin_size, block_size, P_ ## policy); \
+	return basic_policy_create(cache_size, origin_size, block_size, P_ ## policy, argc, argv); \
 }
 
 #define	__POLICY_TYPE(policy) \

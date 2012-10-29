@@ -123,6 +123,7 @@ struct cache {
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
 	atomic_t nr_migrations;
+	unsigned migration_threshold;
 	wait_queue_head_t migration_wait;
 
 	/*
@@ -977,7 +978,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
 			if (r) {
 				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
-				return;
+				break;
 			}
 
 			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
@@ -1167,12 +1168,14 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, b
 }
 
 static int create_cache_policy(struct cache *cache,
-			       const char *policy_name, char **error)
+			       const char *policy_name, char **error,
+			       struct dm_arg_set *as)
 {
 	cache->policy =
 		dm_cache_policy_create(policy_name, cache->cache_size,
 				       cache->origin_sectors,
-				       cache->sectors_per_block);
+				       cache->sectors_per_block,
+				       as->argc, as->argv);
 	if (!cache->policy) {
 		*error = "Error creating cache's policy";
 		return -ENOMEM;
@@ -1345,6 +1348,8 @@ bad_cache:
  * cache dev	   : fast device holding cached data blocks
  * data block size : cache unit size in sectors
  * policy          : the replacement policy to use
+ * #policy_args    : number of policy arguments (key value pairs count as 2; delimiter is space)
+ * {policy_args}   : the policy arguments as key value pairs
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1358,7 +1363,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	const char *policy_name;
 	unsigned long tmp;
 
-	if (argc < 5) {
+	if (argc < 6) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -1418,7 +1423,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad_max_io_len;
 
-	r = create_cache_policy(cache, policy_name, &ti->error);
+	r = create_cache_policy(cache, policy_name, &ti->error, &as);
 	if (r)
 		goto bad_max_io_len;
 
@@ -1667,6 +1672,7 @@ static void cache_resume(struct dm_target *ti)
 static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
+	int r = 0;
 	ssize_t sz = 0;
 	char buf[BDEVNAME_SIZE];
 	struct cache *cache = ti->private;
@@ -1695,10 +1701,50 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
-		DMEMIT("%s", dm_cache_policy_get_name(cache->policy));
+		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
 	}
 
+	if (sz < maxlen)
+		r = policy_status(cache->policy, type, status_flags, result + sz, maxlen - sz);
+
+	return r;
+}
+
+static int process_config_option(struct cache *cache, char **argv)
+{
+	if (strcmp(argv[1], "migration_threshold")) {
+		unsigned long tmp;
+
+		if (kstrtoul(argv[2], 10, &tmp) || !tmp)
+			return -EINVAL;
+
+		cache->migration_threshold = tmp;
+
+	} else
+		return 1; /* Inform caller it's not our option. */
+
 	return 0;
+}
+
+static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
+{
+	int r = 0;
+	struct cache *cache = ti->private;
+
+	if (argc != 3)
+		return -EINVAL;
+
+	if (strcmp(argv[0], "set_config")) {
+		r = process_config_option(cache, argv);
+		if (r < 0)
+			goto bad;
+	}
+
+	if (r)
+		r = policy_message(cache->policy, argc, argv);
+
+bad:
+	return r;
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
@@ -1772,6 +1818,7 @@ static struct target_type cache_target = {
 	.preresume = cache_preresume,
 	.resume = cache_resume,
 	.status = cache_status,
+	.message = cache_message,
 	.iterate_devices = cache_iterate_devices,
 	.merge = cache_bvec_merge,
 	.io_hints = cache_io_hints,

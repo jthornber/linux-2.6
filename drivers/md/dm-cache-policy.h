@@ -7,6 +7,8 @@
 #ifndef DM_CACHE_POLICY_H
 #define DM_CACHE_POLICY_H
 
+#include <linux/device-mapper.h>
+
 #include "dm-cache-metadata.h"
 #include "persistent-data/dm-block-manager.h"
 
@@ -121,12 +123,6 @@ struct dm_cache_policy {
 	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn, void *context);
 
 	/*
-	 * Called when a cache target needs to reload a cleared out mapping on a failure.
-	 */
-	void (*reload_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
-
-
-	/*
 	 * Override functions used on the error paths of the core target.
 	 * They must succeed.
 	 */
@@ -136,6 +132,11 @@ struct dm_cache_policy {
 
 	/* Remove any entry (e.g. for writeback purpose) */
 	int (*remove_any)(struct dm_cache_policy *p, struct policy_result *result);
+
+	/*
+	 * Called when a cache target needs to reload a cleared out mapping on a failure.
+	 */
+	void (*reload_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
 
 	/*
 	 * How full is the cache?
@@ -150,6 +151,12 @@ struct dm_cache_policy {
 	 * The policy should only count an entry as hit once per tick.
 	 */
 	void (*tick)(struct dm_cache_policy *p);
+
+	/*
+	 * Status and message.
+	 */
+	int (*status) (struct dm_cache_policy *p, status_type_t type, unsigned status_flags, char *result, unsigned maxlen);
+	int (*message) (struct dm_cache_policy *p, unsigned argc, char **argv);
 
 	/*
 	 * Book keeping ptr for the policy register, not for general use.
@@ -175,7 +182,9 @@ struct dm_cache_policy_type {
 	char name[CACHE_POLICY_NAME_MAX];
 	size_t hint_size;	/* in bytes, must be 0 or 4 */
 	struct module *owner;
-	struct dm_cache_policy *(*create)(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size);
+	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
+					  sector_t origin_size, sector_t block_size,
+					  int argc, char **argv);
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);

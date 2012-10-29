@@ -28,12 +28,6 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 	return p->load_mapping(p, oblock, cblock, hint, hint_valid);
 }
 
-static inline void policy_reload_mapping(struct dm_cache_policy *p,
-					 dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	p->reload_mapping(p, oblock, cblock);
-}
-
 static inline void policy_load_mappings_completed(struct dm_cache_policy *p)
 {
 	if (p->load_mappings_completed)
@@ -51,15 +45,21 @@ static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t 
 	return p->remove_mapping(p, oblock);
 }
 
+static inline void policy_force_mapping(struct dm_cache_policy *p,
+					dm_oblock_t current_oblock, dm_oblock_t new_oblock)
+{
+	return p->force_mapping(p, current_oblock, new_oblock);
+}
+
 static inline int policy_remove_any(struct dm_cache_policy *p, struct policy_result *result)
 {
 	return p->remove_any ? p->remove_any(p, result) : -ENOENT;
 }
 
-static inline void policy_force_mapping(struct dm_cache_policy *p,
-					dm_oblock_t current_oblock, dm_oblock_t new_oblock)
+static inline void policy_reload_mapping(struct dm_cache_policy *p,
+					 dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	return p->force_mapping(p, current_oblock, new_oblock);
+	p->reload_mapping ? p->reload_mapping(p, oblock, cblock) : 0;
 }
 
 static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)
@@ -73,13 +73,24 @@ static inline void policy_tick(struct dm_cache_policy *p)
 		return p->tick(p);
 }
 
+static inline int policy_status(struct dm_cache_policy *p, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+{
+	return p->status ? p->status(p, type, status_flags, result, maxlen) : 0;
+}
+
+static inline int policy_message(struct dm_cache_policy *p, unsigned argc, char **argv)
+{
+	return p->message ? p->message(p, argc, argv) : 0;
+}
+
 /*----------------------------------------------------------------*/
 
 /*
  * Creates a new cache policy given a policy name, a cache size, an origin size and the block size.
  */
 struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
-					       sector_t origin_size, sector_t block_size);
+					       sector_t origin_size, sector_t block_size,
+					       int argc, char **argv);
 
 /*
  * Destroys the policy.  This drops references to the policy module as well

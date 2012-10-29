@@ -209,6 +209,7 @@ static void __cell_release(struct dm_bio_prison_cell *cell, struct bio_list *inm
 	if (inmates) {
 		if (cell->holder)
 			bio_list_add(inmates, cell->holder);
+
 		bio_list_merge(inmates, &cell->bios);
 	}
 
