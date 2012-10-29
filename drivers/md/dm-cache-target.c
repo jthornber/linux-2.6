@@ -220,15 +220,20 @@ static bool is_dirty(struct cache *cache, dm_cblock_t b)
 
 static void set_dirty(struct cache *cache, dm_cblock_t b)
 {
-	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset))
+	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset)) {
 		cache->nr_dirty++;
+		policy_set_dirty(cache->policy, b);
+	}
 }
 
 static void clear_dirty(struct cache *cache, dm_cblock_t b)
 {
-	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset))
+	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset)) {
+		policy_clear_dirty(cache->policy, b);
+
 		if (!--cache->nr_dirty)
 			dm_table_event(cache->ti->table);
+	}
 }
 
 /*----------------------------------------------------------------*/
