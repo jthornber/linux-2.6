@@ -697,12 +697,12 @@ static void demote(struct cache *cache, dm_oblock_t oblock,
 	quiesce_migration(mg);
 }
 
-static void writeback_then_promote(struct cache *cache,
-				   dm_oblock_t old_oblock,
-				   dm_oblock_t new_oblock,
-				   dm_cblock_t cblock,
-				   struct dm_bio_prison_cell *old_ocell,
-				   struct dm_bio_prison_cell *new_ocell)
+static void demote_then_promote(struct cache *cache,
+				dm_oblock_t old_oblock,
+				dm_oblock_t new_oblock,
+				dm_cblock_t cblock,
+				struct dm_bio_prison_cell *old_ocell,
+				struct dm_bio_prison_cell *new_ocell)
 {
 	struct dm_cache_migration *mg = alloc_migration(cache);
 
@@ -892,9 +892,8 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		atomic_inc(&cache->demotion);
 		atomic_inc(&cache->promotion);
 
-		writeback_then_promote(cache, lookup_result.old_oblock, block,
-				       lookup_result.cblock,
-				       old_ocell, new_ocell);
+		demote_then_promote(cache, lookup_result.old_oblock, block,
+				    lookup_result.cblock, old_ocell, new_ocell);
 		release_cell = 0;
 		break;
 	}
