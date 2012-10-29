@@ -88,6 +88,8 @@ enum cache_mode {
 struct cache_features {
 	enum cache_mode mode;
 
+	bool ctr_set:1;	/* Constructor has set feature argument below. */
+
 	bool write_through:1;
 };
 
@@ -1384,6 +1386,7 @@ bad_cache:
 static void cache_features_init(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
+	cf->ctr_set = false;
 	cf->write_through = false;
 }
 
@@ -1412,13 +1415,15 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 		arg_name = dm_shift_arg(as);
 		argc--;
 
-		if (!strcasecmp(arg_name, "write-back"))
+		if (!strcasecmp(arg_name, "write-back")) {
 			cf->write_through = false;
+			cf->ctr_set = true;
 
-		else if (!strcasecmp(arg_name, "write-through"))
+		} else if (!strcasecmp(arg_name, "write-through")) {
 			cf->write_through = true;
+			cf->ctr_set = true;
 
-		else {
+		} else {
 			ti->error = "Unrecognised pool feature requested";
 			r = -EINVAL;
 			break;
@@ -1797,11 +1802,17 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_TABLE:
 		format_dev_t(buf, cache->metadata_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
-		DMEMIT("%s ", buf);
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
+		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
+		DMEMIT("%s ", buf);
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
+
+		if (cache->cf.ctr_set)
+			DMEMIT("1 %s ", cache->cf.write_through ? "write-through" : "write-back");
+		else
+			DMEMIT("0 ");
+
 		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
 	}
 
