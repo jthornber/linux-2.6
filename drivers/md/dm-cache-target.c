@@ -846,7 +846,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (cache->writethrough)
+		if (cache->writethrough && !is_dirty(cache, lookup_result.cblock))
 			issue_writethrough(cache, bio, lookup_result.cblock, GFP_KERNEL);
 		else {
 			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
@@ -1531,7 +1531,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (cache->writethrough &&
+		if (cache->writethrough && !is_dirty(cache, lookup_result.cblock) &&
 		    !issue_writethrough(cache, bio, lookup_result.cblock, GFP_NOIO)) {
 			cell_defer(cache, cell, true);
 			return DM_MAPIO_SUBMITTED;
