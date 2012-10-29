@@ -451,10 +451,7 @@ static void debug_destroy(struct dm_cache_policy *pe)
 	p->hit = ~0 - 1; /* - 1 due to ++ in log_stats() */
 	log_stats(p);
 
-	if (test_ok(p))
-		DMINFO("Test ok");
-	else
-		DMINFO("Test FAILED!");
+	DMINFO("Test %s", test_ok(p) ? "ok" : "FAILED");
 
 	dm_cache_policy_destroy(p->debug_policy);
 	free_debug_blocks_and_hashs(p);
