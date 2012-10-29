@@ -301,25 +301,26 @@ static void wb_force_mapping(struct dm_cache_policy *pe,
 
 static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 {
-	struct wb_cache_entry *e;
+	struct wb_cache_entry *r;
 
 	BUG_ON(p->nr_dirty >= p->cache_size);
 
 	if (!p->nr_dirty)
 		return NULL;
 
-	list_for_each_entry(e, &p->used, list) {
-		if (e->dirty) {
+	list_for_each_entry(r, &p->used, list) {
+		if (r->dirty) {
 			list_del_init(&p->used);
-			list_splice(&e->list, &p->used);
+			list_splice(&r->list, &p->used);
 			break;
 		}
 	}
 
-	BUG_ON(!e->dirty);
-	e->dirty = false;
+	BUG_ON(!r->dirty);
+	r->dirty = false;
 	p->nr_dirty--;
-	return e;
+
+	return r;
 }
 
 static int wb_writeback_work(struct dm_cache_policy *pe,
