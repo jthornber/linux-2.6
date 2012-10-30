@@ -135,11 +135,11 @@ static struct dm_bio_prison_cell *__search_bucket(struct hlist_head *bucket,
  *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
-int __dm_bio_detain(struct dm_bio_prison *prison,
-		    struct dm_cell_key *key,
-		    struct bio *inmate,
-		    struct dm_bio_prison_cell *memory,
-		    struct dm_bio_prison_cell **ref)
+static int __dm_bio_detain(struct dm_bio_prison *prison,
+			   struct dm_cell_key *key,
+			   struct bio *inmate,
+			   struct dm_bio_prison_cell *memory,
+			   struct dm_bio_prison_cell **ref)
 {
 	int r = 1;
 	unsigned long flags;

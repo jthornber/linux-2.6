@@ -220,9 +220,81 @@ struct dm_cache_migration {
 	struct dm_bio_prison_cell *new_ocell;
 };
 
+/*
+ * Processing a bio in the worker thread may require these memory
+ * allocations.  We prealloc to avoid deadlocks (the same worker thread
+ * frees them back to the mempool).
+ */
+struct prealloc {
+	struct dm_cache_migration *mg;
+	struct dm_bio_prison_cell *cell1;
+	struct dm_bio_prison_cell *cell2;
+};
+
 static void wake_worker(struct cache *cache)
 {
 	queue_work(cache->wq, &cache->worker);
+}
+
+/*----------------------------------------------------------------*/
+
+static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
+{
+	// FIXME: given we're doing this, can we get rid of the mempools?
+
+	if (!p->mg) {
+		p->mg = mempool_alloc(cache->migration_pool, GFP_ATOMIC);
+		if (!p->mg)
+			return -ENOMEM;
+	}
+
+	if (!p->cell1) {
+		p->cell1 = dm_bio_prison_alloc_cell(cache->prison, GFP_ATOMIC);
+		if (!p->cell1)
+			return -ENOMEM;
+	}
+
+	if (!p->cell2) {
+		p->cell2 = dm_bio_prison_alloc_cell(cache->prison, GFP_ATOMIC);
+		if (!p->cell2)
+			return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void prealloc_free_structs(struct cache *cache, struct prealloc *p)
+{
+	if (p->cell2)
+		dm_bio_prison_free_cell(cache->prison, p->cell2);
+
+	if (p->cell1)
+		dm_bio_prison_free_cell(cache->prison, p->cell1);
+
+	if (p->mg)
+		mempool_free(p->mg, cache->migration_pool);
+}
+
+static struct dm_cache_migration *prealloc_get_migration(struct prealloc *p)
+{
+	struct dm_cache_migration *mg = p->mg;
+
+	BUG_ON(!mg);
+	p->mg = NULL;
+
+	return mg;
+}
+
+static struct dm_bio_prison_cell **prealloc_get_cell(struct prealloc *p)
+{
+	if (p->cell1)
+		return &p->cell1;
+
+	if (p->cell2)
+		return &p->cell2;
+
+	BUG();
+	return NULL;
 }
 
 /*----------------------------------------------------------------*/
@@ -234,46 +306,63 @@ static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
 	key->block = from_oblock(oblock);
 }
 
-static int bio_detain(struct cache *cache, dm_oblock_t oblock, struct bio *bio,
-		      gfp_t gfp, struct dm_bio_prison_cell **result)
+// FIXME: refactor these three
+static int bio_detain_(struct cache *cache,
+		       dm_oblock_t oblock, struct bio *bio,
+		       gfp_t gfp,
+		       struct dm_bio_prison_cell **result)
 {
 	int r;
 	struct dm_cell_key key;
 	struct dm_bio_prison_cell *cell;
 
 	cell = dm_bio_prison_alloc_cell(cache->prison, gfp);
-	if (!cell)
-		return -ENOMEM;
 
 	build_key(oblock, &key);
 	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
 
-	if (r > 1)
-		/* We reused an old cell, we can get rid of the new one */
+	if (r)
 		dm_bio_prison_free_cell(cache->prison, cell);
 
 	return r;
 }
 
+static int bio_detain(struct cache *cache, struct prealloc *structs,
+		      dm_oblock_t oblock, struct bio *bio,
+		      struct dm_bio_prison_cell **result)
+{
+	int r;
+	struct dm_cell_key key;
+	struct dm_bio_prison_cell **cell;
+
+	cell = prealloc_get_cell(structs);
+
+	build_key(oblock, &key);
+	r = dm_bio_detain(cache->prison, &key, bio, *cell, result);
+
+	if (!r)
+		/* cell was used */
+		*cell = NULL;
+
+	return r;
+}
+
 static int bio_detain_no_holder(struct cache *cache,
+				struct prealloc *structs,
 				dm_oblock_t oblock,
-				gfp_t gfp,
 				struct dm_bio_prison_cell **result)
 {
 	int r;
 	struct dm_cell_key key;
-	struct dm_bio_prison_cell *cell;
+	struct dm_bio_prison_cell **cell;
 
-	cell = dm_bio_prison_alloc_cell(cache->prison, gfp);
-	if (!cell)
-		return -ENOMEM;
+	cell = prealloc_get_cell(structs);
 
 	build_key(oblock, &key);
-	r = dm_bio_detain_no_holder(cache->prison, &key, cell, result);
+	r = dm_bio_detain_no_holder(cache->prison, &key, *cell, result);
 
-	if (r > 1)
-		/* We reused an old cell, we can get rid of the new one */
-		dm_bio_prison_free_cell(cache->prison, cell);
+	if (!r)
+		*cell = NULL;
 
 	return r;
 }
@@ -460,27 +549,6 @@ static void issue(struct cache *cache, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
-static int prealloc_migration(struct cache *cache)
-{
-	if (cache->next_migration)
-		return 0;
-
-	cache->next_migration = mempool_alloc(cache->migration_pool, GFP_ATOMIC);
-
-	// FIXME: instrument to see how often this happens, especially with new cache.
-	return cache->next_migration ? 0 : -ENOMEM;
-}
-
-static struct dm_cache_migration *alloc_migration(struct cache *cache)
-{
-	struct dm_cache_migration *r = cache->next_migration;
-
-	BUG_ON(!r);
-	cache->next_migration = NULL;
-
-	return r;
-}
-
 static void free_migration(struct dm_cache_migration *mg)
 {
 	mempool_free(mg, mg->cache->migration_pool);
@@ -737,10 +805,10 @@ static void quiesce_migration(struct dm_cache_migration *mg)
 		queue_quiesced_migration(mg);
 }
 
-static void promote(struct cache *cache, dm_oblock_t oblock,
+static void promote(struct cache *cache, struct prealloc *structs, dm_oblock_t oblock,
 		    dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
 {
-	struct dm_cache_migration *mg = alloc_migration(cache);
+	struct dm_cache_migration *mg = prealloc_get_migration(structs);
 
 	mg->err = false;
 	mg->demote = false;
@@ -756,10 +824,10 @@ static void promote(struct cache *cache, dm_oblock_t oblock,
 	quiesce_migration(mg);
 }
 
-static void demote(struct cache *cache, dm_oblock_t oblock,
+static void demote(struct cache *cache, struct prealloc *structs, dm_oblock_t oblock,
 		   dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
 {
-	struct dm_cache_migration *mg = alloc_migration(cache);
+	struct dm_cache_migration *mg = prealloc_get_migration(structs);
 
 	mg->err = false;
 	mg->demote = true;
@@ -776,13 +844,14 @@ static void demote(struct cache *cache, dm_oblock_t oblock,
 }
 
 static void demote_then_promote(struct cache *cache,
+				struct prealloc *structs,
 				dm_oblock_t old_oblock,
 				dm_oblock_t new_oblock,
 				dm_cblock_t cblock,
 				struct dm_bio_prison_cell *old_ocell,
 				struct dm_bio_prison_cell *new_ocell)
 {
-	struct dm_cache_migration *mg = alloc_migration(cache);
+	struct dm_cache_migration *mg = prealloc_get_migration(structs);
 
 	mg->err = false;
 	mg->demote = true;
@@ -906,7 +975,7 @@ static bool may_migrate(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
-static void process_bio(struct cache *cache, struct bio *bio)
+static void process_bio(struct cache *cache, struct prealloc *structs, struct bio *bio)
 {
 	int r;
 	int release_cell = 1;
@@ -919,7 +988,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	r = bio_detain(cache, block, bio, GFP_NOIO, &new_ocell);
+	r = bio_detain(cache, structs, block, bio, &new_ocell);
 	if (r > 0)
 		return;
 
@@ -947,14 +1016,13 @@ static void process_bio(struct cache *cache, struct bio *bio)
 
 	case POLICY_NEW:
 		atomic_inc(&cache->promotion);
-		promote(cache, block, lookup_result.cblock, new_ocell);
+		promote(cache, structs, block, lookup_result.cblock, new_ocell);
 		release_cell = 0;
 		break;
 
 	case POLICY_REPLACE:
-		// FIXME: GFP_ATOMIC ?
-		r = bio_detain(cache, lookup_result.old_oblock,
-			       bio, GFP_NOIO, &old_ocell);
+		r = bio_detain(cache, structs, lookup_result.old_oblock,
+			       bio, &old_ocell);
 		if (r > 0) {
 			/*
 			 * We have to be careful to avoid lock inversion of
@@ -969,7 +1037,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		atomic_inc(&cache->demotion);
 		atomic_inc(&cache->promotion);
 
-		demote_then_promote(cache, lookup_result.old_oblock, block,
+		demote_then_promote(cache, structs, lookup_result.old_oblock, block,
 				    lookup_result.cblock, old_ocell, new_ocell);
 		release_cell = 0;
 		break;
@@ -1002,7 +1070,9 @@ static void process_deferred_bios(struct cache *cache)
 	unsigned long flags;
 	struct bio_list bios;
 	struct bio *bio;
+	struct prealloc structs;
 
+	memset(&structs, 0, sizeof(structs));
 	bio_list_init(&bios);
 
 	spin_lock_irqsave(&cache->lock, flags);
@@ -1016,14 +1086,12 @@ static void process_deferred_bios(struct cache *cache)
 		 * this bio might require one, we pause until there are some
 		 * prepared mappings to process.
 		 */
-		if (prealloc_migration(cache)) {
+		if (prealloc_data_structs(cache, &structs)) {
 			spin_lock_irqsave(&cache->lock, flags);
 			bio_list_merge(&cache->deferred_bios, &bios);
 			spin_unlock_irqrestore(&cache->lock, flags);
 			break;
 		}
-
-		// FIXME: preallocate cells too
 
 		bio = bio_list_pop(&bios);
 
@@ -1034,8 +1102,10 @@ static void process_deferred_bios(struct cache *cache)
 			process_discard_bio(cache, bio);
 
 		else
-			process_bio(cache, bio);
+			process_bio(cache, &structs, bio);
 	}
+
+	prealloc_free_structs(cache, &structs);
 }
 
 static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
@@ -1058,27 +1128,30 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 static void writeback_all_dirty_blocks(struct cache *cache)
 {
 	int r = 0;
+	dm_oblock_t oblock;
+	dm_cblock_t cblock;
+	struct prealloc structs;
 
+	memset(&structs, 0, sizeof(structs));
 	while (!r && may_migrate(cache)) {
-		dm_oblock_t oblock;
-		dm_cblock_t cblock;
-
-		if (prealloc_migration(cache))
+		if (prealloc_data_structs(cache, &structs))
 			break;
 
 		r = policy_writeback_work(cache->policy, &oblock, &cblock);
 		if (!r) {
 			struct dm_bio_prison_cell *old_ocell;
 
-			r = bio_detain_no_holder(cache, oblock, GFP_ATOMIC, &old_ocell);
+			r = bio_detain_no_holder(cache, &structs, oblock, &old_ocell);
 			if (r) {
 				policy_set_dirty(cache->policy, oblock);
 				break;
 			}
 
-			demote(cache, oblock, cblock, old_ocell);
+			demote(cache, &structs, oblock, cblock, old_ocell);
 		}
 	}
+
+	prealloc_free_structs(cache, &structs);
 }
 
 /*----------------------------------------------------------------
@@ -1669,7 +1742,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	r = bio_detain(cache, block, bio, GFP_ATOMIC, &cell);
+	r = bio_detain_(cache, block, bio, GFP_ATOMIC, &cell);
 	if (r) {
 		if (r < 0)
 			defer_bio(cache, bio);
