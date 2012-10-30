@@ -16,7 +16,6 @@
 
 struct dm_bio_prison_cell {
 	struct hlist_node list;
-	struct dm_bio_prison *prison;
 	struct dm_cell_key key;
 	struct bio *holder;
 	struct bio_list bios;
@@ -87,6 +86,19 @@ void dm_bio_prison_destroy(struct dm_bio_prison *prison)
 }
 EXPORT_SYMBOL_GPL(dm_bio_prison_destroy);
 
+struct dm_bio_prison_cell *
+dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
+{
+	return mempool_alloc(prison->cell_pool, gfp);
+}
+
+void
+dm_bio_prison_free_cell(struct dm_bio_prison *prison,
+			struct dm_bio_prison_cell *cell)
+{
+	mempool_free(cell, prison->cell_pool);
+}
+
 static uint32_t hash_key(struct dm_bio_prison *prison, struct dm_cell_key *key)
 {
 	const unsigned long BIG_PRIME = 4294967291UL;
@@ -121,8 +133,11 @@ static struct dm_bio_prison_cell *__search_bucket(struct hlist_head *bucket,
  *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
-int __dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
-		    struct bio *inmate, struct dm_bio_prison_cell **ref)
+int __dm_bio_detain(struct dm_bio_prison *prison,
+		    struct dm_cell_key *key,
+		    struct bio *inmate,
+		    struct dm_bio_prison_cell *memory,
+		    struct dm_bio_prison_cell **ref)
 {
 	int r = 1;
 	unsigned long flags;
@@ -145,7 +160,7 @@ int __dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 	 * Allocate a new cell
 	 */
 	spin_unlock_irqrestore(&prison->lock, flags);
-	cell2 = mempool_alloc(prison->cell_pool, GFP_NOIO);
+	cell2 = memory;
 	spin_lock_irqsave(&prison->lock, flags);
 
 	/*
@@ -154,8 +169,6 @@ int __dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 	 */
 	cell = __search_bucket(prison->cells + hash, key);
 	if (cell) {
-		mempool_free(cell2, prison->cell_pool);
-
 		if (inmate)
 			bio_list_add(&cell->bios, inmate);
 
@@ -167,7 +180,6 @@ int __dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 	 */
 	cell = cell2;
 
-	cell->prison = prison;
 	memcpy(&cell->key, key, sizeof(cell->key));
 	cell->holder = inmate;
 	bio_list_init(&cell->bios);
@@ -183,27 +195,31 @@ out:
 	return r;
 }
 
-int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
-		  struct bio *inmate, struct dm_bio_prison_cell **ref)
+int dm_bio_detain(struct dm_bio_prison *prison,
+		  struct dm_cell_key *key,
+		  struct bio *inmate,
+		  struct dm_bio_prison_cell *memory,
+		  struct dm_bio_prison_cell **ref)
 {
-	return __dm_bio_detain(prison, key, inmate, ref);
+	return __dm_bio_detain(prison, key, inmate, memory, ref);
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain);
 
-int dm_bio_detain_no_holder(struct dm_bio_prison *prison, struct dm_cell_key *key,
+int dm_bio_detain_no_holder(struct dm_bio_prison *prison,
+			    struct dm_cell_key *key,
+			    struct dm_bio_prison_cell *memory,
 			    struct dm_bio_prison_cell **ref)
 {
-	return __dm_bio_detain(prison, key, NULL, ref);
+	return __dm_bio_detain(prison, key, NULL, memory, ref);
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain_no_holder);
 
 /*
  * @inmates must have been initialised prior to this call
  */
-static void __cell_release(struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+static void __cell_release(struct dm_bio_prison *prison,
+			   struct dm_bio_prison_cell *cell, struct bio_list *inmates)
 {
-	struct dm_bio_prison *prison = cell->prison;
-
 	hlist_del(&cell->list);
 
 	if (inmates) {
@@ -216,13 +232,13 @@ static void __cell_release(struct dm_bio_prison_cell *cell, struct bio_list *inm
 	mempool_free(cell, prison->cell_pool);
 }
 
-void dm_cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios)
+void dm_cell_release(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell, struct bio_list *bios)
 {
 	unsigned long flags;
-	struct dm_bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	__cell_release(cell, bios);
+	__cell_release(prison, cell, bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
 EXPORT_SYMBOL_GPL(dm_cell_release);
@@ -233,21 +249,22 @@ EXPORT_SYMBOL_GPL(dm_cell_release);
  * bio may be in the cell.  This function releases the cell, and also does
  * a sanity check.
  */
-static void __cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio)
+static void __cell_release_singleton(struct dm_bio_prison *prison,
+				     struct dm_bio_prison_cell *cell, struct bio *bio)
 {
 	BUG_ON(cell->holder != bio);
 	BUG_ON(!bio_list_empty(&cell->bios));
 
-	__cell_release(cell, NULL);
+	__cell_release(prison, cell, NULL);
 }
 
-void dm_cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio)
+void dm_cell_release_singleton(struct dm_bio_prison *prison,
+			       struct dm_bio_prison_cell *cell, struct bio *bio)
 {
 	unsigned long flags;
-	struct dm_bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	__cell_release_singleton(cell, bio);
+	__cell_release_singleton(prison, cell, bio);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
 EXPORT_SYMBOL_GPL(dm_cell_release_singleton);
@@ -255,30 +272,31 @@ EXPORT_SYMBOL_GPL(dm_cell_release_singleton);
 /*
  * Sometimes we don't want the holder, just the additional bios.
  */
-static void __cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+static void __cell_release_no_holder(struct dm_bio_prison *prison,
+				     struct dm_bio_prison_cell *cell,
+				     struct bio_list *inmates)
 {
-	struct dm_bio_prison *prison = cell->prison;
-
 	hlist_del(&cell->list);
 	bio_list_merge(inmates, &cell->bios);
 
 	mempool_free(cell, prison->cell_pool);
 }
 
-void dm_cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+void dm_cell_release_no_holder(struct dm_bio_prison *prison,
+			       struct dm_bio_prison_cell *cell,
+			       struct bio_list *inmates)
 {
 	unsigned long flags;
-	struct dm_bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	__cell_release_no_holder(cell, inmates);
+	__cell_release_no_holder(prison, cell, inmates);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
 EXPORT_SYMBOL_GPL(dm_cell_release_no_holder);
 
-void dm_cell_error(struct dm_bio_prison_cell *cell)
+void dm_cell_error(struct dm_bio_prison *prison,
+		   struct dm_bio_prison_cell *cell)
 {
-	struct dm_bio_prison *prison = cell->prison;
 	struct bio_list bios;
 	struct bio *bio;
 	unsigned long flags;
@@ -286,7 +304,7 @@ void dm_cell_error(struct dm_bio_prison_cell *cell)
 	bio_list_init(&bios);
 
 	spin_lock_irqsave(&prison->lock, flags);
-	__cell_release(cell, &bios);
+	__cell_release(prison, cell, &bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
