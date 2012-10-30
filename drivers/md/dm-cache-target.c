@@ -419,6 +419,8 @@ static int prealloc_migration(struct cache *cache)
 		return 0;
 
 	cache->next_migration = mempool_alloc(cache->migration_pool, GFP_ATOMIC);
+
+	// FIXME: instrument to see how often this happens, especially with new cache.
 	return cache->next_migration ? 0 : -ENOMEM;
 }
 
