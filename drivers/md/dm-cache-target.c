@@ -1010,7 +1010,7 @@ static void process_deferred_bios(struct cache *cache)
 	bio_list_init(&cache->deferred_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	while ((bio = bio_list_pop(&bios))) {
+	while (!bio_list_empty(&bios)) {
 		/*
 		 * If we've got no free migration structs, and processing
 		 * this bio might require one, we pause until there are some
@@ -1020,9 +1020,12 @@ static void process_deferred_bios(struct cache *cache)
 			spin_lock_irqsave(&cache->lock, flags);
 			bio_list_merge(&cache->deferred_bios, &bios);
 			spin_unlock_irqrestore(&cache->lock, flags);
-
 			break;
 		}
+
+		// FIXME: preallocate cells too
+
+		bio = bio_list_pop(&bios);
 
 		if (bio->bi_rw & REQ_FLUSH)
 			process_flush_bio(cache, bio);
