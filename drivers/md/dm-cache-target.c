@@ -220,16 +220,62 @@ struct dm_cache_migration {
 	struct dm_bio_prison_cell *new_ocell;
 };
 
-static void build_key(dm_block_t block, struct dm_cell_key *key)
-{
-	key->virtual = 0;
-	key->dev = 0;
-	key->block = block;
-}
-
 static void wake_worker(struct cache *cache)
 {
 	queue_work(cache->wq, &cache->worker);
+}
+
+/*----------------------------------------------------------------*/
+
+static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
+{
+	key->virtual = 0;
+	key->dev = 0;
+	key->block = from_oblock(oblock);
+}
+
+static int bio_detain(struct cache *cache, dm_oblock_t oblock, struct bio *bio,
+		      gfp_t gfp, struct dm_bio_prison_cell **result)
+{
+	int r;
+	struct dm_cell_key key;
+	struct dm_bio_prison_cell *cell;
+
+	cell = dm_bio_prison_alloc_cell(cache->prison, gfp);
+	if (!cell)
+		return -ENOMEM;
+
+	build_key(oblock, &key);
+	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
+
+	if (r > 1)
+		/* We reused an old cell, we can get rid of the new one */
+		dm_bio_prison_free_cell(cache->prison, cell);
+
+	return r;
+}
+
+static int bio_detain_no_holder(struct cache *cache,
+				dm_oblock_t oblock,
+				gfp_t gfp,
+				struct dm_bio_prison_cell **result)
+{
+	int r;
+	struct dm_cell_key key;
+	struct dm_bio_prison_cell *cell;
+
+	cell = dm_bio_prison_alloc_cell(cache->prison, gfp);
+	if (!cell)
+		return -ENOMEM;
+
+	build_key(oblock, &key);
+	r = dm_bio_detain_no_holder(cache->prison, &key, cell, result);
+
+	if (r > 1)
+		/* We reused an old cell, we can get rid of the new one */
+		dm_bio_prison_free_cell(cache->prison, cell);
+
+	return r;
 }
 
 /*----------------------------------------------------------------*/
@@ -454,6 +500,7 @@ static void dec_nr_migrations(struct cache *cache)
 static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
 	(holder ? dm_cell_release : dm_cell_release_no_holder)(cell, &cache->deferred_bios);
+	dm_bio_prison_free_cell(cache->prison, cell);
 }
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
@@ -860,7 +907,6 @@ static void process_bio(struct cache *cache, struct bio *bio)
 {
 	int r;
 	int release_cell = 1;
-	struct dm_cell_key key;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
@@ -870,8 +916,7 @@ static void process_bio(struct cache *cache, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	build_key(from_oblock(block), &key);
-	r = dm_bio_detain(cache->prison, &key, bio, &new_ocell);
+	r = bio_detain(cache, block, bio, GFP_NOIO, &new_ocell);
 	if (r > 0)
 		return;
 
@@ -904,8 +949,9 @@ static void process_bio(struct cache *cache, struct bio *bio)
 		break;
 
 	case POLICY_REPLACE:
-		build_key(from_oblock(lookup_result.old_oblock), &key);
-		r = dm_bio_detain(cache->prison, &key, bio, &old_ocell);
+		// FIXME: GFP_ATOMIC ?
+		r = bio_detain(cache, lookup_result.old_oblock,
+			       bio, GFP_NOIO, &old_ocell);
 		if (r > 0) {
 			/*
 			 * We have to be careful to avoid lock inversion of
@@ -1016,13 +1062,9 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 
 		r = policy_writeback_work(cache->policy, &oblock, &cblock);
 		if (!r) {
-			struct dm_cell_key key;
 			struct dm_bio_prison_cell *old_ocell;
 
-			build_key(from_oblock(oblock), &key);
-
-			// FIXME: doesn't this alloc from a mempool, and so is liable to a deadlock?
-			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
+			r = bio_detain_no_holder(cache, oblock, GFP_ATOMIC, &old_ocell);
 			if (r) {
 				policy_set_dirty(cache->policy, oblock);
 				break;
@@ -1032,7 +1074,6 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 		}
 	}
 }
-
 
 /*----------------------------------------------------------------
  * Main worker loop
@@ -1595,7 +1636,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	struct cache *cache = ti->private;
 
 	int r;
-	struct dm_cell_key key;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	bool can_migrate = false;
 	bool discarded_block;
@@ -1623,10 +1663,13 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	build_key(from_oblock(block), &key);
-	r = dm_bio_detain(cache->prison, &key, bio, &cell);
-	if (r > 0)
+	r = bio_detain(cache, block, bio, GFP_ATOMIC, &cell);
+	if (r) {
+		if (r < 0)
+			defer_bio(cache, bio);
+
 		return DM_MAPIO_SUBMITTED;
+	}
 
 	discarded_block = is_discarded(cache, block);
 
