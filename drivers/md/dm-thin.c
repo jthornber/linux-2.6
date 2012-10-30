@@ -663,6 +663,7 @@ static int ensure_next_mapping(struct pool *pool)
 
 	pool->next_mapping = mempool_alloc(pool->mapping_pool, GFP_ATOMIC);
 
+	// FIXME: instrument to see how often this happens, especially with new cache.
 	return pool->next_mapping ? 0 : -ENOMEM;
 }
 
