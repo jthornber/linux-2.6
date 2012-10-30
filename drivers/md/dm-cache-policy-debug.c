@@ -572,10 +572,8 @@ static dm_cblock_t debug_residency(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
 	bool ok = true;
-	dm_cblock_t r;
+	dm_cblock_t r = policy_residency(p->debug_policy);
 
-	mutex_lock(&p->lock);
-	r = policy_residency(p->debug_policy);
 	if (r > p->cache_blocks) {
 		if (modparms.verbose & 0x1)
 			DMWARN("Residency=%llu claimed larger than cache size=%llu!", (LLU) r, (LLU) p->cache_blocks);
@@ -594,8 +592,6 @@ static dm_cblock_t debug_residency(struct dm_cache_policy *pe)
 
 	if (ok)
 		p->good.residency++;
-
-	mutex_unlock(&p->lock);
 
 	return r;
 }
