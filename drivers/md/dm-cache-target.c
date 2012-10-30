@@ -499,7 +499,8 @@ static void dec_nr_migrations(struct cache *cache)
 
 static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
-	(holder ? dm_cell_release : dm_cell_release_no_holder)(cell, &cache->deferred_bios);
+	(holder ? dm_cell_release : dm_cell_release_no_holder)
+		(cache->prison, cell, &cache->deferred_bios);
 	dm_bio_prison_free_cell(cache->prison, cell);
 }
 
