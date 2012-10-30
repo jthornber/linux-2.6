@@ -1386,6 +1386,7 @@ static void sort_in_cache_entry(struct policy *p, struct basic_cache_entry *e)
 	struct list_head *elt;
 	struct basic_cache_entry *cur;
 
+	/* FIXME: overhead walking list. */
 	list_for_each(elt, &p->queues.used) {
 		cur = list_entry(elt, struct basic_cache_entry, ce.list);
 		if (e->ce.count[T_HITS][0] > cur->ce.count[T_HITS][0])

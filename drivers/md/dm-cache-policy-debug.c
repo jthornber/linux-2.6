@@ -333,7 +333,7 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_oblock_t oblo
 		/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE -> POLICY_NEW FALSE. */
 		if (ec) {
 			if (modparms.verbose & 0x2)
-				DMWARN("POLICY_NEW: oblock=%llu e->cblock=%u already existing invalid!", oblock, ec->cblock);
+				DMWARN("POLICY_NEW: oblock=%llu e->cblock=%u already existing invalid!", from_oblock(oblock), from_cblock(ec->cblock));
 
 			check_op("POLICY_NEW", ec->op);
 			free_debug_entry(p, ec);
@@ -357,9 +357,9 @@ static struct debug_entry *analyse_map_result(struct policy *p, dm_oblock_t oblo
 		if (eo) {
 			if (from_oblock(result->old_oblock) == from_oblock(oblock)) {
 				if (modparms.verbose & 0x2)
-					DMWARN("POLICY_REPLACE: e->cblock=%llu e->oblock=%llu = result->old_block=%llu invalid!",
+					DMWARN("POLICY_REPLACE: e->cblock=%u e->oblock=%llu = result->old_block=%llu invalid!",
+					       from_cblock(eo->cblock),
 					       (LLU) from_oblock(eo->oblock),
-					       (LLU) from_cblock(eo->cblock),
 					       (LLU) from_oblock(result->old_oblock));
 
 				p->bad.replace++;
