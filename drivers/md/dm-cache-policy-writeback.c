@@ -377,7 +377,6 @@ static void init_policy_functions(struct policy *p)
 	p->policy.set_dirty = wb_set_dirty;
 	p->policy.clear_dirty = wb_clear_dirty;
 	p->policy.load_mapping = wb_load_mapping;
-	p->policy.load_mappings_completed = NULL;
 	p->policy.walk_mappings = NULL;
 	p->policy.remove_mapping = wb_remove_mapping;
 	p->policy.force_mapping = wb_force_mapping;

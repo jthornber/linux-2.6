@@ -241,8 +241,6 @@ struct policy {
 	unsigned long *allocation_bitset;
 	dm_cblock_t nr_cblocks_allocated;
 
-	struct basic_cache_entry **tmp_entries;
-
 	int threshold_args[2];
 };
 
@@ -320,8 +318,10 @@ static void free_cache_entries(struct policy *p)
 {
 	struct basic_cache_entry *e, *tmp;
 
-	list_splice(&p->queues.free, &p->queues.used);
 	list_for_each_entry_safe(e, tmp, &p->queues.free, ce.list)
+		kmem_cache_free(basic_entry_cache, e);
+
+	list_for_each_entry_safe(e, tmp, &p->queues.used, used)
 		kmem_cache_free(basic_entry_cache, e);
 }
 
@@ -606,10 +606,10 @@ static void calc_rw_threshold(struct policy *p)
 			p->promote_threshold[1] /= nr;
 		}
 
-		/* Average pre cache and cache; add default thresholds. FIXME: explicit cast. */
-		p->promote_threshold[0] = ((p->promote_threshold[0] + p->cache_count[p->queues.ctype][0] / (unsigned) from_cblock(p->cache_size)) >> 1) +
+		/* Average pre cache and cache; add default thresholds. */
+		p->promote_threshold[0] = ((p->promote_threshold[0] + p->cache_count[p->queues.ctype][0] / from_cblock(p->cache_size)) >> 1) +
 					  ctype_threshold(p, READ_PROMOTE_THRESHOLD);
-		p->promote_threshold[1] = ((p->promote_threshold[1] + p->cache_count[p->queues.ctype][1] / (unsigned) from_cblock(p->cache_size)) >> 1) +
+		p->promote_threshold[1] = ((p->promote_threshold[1] + p->cache_count[p->queues.ctype][1] / from_cblock(p->cache_size)) >> 1) +
 					  ctype_threshold(p, WRITE_PROMOTE_THRESHOLD);
 
 		pr_alert("promote thresholds = %u/%u queue stats = %u/%u\n",
@@ -1296,32 +1296,42 @@ static void hint_to_counts(uint32_t val, unsigned *read, unsigned *write)
 }
 
 /* Walk queues for lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
+static int __basic_walk_mappings(struct policy *p, struct basic_cache_entry *e, policy_walk_fn fn, void *context)
+{
+	unsigned reads, writes, nr = 0;
+
+	if (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
+ 		reads = e->ce.count[T_HITS][0];
+ 		writes = e->ce.count[T_HITS][1];
+
+	} else {
+		reads = nr++;
+
+		if (IS_FILO_MRU(p))
+			reads = from_cblock(p->cache_size) - reads - 1;
+
+		writes = 0;
+	}
+
+	return fn(context, e->cblock, e->ce.oblock, counts_to_hint(reads, writes));
+}
+
 static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
 {
 	int r = 0;
-	unsigned nr = 0;
 	struct policy *p = to_policy(pe);
 	struct basic_cache_entry *e;
 
 	mutex_lock(&p->lock);
 
+	list_for_each_entry(e, &p->queues.used, ce.list) {
+		r = __basic_walk_mappings(p, e, fn, context);
+		if (r)
+			return r;
+	}
+
 	list_for_each_entry(e, &p->queues.used, used) {
-		unsigned reads, writes;
-
-		if (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
- 			reads = e->ce.count[T_HITS][0];
- 			writes = e->ce.count[T_HITS][1];
-
-		} else {
-			reads = nr++;
-
-			if (IS_FILO_MRU(p))
-				reads = from_cblock(p->cache_size) - reads - 1;
-
-			writes = 0;
-		}
-
-		r = fn(context, e->cblock, e->ce.oblock, counts_to_hint(reads, writes));
+		r = __basic_walk_mappings(p, e, fn, context);
 		if (r)
 			break;
 	}
@@ -1371,28 +1381,32 @@ static void basic_force_mapping(struct dm_cache_policy *pe,
 	mutex_unlock(&p->lock);
 }
 
+static void sort_in_cache_entry(struct policy *p, struct basic_cache_entry *e)
+{
+	struct list_head *elt;
+	struct basic_cache_entry *cur;
+
+	list_for_each(elt, &p->queues.used) {
+		cur = list_entry(elt, struct basic_cache_entry, ce.list);
+		if (e->ce.count[T_HITS][0] > cur->ce.count[T_HITS][0])
+			break;
+	}
+
+	if (elt == &p->queues.used)
+		list_add_tail(&e->ce.list, elt);
+	else
+		list_add(&e->ce.list, elt);
+}
+
 static int basic_load_mapping(struct dm_cache_policy *pe,
 			      dm_oblock_t oblock, dm_cblock_t cblock,
 			      uint32_t hint, bool hint_valid)
 {
-	int r = 0;
 	struct policy *p = to_policy(pe);
-	struct basic_cache_entry *e;
-	bool is_multiqueue = (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p));
+	struct basic_cache_entry *e = alloc_cache_entry(p);
 
-	/* FIXME: if we can't allocate the array, just add the mapping? */
-	if (!is_multiqueue &&
-	    !p->tmp_entries) {
-		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * from_cblock(p->cache_size));
-		if (!p->tmp_entries)
-			return -ENOMEM;
-	}
-
-	e = alloc_cache_entry(p);
-	if (!e) {
-		r = -ENOMEM;
-		goto bad;
-	}
+	if (!e)
+		return -ENOMEM;
 
 	e->cblock = cblock;
 	e->ce.oblock = oblock;
@@ -1401,41 +1415,21 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 		unsigned reads, writes;
 
 		hint_to_counts(hint, &reads, &writes);
+		e->ce.count[T_HITS][0] = reads;
+		e->ce.count[T_HITS][1] = writes;
 
-		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
+		if (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
 			/* FIXME: store also in larger hints rather than making up. */
-			e->ce.count[T_HITS][0] = reads;
-			e->ce.count[T_HITS][1] = writes;
 			e->ce.count[T_SECTORS][0] = reads * p->block_size;
 			e->ce.count[T_SECTORS][1] = writes * p->block_size;
 			add_cache_entry(p, e);
-			p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
 
 		} else
-			p->tmp_entries[reads] = e;
-	}
+			sort_in_cache_entry(p, e);
+	} else
+		add_cache_entry(p, e);
 
-bad:
-	return r;
-}
-
-static void basic_load_mappings_completed(struct dm_cache_policy *pe)
-{
-	struct policy *p = to_policy(pe);
-
-	if (p->tmp_entries) {
-		unsigned u;
-
-		for (u = 0; u < from_cblock(p->cache_size); p++) {
-			if (p->tmp_entries[u]) {
-				add_cache_entry(p, p->tmp_entries[u]);
-				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-			}
-		}
-
-		vfree(p->tmp_entries);
-		p->tmp_entries = NULL;
-	}
+	return 0;
 }
 
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
@@ -1535,7 +1529,6 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = basic_destroy;
 	p->policy.map = basic_map;
 	p->policy.load_mapping = basic_load_mapping;
-	p->policy.load_mappings_completed = basic_load_mappings_completed;
 	p->policy.walk_mappings = basic_walk_mappings;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.force_mapping = basic_force_mapping;
