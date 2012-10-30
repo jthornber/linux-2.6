@@ -1440,14 +1440,7 @@ static void basic_load_mappings_completed(struct dm_cache_policy *pe)
 
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
 {
-	struct policy *p = to_policy(pe);
-	dm_cblock_t r;
-
-	mutex_lock(&p->lock);
-	r = from_cblock(p->nr_cblocks_allocated);
-	mutex_unlock(&p->lock);
-
-	return r;
+	return from_cblock(to_policy(pe)->nr_cblocks_allocated);
 }
 
 static void basic_tick(struct dm_cache_policy *pe)
