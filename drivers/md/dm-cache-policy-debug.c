@@ -568,11 +568,11 @@ static int debug_writeback_work(struct dm_cache_policy *pe,
 	return r;
 }
 
-static dm_block_t debug_residency(struct dm_cache_policy *pe)
+static dm_cblock_t debug_residency(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
 	bool ok = true;
-	dm_block_t r;
+	dm_cblock_t r;
 
 	mutex_lock(&p->lock);
 	r = policy_residency(p->debug_policy);

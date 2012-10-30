@@ -193,12 +193,12 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return 0;
 }
 
-static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
+static void __set_clear_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock, bool set)
 {
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 
-	e = lookup_cache_entry(p, oblock);
+	e = lookup_cache_entry(p, cblock);
 	BUG_ON(!e);
 
 	if (set) {
@@ -216,14 +216,14 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	}
 }
 
-static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+static void wb_set_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock)
 {
-	__set_clear_dirty(pe, oblock, true);
+	__set_clear_dirty(pe, cblock, true);
 }
 
-static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+static void wb_clear_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock)
 {
-	__set_clear_dirty(pe, oblock, false);
+	__set_clear_dirty(pe, cblock, false);
 }
 
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)

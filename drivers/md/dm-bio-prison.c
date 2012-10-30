@@ -91,6 +91,7 @@ dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
 {
 	return mempool_alloc(prison->cell_pool, gfp);
 }
+EXPORT_SYMBOL_GPL(dm_bio_prison_alloc_cell);
 
 void
 dm_bio_prison_free_cell(struct dm_bio_prison *prison,
@@ -98,6 +99,7 @@ dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 {
 	mempool_free(cell, prison->cell_pool);
 }
+EXPORT_SYMBOL_GPL(dm_bio_prison_free_cell);
 
 static uint32_t hash_key(struct dm_bio_prison *prison, struct dm_cell_key *key)
 {
