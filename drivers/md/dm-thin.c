@@ -248,7 +248,7 @@ static void cell_release(struct pool *pool,
 			 struct dm_bio_prison_cell *cell,
 			 struct bio_list *bios)
 {
-	dm_cell_release(cell, bios);
+	dm_cell_release(pool->prison, cell, bios);
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
@@ -256,7 +256,7 @@ static void cell_release_no_holder(struct pool *pool,
 				   struct dm_bio_prison_cell *cell,
 				   struct bio_list *bios)
 {
-	dm_cell_release_no_holder(cell, bios);
+	dm_cell_release_no_holder(pool->prison, cell, bios);
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
@@ -264,7 +264,14 @@ static void cell_release_singleton(struct pool *pool,
 				   struct dm_bio_prison_cell *cell,
 				   struct bio *bio)
 {
-	dm_cell_release_singleton(cell, bio);
+	dm_cell_release_singleton(pool->prison, cell, bio);
+	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
+static void cell_error(struct pool *pool,
+		       struct dm_bio_prison_cell *cell)
+{
+	dm_cell_error(pool->prison, cell);
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
@@ -578,7 +585,7 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 {
 	if (m->bio)
 		m->bio->bi_end_io = m->saved_bi_end_io;
-	dm_cell_error(m->cell);
+	cell_error(m->tc->pool, m->cell);
 	list_del(&m->list);
 	mempool_free(m, m->tc->pool->mapping_pool);
 }
@@ -593,7 +600,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		bio->bi_end_io = m->saved_bi_end_io;
 
 	if (m->err) {
-		dm_cell_error(m->cell);
+		cell_error(m->tc->pool, m->cell);
 		goto out;
 	}
 
@@ -605,7 +612,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
 	if (r) {
 		DMERR("dm_thin_insert_block() failed");
-		dm_cell_error(m->cell);
+		cell_error(m->tc->pool, m->cell);
 		goto out;
 	}
 
@@ -772,7 +779,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
 			DMERR("dm_kcopyd_copy() failed");
-			dm_cell_error(cell);
+			cell_error(m->tc->pool, cell);
 		}
 	}
 }
@@ -837,7 +844,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 		if (r < 0) {
 			mempool_free(m, pool->mapping_pool);
 			DMERR("dm_kcopyd_zero() failed");
-			dm_cell_error(cell);
+			cell_error(pool, cell);
 		}
 	}
 }
@@ -1058,7 +1065,7 @@ static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
 
 	default:
 		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
-		dm_cell_error(cell);
+		cell_error(tc->pool, cell);
 		break;
 	}
 }
@@ -1133,7 +1140,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	default:
 		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
 		set_pool_mode(tc->pool, PM_READ_ONLY);
-		dm_cell_error(cell);
+		cell_error(pool, cell);
 		break;
 	}
 }
