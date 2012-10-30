@@ -309,7 +309,7 @@ struct mq_policy {
 };
 
 /*----------------------------------------------------------------*/
-/* Free/alloc mq cache entry sructures. */
+/* Free/alloc mq cache entry structures. */
 static void takeout_queue(struct list_head *lh, struct queue *q)
 {
 	unsigned level;

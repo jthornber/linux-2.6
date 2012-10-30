@@ -35,6 +35,9 @@
 #define RANDOM_THRESHOLD_DEFAULT 1
 #define SEQUENTIAL_THRESHOLD_DEFAULT 2
 
+static struct kmem_cache *basic_entry_cache;
+static struct kmem_cache *track_entry_cache;
+
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
 	PATTERN_RANDOM
@@ -230,7 +233,6 @@ struct policy {
 	/* FIXME: unify with track_queue? */
 	dm_cblock_t cache_size;
 	unsigned cache_nr_words;
-	struct basic_cache_entry *cblocks;
 	struct hash chash;
 	unsigned cache_count[2][2];
 
@@ -312,59 +314,87 @@ static void free_hash(struct hash *hash)
 	vfree(hash->table);
 }
 
-static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size)
+/* Free/alloc basic cache entry structures. */
+static void free_cache_entries(struct policy *p)
 {
-	int r = -ENOMEM;
+	struct basic_cache_entry *e, *tmp;
 
-	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
-	if (p->cblocks) {
-		unsigned u = from_cblock(cache_size);
+	list_splice(&p->queues.free, &p->queues.used);
+	list_for_each_entry_safe(e, tmp, &p->queues.free, ce.list)
+		kmem_cache_free(basic_entry_cache, e);
+}
 
-		queue_init(&p->queues.free);
+static int alloc_cache_entries_with_hash(struct policy *p, dm_cblock_t cache_size)
+{
+	int r;
+	unsigned u = from_cblock(cache_size);
 
-		while (u--)
-			queue_add(&p->queues.free, &p->cblocks[u].ce.list);
+	queue_init(&p->queues.free);
 
-		p->nr_cblocks_allocated = to_cblock(0);
+	while (u--) {
+		struct basic_cache_entry *e = kmem_cache_alloc(basic_entry_cache, GFP_KERNEL);
 
-		/* Cache entries hash. */
-		r = alloc_hash(&p->chash, from_cblock(cache_size));
-		if (r)
-			vfree(p->cblocks);
+		if (!e)
+			goto bad_cache_alloc;
+
+		queue_add(&p->queues.free, &e->ce.list);
 	}
 
-	return r;
+	p->nr_cblocks_allocated = to_cblock(0);
+
+	/* Cache entries hash. */
+	r = alloc_hash(&p->chash, from_cblock(cache_size));
+	if (!r)
+		return 0;
+
+bad_cache_alloc:
+	free_cache_entries(p);
+
+	return -ENOMEM;
 }
 
 static void free_cache_blocks_and_hash(struct policy *p)
 {
 	free_hash(&p->chash);
-	vfree(p->cblocks);
+	free_cache_entries(p);
 }
 
-static int alloc_track_queue_with_hash(struct track_queue *q, unsigned elts)
+static void free_track_entries(struct policy *p)
+{
+	struct track_queue_entry *tqe, *tmp;
+
+	list_splice(&p->queues.pre.free, &p->queues.pre.free);
+	list_splice(&p->queues.pre.free, &p->queues.pre.used);
+	list_splice(&p->queues.pre.free, &p->queues.post.free);
+	list_splice(&p->queues.pre.free, &p->queues.post.used);
+	list_for_each_entry_safe(tqe, tmp, &p->queues.pre.free, ce.list)
+		kmem_cache_free(track_entry_cache, tqe);
+}
+
+static int alloc_track_queue_with_hash(struct policy *p, struct track_queue *q, unsigned elts)
 {
 	int r;
-	unsigned u;
+	unsigned u = elts;
 
 	queue_init(&q->free);
 	queue_init(&q->used);
 
-	q->elts = vzalloc(sizeof(*q->elts) * elts);
-	if (!q->elts)
-		return -ENOMEM;
+	while (u--) {
+		struct track_queue *tqe = kmem_cache_alloc(track_entry_cache, GFP_KERNEL);
 
-	u = q->nr_elts = elts;
-	while (u--)
+		if (!tqe)
+			goto bad_cache_alloc;
+
 		queue_add(&q->free, &q->elts[u].ce.list);
-
-	r = alloc_hash(&q->hash, elts);
-	if (r) {
-		vfree(q->elts);
-		return -ENOMEM;
 	}
 
-	return 0;
+	r = alloc_hash(&q->hash, elts);
+	if (!r)
+		return 0;
+
+bad_cache_alloc:
+	free_track_entries(p);
+	return -ENOMEM;
 }
 
 static void free_track_queue(struct track_queue *q)
@@ -942,7 +972,6 @@ static struct list_head *queue_evict_lfu_mfu(struct policy *p)
 
 static struct list_head *queue_evict_random(struct policy *p)
 {
-	struct basic_cache_entry *e;
 	struct list_head *r;
 	dm_block_t off = random32();
 
@@ -950,11 +979,13 @@ static struct list_head *queue_evict_random(struct policy *p)
 	if (from_cblock(p->cache_size) >= UINT_MAX)
 		off |= ((dm_block_t) random32() << 32);
 
-	e = p->cblocks + do_div(off, from_cblock(p->cache_size));
-	r = &e->ce.list;
-	queue_del(r);
-	queue_del(&e->used);
+	/* FIXME: overhead walking list. */
+	off = do_div(off, from_cblock(p->cache_size));
+	r = p->queues.used.next;
+	while (off--)
+		r = r->next;
 
+	queue_del(r);
 	return r;
 }
 
@@ -1557,7 +1588,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	mutex_init(&p->lock);
 
 	/* Allocate cache entry structs and add them to free list. */
-	r = alloc_cache_blocks_with_hash(p, cache_size);
+	r = alloc_cache_entries_with_hash(p, cache_size);
 	if (r)
 		goto bad_free_policy;
 
@@ -1567,12 +1598,12 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		goto bad_free_cache_blocks_and_hash;
 
 	/* Create in queue to track entries waiting for the cache in order to stear their promotion. */
-	r = alloc_track_queue_with_hash(&p->queues.pre, max(from_cblock(cache_size), (dm_block_t) 128));
+	r = alloc_track_queue_with_hash(p, &p->queues.pre, max(from_cblock(cache_size), (dm_block_t) 128));
 	if (r)
 		goto bad_free_allocation_bitset;
 
 	/* Create cache_size queue to track evicted cache entries. */
-	r = alloc_track_queue_with_hash(&p->queues.post, max(from_cblock(cache_size) >> 1, (dm_block_t) 128));
+	r = alloc_track_queue_with_hash(p, &p->queues.post, max(from_cblock(cache_size) >> 1, (dm_block_t) 128));
 	if (r)
 		goto bad_free_track_queue_pre;
 
@@ -1689,13 +1720,34 @@ static int __init basic_init(void)
 {
 	int i = ARRAY_SIZE(policy_types), r;
 
+	basic_entry_cache = kmem_cache_create("dm_basic_policy_cache_entry",
+					      sizeof(struct basic_cache_entry),
+					      __alignof__(struct basic_cache_entry),
+					      0, NULL);
+	if (!basic_entry_cache)
+		goto bad;
+
+	track_entry_cache = kmem_cache_create("dm_basic_policy_track_entry",
+					      sizeof(struct track_queue_entry),
+					      __alignof__(struct track_queue_entry),
+					      0, NULL);
+	if (!track_entry_cache)
+		goto bad_basic_entry_create;
+
 	while (i--) {
 		r = dm_cache_policy_register(policy_types[i]);
 		if (r)
 			break;
 	}
 
-	return r;
+	if (!r)
+		return 0;
+
+	kmem_cache_destroy(track_entry_cache);
+bad_basic_entry_create:
+	kmem_cache_destroy(basic_entry_cache);
+bad:
+	return -ENOMEM;
 }
 
 static void __exit basic_exit(void)
@@ -1704,6 +1756,9 @@ static void __exit basic_exit(void)
 
 	while (i--)
 		dm_cache_policy_unregister(policy_types[i]);
+
+	kmem_cache_destroy(track_entry_cache);
+	kmem_cache_destroy(basic_entry_cache);
 }
 
 module_init(basic_init);
