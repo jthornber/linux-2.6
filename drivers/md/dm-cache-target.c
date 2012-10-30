@@ -149,7 +149,7 @@ struct cache {
 	/*
 	 * cache_size entries, dirty if set
 	 */
-	unsigned nr_dirty;
+	dm_cblock_t nr_dirty;
 	unsigned long *dirty_bitset;
 
 	/*
@@ -288,7 +288,7 @@ static bool is_dirty(struct cache *cache, dm_cblock_t b)
 static void set_dirty(struct cache *cache, dm_cblock_t b)
 {
 	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset)) {
-		cache->nr_dirty++;
+		cache->nr_dirty = to_cblock(from_cblock(cache->nr_dirty) + 1);
 		policy_set_dirty(cache->policy, b);
 	}
 }
@@ -298,7 +298,8 @@ static void clear_dirty(struct cache *cache, dm_cblock_t b)
 	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset)) {
 		policy_clear_dirty(cache->policy, b);
 
-		if (!--cache->nr_dirty)
+		cache->nr_dirty = to_cblock(from_cblock(cache->nr_dirty) - 1);
+		if (!from_cblock(cache->nr_dirty))
 			dm_table_event(cache->ti->table);
 	}
 }
@@ -1067,7 +1068,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 
 			r = bio_detain_no_holder(cache, oblock, GFP_ATOMIC, &old_ocell);
 			if (r) {
-				policy_set_dirty(cache->policy, oblock);
+				policy_set_dirty(cache->policy, cblock);
 				break;
 			}
 
@@ -1738,7 +1739,8 @@ static int write_dirty_bitset(struct cache *cache)
 	unsigned i, r;
 
 	for (i = 0; i < from_cblock(cache->cache_size); i++) {
-		r = dm_cache_set_dirty(cache->cmd, to_cblock(i), is_dirty(cache, i));
+		r = dm_cache_set_dirty(cache->cmd, to_cblock(i),
+				       is_dirty(cache, to_cblock(i)));
 		if (r)
 			return r;
 	}

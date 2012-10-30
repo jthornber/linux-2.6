@@ -21,16 +21,16 @@ static inline int policy_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return p->map(p, oblock, can_migrate, discarded_oblock, bio, result);
 }
 
-static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline void policy_set_dirty(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	if (p->set_dirty)
-		p->set_dirty(p, oblock);
+		p->set_dirty(p, cblock);
 }
 
-static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	if (p->clear_dirty)
-		p->clear_dirty(p, oblock);
+		p->clear_dirty(p, cblock);
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p,
