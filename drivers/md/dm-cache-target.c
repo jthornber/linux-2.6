@@ -285,18 +285,18 @@ static bool is_dirty(struct cache *cache, dm_cblock_t b)
 	return test_bit(from_cblock(b), cache->dirty_bitset);
 }
 
-static void set_dirty(struct cache *cache, dm_cblock_t b)
+static void set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset)) {
+	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		cache->nr_dirty = to_cblock(from_cblock(cache->nr_dirty) + 1);
-		policy_set_dirty(cache->policy, b);
+		policy_set_dirty(cache->policy, oblock);
 	}
 }
 
-static void clear_dirty(struct cache *cache, dm_cblock_t b)
+static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset)) {
-		policy_clear_dirty(cache->policy, b);
+	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
+		policy_clear_dirty(cache->policy, oblock);
 
 		cache->nr_dirty = to_cblock(from_cblock(cache->nr_dirty) - 1);
 		if (!from_cblock(cache->nr_dirty))
@@ -418,7 +418,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 {
 	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
-		set_dirty(cache, cblock);
+		set_dirty(cache, oblock, cblock);
 		clear_discard(cache, oblock);
 	}
 }
@@ -581,6 +581,7 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 
 	if (mg->demote) {
 		cell_defer(cache, mg->old_ocell, mg->promote ? 0 : 1);
+		clear_dirty(cache, mg->old_oblock, mg->cblock);
 
 		if (mg->promote) {
 			mg->demote = false;
@@ -592,10 +593,9 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			cleanup_migration(mg);
 	} else {
 		cell_defer(cache, mg->new_ocell, 1);
+		clear_dirty(cache, mg->new_oblock, mg->cblock);
 		cleanup_migration(mg);
 	}
-
-	clear_dirty(cache, mg->cblock);
 }
 
 static void copy_complete(int read_err, unsigned long write_err, void *context)
@@ -653,7 +653,8 @@ static void issue_copy(struct dm_cache_migration *mg)
 	struct cache *cache = mg->cache;
 
 	if (mg->demote)
-		avoid = !is_dirty(cache, mg->cblock) || is_discarded(cache, mg->old_oblock);
+		avoid = !is_dirty(cache, mg->cblock) ||
+			is_discarded(cache, mg->old_oblock);
 	else
 		avoid = is_discarded(cache, mg->new_oblock);
 
@@ -1068,7 +1069,7 @@ static void writeback_all_dirty_blocks(struct cache *cache)
 
 			r = bio_detain_no_holder(cache, oblock, GFP_ATOMIC, &old_ocell);
 			if (r) {
-				policy_set_dirty(cache->policy, cblock);
+				policy_set_dirty(cache->policy, oblock);
 				break;
 			}
 
@@ -1254,7 +1255,7 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, b
 {
 	struct cache *cache = context;
 
-	dirty ? set_dirty(cache, cblock) : clear_dirty(cache, cblock);
+	dirty ? set_dirty(cache, oblock, cblock) : clear_dirty(cache, oblock, cblock);
 	return policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
 }
 

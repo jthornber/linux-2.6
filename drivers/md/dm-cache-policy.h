@@ -115,8 +115,11 @@ struct dm_cache_policy {
 		   struct bio *bio,
 		   struct policy_result *result);
 
-	void (*set_dirty)(struct dm_cache_policy *p, dm_cblock_t cblock);
-	void (*clear_dirty)(struct dm_cache_policy *p, dm_cblock_t cblock);
+	/*
+	 * oblock must be a mapped block.
+	 */
+	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a
