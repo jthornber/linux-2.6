@@ -1109,6 +1109,7 @@ static void do_worker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(ws, struct cache, worker);
 
+	// FIXME: get rid of this loop, and let wake_up do its thing.
 	do {
 		if (!is_quiescing(cache))
 			process_deferred_bios(cache);
@@ -1117,7 +1118,6 @@ static void do_worker(struct work_struct *ws)
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
 
 		writeback_all_dirty_blocks(cache);
-
 
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
