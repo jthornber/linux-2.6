@@ -61,6 +61,7 @@ struct cache_disk_superblock {
 	__u8 uuid[16];
 	__le64 magic;
 	__le32 version;
+	__le32 hint_size;
 
 	__u8 policy_name[CACHE_POLICY_NAME_SIZE];
 
