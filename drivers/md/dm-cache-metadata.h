@@ -29,12 +29,12 @@ static inline dm_block_t from_oblock(dm_oblock_t b)
 	return (__force dm_block_t) b;
 }
 
-static inline dm_cblock_t to_cblock(dm_block_t b)
+static inline dm_cblock_t to_cblock(uint32_t b)
 {
 	return (__force dm_cblock_t) b;
 }
 
-static inline dm_block_t from_cblock(dm_cblock_t b)
+static inline uint32_t from_cblock(dm_cblock_t b)
 {
 	return (__force dm_block_t) b;
 }

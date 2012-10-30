@@ -46,7 +46,7 @@ struct policy {
 	struct wb_cache_entry *cblocks;
 	struct hash chash;
 
-	dm_block_t nr_dirty;
+	dm_cblock_t nr_dirty;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -193,37 +193,37 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return 0;
 }
 
-static void __set_clear_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock, bool set)
+static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
 {
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 
-	e = lookup_cache_entry(p, cblock);
+	e = lookup_cache_entry(p, oblock);
 	BUG_ON(!e);
 
 	if (set) {
 		if (!e->dirty) {
 			e->dirty = true;
-			p->nr_dirty++;
+			p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) + 1);
 		}
 
 	} else {
 		if (e->dirty) {
 			e->dirty = false;
-			BUG_ON(!p->nr_dirty);
-			p->nr_dirty--;
+			BUG_ON(!from_cblock(p->nr_dirty));
+			p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) - 1);
 		}
 	}
 }
 
-static void wb_set_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock)
+static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
-	__set_clear_dirty(pe, cblock, true);
+	__set_clear_dirty(pe, oblock, true);
 }
 
-static void wb_clear_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock)
+static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
-	__set_clear_dirty(pe, cblock, false);
+	__set_clear_dirty(pe, oblock, false);
 }
 
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
@@ -302,7 +302,7 @@ static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 {
 	struct wb_cache_entry *r;
 
-	BUG_ON(p->nr_dirty >= p->cache_size);
+	BUG_ON(from_cblock(p->nr_dirty) >= from_cblock(p->cache_size));
 
 	if (!p->nr_dirty)
 		return NULL;
@@ -318,7 +318,7 @@ static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 	BUG_ON(!r->dirty);
 	r->dirty = false;
 	BUG_ON(!p->nr_dirty);
-	p->nr_dirty--;
+	p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) - 1);
 
 	return r;
 }
@@ -349,7 +349,7 @@ static int wb_writeback_work(struct dm_cache_policy *pe,
 
 static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 {
-	return from_cblock(to_policy(pe)->nr_cblocks_allocated);
+	return to_policy(pe)->nr_cblocks_allocated;
 }
 
 static int wb_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
@@ -359,7 +359,7 @@ static int wb_status(struct dm_cache_policy *pe, status_type_t type, unsigned st
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("%llu", (long long unsigned) p->nr_dirty);
+		DMEMIT("%u", from_cblock(p->nr_dirty));
 		break;
 
 	case STATUSTYPE_TABLE:

@@ -1316,7 +1316,7 @@ static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, vo
 			reads = nr++;
 
 			if (IS_FILO_MRU(p))
-				reads = p->cache_size - reads - 1;
+				reads = from_cblock(p->cache_size) - reads - 1;
 
 			writes = 0;
 		}
@@ -1383,7 +1383,7 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 	/* FIXME: if we can't allocate the array, just add the mapping? */
 	if (!is_multiqueue &&
 	    !p->tmp_entries) {
-		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * p->cache_size);
+		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * from_cblock(p->cache_size));
 		if (!p->tmp_entries)
 			return -ENOMEM;
 	}
@@ -1426,7 +1426,7 @@ static void basic_load_mappings_completed(struct dm_cache_policy *pe)
 	if (p->tmp_entries) {
 		unsigned u;
 
-		for (u = 0; u < p->cache_size; p++) {
+		for (u = 0; u < from_cblock(p->cache_size); p++) {
 			if (p->tmp_entries[u]) {
 				add_cache_entry(p, p->tmp_entries[u]);
 				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
@@ -1440,7 +1440,7 @@ static void basic_load_mappings_completed(struct dm_cache_policy *pe)
 
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
 {
-	return from_cblock(to_policy(pe)->nr_cblocks_allocated);
+	return to_policy(pe)->nr_cblocks_allocated;
 }
 
 static void basic_tick(struct dm_cache_policy *pe)
@@ -1596,7 +1596,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	p->find_free_last_word = 0;
 	p->block_size = block_size;
 	p->origin_size = origin_size;
-	p->calc_threshold_hits = max(from_cblock(cache_size) >> 2, (dm_block_t) 128);
+	p->calc_threshold_hits = max(from_cblock(cache_size) >> 2, 128U);
 	p->promote_threshold[0] = ctype_threshold(p, READ_PROMOTE_THRESHOLD);
 	p->promote_threshold[1] = ctype_threshold(p, WRITE_PROMOTE_THRESHOLD);
 	atomic_set(&p->tick.t_ext, 0);
@@ -1613,12 +1613,12 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		goto bad_free_cache_blocks_and_hash;
 
 	/* Create in queue to track entries waiting for the cache in order to stear their promotion. */
-	r = alloc_track_queue_with_hash(p, &p->queues.pre, max(from_cblock(cache_size), (dm_block_t) 128));
+	r = alloc_track_queue_with_hash(p, &p->queues.pre, max(from_cblock(cache_size), 128U));
 	if (r)
 		goto bad_free_allocation_bitset;
 
 	/* Create cache_size queue to track evicted cache entries. */
-	r = alloc_track_queue_with_hash(p, &p->queues.post, max(from_cblock(cache_size) >> 1, (dm_block_t) 128));
+	r = alloc_track_queue_with_hash(p, &p->queues.post, max(from_cblock(cache_size) >> 1, 128U));
 	if (r)
 		goto bad_free_track_queue_pre;
 
@@ -1641,11 +1641,11 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		 * Ie. 75% minimum is reserved for cblocks with multiple hits.
 		 */
 		mqueues = 2;
-		p->queues.twoqueue_q0_max_elts = min(max(from_cblock(cache_size) >> 2, (dm_block_t) 16),
+		p->queues.twoqueue_q0_max_elts = min(max(from_cblock(cache_size) >> 2, 16U),
 						     from_cblock(cache_size));
 
 	} else if (IS_MULTIQUEUE(p)) {
-		mqueues = min(max((dm_block_t) ilog2(block_size << 13), (dm_block_t) 8), from_cblock(cache_size)); /* Multiple queues. */
+		mqueues = min(max((dm_block_t) ilog2(block_size << 13), (dm_block_t) 8), (dm_block_t) from_cblock(cache_size)); /* Multiple queues. */
 		p->jiffies = get_jiffies_64();
 	}
 
