@@ -101,12 +101,17 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cac
 	struct dm_cache_policy_type *type;
 
 	type = get_policy(name);
-	if (type) {
-		p = type->create(cache_size, origin_size, block_size, argc, argv);
-		if (p)
-			p->private = type;
-	} else
+	if (!type) {
 		DMWARN("unknown policy type");
+		return NULL;
+	}
+
+	p = type->create(cache_size, origin_size, block_size, argc, argv);
+	if (!p) {
+		put_policy(type);
+		return NULL;
+	}
+	p->private = type;
 
 	return p;
 }
