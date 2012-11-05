@@ -34,14 +34,22 @@ struct dm_cell_key {
 struct dm_bio_prison *dm_bio_prison_create(unsigned nr_cells);
 void dm_bio_prison_destroy(struct dm_bio_prison *prison);
 
+struct dm_bio_prison_cell *dm_bio_prison_alloc_cell(struct dm_bio_prison *prison,
+						    gfp_t gfp);
+void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
+			     struct dm_bio_prison_cell *cell);
+
 /*
  * This may block if a new cell needs allocating.  You must ensure that
  * cells will be unlocked even if the calling thread is blocked.
  *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
-int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
-		  struct bio *inmate, struct dm_bio_prison_cell **ref);
+int dm_bio_detain(struct dm_bio_prison *prison,
+		  struct dm_cell_key *key,
+		  struct bio *inmate,
+		  struct dm_bio_prison_cell *memory,
+		  struct dm_bio_prison_cell **ref);
 
 void dm_cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios);
 void dm_cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio); // FIXME: bio arg not needed
