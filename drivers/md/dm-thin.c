@@ -595,6 +595,7 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 {
 	struct thin_c *tc = m->tc;
+	struct pool *pool = tc->pool;
 	struct bio *bio;
 	int r;
 
@@ -603,7 +604,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		bio->bi_end_io = m->saved_bi_end_io;
 
 	if (m->err) {
-		cell_error(tc->pool, m->cell);
+		cell_error(pool, m->cell);
 		goto out;
 	}
 
@@ -615,7 +616,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
 	if (r) {
 		DMERR("dm_thin_insert_block() failed");
-		cell_error(tc->pool, m->cell);
+		cell_error(pool, m->cell);
 		goto out;
 	}
 
@@ -633,7 +634,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 
 out:
 	list_del(&m->list);
-	mempool_free(m, tc->pool->mapping_pool);
+	mempool_free(m, pool->mapping_pool);
 }
 
 static void process_prepared_discard_fail(struct dm_thin_new_mapping *m)
@@ -1105,12 +1106,13 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 {
 	int r;
 	dm_block_t data_block;
+	struct pool *pool = tc->pool;
 
 	/*
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
 	if (!bio->bi_size) {
-		cell_release_singleton(tc->pool, cell, bio);
+		cell_release_singleton(pool, cell, bio);
 		remap_and_issue(tc, bio, 0);
 		return;
 	}
@@ -1120,7 +1122,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 */
 	if (bio_data_dir(bio) == READ) {
 		zero_fill_bio(bio);
-		cell_release_singleton(tc->pool, cell, bio);
+		cell_release_singleton(pool, cell, bio);
 		bio_endio(bio, 0);
 		return;
 	}
@@ -1135,13 +1137,13 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 		break;
 
 	case -ENOSPC:
-		no_space(tc->pool, cell);
+		no_space(pool, cell);
 		break;
 
 	default:
 		DMERR("%s: alloc_data_block() failed, error = %d", __func__, r);
-		set_pool_mode(tc->pool, PM_READ_ONLY);
-		cell_error(tc->pool, cell);
+		set_pool_mode(pool, PM_READ_ONLY);
+		cell_error(pool, cell);
 		break;
 	}
 }
@@ -1149,6 +1151,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 static void process_bio(struct thin_c *tc, struct bio *bio)
 {
 	int r;
+	struct pool *pool = tc->pool;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_bio_prison_cell *cell;
 	struct dm_cell_key key;
@@ -1159,7 +1162,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	 * being provisioned so we have nothing further to do here.
 	 */
 	build_virtual_key(tc->td, block, &key);
-	if (bio_detain(tc->pool, &key, bio, &cell))
+	if (bio_detain(pool, &key, bio, &cell))
 		return;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
@@ -1174,7 +1177,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		 * TODO: this will probably have to change when discard goes
 		 * back in.
 		 */
-		cell_release_singleton(tc->pool, cell, bio);
+		cell_release_singleton(pool, cell, bio);
 
 		if (lookup_result.shared)
 			process_shared_bio(tc, bio, block, &lookup_result);
@@ -1184,7 +1187,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	case -ENODATA:
 		if (bio_data_dir(bio) == READ && tc->origin_dev) {
-			cell_release_singleton(tc->pool, cell, bio);
+			cell_release_singleton(pool, cell, bio);
 			remap_to_origin_and_issue(tc, bio);
 		} else
 			provision_block(tc, bio, block, cell);
@@ -1192,7 +1195,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	default:
 		DMERR("dm_thin_find_block() failed, error = %d", r);
-		cell_release_singleton(tc->pool, cell, bio);
+		cell_release_singleton(pool, cell, bio);
 		bio_io_error(bio);
 		break;
 	}
