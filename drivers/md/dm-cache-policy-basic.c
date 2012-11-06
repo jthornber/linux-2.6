@@ -1408,7 +1408,6 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = basic_destroy;
 	p->policy.map = basic_map;
 	p->policy.load_mapping = basic_load_mapping;
-	p->policy.load_mappings_completed = basic_load_mappings_completed;
 	p->policy.walk_mappings = basic_walk_mappings;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.remove_any = NULL;

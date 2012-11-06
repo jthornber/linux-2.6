@@ -938,7 +938,6 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.load_mapping = mq_load_mapping;
-	mq->policy.load_mappings_completed = NULL;
 	mq->policy.walk_mappings = mq_walk_mappings;
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.remove_any = NULL;

@@ -128,8 +128,6 @@ struct dm_cache_policy {
 	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock,
 			    uint32_t hint, bool hint_valid);
 
-	void (*load_mappings_completed)(struct dm_cache_policy *p);
-
 	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn, void *context);
 
 	/*

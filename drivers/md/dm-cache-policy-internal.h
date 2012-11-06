@@ -40,12 +40,6 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 	return p->load_mapping(p, oblock, cblock, hint, hint_valid);
 }
 
-static inline void policy_load_mappings_completed(struct dm_cache_policy *p)
-{
-	if (p->load_mappings_completed)
-		p->load_mappings_completed(p);
-}
-
 static inline int policy_walk_mappings(struct dm_cache_policy *p,
 				      policy_walk_fn fn, void *context)
 {

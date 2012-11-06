@@ -1657,7 +1657,6 @@ static void cache_resume(struct dm_target *ti)
 	struct cache *cache = ti->private;
 
 	cache->need_tick_bio = true;
-	policy_load_mappings_completed(cache->policy);
 	do_waker(&cache->waker.work);
 }
 
