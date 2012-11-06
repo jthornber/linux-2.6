@@ -1,5 +1,4 @@
 /*
- *
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
  * writeback cache policy supporting flushing out dirty cache blocks.
@@ -24,6 +23,7 @@ struct wb_cache_entry {
 
 	dm_cblock_t cblock;
 	dm_oblock_t oblock;
+	bool dirty;
 };
 
 struct hash {
@@ -45,6 +45,8 @@ struct policy {
 	dm_cblock_t cache_size, nr_cblocks_allocated;
 	struct wb_cache_entry *cblocks;
 	struct hash chash;
+
+	dm_cblock_t nr_dirty;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -92,10 +94,10 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size
 
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
 	if (p->cblocks) {
-		while (cache_size != to_cblock(0)) {
-			list_add(&p->cblocks[from_cblock(cache_size)].list, &p->free);
-			cache_size = to_cblock(from_cblock(cache_size) - 1);
-		}
+		unsigned u = from_cblock(cache_size);
+
+		while (u--)
+			list_add(&p->cblocks[u].list, &p->free);
 
 		p->nr_cblocks_allocated = 0;
 
@@ -191,33 +193,43 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return 0;
 }
 
-static void wb_destroy(struct dm_cache_policy *pe)
+static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
 {
 	struct policy *p = to_policy(pe);
+	struct wb_cache_entry *e;
 
-	free_cache_blocks_and_hash(p);
-	kfree(p);
+	e = lookup_cache_entry(p, oblock);
+	BUG_ON(!e);
+
+	if (set) {
+		if (!e->dirty) {
+			e->dirty = true;
+			p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) + 1);
+		}
+
+	} else {
+		if (e->dirty) {
+			e->dirty = false;
+			BUG_ON(!from_cblock(p->nr_dirty));
+			p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) - 1);
+		}
+	}
+}
+
+static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+{
+	__set_clear_dirty(pe, oblock, true);
+}
+
+static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+{
+	__set_clear_dirty(pe, oblock, false);
 }
 
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
 {
 	insert_cache_hash_entry(p, e);
 	list_add(&e->list, &p->used);
-	p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-}
-
-static struct wb_cache_entry *del_cache_entry(struct policy *p)
-{
-	if (!list_empty(&p->used)) {
-		struct wb_cache_entry *e = list_entry(list_pop(&p->used), struct wb_cache_entry, list);
-
-		remove_cache_hash_entry(e);
-		list_add(&e->list, &p->free);
-		p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) - 1);
-		return e;
-	}
-
-	return NULL;
 }
 
 static int wb_load_mapping(struct dm_cache_policy *pe,
@@ -226,10 +238,8 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 {
 	int r;
 	struct policy *p = to_policy(pe);
-	struct wb_cache_entry *e;
+	struct wb_cache_entry *e = alloc_cache_entry(p);
 
-	mutex_lock(&p->lock);
-	e = alloc_cache_entry(p);
 	if (e) {
 		e->cblock = cblock;
 		e->oblock = oblock;
@@ -239,9 +249,15 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	} else
 		r = -ENOMEM;
 
-	mutex_unlock(&p->lock);
-
 	return r;
+}
+
+static void wb_destroy(struct dm_cache_policy *pe)
+{
+	struct policy *p = to_policy(pe);
+
+	free_cache_blocks_and_hash(p);
+	kfree(p);
 }
 
 static struct wb_cache_entry *__wb_force_remove_mapping(struct policy *p, dm_oblock_t oblock)
@@ -269,27 +285,6 @@ static void wb_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 	mutex_unlock(&p->lock);
 }
 
-static int wb_remove_any(struct dm_cache_policy *pe, struct policy_result *result)
-{
-	int r;
-	struct policy *p = to_policy(pe);
-	struct wb_cache_entry *e;
-
-	mutex_lock(&p->lock);
-	e = del_cache_entry(p);
-	if (e) {
-		result->old_oblock = e->oblock;
-		result->cblock = e->cblock;
-		r = 0;
-
-	} else
-		r = -ENOENT;
-
-	mutex_unlock(&p->lock);
-
-	return r;
-}
-
 static void wb_force_mapping(struct dm_cache_policy *pe,
 				dm_oblock_t current_oblock, dm_oblock_t oblock)
 {
@@ -303,30 +298,97 @@ static void wb_force_mapping(struct dm_cache_policy *pe,
 	mutex_unlock(&p->lock);
 }
 
-static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
+static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 {
+	struct wb_cache_entry *r;
+
+	BUG_ON(from_cblock(p->nr_dirty) >= from_cblock(p->cache_size));
+
+	if (!p->nr_dirty)
+		return NULL;
+
+	list_for_each_entry(r, &p->used, list) {
+		if (r->dirty) {
+			list_del_init(&p->used);
+			list_splice(&r->list, &p->used);
+			break;
+		}
+	}
+
+	BUG_ON(!r->dirty);
+	r->dirty = false;
+	BUG_ON(!p->nr_dirty);
+	p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) - 1);
+
+	return r;
+}
+
+static int wb_writeback_work(struct dm_cache_policy *pe,
+			     dm_oblock_t *oblock,
+			     dm_cblock_t *cblock)
+{
+	int r;
 	struct policy *p = to_policy(pe);
-	dm_cblock_t r;
+	struct wb_cache_entry *e;
 
 	mutex_lock(&p->lock);
-	r = p->nr_cblocks_allocated;
+
+	e = get_next_dirty_entry(p);
+	if (e) {
+		*oblock = e->oblock;
+		*cblock = e->cblock;
+		r = 0;
+
+	} else
+		r = -ENOENT;
+
 	mutex_unlock(&p->lock);
 
 	return r;
 }
+
+static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
+{
+	return to_policy(pe)->nr_cblocks_allocated;
+}
+
+#if 0
+static int wb_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+{
+	ssize_t sz = 0;
+	struct policy *p = to_policy(pe);
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%u", from_cblock(p->nr_dirty));
+		break;
+
+	case STATUSTYPE_TABLE:
+		break;
+	}
+
+	return 0;
+}
+#endif
 
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
 	p->policy.destroy = wb_destroy;
 	p->policy.map = wb_map;
+	p->policy.set_dirty = wb_set_dirty;
+	p->policy.clear_dirty = wb_clear_dirty;
 	p->policy.load_mapping = wb_load_mapping;
 	p->policy.walk_mappings = NULL;
 	p->policy.remove_mapping = wb_remove_mapping;
-	p->policy.writeback_work = wb_remove_any;
+	p->policy.writeback_work = wb_writeback_work;
 	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
+#if 0
+	p->policy.status = wb_status;
+	p->policy.message = NULL;
+#endif
 }
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,

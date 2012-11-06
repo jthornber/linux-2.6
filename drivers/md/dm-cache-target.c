@@ -891,7 +891,8 @@ static bool may_migrate(struct cache *cache)
 	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
 	return current_volume < cache->migration_threshold;
 #else
-	return true;
+	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
+	return current_volume < 2048 * 20;
 #endif
 }
 
