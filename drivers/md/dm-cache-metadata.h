@@ -16,8 +16,8 @@
  * origin device, and indexes into the cache device.
  */
 
-typedef dm_block_t __bitwise dm_oblock_t;
-typedef dm_block_t __bitwise dm_cblock_t;
+typedef dm_block_t __bitwise__ dm_oblock_t;
+typedef dm_block_t __bitwise__ dm_cblock_t;
 
 static inline dm_oblock_t to_oblock(dm_block_t b)
 {
