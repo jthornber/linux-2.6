@@ -200,14 +200,14 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain);
 
-int dm_bio_detain_no_holder(struct dm_bio_prison *prison,
-			    struct dm_cell_key *key,
-			    struct dm_bio_prison_cell *memory,
-			    struct dm_bio_prison_cell **ref)
+int dm_get_cell(struct dm_bio_prison *prison,
+		struct dm_cell_key *key,
+		struct dm_bio_prison_cell *memory,
+		struct dm_bio_prison_cell **ref)
 {
 	return __bio_detain(prison, key, NULL, memory, ref);
 }
-EXPORT_SYMBOL_GPL(dm_bio_detain_no_holder);
+EXPORT_SYMBOL_GPL(dm_get_cell);
 
 /*
  * @inmates must have been initialised prior to this call

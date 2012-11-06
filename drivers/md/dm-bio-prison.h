@@ -40,6 +40,19 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 			     struct dm_bio_prison_cell *cell);
 
 /*
+ * Creates, or retrieves a cell for the given key.
+ *
+ * Returns 1 if pre-existing cell returned, zero if new cell created using
+ * @memory.
+ */
+int dm_get_cell(struct dm_bio_prison *prison,
+		struct dm_cell_key *key,
+		struct dm_bio_prison_cell *memory,
+		struct dm_bio_prison_cell **ref);
+
+/*
+ * An atomic op that combines retrieving a cell, and adding a bio to it.
+ *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
 int dm_bio_detain(struct dm_bio_prison *prison,
@@ -47,11 +60,6 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct bio *inmate,
 		  struct dm_bio_prison_cell *memory,
 		  struct dm_bio_prison_cell **ref);
-
-int dm_bio_detain_no_holder(struct dm_bio_prison *prison,
-			    struct dm_cell_key *key,
-			    struct dm_bio_prison_cell *memory,
-			    struct dm_bio_prison_cell **ref);
 
 void dm_cell_release(struct dm_bio_prison *prison,
 		     struct dm_bio_prison_cell *cell,
