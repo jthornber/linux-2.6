@@ -138,8 +138,8 @@ struct dm_cache_policy {
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
 
-	/* Remove any entry (e.g. for writeback purpose) */
-	int (*remove_any)(struct dm_cache_policy *p, struct policy_result *result);
+	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
+
 
 	/*
 	 * How full is the cache?

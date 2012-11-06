@@ -46,14 +46,16 @@ static inline int policy_walk_mappings(struct dm_cache_policy *p,
 	return p->walk_mappings ? p->walk_mappings(p, fn, context) : 0;
 }
 
+static inline int policy_writeback_work(struct dm_cache_policy *p,
+					dm_oblock_t *oblock,
+					dm_cblock_t *cblock)
+{
+	return p->writeback_work ? p->writeback_work(p, oblock, cblock) : -ENOENT;
+}
+
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	return p->remove_mapping(p, oblock);
-}
-
-static inline int policy_remove_any(struct dm_cache_policy *p, struct policy_result *result)
-{
-	return p->remove_any(p, result) ? p->remove_any(p, result) : -ENOENT;
 }
 
 static inline void policy_force_mapping(struct dm_cache_policy *p,

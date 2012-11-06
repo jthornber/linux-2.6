@@ -78,6 +78,20 @@ static void free_bitset(unsigned long *bits)
  */
 #define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (32 * 1024 >> SECTOR_SHIFT)
 
+/*
+ * FIXME: the cache is read/write for the time being.
+ */
+enum cache_mode {
+	CM_WRITE,		/* metadata may be changed */
+};
+
+struct cache_features {
+	enum cache_mode mode;
+
+	bool ctr_set:1;	/* Constructor has set feature argument below. */
+	bool write_through:1;
+};
+
 struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -96,6 +110,11 @@ struct cache {
 	 * The faster of the two data devices.  Typically an SSD.
 	 */
 	struct dm_dev *cache_dev;
+
+	/*
+	 * Cache features such as write-through.
+	 */
+	struct cache_features cf;
 
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
@@ -153,6 +172,8 @@ struct cache {
 	bool need_tick_bio;
 
 	struct dm_cache_policy *policy;
+	unsigned policy_nr_args;
+
 	bool quiescing;
 	bool commit_requested;
 	bool loaded_mappings;
@@ -318,7 +339,6 @@ static int bio_detain(struct cache *cache, struct prealloc *structs,
 	return r;
 }
 
-#if 0
 static int bio_detain_no_holder(struct cache *cache,
 				struct prealloc *structs,
 				dm_oblock_t oblock,
@@ -331,14 +351,13 @@ static int bio_detain_no_holder(struct cache *cache,
 	cell = prealloc_get_cell(structs);
 
 	build_key(oblock, &key);
-	r = dm_bio_detain_no_holder(cache->prison, &key, *cell, result);
+	r = dm_get_cell(cache->prison, &key, *cell, result);
 
 	if (!r)
 		*cell = NULL;
 
 	return r;
 }
-#endif
 
 /*----------------------------------------------------------------*/
 
@@ -768,13 +787,32 @@ static void promote(struct cache *cache, struct prealloc *structs, dm_oblock_t o
 	quiesce_migration(mg);
 }
 
-static void writeback_then_promote(struct cache *cache,
-				   struct prealloc *structs,
-				   dm_oblock_t old_oblock,
-				   dm_oblock_t new_oblock,
-				   dm_cblock_t cblock,
-				   struct dm_bio_prison_cell *old_ocell,
-				   struct dm_bio_prison_cell *new_ocell)
+static void demote(struct cache *cache, struct prealloc *structs, dm_oblock_t oblock,
+		   dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
+{
+	struct dm_cache_migration *mg = prealloc_get_migration(structs);
+
+	mg->err = false;
+	mg->demote = true;
+	mg->promote = false;
+	mg->cache = cache;
+	mg->old_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = cell;
+	mg->new_ocell = NULL;
+	mg->start_jiffies = jiffies;
+
+	inc_nr_migrations(cache);
+	quiesce_migration(mg);
+}
+
+static void demote_then_promote(struct cache *cache,
+				struct prealloc *structs,
+				dm_oblock_t old_oblock,
+				dm_oblock_t new_oblock,
+				dm_cblock_t cblock,
+				struct dm_bio_prison_cell *old_ocell,
+				struct dm_bio_prison_cell *new_ocell)
 {
 	struct dm_cache_migration *mg = prealloc_get_migration(structs);
 
@@ -847,6 +885,16 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 	bio_endio(bio, 0);
 }
 
+static bool may_migrate(struct cache *cache)
+{
+#if 0
+	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
+	return current_volume < cache->migration_threshold;
+#else
+	return true;
+#endif
+}
+
 static void process_bio(struct cache *cache, struct prealloc *structs, struct bio *bio)
 {
 	int r;
@@ -856,7 +904,6 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool discarded_block = is_discarded(cache, block);
-	bool can_migrate = true;
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -865,7 +912,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 	if (r > 0)
 		return;
 
-	policy_map(cache->policy, block, can_migrate, discarded_block, bio, &lookup_result);
+	policy_map(cache->policy, block, may_migrate(cache), discarded_block, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
@@ -903,9 +950,9 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 		atomic_inc(&cache->demotion);
 		atomic_inc(&cache->promotion);
 
-		writeback_then_promote(cache, structs, lookup_result.old_oblock, block,
-				       lookup_result.cblock,
-				       old_ocell, new_ocell);
+		demote_then_promote(cache, structs, lookup_result.old_oblock, block,
+				    lookup_result.cblock,
+				    old_ocell, new_ocell);
 		release_cell = 0;
 		break;
 	}
@@ -992,6 +1039,35 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
 }
 
+static void writeback_some_dirty_blocks(struct cache *cache)
+{
+	int r = 0;
+	dm_oblock_t oblock;
+	dm_cblock_t cblock;
+	struct prealloc structs;
+
+	memset(&structs, 0, sizeof(structs));
+	while (!r && may_migrate(cache)) {
+		if (prealloc_data_structs(cache, &structs))
+			break;
+
+		r = policy_writeback_work(cache->policy, &oblock, &cblock);
+		if (!r) {
+			struct dm_bio_prison_cell *old_ocell;
+
+			r = bio_detain_no_holder(cache, &structs, oblock, &old_ocell);
+			if (r) {
+				policy_set_dirty(cache->policy, oblock);
+				break;
+			}
+
+			demote(cache, &structs, oblock, cblock, old_ocell);
+		}
+	}
+
+	prealloc_free_structs(cache, &structs);
+}
+
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -1073,6 +1149,8 @@ static void do_worker(struct work_struct *ws)
 
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
+
+		writeback_some_dirty_blocks(cache);
 
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);

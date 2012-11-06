@@ -323,7 +323,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.load_mapping = wb_load_mapping;
 	p->policy.walk_mappings = NULL;
 	p->policy.remove_mapping = wb_remove_mapping;
-	p->policy.remove_any = wb_remove_any;
+	p->policy.writeback_work = wb_remove_any;
 	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
