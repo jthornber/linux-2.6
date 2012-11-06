@@ -121,8 +121,8 @@ static struct dm_bio_prison_cell *__search_bucket(struct hlist_head *bucket,
  *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
-int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
-		  struct bio *inmate, struct dm_bio_prison_cell **ref)
+int __dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
+		    struct bio *inmate, struct dm_bio_prison_cell **ref)
 {
 	int r = 1;
 	unsigned long flags;
@@ -135,7 +135,9 @@ int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 
 	cell = __search_bucket(prison->cells + hash, key);
 	if (cell) {
-		bio_list_add(&cell->bios, inmate);
+		if (inmate)
+			bio_list_add(&cell->bios, inmate);
+
 		goto out;
 	}
 
@@ -153,7 +155,10 @@ int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 	cell = __search_bucket(prison->cells + hash, key);
 	if (cell) {
 		mempool_free(cell2, prison->cell_pool);
-		bio_list_add(&cell->bios, inmate);
+
+		if (inmate)
+			bio_list_add(&cell->bios, inmate);
+
 		goto out;
 	}
 
@@ -177,7 +182,20 @@ out:
 
 	return r;
 }
+
+int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
+		  struct bio *inmate, struct dm_bio_prison_cell **ref)
+{
+	return __dm_bio_detain(prison, key, inmate, ref);
+}
 EXPORT_SYMBOL_GPL(dm_bio_detain);
+
+int dm_bio_detain_no_holder(struct dm_bio_prison *prison, struct dm_cell_key *key,
+			    struct dm_bio_prison_cell **ref)
+{
+	return __dm_bio_detain(prison, key, NULL, ref);
+}
+EXPORT_SYMBOL_GPL(dm_bio_detain_no_holder);
 
 /*
  * @inmates must have been initialised prior to this call
@@ -189,7 +207,9 @@ static void __cell_release(struct dm_bio_prison_cell *cell, struct bio_list *inm
 	hlist_del(&cell->list);
 
 	if (inmates) {
-		bio_list_add(inmates, cell->holder);
+		if (cell->holder)
+			bio_list_add(inmates, cell->holder);
+
 		bio_list_merge(inmates, &cell->bios);
 	}
 

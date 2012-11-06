@@ -848,6 +848,16 @@ static int mq_load_mapping(struct dm_cache_policy *p,
 	return 0;
 }
 
+static void mq_reload_mapping(struct dm_cache_policy *p,
+			      dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	mq_load_mapping(p, oblock, cblock, 0, false);
+	mutex_unlock(&mq->lock);
+}
+
 static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
 {
 	struct mq_policy *mq = to_mq_policy(p);
@@ -938,8 +948,11 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.load_mapping = mq_load_mapping;
+	mq->policy.load_mappings_completed = NULL;
 	mq->policy.walk_mappings = mq_walk_mappings;
+	mq->policy.reload_mapping = mq_reload_mapping;
 	mq->policy.remove_mapping = mq_remove_mapping;
+	mq->policy.remove_any = NULL;
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;

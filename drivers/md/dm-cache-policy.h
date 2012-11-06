@@ -116,7 +116,15 @@ struct dm_cache_policy {
 	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock,
 			    uint32_t hint, bool hint_valid);
 
+	void (*load_mappings_completed)(struct dm_cache_policy *p);
+
 	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn, void *context);
+
+	/*
+	 * Called when a cache target needs to reload a cleared out mapping on a failure.
+	 */
+	void (*reload_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
+
 
 	/*
 	 * Override functions used on the error paths of the core target.
@@ -125,6 +133,9 @@ struct dm_cache_policy {
 	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
+
+	/* Remove any entry (e.g. for writeback purpose) */
+	int (*remove_any)(struct dm_cache_policy *p, struct policy_result *result);
 
 	/*
 	 * How full is the cache?

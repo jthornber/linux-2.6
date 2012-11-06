@@ -128,6 +128,7 @@ struct cache {
 	/*
 	 * cache_size entries, dirty if set
 	 */
+	unsigned nr_dirty;
 	unsigned long *dirty_bitset;
 
 	/*
@@ -201,6 +202,26 @@ static void build_key(dm_block_t block, struct dm_cell_key *key)
 static void wake_worker(struct cache *cache)
 {
 	queue_work(cache->wq, &cache->worker);
+}
+
+/*----------------------------------------------------------------*/
+
+static bool is_dirty(struct cache *cache, dm_cblock_t b)
+{
+	return test_bit(from_cblock(b), cache->dirty_bitset);
+}
+
+static void set_dirty(struct cache *cache, dm_cblock_t b)
+{
+	if (!test_and_set_bit(from_cblock(b), cache->dirty_bitset))
+		cache->nr_dirty++;
+}
+
+static void clear_dirty(struct cache *cache, dm_cblock_t b)
+{
+	if (test_and_clear_bit(from_cblock(b), cache->dirty_bitset))
+		if (!--cache->nr_dirty)
+			dm_table_event(cache->ti->table);
 }
 
 /*----------------------------------------------------------------*/
@@ -317,7 +338,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 {
 	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
-		set_bit(from_cblock(cblock), cache->dirty_bitset);
+		set_dirty(cache, cblock);
 		clear_discard(cache, oblock);
 	}
 }
@@ -402,13 +423,15 @@ static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, b
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
-	unsigned long flags;
+	if (cell) {
+		unsigned long flags;
 
-	spin_lock_irqsave(&cache->lock, flags);
-	__cell_defer(cache, cell, holder);
-	spin_unlock_irqrestore(&cache->lock, flags);
+		spin_lock_irqsave(&cache->lock, flags);
+		__cell_defer(cache, cell, holder);
+		spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(cache);
+		wake_worker(cache);
+	}
 }
 
 static void cleanup_migration(struct cache *cache, struct dm_cache_migration *mg)
@@ -481,9 +504,10 @@ static void migration_success_post_commit(struct cache *cache, struct dm_cache_m
 
 	} else {
 		cell_defer(cache, mg->new_ocell, 1);
-		clear_bit(from_cblock(mg->cblock), cache->dirty_bitset);
 		cleanup_migration(cache, mg);
 	}
+
+	clear_dirty(cache, mg->cblock);
 }
 
 static void copy_complete(int read_err, unsigned long write_err, void *context)
@@ -539,8 +563,7 @@ static void issue_copy(struct cache *cache, struct dm_cache_migration *mg)
 	bool avoid;
 
 	if (mg->demote)
-		avoid = !test_bit(from_cblock(mg->cblock), cache->dirty_bitset) ||
-			is_discarded(cache, mg->old_oblock);
+		avoid = !is_dirty(cache, mg->cblock) || is_discarded(cache, mg->old_oblock);
 	else
 		avoid = is_discarded(cache, mg->new_oblock);
 
@@ -640,6 +663,25 @@ static void promote(struct cache *cache, dm_oblock_t oblock,
 	quiesce_migration(cache, mg);
 }
 
+static void demote(struct cache *cache, dm_oblock_t oblock,
+		   dm_cblock_t cblock, struct dm_bio_prison_cell *cell)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+
+	mg->err = false;
+	mg->demote = true;
+	mg->promote = false;
+	mg->cache = cache;
+	mg->old_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = cell;
+	mg->new_ocell = NULL;
+	mg->start_jiffies = jiffies;
+
+	inc_nr_migrations(cache);
+	quiesce_migration(cache, mg);
+}
+
 static void writeback_then_promote(struct cache *cache,
 				   dm_oblock_t old_oblock,
 				   dm_oblock_t new_oblock,
@@ -706,7 +748,7 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
+	dm_block_t start_block = dm_sector_div_up(bio->bi_sector, cache->sectors_per_block);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
@@ -861,6 +903,31 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
 }
 
+static void writeback_all_dirty_blocks(struct cache *cache)
+{
+	int r = 0;
+
+	while (!r) {
+		struct policy_result lookup_result;
+
+		r = policy_remove_any(cache->policy, &lookup_result);
+		if (!r) {
+			struct dm_cell_key key;
+			struct dm_bio_prison_cell *old_ocell;
+
+			build_key(from_oblock(lookup_result.old_oblock), &key);
+			r = dm_bio_detain_no_holder(cache->prison, &key, &old_ocell);
+			if (r) {
+				policy_reload_mapping(cache->policy, lookup_result.old_oblock, lookup_result.cblock);
+				return;
+			}
+
+			demote(cache, lookup_result.old_oblock, lookup_result.cblock, old_ocell);
+		}
+	}
+}
+
+
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -942,6 +1009,9 @@ static void do_worker(struct work_struct *ws)
 
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
+
+		writeback_all_dirty_blocks(cache);
+
 
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
@@ -1034,9 +1104,7 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, b
 {
 	struct cache *cache = context;
 
-	dirty ? set_bit(from_cblock(cblock), cache->dirty_bitset) :
-		clear_bit(from_cblock(cblock), cache->dirty_bitset);
-
+	dirty ? set_dirty(cache, cblock) : clear_dirty(cache, cblock);
 	return policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
 }
 
@@ -1121,6 +1189,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 		goto bad_alloc_dirty_bitset;
 	}
 	set_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
+	cache->nr_dirty = cache->cache_size;
 
 	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {
@@ -1228,6 +1297,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
 	const char *policy_name;
+	unsigned long tmp;
 
 	if (argc < 5) {
 		ti->error = "Invalid argument count";
@@ -1236,12 +1306,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argc = argc;
 	as.argv = argv;
 
-	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
-	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
-	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+	if (kstrtoul(argv[3], 10, &tmp) || !tmp ||
+	    tmp < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    tmp & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		ti->error = "Invalid data block size";
 		return -EINVAL;
 	}
+	block_size = tmp;
 
 	policy_name = argv[4];
 
@@ -1432,8 +1503,7 @@ static int write_dirty_bitset(struct cache *cache)
 	unsigned i, r;
 
 	for (i = 0; i < from_cblock(cache->cache_size); i++) {
-		r = dm_cache_set_dirty(cache->cmd, to_cblock(i),
-				       test_bit(i, cache->dirty_bitset));
+		r = dm_cache_set_dirty(cache->cmd, to_cblock(i), is_dirty(cache, i));
 		if (r)
 			return r;
 	}
@@ -1522,7 +1592,9 @@ static int cache_preresume(struct dm_target *ti)
 static void cache_resume(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
+
 	cache->need_tick_bio = true;
+	policy_load_mappings_completed(cache->policy);
 	do_waker(&cache->waker.work);
 }
 
@@ -1546,7 +1618,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->demotion),
 		       (unsigned) atomic_read(&cache->promotion),
 		       (unsigned long long) from_cblock(residency),
-		       (unsigned) atomic_read(&cache->cache_cell_clash));
+		       cache->nr_dirty);
 		break;
 
 	case STATUSTYPE_TABLE:
