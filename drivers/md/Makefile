@@ -13,7 +13,6 @@ dm-log-userspace-y \
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
 dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
 dm-cache-mq-y   += dm-cache-policy-mq.o
-dm-cache-mkfs-y += dm-cache-policy-mkfs.o
 dm-cache-basic-y += dm-cache-policy-basic.o
 dm-cache-writeback-y += dm-cache-policy-writeback.o
 dm-cache-debug-y += dm-cache-policy-debug.o
@@ -51,7 +50,6 @@ obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
-obj-$(CONFIG_DM_CACHE_MKFS)	+= dm-cache-mkfs.o
 obj-$(CONFIG_DM_CACHE_BASIC)	+= dm-cache-basic.o
 obj-$(CONFIG_DM_CACHE_DEBUG)	+= dm-cache-debug.o
 obj-$(CONFIG_DM_CACHE_WRITEBACK) += dm-cache-writeback.o

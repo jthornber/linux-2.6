@@ -282,13 +282,6 @@ config DM_CACHE_MQ
        ---help---
          Under development
 
-config DM_CACHE_MKFS
-       tristate "MKFS Cache Policy - a degenerate policy to highlight poor tests (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         Under development
-
 config DM_CACHE_BASIC
        tristate "Basic Cache Policies - a list of replacement policies (EXPERIMENTAL)"
        depends on DM_CACHE
