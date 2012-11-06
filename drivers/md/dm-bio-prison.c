@@ -16,7 +16,6 @@
 
 struct dm_bio_prison_cell {
 	struct hlist_node list;
-	struct dm_bio_prison *prison;
 	struct dm_cell_key key;
 	struct bio *holder;
 	struct bio_list bios;
@@ -179,7 +178,6 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 	 */
 	cell = cell2;
 
-	cell->prison = prison;
 	memcpy(&cell->key, key, sizeof(cell->key));
 	cell->holder = inmate;
 	bio_list_init(&cell->bios);
@@ -209,10 +207,11 @@ static void __cell_release(struct dm_bio_prison_cell *cell, struct bio_list *inm
 	}
 }
 
-void dm_cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios)
+void dm_cell_release(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell,
+		     struct bio_list *bios)
 {
 	unsigned long flags;
-	struct dm_bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
 	__cell_release(cell, bios);
@@ -234,10 +233,10 @@ static void __cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio
 	__cell_release(cell, NULL);
 }
 
-void dm_cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio)
+void dm_cell_release_singleton(struct dm_bio_prison *prison,
+			       struct dm_bio_prison_cell *cell, struct bio *bio)
 {
 	unsigned long flags;
-	struct dm_bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
 	__cell_release_singleton(cell, bio);
@@ -254,10 +253,10 @@ static void __cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio
 	bio_list_merge(inmates, &cell->bios);
 }
 
-void dm_cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+void dm_cell_release_no_holder(struct dm_bio_prison *prison,
+			       struct dm_bio_prison_cell *cell, struct bio_list *inmates)
 {
 	unsigned long flags;
-	struct dm_bio_prison *prison = cell->prison;
 
 	spin_lock_irqsave(&prison->lock, flags);
 	__cell_release_no_holder(cell, inmates);
@@ -265,9 +264,9 @@ void dm_cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list 
 }
 EXPORT_SYMBOL_GPL(dm_cell_release_no_holder);
 
-void dm_cell_error(struct dm_bio_prison_cell *cell)
+void dm_cell_error(struct dm_bio_prison *prison,
+		   struct dm_bio_prison_cell *cell)
 {
-	struct dm_bio_prison *prison = cell->prison;
 	struct bio_list bios;
 	struct bio *bio;
 	unsigned long flags;

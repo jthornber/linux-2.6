@@ -51,10 +51,17 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_bio_prison_cell *memory,
 		  struct dm_bio_prison_cell **ref);
 
-void dm_cell_release(struct dm_bio_prison_cell *cell, struct bio_list *bios);
-void dm_cell_release_singleton(struct dm_bio_prison_cell *cell, struct bio *bio); // FIXME: bio arg not needed
-void dm_cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates);
-void dm_cell_error(struct dm_bio_prison_cell *cell);
+void dm_cell_release(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell,
+		     struct bio_list *bios);
+void dm_cell_release_singleton(struct dm_bio_prison *prison,
+			       struct dm_bio_prison_cell *cell,
+			       struct bio *bio); // FIXME: bio arg not needed
+void dm_cell_release_no_holder(struct dm_bio_prison *prison,
+			       struct dm_bio_prison_cell *cell,
+			       struct bio_list *inmates);
+void dm_cell_error(struct dm_bio_prison *prison,
+		   struct dm_bio_prison_cell *cell);
 
 /*----------------------------------------------------------------*/
 
