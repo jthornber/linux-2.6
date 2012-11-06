@@ -129,17 +129,11 @@ static struct dm_bio_prison_cell *__search_bucket(struct hlist_head *bucket,
 	return NULL;
 }
 
-/*
- * This may block if a new cell needs allocating.  You must ensure that
- * cells will be unlocked even if the calling thread is blocked.
- *
- * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
- */
-int dm_bio_detain(struct dm_bio_prison *prison,
-		  struct dm_cell_key *key,
-		  struct bio *inmate,
-		  struct dm_bio_prison_cell *memory,
-		  struct dm_bio_prison_cell **ref)
+static int __bio_detain(struct dm_bio_prison *prison,
+			struct dm_cell_key *key,
+			struct bio *inmate,
+			struct dm_bio_prison_cell *memory,
+			struct dm_bio_prison_cell **ref)
 {
 	int r = 1;
 	unsigned long flags;
@@ -152,7 +146,8 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 
 	cell = __search_bucket(prison->cells + hash, key);
 	if (cell) {
-		bio_list_add(&cell->bios, inmate);
+		if (inmate)
+			bio_list_add(&cell->bios, inmate);
 		goto out;
 	}
 
@@ -169,7 +164,8 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 	 */
 	cell = __search_bucket(prison->cells + hash, key);
 	if (cell) {
-		bio_list_add(&cell->bios, inmate);
+		if (inmate)
+			bio_list_add(&cell->bios, inmate);
 		goto out;
 	}
 
@@ -192,7 +188,26 @@ out:
 
 	return r;
 }
+
+
+int dm_bio_detain(struct dm_bio_prison *prison,
+		  struct dm_cell_key *key,
+		  struct bio *inmate,
+		  struct dm_bio_prison_cell *memory,
+		  struct dm_bio_prison_cell **ref)
+{
+	return __bio_detain(prison, key, inmate, memory, ref);
+}
 EXPORT_SYMBOL_GPL(dm_bio_detain);
+
+int dm_bio_detain_no_holder(struct dm_bio_prison *prison,
+			    struct dm_cell_key *key,
+			    struct dm_bio_prison_cell *memory,
+			    struct dm_bio_prison_cell **ref)
+{
+	return __bio_detain(prison, key, NULL, memory, ref);
+}
+EXPORT_SYMBOL_GPL(dm_bio_detain_no_holder);
 
 /*
  * @inmates must have been initialised prior to this call

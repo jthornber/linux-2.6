@@ -40,9 +40,6 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 			     struct dm_bio_prison_cell *cell);
 
 /*
- * This may block if a new cell needs allocating.  You must ensure that
- * cells will be unlocked even if the calling thread is blocked.
- *
  * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
 int dm_bio_detain(struct dm_bio_prison *prison,
@@ -50,6 +47,11 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct bio *inmate,
 		  struct dm_bio_prison_cell *memory,
 		  struct dm_bio_prison_cell **ref);
+
+int dm_bio_detain_no_holder(struct dm_bio_prison *prison,
+			    struct dm_cell_key *key,
+			    struct dm_bio_prison_cell *memory,
+			    struct dm_bio_prison_cell **ref);
 
 void dm_cell_release(struct dm_bio_prison *prison,
 		     struct dm_bio_prison_cell *cell,
