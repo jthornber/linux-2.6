@@ -1060,6 +1060,9 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 {
 	unsigned u;
 
+	if (!argc)
+		return 0;
+
 	if (argc != 2 && argc != 4)
 		return -EINVAL;
 

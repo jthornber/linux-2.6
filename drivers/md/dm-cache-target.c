@@ -1524,12 +1524,6 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 		{0, 1, "Invalid number of cache feature arguments"},
 	};
 
-	/*
-	 * No feature arguments supplied.
-	 */
-	if (!as->argc)
-		return 0;
-
 	r = dm_read_arg_group(_args, as, &argc, &ti->error);
 	if (r)
 		return -EINVAL;
@@ -1587,7 +1581,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	const char *policy_name, *policy_argc;
 	unsigned long tmp;
 
-	if (argc < 6) {
+	if (argc < 7) {
 		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
@@ -1686,10 +1680,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 bad_max_io_len:
 	kfree(cache);
 bad_target_length:
+bad_policy_argc:
 bad_cache_create:
 	dm_put_device(ti, origin_dev);
 bad_origin:
-bad_policy_argc:
 	dm_put_device(ti, cache_dev);
 bad_cache:
 	dm_put_device(ti, metadata_dev);
