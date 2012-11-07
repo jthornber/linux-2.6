@@ -770,6 +770,8 @@ static int map(struct mq_policy *mq,
 		r = no_entry_found(mq, oblock, can_migrate, discarded_oblock,
 				   data_dir, result);
 
+	if (r == -EWOULDBLOCK)
+		result->op = POLICY_MISS;
 	return r;
 }
 

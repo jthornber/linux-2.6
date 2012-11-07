@@ -892,7 +892,7 @@ static bool may_migrate(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 #else
 	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
-	return current_volume < 2048 * 20;
+	return current_volume < 2048 * 100;
 #endif
 }
 
@@ -904,6 +904,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	bool can_migrate = may_migrate(cache);
 	bool discarded_block = is_discarded(cache, block);
 
 	/*
@@ -913,7 +914,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 	if (r > 0)
 		return;
 
-	policy_map(cache->policy, block, may_migrate(cache), discarded_block, bio, &lookup_result);
+	policy_map(cache->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &cache->read_hit : &cache->write_hit);
@@ -956,10 +957,14 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 				    old_ocell, new_ocell);
 		release_cell = 0;
 		break;
+
+	default:
+		DMERR("unknown policy op returned, erroring bio\n");
+		bio_io_error(bio);
 	}
 
 	if (release_cell)
-		cell_defer(cache, new_ocell, 0);
+		cell_defer(cache, new_ocell, false);
 }
 
 static int need_commit_due_to_time(struct cache *cache)
@@ -1046,24 +1051,25 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;
 	struct prealloc structs;
+	struct dm_bio_prison_cell *old_ocell;
 
 	memset(&structs, 0, sizeof(structs));
-	while (!r && may_migrate(cache)) {
+
+	while (may_migrate(cache)) {
 		if (prealloc_data_structs(cache, &structs))
 			break;
 
 		r = policy_writeback_work(cache->policy, &oblock, &cblock);
-		if (!r) {
-			struct dm_bio_prison_cell *old_ocell;
+		if (r)
+			break;
 
-			r = bio_detain_no_holder(cache, &structs, oblock, &old_ocell);
-			if (r) {
-				policy_set_dirty(cache->policy, oblock);
-				break;
-			}
-
-			demote(cache, &structs, oblock, cblock, old_ocell);
+		r = bio_detain_no_holder(cache, &structs, oblock, &old_ocell);
+		if (r) {
+			policy_set_dirty(cache->policy, oblock);
+			break;
 		}
+
+		demote(cache, &structs, oblock, cblock, old_ocell);
 	}
 
 	prealloc_free_structs(cache, &structs);
