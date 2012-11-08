@@ -21,8 +21,8 @@ struct wb_cache_entry {
 	struct list_head list;
 	struct hlist_node hlist;
 
-	dm_cblock_t cblock;
 	dm_oblock_t oblock;
+	dm_cblock_t cblock;
 	bool dirty;
 };
 
@@ -36,7 +36,9 @@ struct policy {
 	struct dm_cache_policy policy;
 	struct mutex lock;
 
-	struct list_head free, used; /* Free/used cache entry list */
+	struct list_head free;
+	struct list_head clean;
+	struct list_head dirty;
 
 	/*
 	 * We know exactly how many cblocks will be needed,
@@ -45,12 +47,13 @@ struct policy {
 	dm_cblock_t cache_size, nr_cblocks_allocated;
 	struct wb_cache_entry *cblocks;
 	struct hash chash;
-
-	dm_cblock_t nr_dirty;
 };
 
 /*----------------------------------------------------------------------------*/
-/* Low-level functions. */
+
+/*
+ * Low-level functions.
+ */
 static unsigned next_power(unsigned n, unsigned min)
 {
 	return roundup_pow_of_two(max(n, min));
@@ -64,10 +67,7 @@ static struct policy *to_policy(struct dm_cache_policy *p)
 static struct list_head *list_pop(struct list_head *q)
 {
 	struct list_head *r = q->next;
-
-	BUG_ON(!r);
 	list_del(r);
-
 	return r;
 }
 
@@ -204,32 +204,39 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	if (set) {
 		if (!e->dirty) {
 			e->dirty = true;
-			p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) + 1);
+			list_move(&e->list, &p->dirty);
 		}
 
 	} else {
 		if (e->dirty) {
 			e->dirty = false;
-			BUG_ON(!from_cblock(p->nr_dirty));
-			p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) - 1);
+			list_move(&e->list, &p->clean);
 		}
 	}
 }
 
 static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
+	struct policy *p = to_policy(pe);
+
+	mutex_lock(&p->lock);
 	__set_clear_dirty(pe, oblock, true);
+	mutex_unlock(&p->lock);
 }
 
 static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
+	struct policy *p = to_policy(pe);
+
+	mutex_lock(&p->lock);
 	__set_clear_dirty(pe, oblock, false);
+	mutex_unlock(&p->lock);
 }
 
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
 {
 	insert_cache_hash_entry(p, e);
-	list_add(&e->list, &p->used);
+	list_add(&e->list, &p->dirty);
 }
 
 static int wb_load_mapping(struct dm_cache_policy *pe,
@@ -300,25 +307,17 @@ static void wb_force_mapping(struct dm_cache_policy *pe,
 
 static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 {
+	struct list_head *l;
 	struct wb_cache_entry *r;
 
-	BUG_ON(from_cblock(p->nr_dirty) >= from_cblock(p->cache_size));
-
-	if (!p->nr_dirty)
+	if (list_empty(&p->dirty))
 		return NULL;
 
-	list_for_each_entry(r, &p->used, list) {
-		if (r->dirty) {
-			list_del_init(&p->used);
-			list_splice(&r->list, &p->used);
-			break;
-		}
-	}
+	l = list_pop(&p->dirty);
+	r = container_of(l, struct wb_cache_entry, list);
 
-	BUG_ON(!r->dirty);
 	r->dirty = false;
-	BUG_ON(!p->nr_dirty);
-	p->nr_dirty = to_cblock(from_cblock(p->nr_dirty) - 1);
+	list_add(l, &p->clean);
 
 	return r;
 }
@@ -403,7 +402,9 @@ static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 
 	init_policy_functions(p);
 	INIT_LIST_HEAD(&p->free);
-	INIT_LIST_HEAD(&p->used);
+	INIT_LIST_HEAD(&p->clean);
+	INIT_LIST_HEAD(&p->dirty);
+
 	p->cache_size = cache_size;
 	mutex_init(&p->lock);
 

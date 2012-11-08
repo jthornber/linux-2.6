@@ -100,11 +100,12 @@ struct dm_cache_policy {
 	 * can_migrate - gives permission for POLICY_NEW or POLICY_REPLACE
 	 *               instructions.  If denied and the policy would have
 	 *               returned one of these instructions it should
-	 *               return -EWOULDBLOCK (FIXME: is there a better
-	 *               error code).
+	 *               return -EWOULDBLOCK *and* set result->op to POLICY_MISS.
 	 *
 	 * discarded_oblock - indicates whether the whole origin block is
-	 *               in a discarded state.
+	 *               in a discarded state (FIXME: better to tell the
+	 *               policy about this sooner, so it can recycle that
+	 *               cache block if it wants.)
 	 * bio         - the bio that triggered this call.
 	 * result      - gets filled in with the instruction.
 	 *
