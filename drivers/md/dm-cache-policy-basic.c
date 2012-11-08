@@ -1,5 +1,4 @@
-/*, 
- *
+/*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
  * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue cache replacement policies.

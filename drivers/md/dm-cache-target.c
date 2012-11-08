@@ -341,11 +341,10 @@ static int bio_detain(struct cache *cache, struct prealloc *structs,
 	return r;
 }
 
-// FIXME: rename to get cell
-static int bio_detain_no_holder(struct cache *cache,
-				struct prealloc *structs,
-				dm_oblock_t oblock,
-				struct dm_bio_prison_cell **result)
+static int get_cell(struct cache *cache,
+		    struct prealloc *structs,
+		    dm_oblock_t oblock,
+		    struct dm_bio_prison_cell **result)
 {
 	int r;
 	struct dm_cell_key key;
@@ -1112,7 +1111,7 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 		if (r)
 			break;
 
-		r = bio_detain_no_holder(cache, &structs, oblock, &old_ocell);
+		r = get_cell(cache, &structs, oblock, &old_ocell);
 		if (r) {
 			policy_set_dirty(cache->policy, oblock);
 			break;
