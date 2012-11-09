@@ -236,7 +236,10 @@ static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
 {
 	insert_cache_hash_entry(p, e);
-	list_add(&e->list, &p->dirty);
+	if (e->dirty)
+		list_add(&e->list, &p->dirty);
+	else
+		list_add(&e->list, &p->clean);
 }
 
 static int wb_load_mapping(struct dm_cache_policy *pe,
@@ -250,6 +253,7 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	if (e) {
 		e->cblock = cblock;
 		e->oblock = oblock;
+		e->dirty = true;
 		add_cache_entry(p, e);
 		r = 0;
 
