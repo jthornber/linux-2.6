@@ -23,7 +23,8 @@ struct wb_cache_entry {
 
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;
-	bool dirty;
+	bool dirty:1;
+	bool pending:1;
 };
 
 struct hash {
@@ -38,6 +39,7 @@ struct policy {
 
 	struct list_head free;
 	struct list_head clean;
+	struct list_head clean_pending;
 	struct list_head dirty;
 
 	/*
@@ -204,11 +206,12 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	if (set) {
 		if (!e->dirty) {
 			e->dirty = true;
-			list_move(&e->list, &p->dirty);
+			list_move(&e->list, e->pending ? &p->clean_pending : &p->dirty);
 		}
 
 	} else {
 		if (e->dirty) {
+			e->pending = false;
 			e->dirty = false;
 			list_move(&e->list, &p->clean);
 		}
@@ -320,8 +323,8 @@ static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 	l = list_pop(&p->dirty);
 	r = container_of(l, struct wb_cache_entry, list);
 
-	r->dirty = false;
-	list_add(l, &p->clean);
+	r->dirty = true;
+	list_add(l, &p->clean_pending);
 
 	return r;
 }
@@ -407,6 +410,7 @@ static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 	init_policy_functions(p);
 	INIT_LIST_HEAD(&p->free);
 	INIT_LIST_HEAD(&p->clean);
+	INIT_LIST_HEAD(&p->clean_pending);
 	INIT_LIST_HEAD(&p->dirty);
 
 	p->cache_size = cache_size;
