@@ -634,6 +634,7 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 			DMWARN("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(cache->policy, mg->new_oblock);
 			cleanup_migration(mg);
+			return;
 		}
 	}
 
@@ -661,13 +662,18 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			spin_lock_irqsave(&cache->lock, flags);
 			list_add_tail(&mg->list, &cache->quiesced_migrations);
 			spin_unlock_irqrestore(&cache->lock, flags);
-		} else
-			cleanup_migration(mg);
 
-		clear_dirty(cache, mg->old_oblock, mg->cblock);
+			// FIXME: this mapping no longer in policy so can't call.
+			clear_dirty(cache, mg->old_oblock, mg->cblock);
+
+		} else {
+			// FIXME: this mapping no longer in policy so can't call.
+			clear_dirty(cache, mg->old_oblock, mg->cblock);
+			cleanup_migration(mg);
+		}
 
 	} else {
-		cell_defer(cache, mg->new_ocell, 1);
+		cell_defer(cache, mg->new_ocell, true);
 		clear_dirty(cache, mg->new_oblock, mg->cblock);
 		cleanup_migration(mg);
 	}
