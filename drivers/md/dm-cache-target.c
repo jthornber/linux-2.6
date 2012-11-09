@@ -1387,13 +1387,13 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 		goto bad_alloc_dirty_bitset;
 	}
 
-	cache->nr_dirty = cache->cache_size;
+	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
 		*error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
-	set_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
+	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
 	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {

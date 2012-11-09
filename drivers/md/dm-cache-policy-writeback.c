@@ -256,7 +256,7 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	if (e) {
 		e->cblock = cblock;
 		e->oblock = oblock;
-		e->dirty = true;
+		e->dirty = false; /* blocks default to clean */
 		add_cache_entry(p, e);
 		r = 0;
 
