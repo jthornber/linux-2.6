@@ -206,7 +206,7 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	if (set) {
 		if (!e->dirty) {
 			e->dirty = true;
-			list_move(&e->list, e->pending ? &p->clean_pending : &p->dirty);
+			list_move(&e->list, &p->dirty);
 		}
 
 	} else {
