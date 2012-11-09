@@ -372,15 +372,16 @@ static void set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbloc
 {
 	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		cache->nr_dirty = to_cblock(from_cblock(cache->nr_dirty) + 1);
-		policy_set_dirty(cache->policy, oblock);
 	}
+
+	policy_set_dirty(cache->policy, oblock);
 }
 
 static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
-		policy_clear_dirty(cache->policy, oblock);
+	policy_clear_dirty(cache->policy, oblock);
 
+	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		cache->nr_dirty = to_cblock(from_cblock(cache->nr_dirty) - 1);
 		if (!from_cblock(cache->nr_dirty))
 			dm_table_event(cache->ti->table);
