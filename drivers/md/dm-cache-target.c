@@ -8,6 +8,7 @@
 #include "dm-bio-prison.h"
 #include "dm-cache-metadata.h"
 #include "dm-cache-policy-internal.h"
+#include "persistent-data/dm-bitset.h"
 
 #include <asm/div64.h>
 
@@ -51,13 +52,7 @@ static unsigned long *alloc_bitset(unsigned nr_entries)
 static void clear_bitset(void *bitset, unsigned nr_entries)
 {
 	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, 0, s);
-}
-
-static void set_bitset(void *bitset, unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, ~0, s);
+	memset(bitset, 0, s);	
 }
 
 static void free_bitset(unsigned long *bits)
@@ -149,12 +144,6 @@ struct cache {
 	 */
 	dm_cblock_t nr_dirty;
 	unsigned long *dirty_bitset;
-
-	/*
-	 * origin_blocks entries, discarded if set.
-	 * FIXME: This is too big
-	 */
-	unsigned long *discard_bitset;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -397,7 +386,7 @@ static void set_discard(struct cache *cache, dm_oblock_t b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	set_bit(from_oblock(b), cache->discard_bitset);
+	dm_cache_set_discard(cache->cmd, from_oblock(b));
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
@@ -406,7 +395,7 @@ static void clear_discard(struct cache *cache, dm_oblock_t b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	clear_bit(from_oblock(b), cache->discard_bitset);
+	dm_cache_clear_discard(cache->cmd, from_oblock(b));
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
@@ -416,7 +405,7 @@ static bool is_discarded(struct cache *cache, dm_oblock_t b)
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	r = test_bit(from_oblock(b), cache->discard_bitset);
+	r = dm_cache_is_discarded(cache->cmd, from_oblock(b));
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
@@ -1282,7 +1271,6 @@ static void cache_dtr(struct dm_target *ti)
 	dm_bio_prison_destroy(cache->prison);
 	destroy_workqueue(cache->wq);
 	free_bitset(cache->dirty_bitset);
-	free_bitset(cache->discard_bitset);
 	dm_kcopyd_client_destroy(cache->copier);
 	dm_cache_metadata_close(cache->cmd);
 	dm_put_device(ti, cache->metadata_dev);
@@ -1390,17 +1378,17 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
-		*error = "Couldn't allocate dirty_bitset";
+		*error = "Couldn't allocate dirty bitset";
 		goto bad_alloc_dirty_bitset;
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
-	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
-	if (!cache->discard_bitset) {
-		*error = "Couldn't allocate discard bitset";
-		goto bad_alloc_discard_bitset;
+	r = dm_cache_discard_bitset_resize(cmd, from_oblock(cache->origin_blocks));
+	if (r) {
+		*error = "Couldn't resize discard bitset";
+		err_p = ERR_PTR(r);
+		goto bad_discard_bitset;
 	}
-	clear_bitset(cache->discard_bitset, from_oblock(cache->origin_blocks));
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
@@ -1469,8 +1457,7 @@ bad_prison:
 bad_wq:
 	dm_kcopyd_client_destroy(cache->copier);
 bad_kcopyd_client:
-	free_bitset(cache->discard_bitset);
-bad_alloc_discard_bitset:
+bad_discard_bitset:
 	free_bitset(cache->dirty_bitset);
 bad_alloc_dirty_bitset:
 	kfree(cache);

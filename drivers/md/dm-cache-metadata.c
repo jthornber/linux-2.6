@@ -7,6 +7,7 @@
 #include "dm-cache-metadata.h"
 
 #include "persistent-data/dm-array.h"
+#include "persistent-data/dm-bitset.h"
 #include "persistent-data/dm-space-map.h"
 #include "persistent-data/dm-space-map-disk.h"
 #include "persistent-data/dm-transaction-manager.h"
@@ -67,6 +68,7 @@ struct cache_disk_superblock {
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
 	__le64 hint_root;
+	__le64 discard_bitset_root;
 	__le32 data_block_size;
 	__le32 metadata_block_size;
 	__le32 cache_blocks;
@@ -90,10 +92,12 @@ struct dm_cache_metadata {
 
 	struct dm_array_info info;
 	struct dm_array_info hint_info;
+	struct dm_bitset *discard_bitset;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
 	dm_block_t hint_root;
+	dm_block_t discard_bitset_root;
 
 	sector_t data_block_size;
 	dm_cblock_t cache_blocks;
@@ -283,6 +287,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->hint_root = cpu_to_le64(0);
+	disk_super->discard_bitset_root = cpu_to_le64(0);
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
@@ -318,13 +323,21 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r < 0)
 		goto bad;
 
+	cmd->discard_bitset = dm_bitset_create(cmd->tm, &cmd->discard_bitset_root);
+	if (IS_ERR(cmd->discard_bitset)) {
+		r = PTR_ERR(cmd->discard_bitset);
+		goto bad;
+	}
+
 	r = __write_initial_superblock(cmd);
 	if (r)
-		goto bad;
+		goto bad_write_sb;
 
 	cmd->clean_when_opened = true;
 	return 0;
 
+bad_write_sb:
+	dm_bitset_destroy(cmd->discard_bitset);
 bad:
 	dm_tm_destroy(cmd->tm);
 	dm_sm_destroy(cmd->metadata_sm);
@@ -437,6 +450,7 @@ static void __destroy_persistent_data_objects(struct dm_cache_metadata *cmd)
 	dm_sm_destroy(cmd->metadata_sm);
 	dm_tm_destroy(cmd->tm);
 	dm_block_manager_destroy(cmd->bm);
+	dm_bitset_destroy(cmd->discard_bitset);
 }
 
 typedef unsigned long (*flags_mutator)(unsigned long);
@@ -465,6 +479,7 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 {
 	cmd->root = le64_to_cpu(disk_super->mapping_root);
 	cmd->hint_root = le64_to_cpu(disk_super->hint_root);
+	cmd->discard_bitset_root = le64_to_cpu(disk_super->discard_bitset_root);
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
 	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
@@ -551,6 +566,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
+	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
 	disk_super->cache_blocks = cpu_to_le32(from_cblock(cmd->cache_blocks));
 	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
 
@@ -648,10 +664,42 @@ int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size)
 			    &null_mapping, &cmd->root);
 	if (!r)
 		cmd->cache_blocks = new_cache_size;
-	cmd->changed = true;
+	cmd->changed = true; // FIXME: shouldn't this be conditional on !r?
 	up_write(&cmd->root_lock);
 
 	return r;
+}
+
+int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
+				   dm_oblock_t new_nr_entries)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = dm_bitset_resize(cmd->discard_bitset, from_oblock(new_nr_entries),
+			     &cmd->discard_bitset_root, true);
+	if (!r)
+		cmd->changed = true;
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+/* FIXME: review locking for discard_bitset operations, currently leaning on caller */
+
+void dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+{
+	dm_bitset_set_bit(from_oblock(b), cmd->discard_bitset);
+}
+
+void dm_cache_clear_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+{
+	dm_bitset_clear_bit(from_oblock(b), cmd->discard_bitset);
+}
+
+bool dm_cache_is_discarded(struct dm_cache_metadata *cmd, dm_oblock_t b)
+{
+	return dm_bitset_test_bit(from_oblock(b), cmd->discard_bitset);
 }
 
 dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd)
