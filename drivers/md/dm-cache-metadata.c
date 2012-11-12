@@ -72,6 +72,7 @@ struct cache_disk_superblock {
 	__le32 data_block_size;
 	__le32 metadata_block_size;
 	__le32 cache_blocks;
+	__le32 origin_blocks;
 
 	__le32 compat_flags;
 	__le32 compat_ro_flags;
@@ -92,7 +93,7 @@ struct dm_cache_metadata {
 
 	struct dm_array_info info;
 	struct dm_array_info hint_info;
-	struct dm_bitset *discard_bitset;
+	struct dm_bitset_info discard_info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
@@ -101,6 +102,7 @@ struct dm_cache_metadata {
 
 	sector_t data_block_size;
 	dm_cblock_t cache_blocks;
+	dm_oblock_t origin_blocks;
 	bool changed:1;
 	bool clean_when_opened:1;
 
@@ -286,11 +288,12 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 		goto bad_locked;
 
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
-	disk_super->hint_root = cpu_to_le64(0);
-	disk_super->discard_bitset_root = cpu_to_le64(0);
+	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
+	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
+	disk_super->origin_blocks = cpu_to_le32(0);
 	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(0);
@@ -323,21 +326,19 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r < 0)
 		goto bad;
 
-	cmd->discard_bitset = dm_bitset_create(cmd->tm, &cmd->discard_bitset_root);
-	if (IS_ERR(cmd->discard_bitset)) {
-		r = PTR_ERR(cmd->discard_bitset);
+	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+
+	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_bitset_root);
+	if (r < 0)
 		goto bad;
-	}
 
 	r = __write_initial_superblock(cmd);
 	if (r)
-		goto bad_write_sb;
+		goto bad;
 
 	cmd->clean_when_opened = true;
 	return 0;
 
-bad_write_sb:
-	dm_bitset_destroy(cmd->discard_bitset);
 bad:
 	dm_tm_destroy(cmd->tm);
 	dm_sm_destroy(cmd->metadata_sm);
@@ -450,7 +451,6 @@ static void __destroy_persistent_data_objects(struct dm_cache_metadata *cmd)
 	dm_sm_destroy(cmd->metadata_sm);
 	dm_tm_destroy(cmd->tm);
 	dm_block_manager_destroy(cmd->bm);
-	dm_bitset_destroy(cmd->discard_bitset);
 }
 
 typedef unsigned long (*flags_mutator)(unsigned long);
@@ -482,6 +482,7 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->discard_bitset_root = le64_to_cpu(disk_super->discard_bitset_root);
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
+	cmd->origin_blocks = to_oblock(le32_to_cpu(disk_super->origin_blocks));
 	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
 
 	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
@@ -568,6 +569,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
 	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
 	disk_super->cache_blocks = cpu_to_le32(from_cblock(cmd->cache_blocks));
+	disk_super->origin_blocks = cpu_to_le32(from_oblock(cmd->origin_blocks));
 	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
@@ -629,6 +631,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
+	cmd->origin_blocks = 0;
 	cmd->changed = true;
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
@@ -676,30 +679,54 @@ int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = dm_bitset_resize(cmd->discard_bitset, from_oblock(new_nr_entries),
-			     &cmd->discard_bitset_root, true);
+	r = dm_bitset_resize(&cmd->discard_info, cmd->discard_bitset_root,
+			     from_oblock(cmd->origin_blocks),
+			     from_oblock(new_nr_entries),
+			     false, &cmd->discard_bitset_root);
 	if (!r)
-		cmd->changed = true;
+		cmd->origin_blocks = new_nr_entries;
+	cmd->changed = true; // FIXME: shouldn't this be conditional on !r?
 	up_write(&cmd->root_lock);
 
 	return r;
 }
 
-/* FIXME: review locking for discard_bitset operations, currently leaning on caller */
+/* FIXME: propagate dm_bitset_{set,clear,test}_bit failures */
 
 void dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
 {
-	dm_bitset_set_bit(from_oblock(b), cmd->discard_bitset);
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = dm_bitset_set_bit(&cmd->discard_info, cmd->discard_bitset_root,
+			      from_oblock(b), &cmd->discard_bitset_root);
+	up_write(&cmd->root_lock);
+	WARN_ON(r != 0);
 }
 
 void dm_cache_clear_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
 {
-	dm_bitset_clear_bit(from_oblock(b), cmd->discard_bitset);
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = dm_bitset_clear_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				from_oblock(b), &cmd->discard_bitset_root);
+	up_write(&cmd->root_lock);
+	WARN_ON(r != 0);
 }
 
 bool dm_cache_is_discarded(struct dm_cache_metadata *cmd, dm_oblock_t b)
 {
-	return dm_bitset_test_bit(from_oblock(b), cmd->discard_bitset);
+	int r;
+	bool is_discarded;
+
+	down_write(&cmd->root_lock);
+	r = dm_bitset_test_bit(&cmd->discard_info, cmd->discard_bitset_root,
+			       from_oblock(b), &cmd->discard_bitset_root,
+			       &is_discarded);
+	up_write(&cmd->root_lock);
+	WARN_ON(r != 0);
+	return is_discarded;
 }
 
 dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd)

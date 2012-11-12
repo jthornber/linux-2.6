@@ -8,7 +8,6 @@
 #include "dm-bio-prison.h"
 #include "dm-cache-metadata.h"
 #include "dm-cache-policy-internal.h"
-#include "persistent-data/dm-bitset.h"
 
 #include <asm/div64.h>
 
@@ -379,36 +378,21 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 
 /*
  * The discard bitset is accessed from both the worker thread and the
- * cache_map function, we need to protect it.
+ * cache_map function, we need to protect it (done in dm-cache-metadata).
  */
 static void set_discard(struct cache *cache, dm_oblock_t b)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
 	dm_cache_set_discard(cache->cmd, from_oblock(b));
-	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
 static void clear_discard(struct cache *cache, dm_oblock_t b)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
 	dm_cache_clear_discard(cache->cmd, from_oblock(b));
-	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
 static bool is_discarded(struct cache *cache, dm_oblock_t b)
 {
-	int r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	r = dm_cache_is_discarded(cache->cmd, from_oblock(b));
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	return r;
+	return dm_cache_is_discarded(cache->cmd, from_oblock(b));
 }
 
 /*----------------------------------------------------------------*/
