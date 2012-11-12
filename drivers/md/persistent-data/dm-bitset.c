@@ -93,7 +93,7 @@ int dm_bitset_resize(struct dm_bitset *bitset, uint32_t new_nr_entries,
 			    bitset->nr_entries, nr_entries,
 			    &value, &bitset->root);
 	if (!r)
-		bitset->nr_entries = new_nr_entries;
+		bitset->nr_entries = nr_entries;
 
 #ifdef USE_INCORE_AS_VALIDATION
 	if (!r) {
