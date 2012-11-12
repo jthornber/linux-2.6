@@ -11,48 +11,9 @@
 #include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "bitset"
-
-#define USE_INCORE_AS_VALIDATION
-#ifdef USE_INCORE_AS_VALIDATION
-/*----------------------------------------------------------------*/
-
-static size_t bitset_size_in_bytes(unsigned nr_entries)
-{
-	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
-}
-
-static unsigned long *alloc_bitset(unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	return vzalloc(s);
-}
-
-static void clear_bitset(void *bitset, unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, 0, s);	
-}
-
-static void free_bitset(unsigned long *bits)
-{
-	vfree(bits);
-}
-
-#endif
+#define BITS_PER_ARRAY_ENTRY 64
 
 /*----------------------------------------------------------------*/
-
-struct dm_bitset {
-	unsigned nr_entries;
-	dm_block_t root;
-	struct dm_array_info array_info;
-#ifdef USE_INCORE_AS_VALIDATION
-	unsigned long *incore_bitset;
-#endif
-	/* FIXME: to reduce disk access, need 2 64 values: bits_to_be_set and bits_to_be_cleared
-	 * - only write to disk when access outside this word, or the flush call made
-	 */
-};
 
 static struct dm_btree_value_type bitset_bvt = {
 	.context = NULL,
@@ -64,123 +25,137 @@ static struct dm_btree_value_type bitset_bvt = {
 
 /*----------------------------------------------------------------*/
 
-struct dm_bitset *dm_bitset_create(struct dm_transaction_manager *tm,
-				   dm_block_t *root)
+void dm_bitset_info_init(struct dm_transaction_manager *tm,
+				      struct dm_bitset_info *info)
 {
-	struct dm_bitset *bitset = kzalloc(sizeof(struct dm_bitset), GFP_KERNEL);
-
-	if (!bitset)
-		return ERR_PTR(-ENOMEM);
-
-	dm_setup_array_info(&bitset->array_info, tm, &bitset_bvt);
-	dm_array_empty(&bitset->array_info, root);
-	bitset->root = *root;
-
-	return bitset;
+	dm_setup_array_info(&info->array_info, tm, &bitset_bvt);
+	info->current_index_set = false;
 }
-EXPORT_SYMBOL_GPL(dm_bitset_create);
+EXPORT_SYMBOL_GPL(dm_bitset_info_init);
 
-int dm_bitset_resize(struct dm_bitset *bitset, uint32_t new_nr_entries,
-		     dm_block_t *new_root, bool zero)
+int dm_bitset_empty(struct dm_bitset_info *info, dm_block_t *root)
 {
-	int r;
-	/* NOTE: given the use of ceiling, dm_div_up can return an extra entry */
-	uint32_t nr_entries = dm_div_up(new_nr_entries, 64);
-	__le64 value = (zero ? 0 : ~0);
+	return dm_array_empty(&info->array_info, root);
+}
+EXPORT_SYMBOL_GPL(dm_bitset_empty);
+
+int dm_bitset_resize(struct dm_bitset_info *info,
+		     dm_block_t root,
+		     uint32_t old_nr_entries,
+		     uint32_t new_nr_entries,
+		     bool default_value,
+		     dm_block_t *new_root)
+{
+	uint32_t old_blocks = round_up(old_nr_entries, BITS_PER_ARRAY_ENTRY);
+	uint32_t new_blocks = round_up(new_nr_entries, BITS_PER_ARRAY_ENTRY);
+	__le64 value = default_value ? cpu_to_le64(~0) : cpu_to_le64(0);
+
 	__dm_bless_for_disk(&value);
-
-	r = dm_array_resize(&bitset->array_info, bitset->root,
-			    bitset->nr_entries, nr_entries,
-			    &value, &bitset->root);
-	if (!r)
-		bitset->nr_entries = nr_entries;
-
-#ifdef USE_INCORE_AS_VALIDATION
-	if (!r) {
-		bitset->incore_bitset = alloc_bitset(new_nr_entries);
-		clear_bitset(bitset->incore_bitset,  bitset->nr_entries);
-	}
-#endif
-	return r;
+	return dm_array_resize(&info->array_info, root, old_blocks, new_blocks, &value, new_root);
 }
 EXPORT_SYMBOL_GPL(dm_bitset_resize);
 
-void dm_bitset_destroy(struct dm_bitset *bitset)
+int dm_bitset_del(struct dm_bitset_info *info, dm_block_t root)
 {
-#ifdef USE_INCORE_AS_VALIDATION
-	free_bitset(bitset->incore_bitset);
-#endif
-	kfree(bitset);
+	return dm_array_del(&info->array_info, root);
 }
-EXPORT_SYMBOL_GPL(dm_bitset_destroy);
+EXPORT_SYMBOL_GPL(dm_bitset_del);
 
-static void unpack_value(struct dm_bitset *bitset, uint64_t index,
-			 unsigned long *value, uint32_t *value_index)
+int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root, dm_block_t *new_root)
 {
 	int r;
-	__le64 value_le;
+	__le64 value;
 
-	r = dm_array_get(&bitset->array_info, bitset->root, index, &value_le);
-	WARN_ON_ONCE(r); /* FIXME: what to do on lookup failure? */
+	if (!info->current_index_set)
+		return 0;
+
+	value = cpu_to_le64(info->current_bits);
+
+	__dm_bless_for_disk(&value);
+	r = dm_array_set(&info->array_info, root, info->current_index, &value, new_root);
 	if (r)
-		return;
-	*value = le64_to_cpu(value_le);
-	*value_index = *value & 63;
-}
+		return r;
 
-static void pack_value(struct dm_bitset *bitset, uint64_t index, unsigned long value)
+	info->current_index_set = false;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dm_bitset_flush);
+
+static int read_bits(struct dm_bitset_info *info, dm_block_t root, uint32_t array_index)
 {
 	int r;
-	__le64 value_le = cpu_to_le64(value);
+	__le64 value;
 
-	r = dm_array_set(&bitset->array_info, bitset->root, index, &value_le, &bitset->root);
-	WARN_ON_ONCE(r); /* FIXME: what to do on lookup failure? */
+	r = dm_array_get(&info->array_info, root, array_index, &value);
+	if (r)
+		return r;
+
+	info->current_bits = le64_to_cpu(value);
+	info->current_index_set = true;
+	info->current_index = array_index;
+	return 0;
 }
 
-void dm_bitset_set_bit(uint64_t index, struct dm_bitset *bitset)
+static int get_array_entry(struct dm_bitset_info *info, dm_block_t root,
+			   uint32_t index, dm_block_t *new_root)
 {
-	unsigned long value;
-	uint32_t uninitialized_var(value_index);
+	int r;
+	unsigned array_index = index / BITS_PER_ARRAY_ENTRY;
 
-	unpack_value(bitset, index, &value, &value_index);
-	set_bit(value_index, &value);
-	pack_value(bitset, index, value);
+	if (info->current_index_set) {
+		if (info->current_index == array_index)
+			return 0;
 
-#ifdef USE_INCORE_AS_VALIDATION
-	set_bit(index, bitset->incore_bitset);
-#endif
+		r = dm_bitset_flush(info, root, new_root);
+		if (r)
+			return r;
+	}
+
+	return read_bits(info, root, array_index);
+}
+
+int dm_bitset_set_bit(struct dm_bitset_info *info, dm_block_t root,
+		      uint32_t index, dm_block_t *new_root)
+{
+	int r;
+	unsigned b = index % BITS_PER_ARRAY_ENTRY;
+
+	r = get_array_entry(info, root, index, new_root);
+	if (r)
+		return r;
+
+	set_bit(b, (unsigned long *) &info->current_bits);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bitset_set_bit);
 
-void dm_bitset_clear_bit(uint64_t index, struct dm_bitset *bitset)
+int dm_bitset_clear_bit(struct dm_bitset_info *info, dm_block_t root,
+			uint32_t index, dm_block_t *new_root)
 {
-	unsigned long value;
-	uint32_t uninitialized_var(value_index);
+	int r;
+	unsigned b = index % BITS_PER_ARRAY_ENTRY;
 
-	unpack_value(bitset, index, &value, &value_index);
-	clear_bit(value_index, &value);
-	pack_value(bitset, index, value);
+	r = get_array_entry(info, root, index, new_root);
+	if (r)
+		return r;
 
-#ifdef USE_INCORE_AS_VALIDATION
-	clear_bit(index, bitset->incore_bitset);
-#endif
+	clear_bit(b, (unsigned long *) &info->current_bits);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bitset_clear_bit);
 
-int dm_bitset_test_bit(uint64_t index, struct dm_bitset *bitset)
+int dm_bitset_test_bit(struct dm_bitset_info *info, dm_block_t root, uint32_t index,
+		       dm_block_t *new_root, bool *result)
 {
-	unsigned long value;
-	uint32_t uninitialized_var(value_index);
-	int r1, r2;
+	int r;
+	unsigned b = index / BITS_PER_ARRAY_ENTRY;
 
-	unpack_value(bitset, index, &value, &value_index);
-	r1 = test_bit(value_index, &value);
+	r = get_array_entry(info, root, index, new_root);
+	if (r)
+		return r;
 
-#ifdef USE_INCORE_AS_VALIDATION
-	r2 = test_bit(index, bitset->incore_bitset);
-	WARN_ON_ONCE(r1 != r2);
-#endif
-	return r1;
+	*result = test_bit(b, (unsigned long *) &info->current_bits);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bitset_test_bit);
 
