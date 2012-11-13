@@ -749,6 +749,41 @@ int dm_cache_set_discard(struct dm_cache_metadata *cmd,
 	return r;
 }
 
+static int __load_discards(struct dm_cache_metadata *cmd,
+			   load_discard_fn fn, void *context)
+{
+	int r = 0;
+	dm_oblock_t oblock;
+	bool discard;
+
+	for (oblock = 0; oblock < from_oblock(cmd->origin_blocks); oblock++) {
+		if (cmd->clean_when_opened) {
+			r = __is_discarded(cmd, oblock, &discard);
+			if (r)
+				return r;
+		} else
+			discard = false;
+
+		r = fn(context, oblock, discard);
+		if (r)
+			break;
+	}
+
+	return r;
+}
+
+int dm_cache_load_discards(struct dm_cache_metadata *cmd,
+			   load_discard_fn fn, void *context)
+{
+	int r;
+
+	down_read(&cmd->root_lock);
+	r = __load_discards(cmd, fn, context);
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
 dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd)
 {
 	dm_cblock_t r;
@@ -873,6 +908,7 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	struct thunk thunk;
 	unsigned flags;
 
+	/* FIXME: flags is unused */
 	r = get_superblock_flags(cmd, &flags);
 	if (r)
 		return r;

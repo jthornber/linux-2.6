@@ -164,14 +164,15 @@ struct cache {
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
-	bool need_tick_bio;
-
 	struct dm_cache_policy *policy;
 	unsigned policy_nr_args;
 
-	bool quiescing;
-	bool commit_requested;
-	bool loaded_mappings;
+	bool need_tick_bio:1;
+
+	bool quiescing:1;
+	bool commit_requested:1;
+	bool loaded_mappings:1;
+	bool loaded_discards:1;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -1447,6 +1448,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
+	cache->loaded_discards = false;
 	cache->last_commit_jiffies = jiffies;
 
 	load_stats(cache);
@@ -1793,6 +1795,14 @@ static void cache_postsuspend(struct dm_target *ti)
 		DMERR("Couldn't write cache metadata.  Data loss may occur.");
 }
 
+static int load_discard(void *context, dm_oblock_t oblock, bool discard)
+{
+	struct cache *cache = context;
+
+	(discard ? set_discard : clear_discard)(cache, oblock);
+	return 0;
+}
+
 static int cache_preresume(struct dm_target *ti)
 {
 	int r = 0;
@@ -1808,6 +1818,16 @@ static int cache_preresume(struct dm_target *ti)
 		}
 
 		cache->loaded_mappings = true;
+	}
+
+	if (!cache->loaded_discards) {
+		r = dm_cache_load_discards(cache->cmd, load_discard, cache);
+		if (r) {
+			DMERR("couldn't load origin discards");
+			return r;
+		}
+
+		cache->loaded_discards = true;
 	}
 
 	return r;
