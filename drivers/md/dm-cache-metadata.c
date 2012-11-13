@@ -691,42 +691,53 @@ int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
 	return r;
 }
 
-/* FIXME: propagate dm_bitset_{set,clear,test}_bit failures */
-
-void dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+static int __set_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
 {
-	int r;
-
-	down_write(&cmd->root_lock);
-	r = dm_bitset_set_bit(&cmd->discard_info, cmd->discard_bitset_root,
-			      from_oblock(b), &cmd->discard_bitset_root);
-	up_write(&cmd->root_lock);
-	WARN_ON(r != 0);
+	return dm_bitset_set_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				 from_oblock(b), &cmd->discard_bitset_root);
 }
 
-void dm_cache_clear_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+static int __clear_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
 {
-	int r;
-
-	down_write(&cmd->root_lock);
-	r = dm_bitset_clear_bit(&cmd->discard_info, cmd->discard_bitset_root,
-				from_oblock(b), &cmd->discard_bitset_root);
-	up_write(&cmd->root_lock);
-	WARN_ON(r != 0);
+	return dm_bitset_clear_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				   from_oblock(b), &cmd->discard_bitset_root);
 }
 
-bool dm_cache_is_discarded(struct dm_cache_metadata *cmd, dm_oblock_t b)
+static int __is_discarded(struct dm_cache_metadata *cmd, dm_oblock_t b,
+			  bool *is_discarded)
+{
+	return dm_bitset_test_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				  from_oblock(b), &cmd->discard_bitset_root,
+				  is_discarded);
+}
+
+static int __discard(struct dm_cache_metadata *cmd,
+		     dm_oblock_t oblock, bool discard)
 {
 	int r;
-	bool is_discarded;
+
+	if (discard)
+		r = __set_discard(cmd, oblock);
+	else
+		r = __clear_discard(cmd, oblock);
+
+	if (r)
+		return r;
+
+	cmd->changed = true;
+	return 0;
+}
+
+int dm_cache_set_discard(struct dm_cache_metadata *cmd,
+			 dm_oblock_t oblock, bool discard)
+{
+	int r;
 
 	down_write(&cmd->root_lock);
-	r = dm_bitset_test_bit(&cmd->discard_info, cmd->discard_bitset_root,
-			       from_oblock(b), &cmd->discard_bitset_root,
-			       &is_discarded);
+	r = __discard(cmd, oblock, discard);
 	up_write(&cmd->root_lock);
-	WARN_ON(r != 0);
-	return is_discarded;
+
+	return r;
 }
 
 dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd)
@@ -751,7 +762,7 @@ static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
 	if (r)
 		return r;
 
-	cmd->changed = 1;
+	cmd->changed = true;
 	return 0;
 }
 
@@ -777,7 +788,7 @@ static int __insert(struct dm_cache_metadata *cmd,
 	if (r)
 		return r;
 
-	cmd->changed = 1;
+	cmd->changed = true;
 	return 0;
 }
 
@@ -948,7 +959,7 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 	if (r)
 		return r;
 
-	cmd->changed = 1;
+	cmd->changed = true;
 	return 0;
 
 }
@@ -1076,7 +1087,7 @@ static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t
 
 	r = dm_array_set(&cmd->hint_info, cmd->hint_root,
 			 from_cblock(cblock), &value, &cmd->hint_root);
-	cmd->changed = 1;
+	cmd->changed = true;
 
 	return r;
 }

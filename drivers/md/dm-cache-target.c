@@ -144,6 +144,12 @@ struct cache {
 	dm_cblock_t nr_dirty;
 	unsigned long *dirty_bitset;
 
+	/*
+	 * origin_blocks entries, discarded if set.
+	 * FIXME: This is too big
+	 */
+	unsigned long *discard_bitset;
+
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
 	struct work_struct worker;
@@ -378,21 +384,36 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 
 /*
  * The discard bitset is accessed from both the worker thread and the
- * cache_map function, we need to protect it (done in dm-cache-metadata).
+ * cache_map function, we need to protect it.
  */
 static void set_discard(struct cache *cache, dm_oblock_t b)
 {
-	dm_cache_set_discard(cache->cmd, from_oblock(b));
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	set_bit(from_oblock(b), cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
 static void clear_discard(struct cache *cache, dm_oblock_t b)
 {
-	dm_cache_clear_discard(cache->cmd, from_oblock(b));
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	clear_bit(from_oblock(b), cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
 static bool is_discarded(struct cache *cache, dm_oblock_t b)
 {
-	return dm_cache_is_discarded(cache->cmd, from_oblock(b));
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	r = test_bit(from_oblock(b), cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	return r;
 }
 
 /*----------------------------------------------------------------*/
@@ -1255,6 +1276,7 @@ static void cache_dtr(struct dm_target *ti)
 	dm_bio_prison_destroy(cache->prison);
 	destroy_workqueue(cache->wq);
 	free_bitset(cache->dirty_bitset);
+	free_bitset(cache->discard_bitset);
 	dm_kcopyd_client_destroy(cache->copier);
 	dm_cache_metadata_close(cache->cmd);
 	dm_put_device(ti, cache->metadata_dev);
@@ -1356,7 +1378,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	if (r) {
 		*error = "Couldn't resize cache metadata";
 		err_p = ERR_PTR(r);
-		goto bad_alloc_dirty_bitset;
+		goto bad_resize_cache_metadata;
 	}
 
 	cache->nr_dirty = 0;
@@ -1369,10 +1391,17 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 
 	r = dm_cache_discard_bitset_resize(cmd, from_oblock(cache->origin_blocks));
 	if (r) {
-		*error = "Couldn't resize discard bitset";
+		*error = "Couldn't resize on-disk discard bitset";
 		err_p = ERR_PTR(r);
-		goto bad_discard_bitset;
+		goto bad_resize_discard_bitset;
 	}
+
+	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
+	if (!cache->discard_bitset) {
+		*error = "Couldn't allocate discard bitset";
+		goto bad_alloc_discard_bitset;
+	}
+	clear_bitset(cache->discard_bitset, from_oblock(cache->origin_blocks));
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
@@ -1441,9 +1470,12 @@ bad_prison:
 bad_wq:
 	dm_kcopyd_client_destroy(cache->copier);
 bad_kcopyd_client:
-bad_discard_bitset:
+	free_bitset(cache->discard_bitset);
+bad_alloc_discard_bitset:
+bad_resize_discard_bitset:
 	free_bitset(cache->dirty_bitset);
 bad_alloc_dirty_bitset:
+bad_resize_cache_metadata:
 	kfree(cache);
 bad_cache:
 	dm_cache_metadata_close(cmd);
@@ -1691,6 +1723,20 @@ static int write_dirty_bitset(struct cache *cache)
 	return 0;
 }
 
+static int write_discard_bitset(struct cache *cache)
+{
+	unsigned i, r;
+
+	for (i = 0; i < from_oblock(cache->origin_blocks); i++) {
+		r = dm_cache_set_discard(cache->cmd, to_oblock(i),
+					 is_discarded(cache, to_oblock(i)));
+		if (r)
+			return r;
+	}
+
+	return 0;
+}
+
 static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock, uint32_t hint)
 {
 	struct cache *cache = context;
@@ -1714,25 +1760,23 @@ static int write_hints(struct cache *cache)
 	return r;
 }
 
-/*
- * FIXME: also write the discard bitset.
- */
 static int sync_metadata(struct cache *cache)
 {
-	int r1, r2, r3;
+	int r1, r2, r3, r4;
 
 	r1 = write_dirty_bitset(cache);
+	r2 = write_discard_bitset(cache);
 	save_stats(cache);
 
-	r2 = write_hints(cache);
+	r3 = write_hints(cache);
 
 	/*
 	 * If writing the above metadata failed, we still commit, but don't
 	 * set the clean shutdown flag.  This will effectively force every
 	 * dirty bit to be set on reload.
 	 */
-	r3 = dm_cache_commit(cache->cmd, !r1 && !r2);
-	return !r1 && !r2 && !r3;
+	r4 = dm_cache_commit(cache->cmd, !r1 && !r2 && !r3);
+	return !r1 && !r2 && !r3 && !r4;
 }
 
 static void cache_postsuspend(struct dm_target *ti)
