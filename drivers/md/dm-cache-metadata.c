@@ -715,6 +715,15 @@ static int __discard(struct dm_cache_metadata *cmd,
 		     dm_oblock_t oblock, bool discard)
 {
 	int r;
+	bool already_discarded;
+
+	r = __is_discarded(cmd, oblock, &already_discarded);
+	if (r)
+		return r;
+
+	if ((already_discarded && discard) || (!already_discarded && !discard))
+		/* nothing to be done */
+		return 0;
 
 	if (discard)
 		r = __set_discard(cmd, oblock);
