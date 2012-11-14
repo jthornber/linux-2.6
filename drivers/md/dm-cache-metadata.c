@@ -386,6 +386,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	}
 
 	__setup_mapping_info(cmd);
+	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
 	sb_flags = le32_to_cpu(disk_super->flags);
 	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
 	return dm_bm_unlock(sblock);
