@@ -1390,7 +1390,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
-	r = dm_cache_discard_bitset_resize(cmd, from_oblock(cache->origin_blocks));
+	r = dm_cache_discard_bitset_resize(cmd, cache->origin_blocks);
 	if (r) {
 		*error = "Couldn't resize on-disk discard bitset";
 		err_p = ERR_PTR(r);
