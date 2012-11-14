@@ -85,6 +85,14 @@ void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
  */
 int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size);
 dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd);
+int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
+				   dm_oblock_t new_nr_entries);
+
+typedef int (*load_discard_fn)(void *context, dm_oblock_t oblock, bool discard);
+int dm_cache_load_discards(struct dm_cache_metadata *cmd,
+			   load_discard_fn fn, void *context);
+
+int dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_oblock_t oblock, bool discard);
 
 int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);

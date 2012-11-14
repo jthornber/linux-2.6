@@ -19,8 +19,6 @@
 struct dm_bitset_info {
 	struct dm_array_info array_info;
 
-	dm_block_t last_root;
-
 	uint32_t current_index;
 	uint64_t current_bits;
 
@@ -32,23 +30,21 @@ void dm_bitset_info_init(struct dm_transaction_manager *tm,
 
 int dm_bitset_empty(struct dm_bitset_info *info, dm_block_t *root);
 
-int dm_bitset_resize(struct dm_bitset_info *info,
-		     dm_block_t root,
-		     uint32_t old_nr_entries,
-		     uint32_t new_nr_entries,
-		     bool default_value,
-		     dm_block_t *new_root);
+int dm_bitset_resize(struct dm_bitset_info *info, dm_block_t root,
+		     uint32_t old_nr_entries, uint32_t new_nr_entries,
+		     bool default_value, dm_block_t *new_root);
 
 int dm_bitset_del(struct dm_bitset_info *info, dm_block_t root);
-
-int dm_bitset_set_bit(struct dm_bitset_info *info, dm_block_t root,
-		      uint32_t index, dm_block_t *new_root);
-int dm_bitset_clear_bit(struct dm_bitset_info *info, dm_block_t root,
-			uint32_t index, dm_block_t *new_root);
 
 /*
  * May flush and thus update the root.
  */
+int dm_bitset_set_bit(struct dm_bitset_info *info, dm_block_t root,
+		      uint32_t index, dm_block_t *new_root);
+
+int dm_bitset_clear_bit(struct dm_bitset_info *info, dm_block_t root,
+			uint32_t index, dm_block_t *new_root);
+
 int dm_bitset_test_bit(struct dm_bitset_info *info, dm_block_t root,
 		       uint32_t index, dm_block_t *new_root, bool *result);
 

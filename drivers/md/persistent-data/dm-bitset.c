@@ -26,7 +26,7 @@ static struct dm_btree_value_type bitset_bvt = {
 /*----------------------------------------------------------------*/
 
 void dm_bitset_info_init(struct dm_transaction_manager *tm,
-				      struct dm_bitset_info *info)
+			 struct dm_bitset_info *info)
 {
 	dm_setup_array_info(&info->array_info, tm, &bitset_bvt);
 	info->current_index_set = false;
@@ -39,19 +39,17 @@ int dm_bitset_empty(struct dm_bitset_info *info, dm_block_t *root)
 }
 EXPORT_SYMBOL_GPL(dm_bitset_empty);
 
-int dm_bitset_resize(struct dm_bitset_info *info,
-		     dm_block_t root,
-		     uint32_t old_nr_entries,
-		     uint32_t new_nr_entries,
-		     bool default_value,
-		     dm_block_t *new_root)
+int dm_bitset_resize(struct dm_bitset_info *info, dm_block_t root,
+		     uint32_t old_nr_entries, uint32_t new_nr_entries,
+		     bool default_value, dm_block_t *new_root)
 {
-	uint32_t old_blocks = round_up(old_nr_entries, BITS_PER_ARRAY_ENTRY);
-	uint32_t new_blocks = round_up(new_nr_entries, BITS_PER_ARRAY_ENTRY);
+	uint32_t old_blocks = dm_div_up(old_nr_entries, BITS_PER_ARRAY_ENTRY);
+	uint32_t new_blocks = dm_div_up(new_nr_entries, BITS_PER_ARRAY_ENTRY);
 	__le64 value = default_value ? cpu_to_le64(~0) : cpu_to_le64(0);
 
 	__dm_bless_for_disk(&value);
-	return dm_array_resize(&info->array_info, root, old_blocks, new_blocks, &value, new_root);
+	return dm_array_resize(&info->array_info, root, old_blocks, new_blocks,
+			       &value, new_root);
 }
 EXPORT_SYMBOL_GPL(dm_bitset_resize);
 
@@ -61,7 +59,8 @@ int dm_bitset_del(struct dm_bitset_info *info, dm_block_t root)
 }
 EXPORT_SYMBOL_GPL(dm_bitset_del);
 
-int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root, dm_block_t *new_root)
+int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root,
+		    dm_block_t *new_root)
 {
 	int r;
 	__le64 value;
@@ -72,7 +71,8 @@ int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root, dm_block_t *ne
 	value = cpu_to_le64(info->current_bits);
 
 	__dm_bless_for_disk(&value);
-	r = dm_array_set(&info->array_info, root, info->current_index, &value, new_root);
+	r = dm_array_set(&info->array_info, root, info->current_index,
+			 &value, new_root);
 	if (r)
 		return r;
 
@@ -81,7 +81,8 @@ int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root, dm_block_t *ne
 }
 EXPORT_SYMBOL_GPL(dm_bitset_flush);
 
-static int read_bits(struct dm_bitset_info *info, dm_block_t root, uint32_t array_index)
+static int read_bits(struct dm_bitset_info *info, dm_block_t root,
+		     uint32_t array_index)
 {
 	int r;
 	__le64 value;
@@ -144,11 +145,11 @@ int dm_bitset_clear_bit(struct dm_bitset_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_bitset_clear_bit);
 
-int dm_bitset_test_bit(struct dm_bitset_info *info, dm_block_t root, uint32_t index,
-		       dm_block_t *new_root, bool *result)
+int dm_bitset_test_bit(struct dm_bitset_info *info, dm_block_t root,
+		       uint32_t index, dm_block_t *new_root, bool *result)
 {
 	int r;
-	unsigned b = index / BITS_PER_ARRAY_ENTRY;
+	unsigned b = index % BITS_PER_ARRAY_ENTRY;
 
 	r = get_array_entry(info, root, index, new_root);
 	if (r)

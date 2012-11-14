@@ -51,13 +51,7 @@ static unsigned long *alloc_bitset(unsigned nr_entries)
 static void clear_bitset(void *bitset, unsigned nr_entries)
 {
 	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, 0, s);
-}
-
-static void set_bitset(void *bitset, unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, ~0, s);
+	memset(bitset, 0, s);	
 }
 
 static void free_bitset(unsigned long *bits)
@@ -170,14 +164,15 @@ struct cache {
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
-	bool need_tick_bio;
-
 	struct dm_cache_policy *policy;
 	unsigned policy_nr_args;
 
-	bool quiescing;
-	bool commit_requested;
-	bool loaded_mappings;
+	bool need_tick_bio:1;
+
+	bool quiescing:1;
+	bool commit_requested:1;
+	bool loaded_mappings:1;
+	bool loaded_discards:1;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -1384,16 +1379,23 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	if (r) {
 		*error = "Couldn't resize cache metadata";
 		err_p = ERR_PTR(r);
-		goto bad_alloc_dirty_bitset;
+		goto bad_resize_cache_metadata;
 	}
 
 	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
-		*error = "Couldn't allocate dirty_bitset";
+		*error = "Couldn't allocate dirty bitset";
 		goto bad_alloc_dirty_bitset;
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
+
+	r = dm_cache_discard_bitset_resize(cmd, from_oblock(cache->origin_blocks));
+	if (r) {
+		*error = "Couldn't resize on-disk discard bitset";
+		err_p = ERR_PTR(r);
+		goto bad_resize_discard_bitset;
+	}
 
 	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {
@@ -1446,6 +1448,7 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
+	cache->loaded_discards = false;
 	cache->last_commit_jiffies = jiffies;
 
 	load_stats(cache);
@@ -1471,8 +1474,10 @@ bad_wq:
 bad_kcopyd_client:
 	free_bitset(cache->discard_bitset);
 bad_alloc_discard_bitset:
+bad_resize_discard_bitset:
 	free_bitset(cache->dirty_bitset);
 bad_alloc_dirty_bitset:
+bad_resize_cache_metadata:
 	kfree(cache);
 bad_cache:
 	dm_cache_metadata_close(cmd);
@@ -1720,6 +1725,20 @@ static int write_dirty_bitset(struct cache *cache)
 	return 0;
 }
 
+static int write_discard_bitset(struct cache *cache)
+{
+	unsigned i, r;
+
+	for (i = 0; i < from_oblock(cache->origin_blocks); i++) {
+		r = dm_cache_set_discard(cache->cmd, to_oblock(i),
+					 is_discarded(cache, to_oblock(i)));
+		if (r)
+			return r;
+	}
+
+	return 0;
+}
+
 static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock, uint32_t hint)
 {
 	struct cache *cache = context;
@@ -1743,25 +1762,23 @@ static int write_hints(struct cache *cache)
 	return r;
 }
 
-/*
- * FIXME: also write the discard bitset.
- */
 static int sync_metadata(struct cache *cache)
 {
-	int r1, r2, r3;
+	int r1, r2, r3, r4;
 
 	r1 = write_dirty_bitset(cache);
+	r2 = write_discard_bitset(cache);
 	save_stats(cache);
 
-	r2 = write_hints(cache);
+	r3 = write_hints(cache);
 
 	/*
 	 * If writing the above metadata failed, we still commit, but don't
 	 * set the clean shutdown flag.  This will effectively force every
 	 * dirty bit to be set on reload.
 	 */
-	r3 = dm_cache_commit(cache->cmd, !r1 && !r2);
-	return !r1 && !r2 && !r3;
+	r4 = dm_cache_commit(cache->cmd, !r1 && !r2 && !r3);
+	return !r1 && !r2 && !r3 && !r4;
 }
 
 static void cache_postsuspend(struct dm_target *ti)
@@ -1776,6 +1793,14 @@ static void cache_postsuspend(struct dm_target *ti)
 
 	if (!sync_metadata(cache))
 		DMERR("Couldn't write cache metadata.  Data loss may occur.");
+}
+
+static int load_discard(void *context, dm_oblock_t oblock, bool discard)
+{
+	struct cache *cache = context;
+
+	(discard ? set_discard : clear_discard)(cache, oblock);
+	return 0;
 }
 
 static int cache_preresume(struct dm_target *ti)
@@ -1793,6 +1818,16 @@ static int cache_preresume(struct dm_target *ti)
 		}
 
 		cache->loaded_mappings = true;
+	}
+
+	if (!cache->loaded_discards) {
+		r = dm_cache_load_discards(cache->cmd, load_discard, cache);
+		if (r) {
+			DMERR("couldn't load origin discards");
+			return r;
+		}
+
+		cache->loaded_discards = true;
 	}
 
 	return r;
