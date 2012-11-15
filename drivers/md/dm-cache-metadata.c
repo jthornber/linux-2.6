@@ -192,23 +192,6 @@ static int superblock_lock(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-static int get_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flags)
-{
-	int r;
-	struct dm_block *sblock;
-	struct cache_disk_superblock *disk_super;
-
-	r = superblock_read_lock(cmd, &sblock);
-	if (r)
-		return r;
-
-	disk_super = dm_block_data(sblock);
-	*flags = le32_to_cpu(disk_super->flags);
-	dm_bm_unlock(sblock);
-
-	return 0;
-}
-
 static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 {
 	int r;
@@ -403,6 +386,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	}
 
 	__setup_mapping_info(cmd);
+	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
 	sb_flags = le32_to_cpu(disk_super->flags);
 	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
 	return dm_bm_unlock(sblock);
@@ -904,14 +888,7 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 			   load_mapping_fn fn,
 			   void *context)
 {
-	int r;
 	struct thunk thunk;
-	unsigned flags;
-
-	/* FIXME: flags is unused */
-	r = get_superblock_flags(cmd, &flags);
-	if (r)
-		return r;
 
 	thunk.fn = fn;
 	thunk.context = context;
