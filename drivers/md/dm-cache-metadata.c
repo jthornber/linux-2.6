@@ -621,7 +621,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	int r;
 	struct dm_cache_metadata *cmd;
 
-	cmd = kmalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
 	if (!cmd) {
 		DMERR("could not allocate metadata struct");
 		return NULL;
