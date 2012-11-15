@@ -51,7 +51,7 @@ static unsigned long *alloc_bitset(unsigned nr_entries)
 static void clear_bitset(void *bitset, unsigned nr_entries)
 {
 	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, 0, s);	
+	memset(bitset, 0, s);
 }
 
 static void free_bitset(unsigned long *bits)
@@ -77,12 +77,11 @@ static void free_bitset(unsigned long *bits)
  */
 enum cache_mode {
 	CM_WRITE,		/* metadata may be changed */
+	CM_READ_ONLY,		/* metadata may not be changed */
 };
 
 struct cache_features {
 	enum cache_mode mode;
-
-	bool ctr_set:1;	/* Constructor has set feature argument below. */
 	bool write_through:1;
 };
 
@@ -108,7 +107,7 @@ struct cache {
 	/*
 	 * Cache features such as write-through.
 	 */
-	struct cache_features cf;
+	struct cache_features features;
 
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
@@ -135,6 +134,7 @@ struct cache {
 	struct list_head quiesced_migrations;
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
+	sector_t migration_threshold;
 	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
 
@@ -921,7 +921,7 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = dm_div_up(bio->bi_sector, cache->sectors_per_block);
+	dm_block_t start_block = dm_sector_div_up(bio->bi_sector, cache->sectors_per_block);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
@@ -935,13 +935,8 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 
 static bool may_migrate(struct cache *cache)
 {
-#if 0
 	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
 	return current_volume < cache->migration_threshold;
-#else
-	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) * cache->sectors_per_block;
-	return current_volume < 2048 * 100;
-#endif
 }
 
 static void process_bio(struct cache *cache, struct prealloc *structs, struct bio *bio)
@@ -1253,6 +1248,57 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
  * Target methods
  *--------------------------------------------------------------*/
 
+/*
+ * This function gets called on the error paths of the constructor, so we
+ * have to cope with a partially initialised struct.
+ */
+static void destroy(struct cache *cache)
+{
+	if (cache->next_migration)
+		mempool_free(cache->next_migration, cache->migration_pool);
+
+	if (cache->migration_pool)
+		mempool_destroy(cache->migration_pool);
+
+	if (cache->endio_hook_pool)
+		mempool_destroy(cache->endio_hook_pool);
+
+	if (cache->all_io_ds)
+		dm_deferred_set_destroy(cache->all_io_ds);
+
+	if (cache->prison)
+		dm_bio_prison_destroy(cache->prison);
+
+	if (cache->wq)
+		destroy_workqueue(cache->wq);
+
+	if (cache->dirty_bitset)
+		free_bitset(cache->dirty_bitset);
+
+	if (cache->discard_bitset)
+		free_bitset(cache->discard_bitset);
+
+	if (cache->copier)
+		dm_kcopyd_client_destroy(cache->copier);
+
+	if (cache->cmd)
+		dm_cache_metadata_close(cache->cmd);
+
+	if (cache->metadata_dev)
+		dm_put_device(cache->ti, cache->metadata_dev);
+
+	if (cache->origin_dev)
+		dm_put_device(cache->ti, cache->origin_dev);
+
+	if (cache->cache_dev)
+		dm_put_device(cache->ti, cache->cache_dev);
+
+	if (cache->policy)
+		dm_cache_policy_destroy(cache->policy);
+
+	kfree(cache);
+}
+
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
@@ -1268,24 +1314,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->cache_cell_clash));
 	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->commit_count));
 
-	if (cache->next_migration)
-		mempool_free(cache->next_migration, cache->migration_pool);
-
-	mempool_destroy(cache->migration_pool);
-	mempool_destroy(cache->endio_hook_pool);
-	dm_deferred_set_destroy(cache->all_io_ds);
-	dm_bio_prison_destroy(cache->prison);
-	destroy_workqueue(cache->wq);
-	free_bitset(cache->dirty_bitset);
-	free_bitset(cache->discard_bitset);
-	dm_kcopyd_client_destroy(cache->copier);
-	dm_cache_metadata_close(cache->cmd);
-	dm_put_device(ti, cache->metadata_dev);
-	dm_put_device(ti, cache->origin_dev);
-	dm_put_device(ti, cache->cache_dev);
-	dm_cache_policy_destroy(cache->policy);
-
-	kfree(cache);
+	destroy(cache);
 }
 
 static sector_t get_dev_size(struct dm_dev *dev)
@@ -1307,13 +1336,274 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock, b
 	return 0;
 }
 
-static int create_cache_policy(struct cache *cache,
-			       const char *policy_name, char **error)
+/*----------------------------------------------------------------*/
+
+/*
+ * Construct a cache device mapping.
+ *
+ * cache <metadata dev> <cache dev> <origin dev> <block size>
+ *       <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
+ *
+ * metadata dev    : fast device holding the persistent metadata
+ * cache dev	   : fast device holding cached data blocks
+ * origin dev	   : slow device holding original data blocks
+ * block size	   : cache unit size in sectors
+ * #feature args [<arg>]* : number of feature arguments followed by
+ *                          optional arguments * cache dev
+ * policy          : the replacement policy to use
+
+ * #policy_args  [<arg>]* : number of policy arguments followed by optional
+ *                          arguments; see policy plugin for instances
+ *			    (key value pairs count as 2; delimiter is space)
+ *
+ * Optional feature arguments are:
+ *	writeback: write back cache allowing cache block contents to
+ *                 differ from origin blocks for performance reasons
+ *	writethrough: write through caching prohibiting cache block
+ *                    content from being distinct from origin block content
+ */
+struct cache_args {
+	struct dm_target *ti;
+
+	struct dm_dev *metadata_dev;
+
+	struct dm_dev *cache_dev;
+	sector_t cache_sectors;
+
+	struct dm_dev *origin_dev;
+	sector_t origin_sectors;
+
+	sector_t block_size;
+
+	const char *policy_name;
+	int policy_argc;
+	char **policy_argv;
+
+	struct cache_features features;
+};
+
+static void destroy_cache_args(struct cache_args *ca)
 {
-	cache->policy =
-		dm_cache_policy_create(policy_name, cache->cache_size,
-				       cache->origin_sectors,
-				       cache->sectors_per_block);
+	if (ca->metadata_dev)
+		dm_put_device(ca->ti, ca->metadata_dev);
+
+	if (ca->cache_dev)
+		dm_put_device(ca->ti, ca->cache_dev);
+
+	if (ca->origin_dev)
+		dm_put_device(ca->ti, ca->origin_dev);
+
+	kfree(ca);
+}
+
+static int ensure_args__(struct dm_arg_set *as,
+		       unsigned count, char **error)
+{
+	if (as->argc < count) {
+		*error = "Insufficient args";
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+#define ensure_args(n) \
+	r = ensure_args__(as, n, error); \
+	if (r) \
+		return r;
+
+static int parse_metadata_dev(struct cache_args *ca,
+			      struct dm_arg_set *as,
+			      char **error)
+{
+	int r;
+	sector_t metadata_dev_size;
+	char b[BDEVNAME_SIZE];
+
+	ensure_args(1);
+
+	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE, &ca->metadata_dev);
+	if (r) {
+		*error = "Error opening metadata device";
+		return r;
+	}
+
+	pr_alert("parse metadata_dev = %p\n", ca->metadata_dev);
+
+	metadata_dev_size = get_dev_size(ca->metadata_dev);
+	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
+		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
+		       bdevname(ca->metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
+
+	return 0;
+}
+
+static int parse_cache_dev(struct cache_args *ca,
+			   struct dm_arg_set *as, char **error)
+{
+	int r;
+
+	ensure_args(1);
+
+	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE, &ca->cache_dev);
+	if (r) {
+		*error = "Error opening cache device";
+		return r;
+	}
+	ca->cache_sectors = get_dev_size(ca->cache_dev);
+
+	return 0;
+}
+
+static int parse_origin_dev(struct cache_args *ca,
+			    struct dm_arg_set *as, char **error)
+{
+	int r;
+
+	ensure_args(1);
+	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE, &ca->origin_dev);
+	if (r) {
+		*error = "Error opening origin device";
+		return r;
+	}
+
+	ca->origin_sectors = get_dev_size(ca->origin_dev);
+	if (ca->ti->len > ca->origin_sectors) {
+		*error = "Device size larger than cached device";
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int parse_block_size(struct cache_args *ca,
+			    struct dm_arg_set *as, char **error)
+{
+	int r;
+	unsigned long tmp;
+
+	ensure_args(1);
+	if (kstrtoul(dm_shift_arg(as), 10, &tmp) || !tmp ||
+	    tmp < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    tmp & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+		*error = "Invalid data block size";
+		return -EINVAL;
+	}
+	ca->block_size = tmp;
+
+	return 0;
+}
+
+static void init_features(struct cache_features *cf)
+{
+	cf->mode = CM_WRITE;
+	cf->write_through = false;
+}
+
+static int parse_features(struct cache_args *ca,
+			  struct dm_arg_set *as,
+			  char **error)
+{
+	static struct dm_arg _args[] = {
+		{0, 1, "Invalid number of cache feature arguments"},
+	};
+
+	int r;
+	unsigned argc;
+	const char *arg;
+	struct cache_features *cf = &ca->features;
+
+	init_features(cf);
+
+	r = dm_read_arg_group(_args, as, &argc, error);
+	if (r)
+		return -EINVAL;
+
+	while (argc--) {
+		arg = dm_shift_arg(as);
+
+		if (!strcasecmp(arg, "writeback"))
+			cf->write_through = false;
+
+		else if (!strcasecmp(arg, "writethrough"))
+			cf->write_through = true;
+
+		else {
+			*error = "Unrecognised cache feature requested";
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int parse_policy(struct cache_args *ca,
+			struct dm_arg_set *as, char **error)
+{
+	static struct dm_arg _args[] = {
+		{0, 1024, "Invalid number of policy arguments"},
+	};
+
+	int r;
+	ensure_args(1);
+	ca->policy_name = dm_shift_arg(as);
+
+	r = dm_read_arg_group(_args, as, &ca->policy_argc, error);
+	if (r)
+		return -EINVAL;
+
+	ca->policy_argv = as->argv;
+	dm_consume_args(as, ca->policy_argc);
+
+	return 0;
+}
+
+static int parse_cache_args(struct cache_args *ca,
+			    int argc, char **argv, char **error)
+{
+	int r;
+	struct dm_arg_set as;
+
+	as.argc = argc;
+	as.argv = argv;
+
+#define parse(name) \
+	r = parse_ ## name(ca, &as, error); \
+	if (r) \
+		return r;
+
+	parse(metadata_dev);
+	pr_alert("back from parse_metadata_dev\n");
+	parse(cache_dev);
+	pr_alert("back from parse_cache_dev\n");
+	parse(origin_dev);
+	pr_alert("back from parse_origin_dev\n");
+	parse(block_size);
+	pr_alert("back from parse_block_size\n");
+	parse(features);
+	pr_alert("back from parse_features\n");
+	parse(policy);
+	pr_alert("back from parse_policy\n");
+#undef parse
+
+	return 0;
+}
+
+/*----------------------------------------------------------------*/
+
+// FIXME: get rid of these
+static struct kmem_cache *_migration_cache;
+static struct kmem_cache *_endio_hook_cache;
+
+static int create_cache_policy(struct cache *cache,
+			       struct cache_args *ca,
+			       char **error)
+{
+	cache->policy =	dm_cache_policy_create(ca->policy_name,
+					       cache->cache_size,
+					       cache->origin_sectors,
+					       cache->sectors_per_block,
+					       ca->policy_argc, ca->policy_argv);
 	if (!cache->policy) {
 		*error = "Error creating cache's policy";
 		return -ENOMEM;
@@ -1322,134 +1612,177 @@ static int create_cache_policy(struct cache *cache,
 	return 0;
 }
 
-static struct kmem_cache *_migration_cache;
-static struct kmem_cache *_endio_hook_cache;
-
-static struct cache *cache_create(struct block_device *metadata_dev,
-				  sector_t block_size, sector_t origin_sectors,
-				  sector_t cache_sectors, const char *policy_name,
-				  bool read_only, char **error)
+static int cache_create(struct cache_args *ca, struct cache **result)
 {
-	int r;
-	void *err_p = ERR_PTR(-ENOMEM);
+	int r = 0;
+	char **error = &ca->ti->error;
 	struct cache *cache;
-	struct dm_cache_metadata *cmd;
-	bool format_device = read_only ? false : true;
+	struct dm_target *ti = ca->ti;
 	dm_block_t origin_blocks;
-
-	cmd = dm_cache_metadata_open(metadata_dev, block_size, format_device);
-	if (IS_ERR(cmd)) {
-		*error = "Error creating metadata object";
-		return (struct cache *)cmd;
-	}
+	struct dm_cache_metadata *cmd;
+	bool may_format = ca->features.mode == CM_WRITE;
 
 	cache = kzalloc(sizeof(*cache), GFP_KERNEL);
-	if (!cache) {
-		*error = "Error allocating memory for cache";
-		goto bad_cache;
+	if (!cache)
+		return -ENOMEM;
+
+	pr_alert("cache_create 1\n");
+	cache->ti = ca->ti;
+	ti->private = cache;
+	ti->num_flush_requests = 2;
+	ti->flush_supported = true;
+
+	ti->num_discard_requests = 1;
+	ti->discards_supported = true;
+	ti->discard_zeroes_data_unsupported = true;
+
+	pr_alert("cache_create 2\n");
+	cache->callbacks.congested_fn = cache_is_congested;
+	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
+
+#define consume(n) n; n = NULL;
+
+	pr_alert("cache_create 3\n");
+	cache->metadata_dev = consume(ca->metadata_dev);
+	cache->origin_dev = consume(ca->origin_dev);
+	cache->cache_dev = consume(ca->cache_dev);
+	memcpy(&cache->features, &ca->features, sizeof(cache->features));
+
+	pr_alert("cache_create 4\n");
+	// FIXME: factor out this whole section
+	origin_blocks = cache->origin_sectors = ca->origin_sectors;
+	do_div(origin_blocks, ca->block_size);
+	cache->origin_blocks = to_oblock(origin_blocks);
+
+	cache->sectors_per_block = ca->block_size;
+	if (dm_set_target_max_io_len(ti, cache->sectors_per_block)) {
+		r = -EINVAL;
+		goto bad;
 	}
 
-	cache->cmd = cmd;
-
-	origin_blocks = cache->origin_sectors = origin_sectors;
-	do_div(origin_blocks, block_size);
-	cache->origin_blocks = to_oblock(origin_blocks);
-	cache->sectors_per_block = block_size;
-	if (block_size & (block_size - 1)) {
-		dm_block_t cache_size = cache_sectors;
+	pr_alert("cache_create 5\n");
+	if (ca->block_size & (ca->block_size - 1)) {
+		dm_block_t cache_size = ca->cache_sectors;
 
 		cache->sectors_per_block_shift = -1;
-		(void) sector_div(cache_size, block_size);
+		(void) sector_div(cache_size, ca->block_size);
 		cache->cache_size = to_cblock(cache_size);
 	} else {
-		cache->sectors_per_block_shift = __ffs(block_size);
-		cache->cache_size = to_cblock(cache_sectors >> cache->sectors_per_block_shift);
+		cache->sectors_per_block_shift = __ffs(ca->block_size);
+		cache->cache_size = to_cblock(ca->cache_sectors >> cache->sectors_per_block_shift);
 	}
 
+	pr_alert("cache_create 6, metadata_dev = %p\n", cache->metadata_dev);
+	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev, ca->block_size, may_format);
+	if (IS_ERR(cmd)) {
+		*error = "Error creating metadata object";
+		r = PTR_ERR(cmd);
+		goto bad;
+	}
+	cache->cmd = cmd;
+
+	pr_alert("cache_create 7\n");
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	INIT_LIST_HEAD(&cache->completed_migrations);
 	INIT_LIST_HEAD(&cache->need_commit_migrations);
+	cache->migration_threshold = 2048 * 100; /* FIXME: needs a #define */
 	atomic_set(&cache->nr_migrations, 0);
 	init_waitqueue_head(&cache->migration_wait);
 
+	// FIXME: is this a recent addition?
+	pr_alert("cache_create 8\n");
 	r = dm_cache_resize(cmd, cache->cache_size);
 	if (r) {
 		*error = "Couldn't resize cache metadata";
-		err_p = ERR_PTR(r);
-		goto bad_resize_cache_metadata;
+		goto bad;
 	}
 
 	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
 		*error = "Couldn't allocate dirty bitset";
-		goto bad_alloc_dirty_bitset;
+		goto bad;
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
+#if 0
+	pr_alert("cache_create 9\n");
 	r = dm_cache_discard_bitset_resize(cmd, cache->origin_blocks);
 	if (r) {
 		*error = "Couldn't resize on-disk discard bitset";
-		err_p = ERR_PTR(r);
-		goto bad_resize_discard_bitset;
+		goto bad;
 	}
+#endif
 
 	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {
 		*error = "Couldn't allocate discard bitset";
-		goto bad_alloc_discard_bitset;
+		goto bad;
 	}
 	clear_bitset(cache->discard_bitset, from_oblock(cache->origin_blocks));
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
 		*error = "Couldn't create kcopyd client";
-		err_p = cache->copier;
-		goto bad_kcopyd_client;
+		r = PTR_ERR(cache->copier);
+		goto bad;
 	}
 
 	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
 	if (!cache->wq) {
 		*error = "Couldn't create workqueue for metadata object";
-		goto bad_wq;
+		goto bad;
 	}
 	INIT_WORK(&cache->worker, do_worker);
 	INIT_DELAYED_WORK(&cache->waker, do_waker);
+	cache->last_commit_jiffies = jiffies;
 
+	pr_alert("cache_create 11\n");
 	cache->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!cache->prison) {
 		*error = "Couldn't create bio prison";
-		goto bad_prison;
+		goto bad;
 	}
 
 	cache->all_io_ds = dm_deferred_set_create();
 	if (!cache->all_io_ds) {
 		*error = "Couldn't create all_io deferred set";
-		goto bad_deferred_set;
+		goto bad;
 	}
 
+	pr_alert("cache_create 12\n");
 	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
 							  _endio_hook_cache);
 	if (!cache->endio_hook_pool) {
 		*error = "Error creating cache's endio_hook mempool";
-		goto bad_endio_hook_pool;
+		goto bad;
 	}
 
+	pr_alert("cache_create 13\n");
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
 		*error = "Error creating cache's endio_hook mempool";
-		goto bad_migration_pool;
+		goto bad;
 	}
 
+	cache->next_migration = NULL;
+
+	pr_alert("cache_create 14\n");
+	r = create_cache_policy(cache, ca, error);
+	if (r)
+		goto bad;
+
+	cache->policy_nr_args = ca->policy_argc;
+
+	cache->need_tick_bio = true;
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
 	cache->loaded_discards = false;
-	cache->last_commit_jiffies = jiffies;
 
 	load_stats(cache);
 
@@ -1459,145 +1792,36 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 	atomic_set(&cache->cache_cell_clash, 0);
 	atomic_set(&cache->commit_count, 0);
 
-	return cache;
+	*result = cache;
+	return 0;
 
-bad_migration_pool:
-	mempool_destroy(cache->endio_hook_pool);
-bad_endio_hook_pool:
-	dm_deferred_set_destroy(cache->all_io_ds);
-bad_deferred_set:
-	dm_bio_prison_destroy(cache->prison);
-bad_prison:
-	destroy_workqueue(cache->wq);
-bad_wq:
-	dm_kcopyd_client_destroy(cache->copier);
-bad_kcopyd_client:
-	free_bitset(cache->discard_bitset);
-bad_alloc_discard_bitset:
-bad_resize_discard_bitset:
-	free_bitset(cache->dirty_bitset);
-bad_alloc_dirty_bitset:
-bad_resize_cache_metadata:
-	kfree(cache);
-bad_cache:
-	dm_cache_metadata_close(cmd);
-
-	return err_p;
+bad:
+	destroy(cache);
+	return r;
 }
 
-/*
- * Construct a hierarchical storage device mapping:
- *
- * cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
- *
- * metadata dev    : fast device holding the persistent metadata
- * origin dev	   : slow device holding original data blocks
- * cache dev	   : fast device holding cached data blocks
- * data block size : cache unit size in sectors
- * policy          : the replacement policy to use
- */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r = -EINVAL;
-	struct cache *cache;
-	struct dm_arg_set as;
-	sector_t block_size, origin_sectors, cache_sectors;
-	struct dm_dev *metadata_dev, *origin_dev, *cache_dev;
-	sector_t metadata_dev_size;
-	char b[BDEVNAME_SIZE];
-	const char *policy_name;
+	struct cache_args *ca;
+	struct cache *cache = NULL;
 
-	if (argc < 5) {
-		ti->error = "Invalid argument count";
-		return -EINVAL;
+	ca = kzalloc(sizeof(*ca), GFP_KERNEL);
+	if (!ca) {
+		ti->error = "Error allocating memory for cache";
+		return -ENOMEM;
 	}
-	as.argc = argc;
-	as.argv = argv;
+	ca->ti = ti;
 
-	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
-	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
-	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
-		ti->error = "Invalid data block size";
-		return -EINVAL;
-	}
-
-	policy_name = argv[4];
-
-	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
-	if (r) {
-		ti->error = "Error opening metadata device";
-		goto bad_metadata;
-	}
-
-	metadata_dev_size = get_dev_size(metadata_dev);
-	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
-		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
-		       bdevname(metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
-
-	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &origin_dev);
-	if (r) {
-		ti->error = "Error opening origin device";
-		goto bad_origin;
-	}
-
-	r = dm_get_device(ti, argv[2], FMODE_READ | FMODE_WRITE, &cache_dev);
-	if (r) {
-		ti->error = "Error opening cache device";
-		goto bad_cache;
-	}
-	cache_sectors = get_dev_size(cache_dev);
-
-	origin_sectors = get_dev_size(origin_dev);
-	if (ti->len > origin_sectors) {
-		ti->error = "Device size larger than cached device";
-		goto bad;
-	}
-
-	dm_consume_args(&as, 5);
-
-	cache = cache_create(metadata_dev->bdev, block_size,
-			     origin_sectors, cache_sectors,
-			     policy_name, false, &ti->error);
-	if (IS_ERR(cache)) {
-		r = PTR_ERR(cache);
-		goto bad;
-	}
-
-	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
-		goto bad_max_io_len;
-
-	r = create_cache_policy(cache, policy_name, &ti->error);
+	r = parse_cache_args(ca, argc, argv, &ti->error);
 	if (r)
-		goto bad_max_io_len;
+		goto out;
 
-	cache->ti = ti;
-	cache->metadata_dev = metadata_dev;
-	cache->origin_dev = origin_dev;
-	cache->cache_dev = cache_dev;
-
+	r = cache_create(ca, &cache);
 	ti->private = cache;
 
-	ti->num_flush_requests = 2;
-	ti->flush_supported = true;
-
-	ti->num_discard_requests = 1;
-	ti->discards_supported = true;
-	ti->discard_zeroes_data_unsupported = true;
-
-	cache->callbacks.congested_fn = cache_is_congested;
-	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
-
-	return 0;
-
-bad_max_io_len:
-	kfree(cache);
-bad:
-	dm_put_device(ti, cache_dev);
-bad_cache:
-	dm_put_device(ti, origin_dev);
-bad_origin:
-	dm_put_device(ti, metadata_dev);
-bad_metadata:
+out:
+	destroy_cache_args(ca);
 	return r;
 }
 
@@ -1844,16 +2068,36 @@ static void cache_resume(struct dm_target *ti)
 static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
+	int r = 0;
 	ssize_t sz = 0;
+	dm_block_t nr_free_blocks_metadata = 0;
+	dm_block_t nr_blocks_metadata = 0;
 	char buf[BDEVNAME_SIZE];
 	struct cache *cache = ti->private;
 	dm_cblock_t residency;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
+		/* Commit to ensure statistics aren't out-of-date */
+		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti)) {
+			r = dm_cache_commit(cache->cmd, false);
+			if (r)
+				DMERR("could not commit metadata for accurate status");
+		}
+
+		r = dm_cache_get_free_metadata_block_count(cache->cmd, &nr_free_blocks_metadata);
+		if (r)
+			DMERR("could not get metadata free block count");
+
+		r = dm_cache_get_metadata_dev_size(cache->cmd, &nr_blocks_metadata);
+		if (r)
+			DMERR("could not get metadata device size");
+
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%u %u %u %u %u %u %llu %u",
+		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u",
+		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
+		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->read_hit),
 		       (unsigned) atomic_read(&cache->read_miss),
 		       (unsigned) atomic_read(&cache->write_hit),
@@ -1867,15 +2111,59 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_TABLE:
 		format_dev_t(buf, cache->metadata_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
-		DMEMIT("%s ", buf);
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
+		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
+		DMEMIT("%s ", buf);
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
-		DMEMIT("%s", dm_cache_policy_get_name(cache->policy));
+
+		DMEMIT("1 %s ", cache->features.write_through ?
+		       "write-through" : "write-back");
+
+		DMEMIT("%s %u ", dm_cache_policy_get_name(cache->policy), cache->policy_nr_args);
 	}
 
+	if (sz < maxlen)
+		r = policy_status(cache->policy, type, status_flags, result + sz, maxlen - sz);
+
+	return r;
+}
+
+static int process_config_option(struct cache *cache, char **argv)
+{
+	if (strcmp(argv[1], "migration_threshold")) {
+		unsigned long tmp;
+
+		if (kstrtoul(argv[2], 10, &tmp))
+			return -EINVAL;
+
+		cache->migration_threshold = tmp;
+
+	} else
+		return 1; /* Inform caller it's not our option. */
+
 	return 0;
+}
+
+static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
+{
+	int r = 0;
+	struct cache *cache = ti->private;
+
+	if (argc != 3)
+		return -EINVAL;
+
+	if (strcmp(argv[0], "set_config")) {
+		r = process_config_option(cache, argv);
+		if (r < 0)
+			goto bad;
+	}
+
+	if (r)
+		r = policy_message(cache->policy, argc, argv);
+
+bad:
+	return r;
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
@@ -1949,6 +2237,7 @@ static struct target_type cache_target = {
 	.preresume = cache_preresume,
 	.resume = cache_resume,
 	.status = cache_status,
+	.message = cache_message,
 	.iterate_devices = cache_iterate_devices,
 	.merge = cache_bvec_merge,
 	.io_hints = cache_io_hints,

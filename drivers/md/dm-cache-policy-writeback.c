@@ -206,7 +206,7 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	if (set) {
 		if (!e->dirty) {
 			e->dirty = true;
-			list_move(&e->list, e->pending ? &p->clean_pending : &p->dirty);
+			list_move(&e->list, &p->dirty);
 		}
 
 	} else {
@@ -322,8 +322,6 @@ static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 
 	l = list_pop(&p->dirty);
 	r = container_of(l, struct wb_cache_entry, list);
-
-	r->dirty = true;
 	list_add(l, &p->clean_pending);
 
 	return r;
@@ -333,7 +331,7 @@ static int wb_writeback_work(struct dm_cache_policy *pe,
 			     dm_oblock_t *oblock,
 			     dm_cblock_t *cblock)
 {
-	int r;
+	int r = -ENOENT;
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 
@@ -344,9 +342,7 @@ static int wb_writeback_work(struct dm_cache_policy *pe,
 		*oblock = e->oblock;
 		*cblock = e->cblock;
 		r = 0;
-
-	} else
-		r = -ENOENT;
+	}
 
 	mutex_unlock(&p->lock);
 
@@ -399,7 +395,8 @@ static void init_policy_functions(struct policy *p)
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
-					 sector_t block_size)
+					 sector_t block_size,
+					 int argc, char **argv)
 {
 	int r;
 	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);

@@ -1418,6 +1418,7 @@ static void init_policy_functions(struct policy *p)
 static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 						   sector_t origin_size,
 						   sector_t block_size,
+						   int argc, char **argv,
 						   enum policy_type type)
 {
 	int r;
@@ -1540,9 +1541,10 @@ bad_free_policy:
 
 /* Policy type creation magic. */
 #define __CREATE_POLICY(policy) \
-static struct dm_cache_policy * policy ## _create(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size) \
+static struct dm_cache_policy * policy ## _create(dm_cblock_t cache_size, sector_t origin_size, \
+						  sector_t block_size, int argc, char **argv) \
 { \
-	return basic_policy_create(cache_size, origin_size, block_size, P_ ## policy); \
+	return basic_policy_create(cache_size, origin_size, block_size, argc, argv, P_ ## policy); \
 }
 
 #define	__POLICY_TYPE(policy) \

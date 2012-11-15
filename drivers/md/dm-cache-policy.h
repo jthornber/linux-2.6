@@ -156,6 +156,12 @@ struct dm_cache_policy {
 	 */
 	void (*tick)(struct dm_cache_policy *p);
 
+ 	/*
+	 * Status and message.
+	 */
+	int (*status) (struct dm_cache_policy *p, status_type_t type, unsigned status_flags, char *result, unsigned maxlen);
+	int (*message) (struct dm_cache_policy *p, unsigned argc, char **argv);
+
 	/*
 	 * Book keeping ptr for the policy register, not for general use.
 	 */
@@ -180,7 +186,9 @@ struct dm_cache_policy_type {
 	char name[CACHE_POLICY_NAME_MAX];
 	size_t hint_size;	/* in bytes, must be 0 or 4 */
 	struct module *owner;
-	struct dm_cache_policy *(*create)(dm_cblock_t cache_size, sector_t origin_size, sector_t block_size);
+	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
+					  sector_t origin_size, sector_t block_size,
+					  int argc, char **argv);
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);
