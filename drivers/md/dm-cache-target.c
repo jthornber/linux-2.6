@@ -1986,15 +1986,24 @@ static int write_hints(struct cache *cache)
 	return r;
 }
 
-static int sync_metadata(struct cache *cache)
+/*
+ * returns true on success
+ */
+static bool sync_metadata(struct cache *cache)
 {
 	int r1, r2, r3, r4;
 
 	r1 = write_dirty_bitset(cache);
+	if (r1)
+		DMERR("Couldn't write dirty bitset");
 	r2 = write_discard_bitset(cache);
+	if (r2)
+		DMERR("Couldn't write discard bitset");
 	save_stats(cache);
 
 	r3 = write_hints(cache);
+	if (r3)
+		DMERR("Couldn't write hints");
 
 	/*
 	 * If writing the above metadata failed, we still commit, but don't
@@ -2002,6 +2011,9 @@ static int sync_metadata(struct cache *cache)
 	 * dirty bit to be set on reload.
 	 */
 	r4 = dm_cache_commit(cache->cmd, !r1 && !r2 && !r3);
+	if (r4)
+		DMERR("Couldn't write cache metadata.  Data loss may occur.");
+
 	return !r1 && !r2 && !r3 && !r4;
 }
 
@@ -2015,8 +2027,7 @@ static void cache_postsuspend(struct dm_target *ti)
 	requeue_deferred_io(cache);
 	stop_quiescing(cache);
 
-	if (!sync_metadata(cache))
-		DMERR("Couldn't write cache metadata.  Data loss may occur.");
+	(void) sync_metadata(cache);
 }
 
 static int load_discard(void *context, dm_oblock_t oblock, bool discard)
