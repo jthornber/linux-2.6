@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
- * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/noop/miss cache replacement policies.
+ * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/dumb/miss cache replacement policies.
  *
  * This file is released under the GPL.
  */
@@ -128,7 +128,7 @@ enum policy_type {
 	P_multiqueue_ws,
 	P_q2,
 	P_twoqueue,
-	P_noop,
+	P_dumb,
 	P_miss,
 	P_basic	/* The default selecting one of the above. */
 };
@@ -149,7 +149,7 @@ struct queue_fns {
 #define	IS_MULTIQUEUE(p)		(p->queues.fns->evict == &queue_evict_multiqueue)
 #define	IS_Q2(p)			(p->queues.fns->add == &queue_add_q2)
 #define	IS_TWOQUEUE(p)			(p->queues.fns->add == &queue_add_twoqueue)
-#define	IS_NOOP(p)			(p->queues.fns->add == &queue_add_noop)
+#define	IS_NOOP(p)			(p->queues.fns->add == &queue_add_dumb)
 #define	IS_MISS(p)			(p->queues.fns->add == &queue_add_miss)
 
 #define	IS_FIFO_FILO(p)			(p->queues.fns->del == &queue_del_fifo_filo)
@@ -849,7 +849,7 @@ static void queue_add_twoqueue(struct policy *p, struct list_head *elt)
 	queue_add_tail(&p->queues.walk, &e->walk);
 }
 
-static void queue_add_noop(struct policy *p, struct list_head *elt)
+static void queue_add_dumb(struct policy *p, struct list_head *elt)
 {
 	queue_add_default_tail(p, elt);
 }
@@ -1486,7 +1486,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		{ &queue_add_multiqueue_ws, &queue_del_multiqueue,	&queue_evict_multiqueue },	/* P_multiqueue_ws */
 		{ &queue_add_q2,            &queue_del_multiqueue,	&queue_evict_q2_twoqueue },	/* P_q2 */
 		{ &queue_add_twoqueue,      &queue_del_multiqueue,	&queue_evict_q2_twoqueue },	/* P_twoqueue */
-		{ &queue_add_noop,	    &queue_del_default,		&queue_evict_default },		/* P_noop */
+		{ &queue_add_dumb,	    &queue_del_default,		&queue_evict_default },		/* P_dumb */
 		{ &queue_add_miss,	    NULL,			NULL }				/* P_miss */
 	};
 	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);
@@ -1631,7 +1631,7 @@ __CREATE_POLICY_TYPE(multiqueue);
 __CREATE_POLICY_TYPE(multiqueue_ws);
 __CREATE_POLICY_TYPE(q2);
 __CREATE_POLICY_TYPE(twoqueue);
-__CREATE_POLICY_TYPE(noop);
+__CREATE_POLICY_TYPE(dumb);
 __CREATE_POLICY_TYPE(miss);
 __CREATE_POLICY_TYPE(basic);
 
@@ -1649,7 +1649,7 @@ static struct dm_cache_policy_type *policy_types[] = {
 	&multiqueue_ws_policy_type,
 	&q2_policy_type,
 	&twoqueue_policy_type,
-	&noop_policy_type,
+	&dumb_policy_type,
 	&miss_policy_type,
 	&basic_policy_type
 };
@@ -1680,7 +1680,7 @@ module_exit(basic_exit);
 
 MODULE_AUTHOR("Joe Thornber/Heinz Mauelshagen");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/noop cache policies");
+MODULE_DESCRIPTION("basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/dumb/miss cache policies");
 
 MODULE_ALIAS("dm-cache-basic"); /* Default mapped to one underneath in basic_policy_create() */
 MODULE_ALIAS("dm-cache-fifo");
@@ -1696,7 +1696,7 @@ MODULE_ALIAS("dm-cache-multiqueue");
 MODULE_ALIAS("dm-cache-multiqueue_ws");
 MODULE_ALIAS("dm-cache-q2");
 MODULE_ALIAS("dm-cache-twoqueue");
-MODULE_ALIAS("dm-cache-noop");
+MODULE_ALIAS("dm-cache-dumb");
 MODULE_ALIAS("dm-cache-miss");
 
 /*----------------------------------------------------------------------------*/
