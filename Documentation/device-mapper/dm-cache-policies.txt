@@ -76,7 +76,8 @@
       allocates a variable number of queues depending on the amout of
       total cache entries;
       queue selection on entry based on hit count;
-      aging based on real time rather than logical time as with 'mq';
+      expiring of cache entries based on real time thresholds rather than
+      logical time ones as with 'mq';
       like 'mq' automatically adjusts to varying load patterns
 
     x multiqueue_ws:
@@ -85,11 +86,11 @@
       rether than hit count;
       suits varying io sizes better
 
-    Experimental ones:
     x random:
       randomly picks an entry;
-      worth a try for varying loads
+      admits stochastic replacement, thus suitable to varying loads
 
+    Experimental ones:
     x q2:
       single lru queue; similar to lru
 
