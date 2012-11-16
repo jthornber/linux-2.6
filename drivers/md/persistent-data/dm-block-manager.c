@@ -428,8 +428,11 @@ static int dm_bm_validate_buffer(struct dm_block_manager *bm,
 		if (!v)
 			return 0;
 		r = v->check(v, (struct dm_block *) buf, dm_bufio_get_block_size(bm->bufio));
-		if (unlikely(r))
+		if (unlikely(r)) {
+			DMERR("%s validator check failed for block %llu", v->name,
+			      (unsigned long long) dm_bufio_get_block_number(buf));
 			return r;
+		}
 		aux->validator = v;
 	} else {
 		if (unlikely(aux->validator != v)) {
@@ -611,6 +614,7 @@ int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 
 	return dm_bufio_write_dirty_buffers(bm->bufio);
 }
+EXPORT_SYMBOL_GPL(dm_bm_flush_and_unlock);
 
 void dm_bm_set_read_only(struct dm_block_manager *bm)
 {

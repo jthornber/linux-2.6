@@ -6,7 +6,8 @@
 
 #include "dm-cache-metadata.h"
 
-#include "persistent-data/dm-btree.h"
+#include "persistent-data/dm-array.h"
+#include "persistent-data/dm-bitset.h"
 #include "persistent-data/dm-space-map.h"
 #include "persistent-data/dm-space-map-disk.h"
 #include "persistent-data/dm-transaction-manager.h"
@@ -30,9 +31,28 @@
  *  2 for btree lookup used within space map
  */
 #define CACHE_MAX_CONCURRENT_LOCKS 5
-
-/* This should be plenty */
 #define SPACE_MAP_ROOT_SIZE 128
+
+enum superblock_flag_bits {
+	/* for spotting crashes that would invalidate the dirty bitset */
+	CLEAN_SHUTDOWN,
+};
+
+/*
+ * Each mapping from cache block -> origin block carries a set of flags.
+ */
+enum mapping_bits {
+	/*
+	 * A valid mapping.  Because we're using an array we clear this
+	 * flag for an non existant mapping.
+	 */
+	M_VALID = 1,
+
+	/*
+	 * The data on the cache is different from that on the origin.
+	 */
+	M_DIRTY = 2
+};
 
 struct cache_disk_superblock {
 	__le32 csum;
@@ -43,14 +63,25 @@ struct cache_disk_superblock {
 	__le64 magic;
 	__le32 version;
 
+	__u8 policy_name[CACHE_POLICY_NAME_SIZE];
+
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
+	__le64 hint_root;
+	__le64 discard_bitset_root;
 	__le32 data_block_size;
 	__le32 metadata_block_size;
+	__le32 cache_blocks;
+	__le32 origin_blocks;
 
 	__le32 compat_flags;
 	__le32 compat_ro_flags;
 	__le32 incompat_flags;
+
+	__le32 read_hits;
+	__le32 read_misses;
+	__le32 write_hits;
+	__le32 write_misses;
 
 } __packed;
 
@@ -60,12 +91,23 @@ struct dm_cache_metadata {
 	struct dm_space_map *metadata_sm;
 	struct dm_transaction_manager *tm;
 
-	struct dm_btree_info info;
+	struct dm_array_info info;
+	struct dm_array_info hint_info;
+	struct dm_bitset_info discard_info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
+	dm_block_t hint_root;
+	dm_block_t discard_bitset_root;
+
 	sector_t data_block_size;
-	bool changed;
+	dm_cblock_t cache_blocks;
+	dm_oblock_t origin_blocks;
+	bool changed:1;
+	bool clean_when_opened:1;
+
+	char policy_name[CACHE_POLICY_NAME_SIZE];
+	struct dm_cache_statistics stats;
 };
 
 /*-------------------------------------------------------------------
@@ -127,6 +169,13 @@ static struct dm_block_validator sb_validator = {
 
 /*----------------------------------------------------------------*/
 
+static int superblock_read_lock(struct dm_cache_metadata *cmd,
+				struct dm_block **sblock)
+{
+	return dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
+			       &sb_validator, sblock);
+}
+
 static int superblock_lock_zero(struct dm_cache_metadata *cmd,
 				struct dm_block **sblock)
 {
@@ -140,6 +189,8 @@ static int superblock_lock(struct dm_cache_metadata *cmd,
 	return dm_bm_write_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
 				&sb_validator, sblock);
 }
+
+/*----------------------------------------------------------------*/
 
 static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 {
@@ -168,15 +219,19 @@ static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	return dm_bm_unlock(b);
 }
 
-static void __setup_btree_details(struct dm_cache_metadata *cmd)
+static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 {
-	cmd->info.tm = cmd->tm;
-	cmd->info.levels = 1;
-	cmd->info.value_type.context = NULL;
-	cmd->info.value_type.size = sizeof(__le64);
-	cmd->info.value_type.inc = NULL;
-	cmd->info.value_type.dec = NULL;
-	cmd->info.value_type.equal = NULL;
+	struct dm_btree_value_type vt;
+
+	vt.context = NULL;
+	vt.size = sizeof(__le64);
+	vt.inc = NULL;
+	vt.dec = NULL;
+	vt.equal = NULL;
+	dm_setup_array_info(&cmd->info, cmd->tm, &vt);
+
+	vt.size = sizeof(__le32);
+	dm_setup_array_info(&cmd->hint_info, cmd->tm, &vt);
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -208,6 +263,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	memset(disk_super->uuid, 0, sizeof(disk_super->uuid));
 	disk_super->magic = cpu_to_le64(CACHE_SUPERBLOCK_MAGIC);
 	disk_super->version = cpu_to_le32(CACHE_VERSION);
+	memset(disk_super->policy_name, 0, CACHE_POLICY_NAME_SIZE);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -215,8 +271,18 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 		goto bad_locked;
 
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
+	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
+	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
+	disk_super->cache_blocks = cpu_to_le32(0);
+	disk_super->origin_blocks = cpu_to_le32(0);
+	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
+
+	disk_super->read_hits = cpu_to_le32(0);
+	disk_super->read_misses = cpu_to_le32(0);
+	disk_super->write_hits = cpu_to_le32(0);
+	disk_super->write_misses = cpu_to_le32(0);
 
 	return dm_tm_commit(cmd->tm, sblock);
 
@@ -237,9 +303,15 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 		return r;
 	}
 
-	__setup_btree_details(cmd);
+	__setup_mapping_info(cmd);
 
-	r = dm_btree_empty(&cmd->info, &cmd->root);
+	r = dm_array_empty(&cmd->info, &cmd->root);
+	if (r < 0)
+		goto bad;
+
+	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+
+	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_bitset_root);
 	if (r < 0)
 		goto bad;
 
@@ -247,6 +319,7 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r)
 		goto bad;
 
+	cmd->clean_when_opened = true;
 	return 0;
 
 bad:
@@ -289,11 +362,11 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	int r;
 	struct dm_block *sblock;
 	struct cache_disk_superblock *disk_super;
+	unsigned long sb_flags;
 
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r < 0) {
-		DMERR("couldn't read superblock");
+		DMERR("couldn't read lock superblock");
 		return r;
 	}
 
@@ -312,7 +385,10 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 		goto bad;
 	}
 
-	__setup_btree_details(cmd);
+	__setup_mapping_info(cmd);
+	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+	sb_flags = le32_to_cpu(disk_super->flags);
+	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
 	return dm_bm_unlock(sblock);
 
 bad:
@@ -320,7 +396,8 @@ bad:
 	return r;
 }
 
-static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_device)
+static int __open_or_format_metadata(struct dm_cache_metadata *cmd,
+				     bool format_device)
 {
 	int r, unformatted;
 
@@ -334,7 +411,8 @@ static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_
 	return __open_metadata(cmd);
 }
 
-static int __create_persistent_data_objects(struct dm_cache_metadata *cmd, bool may_format_device)
+static int __create_persistent_data_objects(struct dm_cache_metadata *cmd,
+					    bool may_format_device)
 {
 	int r;
 	cmd->bm = dm_block_manager_create(cmd->bdev, CACHE_METADATA_BLOCK_SIZE,
@@ -359,6 +437,66 @@ static void __destroy_persistent_data_objects(struct dm_cache_metadata *cmd)
 	dm_block_manager_destroy(cmd->bm);
 }
 
+typedef unsigned long (*flags_mutator)(unsigned long);
+
+static void update_flags(struct cache_disk_superblock *disk_super,
+			 flags_mutator mutator)
+{
+	uint32_t sb_flags = mutator(le32_to_cpu(disk_super->flags));
+	disk_super->flags = cpu_to_le32(sb_flags);
+}
+
+static unsigned long set_clean_shutdown(unsigned long flags)
+{
+	set_bit(CLEAN_SHUTDOWN, &flags);
+	return flags;
+}
+
+static unsigned long clear_clean_shutdown(unsigned long flags)
+{
+	clear_bit(CLEAN_SHUTDOWN, &flags);
+	return flags;
+}
+
+static void read_superblock_fields(struct dm_cache_metadata *cmd,
+				   struct cache_disk_superblock *disk_super)
+{
+	cmd->root = le64_to_cpu(disk_super->mapping_root);
+	cmd->hint_root = le64_to_cpu(disk_super->hint_root);
+	cmd->discard_bitset_root = le64_to_cpu(disk_super->discard_bitset_root);
+	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
+	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
+	cmd->origin_blocks = to_oblock(le32_to_cpu(disk_super->origin_blocks));
+	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
+
+	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
+	cmd->stats.read_misses = le32_to_cpu(disk_super->read_misses);
+	cmd->stats.write_hits = le32_to_cpu(disk_super->write_hits);
+	cmd->stats.write_misses = le32_to_cpu(disk_super->write_misses);
+
+	cmd->changed = false;
+}
+
+/*
+ * The mutator updates the superblock flags.
+ */
+static int __begin_transaction_flags(struct dm_cache_metadata *cmd, flags_mutator mutator)
+{
+	int r;
+	struct cache_disk_superblock *disk_super;
+	struct dm_block *sblock;
+
+	r = superblock_lock(cmd, &sblock);
+	if (r)
+		return r;
+
+	disk_super = dm_block_data(sblock);
+	update_flags(disk_super, mutator);
+	read_superblock_fields(cmd, disk_super);
+
+	return dm_bm_flush_and_unlock(cmd->bm, sblock);
+}
+
 static int __begin_transaction(struct dm_cache_metadata *cmd)
 {
 	int r;
@@ -369,30 +507,27 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	 * We re-read the superblock every time.  Shouldn't need to do this
 	 * really.
 	 */
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r)
 		return r;
 
 	disk_super = dm_block_data(sblock);
-	cmd->root = le64_to_cpu(disk_super->mapping_root);
-	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
-	cmd->changed = 0;
-
+	read_superblock_fields(cmd, disk_super);
 	dm_bm_unlock(sblock);
+
 	return 0;
 }
 
-static int __commit_transaction(struct dm_cache_metadata *cmd)
+static int __commit_transaction(struct dm_cache_metadata *cmd,
+				flags_mutator mutator)
 {
 	int r;
 	size_t metadata_len;
 	struct cache_disk_superblock *disk_super;
 	struct dm_block *sblock;
 
-	debug("__commit_transaction\n");
 	/*
-	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
+	 * We need to know if the cache_disk_superblock exceeds a 512-byte sector.
 	 */
 	BUILD_BUG_ON(sizeof(struct cache_disk_superblock) > 512);
 
@@ -409,8 +544,22 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 		return r;
 
 	disk_super = dm_block_data(sblock);
+
+	if (mutator)
+		update_flags(disk_super, mutator);
+
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
+	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
+	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
+	disk_super->cache_blocks = cpu_to_le32(from_cblock(cmd->cache_blocks));
+	disk_super->origin_blocks = cpu_to_le32(from_oblock(cmd->origin_blocks));
+	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
+
+	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
+	disk_super->read_misses = cpu_to_le32(cmd->stats.read_misses);
+	disk_super->write_hits = cpu_to_le32(cmd->stats.write_hits);
+	disk_super->write_misses = cpu_to_le32(cmd->stats.write_misses);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -424,6 +573,31 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * The mappings are held in a dm-array that has 64-bit values stored in
+ * little-endian format.  The index is the cblock, the high 48bits of the
+ * value are the oblock and the low 16 bit the flags.
+ */
+#define FLAGS_MASK ((1 << 16) - 1)
+
+static __le64 pack_value(dm_oblock_t block, unsigned flags)
+{
+	uint64_t value = from_oblock(block);
+	value <<= 16;
+	value = value | (flags & FLAGS_MASK);
+	return cpu_to_le64(value);
+}
+
+static void unpack_value(__le64 value_le, dm_oblock_t *block, unsigned *flags)
+{
+	uint64_t value = le64_to_cpu(value_le);
+	uint64_t b = value >> 16;
+	*block = to_oblock(b);
+	*flags = value & FLAGS_MASK;
+}
+
+/*----------------------------------------------------------------*/
+
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
 						 bool may_format_device)
@@ -431,7 +605,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	int r;
 	struct dm_cache_metadata *cmd;
 
-	cmd = kmalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
 	if (!cmd) {
 		DMERR("could not allocate metadata struct");
 		return NULL;
@@ -440,17 +614,20 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	init_rwsem(&cmd->root_lock);
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
-	cmd->changed = 1;
+	cmd->cache_blocks = 0;
+	cmd->origin_blocks = 0;
+	cmd->changed = true;
+
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
 		kfree(cmd);
-		return NULL;
+		return ERR_PTR(r);
 	}
 
-	r = __begin_transaction(cmd);
+	r = __begin_transaction_flags(cmd, clear_clean_shutdown);
 	if (r < 0) {
 		dm_cache_metadata_close(cmd);
-		return NULL;
+		return ERR_PTR(r);
 	}
 
 	return cmd;
@@ -458,57 +635,199 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
-	__commit_transaction(cmd);
 	__destroy_persistent_data_objects(cmd);
 	kfree(cmd);
 }
 
-static int __remove(struct dm_cache_metadata *cmd, dm_block_t oblock)
+int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size)
 {
 	int r;
+	__le64 null_mapping = pack_value(0, 0);
 
-	debug("__remove %lu\n", (unsigned long) oblock);
-	r = dm_btree_remove(&cmd->info, cmd->root, &oblock, &cmd->root);
-	if (r)
-		return r;
+	down_write(&cmd->root_lock);
+	__dm_bless_for_disk(&null_mapping);
+	r = dm_array_resize(&cmd->info, cmd->root, from_cblock(cmd->cache_blocks),
+			    from_cblock(new_cache_size),
+			    &null_mapping, &cmd->root);
+	if (!r)
+		cmd->cache_blocks = new_cache_size;
+	cmd->changed = true;
+	up_write(&cmd->root_lock);
 
-	cmd->changed = 1;
-	return 0;
+	return r;
 }
 
-int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock)
+int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
+				   dm_oblock_t new_nr_entries)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __remove(cmd, oblock);
+	r = dm_bitset_resize(&cmd->discard_info, cmd->discard_bitset_root,
+			     from_oblock(cmd->origin_blocks),
+			     from_oblock(new_nr_entries),
+			     false, &cmd->discard_bitset_root);
+	if (!r)
+		cmd->origin_blocks = new_nr_entries;
+	cmd->changed = true; // FIXME: shouldn't this be conditional on !r?
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+static int __set_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+{
+	return dm_bitset_set_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				 from_oblock(b), &cmd->discard_bitset_root);
+}
+
+static int __clear_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+{
+	return dm_bitset_clear_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				   from_oblock(b), &cmd->discard_bitset_root);
+}
+
+static int __is_discarded(struct dm_cache_metadata *cmd, dm_oblock_t b,
+			  bool *is_discarded)
+{
+	return dm_bitset_test_bit(&cmd->discard_info, cmd->discard_bitset_root,
+				  from_oblock(b), &cmd->discard_bitset_root,
+				  is_discarded);
+}
+
+static int __discard(struct dm_cache_metadata *cmd,
+		     dm_oblock_t oblock, bool discard)
+{
+	int r;
+	bool already_discarded;
+
+	r = __is_discarded(cmd, oblock, &already_discarded);
+	if (r)
+		return r;
+
+	if ((already_discarded && discard) || (!already_discarded && !discard))
+		/* nothing to be done */
+		return 0;
+
+	if (discard)
+		r = __set_discard(cmd, oblock);
+	else
+		r = __clear_discard(cmd, oblock);
+
+	if (r)
+		return r;
+
+	cmd->changed = true;
+	return 0;
+}
+
+int dm_cache_set_discard(struct dm_cache_metadata *cmd,
+			 dm_oblock_t oblock, bool discard)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = __discard(cmd, oblock, discard);
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+static int __load_discards(struct dm_cache_metadata *cmd,
+			   load_discard_fn fn, void *context)
+{
+	int r = 0;
+	dm_block_t oblock;
+	bool discard;
+
+	for (oblock = 0; oblock < from_oblock(cmd->origin_blocks); oblock++) {
+		if (cmd->clean_when_opened) {
+			r = __is_discarded(cmd, to_oblock(oblock), &discard);
+			if (r)
+				return r;
+		} else
+			discard = false;
+
+		r = fn(context, to_oblock(oblock), discard);
+		if (r)
+			break;
+	}
+
+	return r;
+}
+
+int dm_cache_load_discards(struct dm_cache_metadata *cmd,
+			   load_discard_fn fn, void *context)
+{
+	int r;
+
+	down_read(&cmd->root_lock);
+	r = __load_discards(cmd, fn, context);
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
+dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd)
+{
+	dm_cblock_t r;
+
+	down_read(&cmd->root_lock);
+	r = cmd->cache_blocks;
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
+static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
+{
+	int r;
+	__le64 value = pack_value(0, 0);
+
+	debug("__remove %lu\n", (unsigned long) oblock);
+	__dm_bless_for_disk(&value);
+	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock), &value, &cmd->root);
+	if (r)
+		return r;
+
+	cmd->changed = true;
+	return 0;
+}
+
+int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = __remove(cmd, cblock);
 	up_write(&cmd->root_lock);
 
 	return r;
 }
 
 static int __insert(struct dm_cache_metadata *cmd,
-		    dm_block_t oblock, dm_block_t cblock)
+		    dm_cblock_t cblock, dm_oblock_t oblock)
 {
 	int r;
-	__le64 value = cpu_to_le64(cblock);
+	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
-	debug("__insert %lu -> %lu\n", (unsigned long) oblock, (unsigned long) cblock);
-	r = dm_btree_insert(&cmd->info, cmd->root, &oblock, &value, &cmd->root);
+	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock), &value, &cmd->root);
 	if (r)
 		return r;
 
-	cmd->changed = 1;
+	cmd->changed = true;
 	return 0;
 }
 
-int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock, dm_block_t cblock)
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd,
+			    dm_cblock_t cblock,
+			    dm_oblock_t oblock)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __insert(cmd, oblock, cblock);
+	r = __insert(cmd, cblock, oblock);
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -517,21 +836,55 @@ int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock, dm
 struct thunk {
 	load_mapping_fn fn;
 	void *context;
+
+	struct dm_cache_metadata *cmd;
+	bool respect_dirty_flags;
+	bool hints_valid;
 };
 
-static int __load_mapping(void *context, uint64_t *keys, void *leaf)
+static bool hints_array_available(struct dm_cache_metadata *cmd,
+				  const char *policy_name)
 {
+	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
+					   sizeof(cmd->policy_name));
+
+	return cmd->clean_when_opened &&
+		policy_names_match &&
+		cmd->hint_root;
+}
+
+static int __load_mapping(void *context, uint64_t cblock, void *leaf)
+{
+	int r = 0;
+	bool dirty;
 	__le64 value;
-	dm_block_t oblock = keys[0], cblock;
+	__le32 hint_value = 0;
+	dm_oblock_t oblock;
+	unsigned flags;
 	struct thunk *thunk = context;
+	struct dm_cache_metadata *cmd = thunk->cmd;
 
 	memcpy(&value, leaf, sizeof(value));
-	cblock = le64_to_cpu(value);
+	unpack_value(value, &oblock, &flags);
 
-	return thunk->fn(thunk->context, oblock, cblock);
+	if (flags & M_VALID) {
+		if (thunk->hints_valid) {
+			r = dm_array_get(&cmd->hint_info, cmd->hint_root,
+					 cblock, &hint_value);
+			if (r && r != -ENODATA)
+				return r;
+		}
+
+		dirty = thunk->respect_dirty_flags ? (flags & M_DIRTY) : true;
+		r = thunk->fn(thunk->context, oblock, to_cblock(cblock),
+			      dirty, le32_to_cpu(hint_value), thunk->hints_valid);
+	}
+
+	return r;
 }
 
 static int __load_mappings(struct dm_cache_metadata *cmd,
+			   const char *policy_name,
 			   load_mapping_fn fn,
 			   void *context)
 {
@@ -539,10 +892,16 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 
 	thunk.fn = fn;
 	thunk.context = context;
-	return dm_btree_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
+
+	thunk.cmd = cmd;
+	thunk.respect_dirty_flags = cmd->clean_when_opened;
+	thunk.hints_valid = hints_array_available(cmd, policy_name);
+
+	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
+			   const char *policy_name,
 			   load_mapping_fn fn,
 			   void *context)
 {
@@ -550,11 +909,41 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 
 	debug("> dm_cache_load_mappings\n");
 	down_read(&cmd->root_lock);
-	r = __load_mappings(cmd, fn, context);
+	r = __load_mappings(cmd, policy_name, fn, context);
 	up_read(&cmd->root_lock);
 	debug("< dm_cache_load_mappings\n");
 
 	return r;
+}
+
+static int __dump_mapping(void *context, uint64_t cblock, void *leaf)
+{
+	int r = 0;
+	__le64 value;
+	dm_oblock_t oblock;
+	unsigned flags;
+
+	memcpy(&value, leaf, sizeof(value));
+	unpack_value(value, &oblock, &flags);
+
+	if (flags & M_VALID)
+		pr_alert("%p o(%u) -> c(%u)\n", leaf,
+			 (unsigned) from_oblock(oblock),
+			 (unsigned) cblock);
+
+	return r;
+}
+
+static int __dump_mappings(struct dm_cache_metadata *cmd)
+{
+	return dm_array_walk(&cmd->info, cmd->root, __dump_mapping, NULL);
+}
+
+void dm_cache_dump(struct dm_cache_metadata *cmd)
+{
+	down_read(&cmd->root_lock);
+	__dump_mappings(cmd);
+	up_read(&cmd->root_lock);
 }
 
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
@@ -568,12 +957,70 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 	return r;
 }
 
-int dm_cache_commit(struct dm_cache_metadata *cmd)
+static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty)
+{
+	int r;
+	unsigned flags;
+	dm_oblock_t oblock;
+	__le64 value;
+
+	r = dm_array_get(&cmd->info, cmd->root, from_cblock(cblock), &value);
+	if (r)
+		return r;
+
+	unpack_value(value, &oblock, &flags);
+
+	if (((flags & M_DIRTY) && dirty) || (!(flags & M_DIRTY) && !dirty))
+		/* nothing to be done */
+		return 0;
+
+	value = pack_value(oblock, flags | (dirty ? M_DIRTY : 0));
+	__dm_bless_for_disk(&value);
+
+	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock), &value, &cmd->root);
+	if (r)
+		return r;
+
+	cmd->changed = true;
+	return 0;
+
+}
+
+int dm_cache_set_dirty(struct dm_cache_metadata *cmd,
+		       dm_cblock_t cblock, bool dirty)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __commit_transaction(cmd);
+	r = __dirty(cmd, cblock, dirty);
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+void dm_cache_get_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats)
+{
+	down_read(&cmd->root_lock);
+	memcpy(stats, &cmd->stats, sizeof(*stats));
+	up_read(&cmd->root_lock);
+}
+
+void dm_cache_set_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats)
+{
+	down_write(&cmd->root_lock);
+	memcpy(&cmd->stats, stats, sizeof(*stats));
+	up_write(&cmd->root_lock);
+}
+
+int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
+{
+	int r;
+	flags_mutator mutator = clean_shutdown ? set_clean_shutdown : clear_clean_shutdown;
+
+	down_write(&cmd->root_lock);
+	r = __commit_transaction(cmd, mutator);
 	if (r)
 		goto out;
 
@@ -584,5 +1031,96 @@ out:
 	return r;
 }
 
+int dm_cache_get_free_metadata_block_count(struct dm_cache_metadata *cmd,
+					   dm_block_t *result)
+{
+	int r = -EINVAL;
+
+	down_read(&cmd->root_lock);
+	r = dm_sm_get_nr_free(cmd->metadata_sm, result);
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
+int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
+				   dm_block_t *result)
+{
+	int r = -EINVAL;
+
+	down_read(&cmd->root_lock);
+	r = dm_sm_get_nr_blocks(cmd->metadata_sm, result);
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
 /*----------------------------------------------------------------*/
 
+static int begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
+{
+	int r;
+	__le32 value;
+
+	if (!policy_name[0] ||
+	    (strlen(policy_name) > sizeof(cmd->policy_name) - 1))
+		return -EINVAL;
+
+	if (strcmp(cmd->policy_name, policy_name)) {
+		strncpy(cmd->policy_name, policy_name, sizeof(cmd->policy_name));
+
+		if (cmd->hint_root) {
+			r = dm_array_del(&cmd->hint_info, cmd->hint_root);
+			if (r)
+				return r;
+		}
+
+		r = dm_array_empty(&cmd->hint_info, &cmd->hint_root);
+		if (r)
+			return r;
+
+		value = cpu_to_le32(0);
+		__dm_bless_for_disk(&value);
+		r = dm_array_resize(&cmd->hint_info, cmd->hint_root, 0,
+				    from_cblock(cmd->cache_blocks), &value, &cmd->hint_root);
+		if (r)
+			return r;
+	}
+
+	return 0;
+}
+
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = begin_hints(cmd, policy_name);
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t hint)
+{
+	int r;
+	__le32 value = cpu_to_le32(hint);
+	__dm_bless_for_disk(&value);
+
+	r = dm_array_set(&cmd->hint_info, cmd->hint_root,
+			 from_cblock(cblock), &value, &cmd->hint_root);
+	cmd->changed = true;
+
+	return r;
+}
+
+int dm_cache_save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t hint)
+{
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = save_hint(cmd, cblock, hint);
+	up_write(&cmd->root_lock);
+
+	return r;
+}

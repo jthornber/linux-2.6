@@ -4,7 +4,7 @@
  * This file is released under the GPL.
  */
 
-#include "dm-cache-policy.h"
+#include "dm-cache-policy-internal.h"
 #include "dm.h"
 
 #include <linux/list.h>
@@ -67,6 +67,10 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type)
 {
 	int r;
 
+	/* One size fits all for now */
+	if (type->hint_size != 0 && type->hint_size != 4)
+		return -EINVAL;
+
 	spin_lock(&register_lock);
 	if (__find_policy(type->name)) {
 		DMWARN("attempt to register policy under duplicate name");
@@ -89,14 +93,16 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type)
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_block_t cache_size)
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
+					       sector_t origin_size, sector_t block_size,
+					       int argc, char **argv)
 {
 	struct dm_cache_policy *p = NULL;
 	struct dm_cache_policy_type *type;
 
 	type = get_policy(name);
 	if (type) {
-		p = type->create(cache_size);
+		p = type->create(cache_size, origin_size, block_size, argc, argv);
 		if (p)
 			p->private = type;
 	} else
@@ -122,5 +128,13 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p)
 	return t->name;
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_get_name);
+
+size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p)
+{
+	struct dm_cache_policy_type *t = p->private;
+
+	return t->hint_size;
+}
+EXPORT_SYMBOL_GPL(dm_cache_policy_get_hint_size);
 
 /*----------------------------------------------------------------*/
