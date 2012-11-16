@@ -1164,7 +1164,7 @@ static int map(struct policy *p, dm_oblock_t oblock,
 		/* Cache hit: update entry on queues, increment its hit count... */
 		update_cache_entry(p, e, bio, result);
 
-	else if (iot_sequential_pattern(&p->tracker))
+	else if (!IS_NOOP(p) && iot_sequential_pattern(&p->tracker))
 		;
 
 	else if (!can_migrate)
