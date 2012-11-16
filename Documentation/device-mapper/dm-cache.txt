@@ -5,7 +5,8 @@
 - Need for a pure dm target that we can layer within dm stacks.
   eg. data device of thin provisioning.
 
-- Modular policy, so everyone can join in and write their own.
+- Modular policy, so everyone can join in and write their own;
+  see dm-cache-policies.txt for given ones
 
 - Reuses the persistent-data library from thin provisioning.
 

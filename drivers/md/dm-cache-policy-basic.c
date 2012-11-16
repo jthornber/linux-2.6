@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
- * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/noop cache replacement policies.
+ * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/noop/miss cache replacement policies.
  *
  * This file is released under the GPL.
  */
@@ -917,7 +917,7 @@ static void queue_del_multiqueue(struct policy *p, struct list_head *elt)
 	}
 
 	queue_del(&e->ce.list);
-		queue_del(&e->walk);
+	queue_del(&e->walk);
 }
 /*----------------------------------------------------------------------------*/
 
