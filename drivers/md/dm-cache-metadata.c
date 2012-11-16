@@ -651,7 +651,7 @@ int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size)
 			    &null_mapping, &cmd->root);
 	if (!r)
 		cmd->cache_blocks = new_cache_size;
-	cmd->changed = true; // FIXME: shouldn't this be conditional on !r?
+	cmd->changed = true;
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -737,18 +737,18 @@ static int __load_discards(struct dm_cache_metadata *cmd,
 			   load_discard_fn fn, void *context)
 {
 	int r = 0;
-	dm_oblock_t oblock;
+	dm_block_t oblock;
 	bool discard;
 
 	for (oblock = 0; oblock < from_oblock(cmd->origin_blocks); oblock++) {
 		if (cmd->clean_when_opened) {
-			r = __is_discarded(cmd, oblock, &discard);
+			r = __is_discarded(cmd, to_oblock(oblock), &discard);
 			if (r)
 				return r;
 		} else
 			discard = false;
 
-		r = fn(context, oblock, discard);
+		r = fn(context, to_oblock(oblock), discard);
 		if (r)
 			break;
 	}

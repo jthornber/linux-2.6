@@ -168,7 +168,7 @@ struct cache {
 	unsigned policy_nr_args;
 
 	bool need_tick_bio:1;
-
+	bool sized:1;
 	bool quiescing:1;
 	bool commit_requested:1;
 	bool loaded_mappings:1;
@@ -1692,14 +1692,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	atomic_set(&cache->nr_migrations, 0);
 	init_waitqueue_head(&cache->migration_wait);
 
-	// FIXME: is this a recent addition?
-	pr_alert("cache_create 8\n");
-	r = dm_cache_resize(cmd, cache->cache_size);
-	if (r) {
-		*error = "Couldn't resize cache metadata";
-		goto bad;
-	}
-
 	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
@@ -1708,14 +1700,11 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
-#if 0
-	pr_alert("cache_create 9\n");
 	r = dm_cache_discard_bitset_resize(cmd, cache->origin_blocks);
 	if (r) {
 		*error = "Couldn't resize on-disk discard bitset";
 		goto bad;
 	}
-#endif
 
 	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {
@@ -1779,6 +1768,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->policy_nr_args = ca->policy_argc;
 
 	cache->need_tick_bio = true;
+	cache->sized = false;
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
@@ -1991,7 +1981,7 @@ static int write_hints(struct cache *cache)
  */
 static bool sync_metadata(struct cache *cache)
 {
-	int r1, r2, r3, r4;
+	int r1, r2 = 0, r3, r4;
 
 	r1 = write_dirty_bitset(cache);
 	if (r1)
@@ -2042,6 +2032,23 @@ static int cache_preresume(struct dm_target *ti)
 {
 	int r = 0;
 	struct cache *cache = ti->private;
+	sector_t actual_cache_size = get_dev_size(cache->cache_dev);
+	(void) sector_div(actual_cache_size, cache->sectors_per_block);
+
+	/*
+	 * Check to see if the cache has resized.
+	 */
+	if (from_cblock(cache->cache_size) != actual_cache_size || !cache->sized) {
+		cache->cache_size = to_cblock(actual_cache_size);
+
+		r = dm_cache_resize(cache->cmd, cache->cache_size);
+		if (r) {
+			DMERR("Couldn't resize cache metadata");
+			return r;
+		}
+
+		cache->sized = true;
+	}
 
 	if (!cache->loaded_mappings) {
 		r = dm_cache_load_mappings(cache->cmd,
