@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
- * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue cache replacement policies.
+ * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/noop cache replacement policies.
  *
  * This file is released under the GPL.
  */
@@ -129,6 +129,7 @@ enum policy_type {
 	P_q2,
 	P_twoqueue,
 	P_noop,
+	P_miss,
 	P_basic	/* The default selecting one of the above. */
 };
 
@@ -149,6 +150,7 @@ struct queue_fns {
 #define	IS_Q2(p)			(p->queues.fns->add == &queue_add_q2)
 #define	IS_TWOQUEUE(p)			(p->queues.fns->add == &queue_add_twoqueue)
 #define	IS_NOOP(p)			(p->queues.fns->add == &queue_add_noop)
+#define	IS_MISS(p)			(p->queues.fns->add == &queue_add_miss)
 
 #define	IS_FIFO_FILO(p)			(p->queues.fns->del == &queue_del_fifo_filo)
 #define	IS_Q2_TWOQUEUE(p)		(p->queues.fns->evict == &queue_evict_q2_twoqueue)
@@ -208,7 +210,7 @@ struct policy {
 		struct btree_head32 fu_head;
 		mempool_t *fu_pool;
 
-		unsigned nr_mqueues, q0_size, twoqueue_q0_max_elts;
+		unsigned nr_mqueues, twoqueue_q0_size, twoqueue_q0_max_elts;
 		struct list_head free; /* Free cache entry list */
 		struct list_head used; /* Used cache entry list */
 		struct list_head walk; /* walk_mappings uses this list */
@@ -334,8 +336,10 @@ static int alloc_cache_blocks_with_hash(struct policy *p, unsigned cache_size)
 
 static void free_cache_blocks_and_hash(struct policy *p)
 {
-	free_hash(&p->chash);
-	vfree(p->cblocks);
+	if (p->cblocks) {
+		free_hash(&p->chash);
+		vfree(p->cblocks);
+	}
 }
 
 static int alloc_track_queue_with_hash(struct track_queue *q, unsigned elts)
@@ -425,7 +429,7 @@ static bool any_free_cblocks(struct policy *p)
 		 * Only allow a certain amount of the total cache size in queue 0
 		 * (cblocks with hit count 1).
 		 */
-		if (p->queues.q0_size == p->queues.twoqueue_q0_max_elts)
+		if (p->queues.twoqueue_q0_size == p->queues.twoqueue_q0_max_elts)
 			return false;
 	}
 
@@ -441,7 +445,8 @@ static unsigned long *alloc_bitset(unsigned nr_cblocks)
 
 static void free_bitset(unsigned long *bits)
 {
-	vfree(bits);
+	if (bits)
+		vfree(bits);
 }
 /*----------------------------------------------------------------------------*/
 
@@ -465,9 +470,10 @@ static struct common_entry *__lookup_common_entry(struct hash *hash, dm_oblock_t
 	return NULL;
 }
 
+static void queue_add_miss(struct policy *, struct list_head *);
 static struct basic_cache_entry *lookup_cache_entry(struct policy *p, dm_oblock_t oblock)
 {
-	struct common_entry *ce = __lookup_common_entry(&p->chash, oblock);
+	struct common_entry *ce = IS_MISS(p) ? NULL : __lookup_common_entry(&p->chash, oblock);
 
 	return ce ? container_of(ce, struct basic_cache_entry, ce) : NULL;
 }
@@ -837,7 +843,7 @@ static void queue_add_twoqueue(struct policy *p, struct list_head *elt)
 
 	queue = e->saved = __get_twoqueue(p, e);
 	if (!queue)
-		p->queues.q0_size++;
+		p->queues.twoqueue_q0_size++;
 
 	queue_add_tail(&p->queues.mq[queue], &e->ce.list);
 	queue_add_tail(&p->queues.walk, &e->walk);
@@ -846,6 +852,11 @@ static void queue_add_twoqueue(struct policy *p, struct list_head *elt)
 static void queue_add_noop(struct policy *p, struct list_head *elt)
 {
 	queue_add_default_tail(p, elt);
+}
+
+static void queue_add_miss(struct policy *p, struct list_head *elt)
+{
+	queue_add_default_tail(p, elt); /* Never called. */
 }
 /*----------------------------------------------------------------------------*/
 
@@ -902,7 +913,7 @@ static void queue_del_multiqueue(struct policy *p, struct list_head *elt)
 		unsigned queue = e->saved;
 
 		if (!queue)
-			p->queues.q0_size--;
+			p->queues.twoqueue_q0_size--;
 	}
 
 	queue_del(&e->ce.list);
@@ -977,7 +988,7 @@ static struct list_head *queue_evict_multiqueue(struct policy *p)
 			struct list_head *r;
 
 			if (IS_TWOQUEUE(p) && cur == p->queues.mq)
-				p->queues.q0_size--;
+				p->queues.twoqueue_q0_size--;
 
 			r = queue_pop(cur);
 			e = list_entry(r, struct basic_cache_entry, ce.list);
@@ -1165,10 +1176,14 @@ static int map(struct policy *p, dm_oblock_t oblock,
 	       bool can_migrate, bool discarded_oblock,
 	       struct bio *bio, struct policy_result *result)
 {
-	struct basic_cache_entry *e = lookup_cache_entry(p, oblock);
+	struct basic_cache_entry *e;
 
 	result->op = POLICY_MISS;
 
+	if (IS_MISS(p))
+		return 0;
+
+	e = lookup_cache_entry(p, oblock);
 	if (e)
 		/* Cache hit: update entry on queues, increment its hit count... */
 		update_cache_entry(p, e, bio, result);
@@ -1200,7 +1215,7 @@ static int basic_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	else if (!mutex_trylock(&p->lock))
 		return -EWOULDBLOCK;
 
-	if (!IS_NOOP(p))
+	if (!IS_NOOP(p) && !IS_MISS(p))
 		map_prerequisites(p, bio);
 
 	r = map(p, oblock, can_migrate, discarded_oblock, bio, result);
@@ -1471,7 +1486,8 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		{ &queue_add_multiqueue_ws, &queue_del_multiqueue,	&queue_evict_multiqueue },	/* P_multiqueue_ws */
 		{ &queue_add_q2,            &queue_del_multiqueue,	&queue_evict_q2_twoqueue },	/* P_q2 */
 		{ &queue_add_twoqueue,      &queue_del_multiqueue,	&queue_evict_q2_twoqueue },	/* P_twoqueue */
-		{ &queue_add_noop,	    &queue_del_default,		&queue_evict_default }		/* P_noop */
+		{ &queue_add_noop,	    &queue_del_default,		&queue_evict_default },		/* P_noop */
+		{ &queue_add_miss,	    NULL,			NULL }				/* P_miss */
 	};
 	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);
 
@@ -1498,6 +1514,11 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	p->promote_threshold[1] = ctype_threshold(p, WRITE_PROMOTE_THRESHOLD);
 	atomic_set(&p->tick.t_ext, 0);
 	mutex_init(&p->lock);
+	queue_init(&p->queues.used);
+	queue_init(&p->queues.walk);
+
+	if (IS_MISS(p))
+		goto out;
 
 	/* Allocate cache entry structs and add them to free list. */
 	r = alloc_cache_blocks_with_hash(p, from_cblock(cache_size));
@@ -1555,9 +1576,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 
 	}
 
-	queue_init(&p->queues.used);
-	queue_init(&p->queues.walk);
-
+out:
 	return &p->policy;
 
 bad_free_track_queue_post:
@@ -1613,6 +1632,7 @@ __CREATE_POLICY_TYPE(multiqueue_ws);
 __CREATE_POLICY_TYPE(q2);
 __CREATE_POLICY_TYPE(twoqueue);
 __CREATE_POLICY_TYPE(noop);
+__CREATE_POLICY_TYPE(miss);
 __CREATE_POLICY_TYPE(basic);
 
 static struct dm_cache_policy_type *policy_types[] = {
@@ -1630,6 +1650,7 @@ static struct dm_cache_policy_type *policy_types[] = {
 	&q2_policy_type,
 	&twoqueue_policy_type,
 	&noop_policy_type,
+	&miss_policy_type,
 	&basic_policy_type
 };
 
@@ -1676,5 +1697,6 @@ MODULE_ALIAS("dm-cache-multiqueue_ws");
 MODULE_ALIAS("dm-cache-q2");
 MODULE_ALIAS("dm-cache-twoqueue");
 MODULE_ALIAS("dm-cache-noop");
+MODULE_ALIAS("dm-cache-miss");
 
 /*----------------------------------------------------------------------------*/
