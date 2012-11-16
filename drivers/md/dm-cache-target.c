@@ -1700,6 +1700,12 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
+	r = dm_cache_discard_bitset_resize(cmd, cache->origin_blocks);
+	if (r) {
+		*error = "Couldn't resize on-disk discard bitset";
+		goto bad;
+	}
+
 	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
 	if (!cache->discard_bitset) {
 		*error = "Couldn't allocate discard bitset";
@@ -2042,15 +2048,6 @@ static int cache_preresume(struct dm_target *ti)
 			DMERR("Couldn't resize cache metadata");
 			return r;
 		}
-
-#if 0
-		pr_alert("cache_create 9\n");
-		r = dm_cache_discard_bitset_resize(cmd, cache->origin_blocks);
-		if (r) {
-			*error = "Couldn't resize on-disk discard bitset";
-			goto bad;
-		}
-#endif
 
 		cache->sized = true;
 	}
