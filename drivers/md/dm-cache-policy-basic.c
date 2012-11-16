@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
- * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/dumb/miss cache replacement policies.
+ * basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/dumb/noop cache replacement policies.
  *
  * This file is released under the GPL.
  */
@@ -129,7 +129,7 @@ enum policy_type {
 	P_q2,
 	P_twoqueue,
 	P_dumb,
-	P_miss,
+	P_noop,
 	P_basic	/* The default selecting one of the above. */
 };
 
@@ -149,8 +149,8 @@ struct queue_fns {
 #define	IS_MULTIQUEUE(p)		(p->queues.fns->evict == &queue_evict_multiqueue)
 #define	IS_Q2(p)			(p->queues.fns->add == &queue_add_q2)
 #define	IS_TWOQUEUE(p)			(p->queues.fns->add == &queue_add_twoqueue)
-#define	IS_NOOP(p)			(p->queues.fns->add == &queue_add_dumb)
-#define	IS_MISS(p)			(p->queues.fns->add == &queue_add_miss)
+#define	IS_DUMB(p)			(p->queues.fns->add == &queue_add_dumb)
+#define	IS_NOOP(p)			(p->queues.fns->add == &queue_add_noop)
 
 #define	IS_FIFO_FILO(p)			(p->queues.fns->del == &queue_del_fifo_filo)
 #define	IS_Q2_TWOQUEUE(p)		(p->queues.fns->evict == &queue_evict_q2_twoqueue)
@@ -470,10 +470,10 @@ static struct common_entry *__lookup_common_entry(struct hash *hash, dm_oblock_t
 	return NULL;
 }
 
-static void queue_add_miss(struct policy *, struct list_head *);
+static void queue_add_noop(struct policy *, struct list_head *);
 static struct basic_cache_entry *lookup_cache_entry(struct policy *p, dm_oblock_t oblock)
 {
-	struct common_entry *ce = IS_MISS(p) ? NULL : __lookup_common_entry(&p->chash, oblock);
+	struct common_entry *ce = IS_NOOP(p) ? NULL : __lookup_common_entry(&p->chash, oblock);
 
 	return ce ? container_of(ce, struct basic_cache_entry, ce) : NULL;
 }
@@ -854,7 +854,7 @@ static void queue_add_dumb(struct policy *p, struct list_head *elt)
 	queue_add_default_tail(p, elt);
 }
 
-static void queue_add_miss(struct policy *p, struct list_head *elt)
+static void queue_add_noop(struct policy *p, struct list_head *elt)
 {
 	queue_add_default_tail(p, elt); /* Never called. */
 }
@@ -1064,7 +1064,7 @@ static void update_cache_entry(struct policy *p, struct basic_cache_entry *e, st
 	result->op = POLICY_HIT;
 	result->cblock = e->cblock;
 
-	if (IS_NOOP(p))
+	if (IS_DUMB(p))
 		return;
 
 	rw = (bio_data_dir(bio) == WRITE ? 1 : 0);
@@ -1104,7 +1104,7 @@ static void get_cache_block(struct policy *p, dm_oblock_t oblock, struct bio *bi
 		result->op = POLICY_REPLACE;
 
 		/* Memorize hits and sectors of just evicted entry on out queue. */
-		if (!IS_NOOP(p))
+		if (!IS_DUMB(p))
 			update_track_queue(p, &p->queues.post, e->ce.oblock, rw, e->ce.count[T_HITS][rw], e->ce.count[T_SECTORS][rw]);
 
 		result->old_oblock = e->ce.oblock;
@@ -1123,7 +1123,7 @@ static void get_cache_block(struct policy *p, dm_oblock_t oblock, struct bio *bi
 	 * If an entry for oblock exists on track queues ->
 	 * retrieve hit counts and sectors from track queues and delete the respective tracking entries.
 	 */
-	if (!IS_NOOP(p)) {
+	if (!IS_DUMB(p)) {
 		memset(&e->ce.count, 0, sizeof(e->ce.count));
 		get_any_counts_from_track_queue(&p->queues.pre, e, oblock);
 		get_any_counts_from_track_queue(&p->queues.post, e, oblock);
@@ -1180,7 +1180,7 @@ static int map(struct policy *p, dm_oblock_t oblock,
 
 	result->op = POLICY_MISS;
 
-	if (IS_MISS(p))
+	if (IS_NOOP(p))
 		return 0;
 
 	e = lookup_cache_entry(p, oblock);
@@ -1188,13 +1188,13 @@ static int map(struct policy *p, dm_oblock_t oblock,
 		/* Cache hit: update entry on queues, increment its hit count... */
 		update_cache_entry(p, e, bio, result);
 
-	else if (!IS_NOOP(p) && iot_sequential_pattern(&p->tracker))
+	else if (!IS_DUMB(p) && iot_sequential_pattern(&p->tracker))
 		;
 
 	else if (!can_migrate)
 		return -EWOULDBLOCK;
 
-	else if (IS_NOOP(p) || should_promote(p, oblock, discarded_oblock, bio, result))
+	else if (IS_DUMB(p) || should_promote(p, oblock, discarded_oblock, bio, result))
 		get_cache_block(p, oblock, bio, result);
 
 	return 0;
@@ -1215,7 +1215,7 @@ static int basic_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	else if (!mutex_trylock(&p->lock))
 		return -EWOULDBLOCK;
 
-	if (!IS_NOOP(p) && !IS_MISS(p))
+	if (!IS_DUMB(p) && !IS_NOOP(p))
 		map_prerequisites(p, bio);
 
 	r = map(p, oblock, can_migrate, discarded_oblock, bio, result);
@@ -1409,7 +1409,7 @@ static void basic_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 	e = __basic_force_remove_mapping(p, oblock);
 	queue_add_tail(&p->queues.free, &e->ce.list);
 
-	if (!IS_NOOP(p)) {
+	if (!IS_DUMB(p)) {
 		get_any_counts_from_track_queue(&p->queues.pre, &tmp, oblock);
 		get_any_counts_from_track_queue(&p->queues.post, &tmp, oblock);
 	}
@@ -1487,7 +1487,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		{ &queue_add_q2,            &queue_del_multiqueue,	&queue_evict_q2_twoqueue },	/* P_q2 */
 		{ &queue_add_twoqueue,      &queue_del_multiqueue,	&queue_evict_q2_twoqueue },	/* P_twoqueue */
 		{ &queue_add_dumb,	    &queue_del_default,		&queue_evict_default },		/* P_dumb */
-		{ &queue_add_miss,	    NULL,			NULL }				/* P_miss */
+		{ &queue_add_noop,	    NULL,			NULL }				/* P_miss */
 	};
 	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);
 
@@ -1517,7 +1517,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	queue_init(&p->queues.used);
 	queue_init(&p->queues.walk);
 
-	if (IS_MISS(p))
+	if (IS_NOOP(p))
 		goto out;
 
 	/* Allocate cache entry structs and add them to free list. */
@@ -1530,7 +1530,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	if (!p->allocation_bitset)
 		goto bad_free_cache_blocks_and_hash;
 
-	if (!IS_NOOP(p)) {
+	if (!IS_DUMB(p)) {
 		/* Create in queue to track entries waiting for the cache in order to stear their promotion. */
 		r = alloc_track_queue_with_hash(&p->queues.pre, from_cblock(max(cache_size, (dm_cblock_t) 128)));
 		if (r)
@@ -1632,7 +1632,7 @@ __CREATE_POLICY_TYPE(multiqueue_ws);
 __CREATE_POLICY_TYPE(q2);
 __CREATE_POLICY_TYPE(twoqueue);
 __CREATE_POLICY_TYPE(dumb);
-__CREATE_POLICY_TYPE(miss);
+__CREATE_POLICY_TYPE(noop);
 __CREATE_POLICY_TYPE(basic);
 
 static struct dm_cache_policy_type *policy_types[] = {
@@ -1650,7 +1650,7 @@ static struct dm_cache_policy_type *policy_types[] = {
 	&q2_policy_type,
 	&twoqueue_policy_type,
 	&dumb_policy_type,
-	&miss_policy_type,
+	&noop_policy_type,
 	&basic_policy_type
 };
 
@@ -1680,7 +1680,7 @@ module_exit(basic_exit);
 
 MODULE_AUTHOR("Joe Thornber/Heinz Mauelshagen");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/dumb/miss cache policies");
+MODULE_DESCRIPTION("basic/fifo/filo/lru/mru/lfu/mfu/lfu_ws/mfu_ws/random/multiqueue/multiqueue_ws/q2/twoqueue/dumb/noop cache policies");
 
 MODULE_ALIAS("dm-cache-basic"); /* Default mapped to one underneath in basic_policy_create() */
 MODULE_ALIAS("dm-cache-fifo");
@@ -1697,6 +1697,6 @@ MODULE_ALIAS("dm-cache-multiqueue_ws");
 MODULE_ALIAS("dm-cache-q2");
 MODULE_ALIAS("dm-cache-twoqueue");
 MODULE_ALIAS("dm-cache-dumb");
-MODULE_ALIAS("dm-cache-miss");
+MODULE_ALIAS("dm-cache-noop");
 
 /*----------------------------------------------------------------------------*/
