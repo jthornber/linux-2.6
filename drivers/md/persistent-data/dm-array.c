@@ -535,13 +535,20 @@ static int grow(struct resize *resize)
 						  resize->new_nr_entries_in_last_block,
 						  resize->value, &resize->root);
 	} else {
-		r = shadow_ablock(resize->info, &resize->root,
-				  resize->old_nr_full_blocks, &block, &ab);
-		if (r)
-			return r;
+		if (!resize->old_nr_entries_in_last_block) {
+			r = insert_partial_ablock(resize->info, resize->block_size,
+						  resize->new_nr_full_blocks,
+						  resize->new_nr_entries_in_last_block,
+						  resize->value, &resize->root);
+		} else {
+			r = shadow_ablock(resize->info, &resize->root,
+					  resize->old_nr_full_blocks, &block, &ab);
+			if (r)
+				return r;
 
-		fill_ablock(resize->info, ab, resize->value, resize->new_nr_entries_in_last_block);
-		unlock_ablock(resize->info, block);
+			fill_ablock(resize->info, ab, resize->value, resize->new_nr_entries_in_last_block);
+			unlock_ablock(resize->info, block);
+		}
 	}
 
 	return r;
