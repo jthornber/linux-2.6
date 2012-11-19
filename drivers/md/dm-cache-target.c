@@ -146,8 +146,9 @@ struct cache {
 
 	/*
 	 * origin_blocks entries, discarded if set.
-	 * FIXME: This is too big
 	 */
+	sector_t discard_block_size; /* a power of 2 times sectors per block */
+	dm_dblock_t discard_nr_blocks;
 	unsigned long *discard_bitset;
 
 	struct dm_kcopyd_client *copier;
@@ -387,31 +388,50 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
  * The discard bitset is accessed from both the worker thread and the
  * cache_map function, we need to protect it.
  */
-static void set_discard(struct cache *cache, dm_oblock_t b)
+static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
+{
+	dm_block_t b = (__force dm_block_t) oblock;
+	do_div(b, cache->discard_block_size);
+	return (__force dm_dblock_t) b;
+}
+
+static void set_discard(struct cache *cache, dm_dblock_t b)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	set_bit(from_oblock(b), cache->discard_bitset);
+	set_bit(from_dblock(b), cache->discard_bitset);
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void clear_discard(struct cache *cache, dm_oblock_t b)
+static void clear_discard(struct cache *cache, dm_dblock_t b)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	clear_bit(from_oblock(b), cache->discard_bitset);
+	clear_bit(from_dblock(b), cache->discard_bitset);
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static bool is_discarded(struct cache *cache, dm_oblock_t b)
+static bool is_discarded(struct cache *cache, dm_dblock_t b)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	r = test_bit(from_oblock(b), cache->discard_bitset);
+	r = test_bit(from_dblock(b), cache->discard_bitset);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	return r;
+}
+
+static bool is_discarded_oblock(struct cache *cache, dm_oblock_t b)
+{
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	r = test_bit(from_dblock(oblock_to_dblock(cache, b)), cache->discard_bitset);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
@@ -487,7 +507,7 @@ static void remap_to_origin_dirty(struct cache *cache, struct bio *bio, dm_obloc
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_origin(cache, bio);
 	if (bio_data_dir(bio) == WRITE)
-		clear_discard(cache, oblock);
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
 }
 
 static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
@@ -496,7 +516,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
 		set_dirty(cache, oblock, cblock);
-		clear_discard(cache, oblock);
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
 	}
 }
 
@@ -730,9 +750,9 @@ static void issue_copy(struct dm_cache_migration *mg)
 
 	if (mg->writeback || mg->demote)
 		avoid = !is_dirty(cache, mg->cblock) ||
-			is_discarded(cache, mg->old_oblock);
+			is_discarded_oblock(cache, mg->old_oblock);
 	else
-		avoid = is_discarded(cache, mg->new_oblock);
+		avoid = is_discarded_oblock(cache, mg->new_oblock);
 
 	avoid ? avoid_copy(mg) : issue_copy_real(mg);
 }
@@ -921,14 +941,15 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = dm_sector_div_up(bio->bi_sector, cache->sectors_per_block);
+	dm_block_t start_block = bio->bi_sector;
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
-	do_div(end_block, cache->sectors_per_block);
+	do_div(start_block, cache->discard_block_size);
+	do_div(end_block, cache->discard_block_size);
 
 	for (b = start_block; b < end_block; b++)
-		set_discard(cache, to_oblock(b));
+		set_discard(cache, to_dblock(b));
 
 	bio_endio(bio, 0);
 }
@@ -948,7 +969,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs, struct bi
 	struct policy_result lookup_result;
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 	bool can_migrate = may_migrate(cache);
-	bool discarded_block = is_discarded(cache, block);
+	bool discarded_block = is_discarded_oblock(cache, block);
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -1428,8 +1449,6 @@ static int parse_metadata_dev(struct cache_args *ca,
 		return r;
 	}
 
-	pr_alert("parse metadata_dev = %p\n", ca->metadata_dev);
-
 	metadata_dev_size = get_dev_size(ca->metadata_dev);
 	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
 		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
@@ -1573,17 +1592,11 @@ static int parse_cache_args(struct cache_args *ca,
 		return r;
 
 	parse(metadata_dev);
-	pr_alert("back from parse_metadata_dev\n");
 	parse(cache_dev);
-	pr_alert("back from parse_cache_dev\n");
 	parse(origin_dev);
-	pr_alert("back from parse_origin_dev\n");
 	parse(block_size);
-	pr_alert("back from parse_block_size\n");
 	parse(features);
-	pr_alert("back from parse_features\n");
 	parse(policy);
-	pr_alert("back from parse_policy\n");
 #undef parse
 
 	return 0;
@@ -1612,6 +1625,23 @@ static int create_cache_policy(struct cache *cache,
 	return 0;
 }
 
+/*
+ * We want the discard block size to be a power of two, at least the size
+ * of the cache block size, and have no more than 2^14 discard blocks
+ * across the origin.
+ */
+static sector_t calculate_discard_block_size(sector_t cache_block_size,
+					     sector_t origin_size)
+{
+	sector_t r = roundup_pow_of_two(cache_block_size);
+	sector_t max_blocks = 1 << 14;
+
+	while ((r * max_blocks) < origin_size)
+		r *= 2;
+
+	return r;
+}
+
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
 	int r = 0;
@@ -1626,7 +1656,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	if (!cache)
 		return -ENOMEM;
 
-	pr_alert("cache_create 1\n");
 	cache->ti = ca->ti;
 	ti->private = cache;
 	ti->num_flush_requests = 2;
@@ -1636,19 +1665,16 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
-	pr_alert("cache_create 2\n");
 	cache->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
 
 #define consume(n) n; n = NULL;
 
-	pr_alert("cache_create 3\n");
 	cache->metadata_dev = consume(ca->metadata_dev);
 	cache->origin_dev = consume(ca->origin_dev);
 	cache->cache_dev = consume(ca->cache_dev);
 	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 
-	pr_alert("cache_create 4\n");
 	// FIXME: factor out this whole section
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
 	do_div(origin_blocks, ca->block_size);
@@ -1660,7 +1686,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	pr_alert("cache_create 5\n");
 	if (ca->block_size & (ca->block_size - 1)) {
 		dm_block_t cache_size = ca->cache_sectors;
 
@@ -1672,7 +1697,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		cache->cache_size = to_cblock(ca->cache_sectors >> cache->sectors_per_block_shift);
 	}
 
-	pr_alert("cache_create 6, metadata_dev = %p\n", cache->metadata_dev);
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev, ca->block_size, may_format);
 	if (IS_ERR(cmd)) {
 		*error = "Error creating metadata object";
@@ -1681,7 +1705,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	cache->cmd = cmd;
 
-	pr_alert("cache_create 7\n");
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
@@ -1700,18 +1723,15 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 
-	r = dm_cache_discard_bitset_resize(cmd, cache->origin_blocks);
-	if (r) {
-		*error = "Couldn't resize on-disk discard bitset";
-		goto bad;
-	}
-
-	cache->discard_bitset = alloc_bitset(from_oblock(cache->origin_blocks));
+	cache->discard_block_size = calculate_discard_block_size(cache->sectors_per_block,
+								 cache->origin_sectors);
+	cache->discard_nr_blocks = oblock_to_dblock(cache, cache->origin_blocks);
+	cache->discard_bitset = alloc_bitset(from_dblock(cache->discard_nr_blocks));
 	if (!cache->discard_bitset) {
 		*error = "Couldn't allocate discard bitset";
 		goto bad;
 	}
-	clear_bitset(cache->discard_bitset, from_oblock(cache->origin_blocks));
+	clear_bitset(cache->discard_bitset, from_dblock(cache->discard_nr_blocks));
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
@@ -1729,7 +1749,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	INIT_DELAYED_WORK(&cache->waker, do_waker);
 	cache->last_commit_jiffies = jiffies;
 
-	pr_alert("cache_create 11\n");
 	cache->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!cache->prison) {
 		*error = "Couldn't create bio prison";
@@ -1742,7 +1761,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	pr_alert("cache_create 12\n");
 	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
 							  _endio_hook_cache);
 	if (!cache->endio_hook_pool) {
@@ -1750,7 +1768,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	pr_alert("cache_create 13\n");
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
@@ -1760,7 +1777,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->next_migration = NULL;
 
-	pr_alert("cache_create 14\n");
 	r = create_cache_policy(cache, ca, error);
 	if (r)
 		goto bad;
@@ -1867,7 +1883,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	discarded_block = is_discarded(cache, block);
+	discarded_block = is_discarded_oblock(cache, block);
 
 	r = policy_map(cache->policy, block, can_migrate, discarded_block, bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
@@ -1898,7 +1914,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	default:
-		pr_alert("illegal value: %u\n", (unsigned) lookup_result.op);
+		DMERR("policy op: %u\n", (unsigned) lookup_result.op);
 		BUG();
 	}
 
@@ -1943,9 +1959,15 @@ static int write_discard_bitset(struct cache *cache)
 {
 	unsigned i, r;
 
-	for (i = 0; i < from_oblock(cache->origin_blocks); i++) {
-		r = dm_cache_set_discard(cache->cmd, to_oblock(i),
-					 is_discarded(cache, to_oblock(i)));
+	r = dm_cache_discard_bitset_resize(cache->cmd, cache->discard_block_size, cache->discard_nr_blocks);
+	if (r) {
+		DMERR("Couldn't resize on-disk discard bitset");
+		return r;
+	}
+
+	for (i = 0; i < from_dblock(cache->discard_nr_blocks); i++) {
+		r = dm_cache_set_discard(cache->cmd, to_dblock(i),
+					 is_discarded(cache, to_dblock(i)));
 		if (r)
 			return r;
 	}
@@ -2022,11 +2044,14 @@ static void cache_postsuspend(struct dm_target *ti)
 	(void) sync_metadata(cache);
 }
 
-static int load_discard(void *context, dm_oblock_t oblock, bool discard)
+static int load_discard(void *context, sector_t discard_block_size,
+			dm_dblock_t dblock, bool discard)
 {
 	struct cache *cache = context;
 
-	(discard ? set_discard : clear_discard)(cache, oblock);
+	// FIXME: handle mis-matched block size
+
+	(discard ? set_discard : clear_discard)(cache, dblock);
 	return 0;
 }
 
@@ -2216,22 +2241,10 @@ static int cache_bvec_merge(struct dm_target *ti,
 static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 {
 	/*
-	 * FIXME: these limits may be incompatible with the cache's data device
+	 * FIXME: these limits may be incompatible with the cache device
 	 */
-	limits->max_discard_sectors = cache->sectors_per_block * 1024;
-
-	/*
-	 * discard_granularity is just a hint, and not enforced.
-	 */
-	if (block_size_is_power_of_two(cache))
-		limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
-	else
-		/*
-		 * Use largest power of 2 that is a factor of sectors_per_block
-		 * but at least DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
-		 */
-		limits->discard_granularity = max(1 << __ffs(cache->sectors_per_block),
-						  DATA_DEV_BLOCK_SIZE_MIN_SECTORS) << SECTOR_SHIFT;
+	limits->max_discard_sectors = cache->discard_block_size * 1024;
+	limits->discard_granularity = cache->discard_block_size << SECTOR_SHIFT;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)

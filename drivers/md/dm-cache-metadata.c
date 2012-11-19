@@ -68,11 +68,14 @@ struct cache_disk_superblock {
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
 	__le64 hint_root;
-	__le64 discard_bitset_root;
+
+	__le64 discard_root;
+	__le64 discard_block_size;
+	__le64 discard_nr_blocks;
+
 	__le32 data_block_size;
 	__le32 metadata_block_size;
 	__le32 cache_blocks;
-	__le32 origin_blocks;
 
 	__le32 compat_flags;
 	__le32 compat_ro_flags;
@@ -98,11 +101,13 @@ struct dm_cache_metadata {
 	struct rw_semaphore root_lock;
 	dm_block_t root;
 	dm_block_t hint_root;
-	dm_block_t discard_bitset_root;
+	dm_block_t discard_root;
+
+	sector_t discard_block_size;
+	dm_dblock_t discard_nr_blocks;
 
 	sector_t data_block_size;
 	dm_cblock_t cache_blocks;
-	dm_oblock_t origin_blocks;
 	bool changed:1;
 	bool clean_when_opened:1;
 
@@ -272,11 +277,12 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
-	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
+	disk_super->discard_root = cpu_to_le64(cmd->discard_root);
+	disk_super->discard_block_size = cpu_to_le64(cmd->discard_block_size);
+	disk_super->discard_nr_blocks = cpu_to_le64(from_dblock(cmd->discard_nr_blocks));
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
-	disk_super->origin_blocks = cpu_to_le32(0);
 	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(0);
@@ -311,9 +317,12 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 
 	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
 
-	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_bitset_root);
+	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_root);
 	if (r < 0)
 		goto bad;
+
+	cmd->discard_block_size = 0;
+	cmd->discard_nr_blocks = 0;
 
 	r = __write_initial_superblock(cmd);
 	if (r)
@@ -463,10 +472,11 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 {
 	cmd->root = le64_to_cpu(disk_super->mapping_root);
 	cmd->hint_root = le64_to_cpu(disk_super->hint_root);
-	cmd->discard_bitset_root = le64_to_cpu(disk_super->discard_bitset_root);
+	cmd->discard_root = le64_to_cpu(disk_super->discard_root);
+	cmd->discard_block_size = le64_to_cpu(disk_super->discard_block_size);
+	cmd->discard_nr_blocks = to_dblock(le64_to_cpu(disk_super->discard_nr_blocks));
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
-	cmd->origin_blocks = to_oblock(le32_to_cpu(disk_super->origin_blocks));
 	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
 
 	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
@@ -531,6 +541,11 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	 */
 	BUILD_BUG_ON(sizeof(struct cache_disk_superblock) > 512);
 
+	r = dm_bitset_flush(&cmd->discard_info, cmd->discard_root,
+			    &cmd->discard_root);
+	if (r)
+		return r;
+
 	r = dm_tm_pre_commit(cmd->tm);
 	if (r < 0)
 		return r;
@@ -551,9 +566,10 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
-	disk_super->discard_bitset_root = cpu_to_le64(cmd->discard_bitset_root);
+	disk_super->discard_root = cpu_to_le64(cmd->discard_root);
+	disk_super->discard_block_size = cpu_to_le64(cmd->discard_block_size);
+	disk_super->discard_nr_blocks = cpu_to_le64(from_dblock(cmd->discard_nr_blocks));
 	disk_super->cache_blocks = cpu_to_le32(from_cblock(cmd->cache_blocks));
-	disk_super->origin_blocks = cpu_to_le32(from_oblock(cmd->origin_blocks));
 	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
@@ -615,7 +631,6 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
-	cmd->origin_blocks = 0;
 	cmd->changed = true;
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
@@ -658,62 +673,54 @@ int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size)
 }
 
 int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
-				   dm_oblock_t new_nr_entries)
+				   sector_t discard_block_size,
+				   dm_dblock_t new_nr_entries)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = dm_bitset_resize(&cmd->discard_info, cmd->discard_bitset_root,
-			     from_oblock(cmd->origin_blocks),
-			     from_oblock(new_nr_entries),
-			     false, &cmd->discard_bitset_root);
-	if (!r)
-		cmd->origin_blocks = new_nr_entries;
-	cmd->changed = true; // FIXME: shouldn't this be conditional on !r?
+	r = dm_bitset_resize(&cmd->discard_info,
+			     cmd->discard_root,
+			     from_dblock(cmd->discard_nr_blocks),
+			     from_dblock(new_nr_entries),
+			     false, &cmd->discard_root);
+	if (!r) {
+		cmd->discard_block_size = discard_block_size;
+		cmd->discard_nr_blocks = new_nr_entries;
+	}
+
+	cmd->changed = true;
 	up_write(&cmd->root_lock);
 
 	return r;
 }
 
-static int __set_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+static int __set_discard(struct dm_cache_metadata *cmd, dm_dblock_t b)
 {
-	return dm_bitset_set_bit(&cmd->discard_info, cmd->discard_bitset_root,
-				 from_oblock(b), &cmd->discard_bitset_root);
+	return dm_bitset_set_bit(&cmd->discard_info, cmd->discard_root,
+				 from_dblock(b), &cmd->discard_root);
 }
 
-static int __clear_discard(struct dm_cache_metadata *cmd, dm_oblock_t b)
+static int __clear_discard(struct dm_cache_metadata *cmd, dm_dblock_t b)
 {
-	return dm_bitset_clear_bit(&cmd->discard_info, cmd->discard_bitset_root,
-				   from_oblock(b), &cmd->discard_bitset_root);
+	return dm_bitset_clear_bit(&cmd->discard_info, cmd->discard_root,
+				   from_dblock(b), &cmd->discard_root);
 }
 
-static int __is_discarded(struct dm_cache_metadata *cmd, dm_oblock_t b,
+static int __is_discarded(struct dm_cache_metadata *cmd, dm_dblock_t b,
 			  bool *is_discarded)
 {
-	return dm_bitset_test_bit(&cmd->discard_info, cmd->discard_bitset_root,
-				  from_oblock(b), &cmd->discard_bitset_root,
+	return dm_bitset_test_bit(&cmd->discard_info, cmd->discard_root,
+				  from_dblock(b), &cmd->discard_root,
 				  is_discarded);
 }
 
 static int __discard(struct dm_cache_metadata *cmd,
-		     dm_oblock_t oblock, bool discard)
+		     dm_dblock_t dblock, bool discard)
 {
 	int r;
-	bool already_discarded;
 
-	r = __is_discarded(cmd, oblock, &already_discarded);
-	if (r)
-		return r;
-
-	if ((already_discarded && discard) || (!already_discarded && !discard))
-		/* nothing to be done */
-		return 0;
-
-	if (discard)
-		r = __set_discard(cmd, oblock);
-	else
-		r = __clear_discard(cmd, oblock);
-
+	r = (discard ? __set_discard : __clear_discard)(cmd, dblock);
 	if (r)
 		return r;
 
@@ -722,12 +729,12 @@ static int __discard(struct dm_cache_metadata *cmd,
 }
 
 int dm_cache_set_discard(struct dm_cache_metadata *cmd,
-			 dm_oblock_t oblock, bool discard)
+			 dm_dblock_t dblock, bool discard)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __discard(cmd, oblock, discard);
+	r = __discard(cmd, dblock, discard);
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -737,18 +744,20 @@ static int __load_discards(struct dm_cache_metadata *cmd,
 			   load_discard_fn fn, void *context)
 {
 	int r = 0;
-	dm_block_t oblock;
+	dm_block_t b;
 	bool discard;
 
-	for (oblock = 0; oblock < from_oblock(cmd->origin_blocks); oblock++) {
+	for (b = 0; b < from_dblock(cmd->discard_nr_blocks); b++) {
+		dm_dblock_t dblock = to_dblock(b);
+
 		if (cmd->clean_when_opened) {
-			r = __is_discarded(cmd, to_oblock(oblock), &discard);
+			r = __is_discarded(cmd, dblock, &discard);
 			if (r)
 				return r;
 		} else
 			discard = false;
 
-		r = fn(context, to_oblock(oblock), discard);
+		r = fn(context, cmd->discard_block_size, dblock, discard);
 		if (r)
 			break;
 	}
