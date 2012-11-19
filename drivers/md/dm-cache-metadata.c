@@ -85,7 +85,6 @@ struct cache_disk_superblock {
 	__le32 read_misses;
 	__le32 write_hits;
 	__le32 write_misses;
-
 } __packed;
 
 struct dm_cache_metadata {
@@ -490,7 +489,8 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 /*
  * The mutator updates the superblock flags.
  */
-static int __begin_transaction_flags(struct dm_cache_metadata *cmd, flags_mutator mutator)
+static int __begin_transaction_flags(struct dm_cache_metadata *cmd,
+				     flags_mutator mutator)
 {
 	int r;
 	struct cache_disk_superblock *disk_super;
@@ -795,7 +795,8 @@ static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
 
 	debug("__remove %lu\n", (unsigned long) oblock);
 	__dm_bless_for_disk(&value);
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock), &value, &cmd->root);
+	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
+			 &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -821,7 +822,8 @@ static int __insert(struct dm_cache_metadata *cmd,
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock), &value, &cmd->root);
+	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
+			 &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -830,8 +832,7 @@ static int __insert(struct dm_cache_metadata *cmd,
 }
 
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd,
-			    dm_cblock_t cblock,
-			    dm_oblock_t oblock)
+			    dm_cblock_t cblock, dm_oblock_t oblock)
 {
 	int r;
 
@@ -857,9 +858,7 @@ static bool hints_array_available(struct dm_cache_metadata *cmd,
 	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
 					   sizeof(cmd->policy_name));
 
-	return cmd->clean_when_opened &&
-		policy_names_match &&
-		cmd->hint_root;
+	return cmd->clean_when_opened && policy_names_match && cmd->hint_root;
 }
 
 static int __load_mapping(void *context, uint64_t cblock, void *leaf)
@@ -892,10 +891,8 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 	return r;
 }
 
-static int __load_mappings(struct dm_cache_metadata *cmd,
-			   const char *policy_name,
-			   load_mapping_fn fn,
-			   void *context)
+static int __load_mappings(struct dm_cache_metadata *cmd, const char *policy_name,
+			   load_mapping_fn fn, void *context)
 {
 	struct thunk thunk;
 
@@ -909,10 +906,8 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
-int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
-			   const char *policy_name,
-			   load_mapping_fn fn,
-			   void *context)
+int dm_cache_load_mappings(struct dm_cache_metadata *cmd, const char *policy_name,
+			   load_mapping_fn fn, void *context)
 {
 	int r;
 
@@ -986,7 +981,8 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 	value = pack_value(oblock, flags | (dirty ? M_DIRTY : 0));
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock), &value, &cmd->root);
+	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
+			 &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -1026,7 +1022,8 @@ void dm_cache_set_stats(struct dm_cache_metadata *cmd,
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown)
 {
 	int r;
-	flags_mutator mutator = clean_shutdown ? set_clean_shutdown : clear_clean_shutdown;
+	flags_mutator mutator = (clean_shutdown ? set_clean_shutdown :
+				 clear_clean_shutdown);
 
 	down_write(&cmd->root_lock);
 	r = __commit_transaction(cmd, mutator);
@@ -1091,7 +1088,8 @@ static int begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
 		value = cpu_to_le32(0);
 		__dm_bless_for_disk(&value);
 		r = dm_array_resize(&cmd->hint_info, cmd->hint_root, 0,
-				    from_cblock(cmd->cache_blocks), &value, &cmd->hint_root);
+				    from_cblock(cmd->cache_blocks),
+				    &value, &cmd->hint_root);
 		if (r)
 			return r;
 	}
@@ -1110,7 +1108,8 @@ int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
 	return r;
 }
 
-static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t hint)
+static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock,
+		     uint32_t hint)
 {
 	int r;
 	__le32 value = cpu_to_le32(hint);
@@ -1123,7 +1122,8 @@ static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t
 	return r;
 }
 
-int dm_cache_save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock, uint32_t hint)
+int dm_cache_save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock,
+		       uint32_t hint)
 {
 	int r;
 
