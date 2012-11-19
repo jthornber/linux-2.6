@@ -120,13 +120,13 @@ struct cache {
 	 */
 	dm_cblock_t cache_size;
 
+	struct dm_cache_metadata *cmd;
+
 	/*
 	 * Fields for converting from sectors to blocks.
 	 */
 	sector_t sectors_per_block;
 	int sectors_per_block_shift;
-
-	struct dm_cache_metadata *cmd;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -135,8 +135,8 @@ struct cache {
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
 	sector_t migration_threshold;
-	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
+	atomic_t nr_migrations;
 
 	/*
 	 * cache_size entries, dirty if set
