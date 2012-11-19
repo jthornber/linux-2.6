@@ -13,11 +13,13 @@
 
 /*
  * It's helpful to get sparse to differentiate between indexes into the
- * origin device, and indexes into the cache device.
+ * origin device, indexes into the cache device, and indexes into the
+ * discard bitset.
  */
 
 typedef dm_block_t __bitwise__ dm_oblock_t;
 typedef uint32_t __bitwise__ dm_cblock_t;
+typedef dm_block_t __bitwise__ dm_dblock_t;
 
 static inline dm_oblock_t to_oblock(dm_block_t b)
 {
@@ -37,6 +39,16 @@ static inline dm_cblock_t to_cblock(uint32_t b)
 static inline uint32_t from_cblock(dm_cblock_t b)
 {
 	return (__force uint32_t) b;
+}
+
+static inline dm_dblock_t to_dblock(dm_block_t b)
+{
+	return (__force dm_dblock_t) b;
+}
+
+static inline dm_block_t from_dblock(dm_dblock_t b)
+{
+	return (__force dm_block_t) b;
 }
 
 /*----------------------------------------------------------------*/
@@ -85,14 +97,17 @@ void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
  */
 int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size);
 dm_cblock_t dm_cache_size(struct dm_cache_metadata *cmd);
-int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
-				   dm_oblock_t new_nr_entries);
 
-typedef int (*load_discard_fn)(void *context, dm_oblock_t oblock, bool discard);
+int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
+				   sector_t discard_block_size,
+				   dm_dblock_t new_nr_entries);
+
+typedef int (*load_discard_fn)(void *context, sector_t discard_block_size,
+			       dm_dblock_t dblock, bool discarded);
 int dm_cache_load_discards(struct dm_cache_metadata *cmd,
 			   load_discard_fn fn, void *context);
 
-int dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_oblock_t oblock, bool discard);
+int dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_dblock_t dblock, bool discard);
 
 int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);
