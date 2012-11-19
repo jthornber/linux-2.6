@@ -1428,8 +1428,6 @@ static int parse_metadata_dev(struct cache_args *ca,
 		return r;
 	}
 
-	pr_alert("parse metadata_dev = %p\n", ca->metadata_dev);
-
 	metadata_dev_size = get_dev_size(ca->metadata_dev);
 	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
 		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
@@ -1573,17 +1571,11 @@ static int parse_cache_args(struct cache_args *ca,
 		return r;
 
 	parse(metadata_dev);
-	pr_alert("back from parse_metadata_dev\n");
 	parse(cache_dev);
-	pr_alert("back from parse_cache_dev\n");
 	parse(origin_dev);
-	pr_alert("back from parse_origin_dev\n");
 	parse(block_size);
-	pr_alert("back from parse_block_size\n");
 	parse(features);
-	pr_alert("back from parse_features\n");
 	parse(policy);
-	pr_alert("back from parse_policy\n");
 #undef parse
 
 	return 0;
@@ -1626,7 +1618,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	if (!cache)
 		return -ENOMEM;
 
-	pr_alert("cache_create 1\n");
 	cache->ti = ca->ti;
 	ti->private = cache;
 	ti->num_flush_requests = 2;
@@ -1636,19 +1627,16 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
-	pr_alert("cache_create 2\n");
 	cache->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
 
 #define consume(n) n; n = NULL;
 
-	pr_alert("cache_create 3\n");
 	cache->metadata_dev = consume(ca->metadata_dev);
 	cache->origin_dev = consume(ca->origin_dev);
 	cache->cache_dev = consume(ca->cache_dev);
 	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 
-	pr_alert("cache_create 4\n");
 	// FIXME: factor out this whole section
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
 	do_div(origin_blocks, ca->block_size);
@@ -1660,7 +1648,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	pr_alert("cache_create 5\n");
 	if (ca->block_size & (ca->block_size - 1)) {
 		dm_block_t cache_size = ca->cache_sectors;
 
@@ -1672,7 +1659,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		cache->cache_size = to_cblock(ca->cache_sectors >> cache->sectors_per_block_shift);
 	}
 
-	pr_alert("cache_create 6, metadata_dev = %p\n", cache->metadata_dev);
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev, ca->block_size, may_format);
 	if (IS_ERR(cmd)) {
 		*error = "Error creating metadata object";
@@ -1681,7 +1667,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	cache->cmd = cmd;
 
-	pr_alert("cache_create 7\n");
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
@@ -1729,7 +1714,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	INIT_DELAYED_WORK(&cache->waker, do_waker);
 	cache->last_commit_jiffies = jiffies;
 
-	pr_alert("cache_create 11\n");
 	cache->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!cache->prison) {
 		*error = "Couldn't create bio prison";
@@ -1742,7 +1726,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	pr_alert("cache_create 12\n");
 	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
 							  _endio_hook_cache);
 	if (!cache->endio_hook_pool) {
@@ -1750,7 +1733,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	pr_alert("cache_create 13\n");
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
@@ -1760,7 +1742,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->next_migration = NULL;
 
-	pr_alert("cache_create 14\n");
 	r = create_cache_policy(cache, ca, error);
 	if (r)
 		goto bad;
@@ -1898,7 +1879,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		break;
 
 	default:
-		pr_alert("illegal value: %u\n", (unsigned) lookup_result.op);
+		DMERR("policy op: %u\n", (unsigned) lookup_result.op);
 		BUG();
 	}
 
