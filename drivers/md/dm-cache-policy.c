@@ -93,8 +93,10 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type)
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 
-struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
-					       sector_t origin_size, sector_t block_size,
+struct dm_cache_policy *dm_cache_policy_create(const char *name,
+					       dm_cblock_t cache_size,
+					       sector_t origin_size,
+					       sector_t block_size,
 					       int argc, char **argv)
 {
 	struct dm_cache_policy *p = NULL;

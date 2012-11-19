@@ -581,7 +581,8 @@ static dm_cblock_t demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 #define READ_PROMOTE_THRESHOLD 1
 #define WRITE_PROMOTE_THRESHOLD 4
 
-static unsigned adjusted_promote_threshold(struct mq_policy *mq, bool discarded_oblock, int data_dir)
+static unsigned adjusted_promote_threshold(struct mq_policy *mq,
+					   bool discarded_oblock, int data_dir)
 {
 	if (discarded_oblock && any_free_cblocks(mq))
 		/*
@@ -596,12 +597,11 @@ static unsigned adjusted_promote_threshold(struct mq_policy *mq, bool discarded_
 		(mq->promote_threshold + WRITE_PROMOTE_THRESHOLD);
 }
 
-static bool should_promote(struct mq_policy *mq,
-			   struct entry *e,
-			   bool discarded_oblock,
-			   int data_dir)
+static bool should_promote(struct mq_policy *mq, struct entry *e,
+			   bool discarded_oblock, int data_dir)
 {
-	return e->hit_count >= adjusted_promote_threshold(mq, discarded_oblock, data_dir);
+	return e->hit_count >=
+		adjusted_promote_threshold(mq, discarded_oblock, data_dir);
 }
 
 static int cache_entry_found(struct mq_policy *mq,
@@ -623,8 +623,7 @@ static int cache_entry_found(struct mq_policy *mq,
  * Moves and entry from the pre_cache to the cache.  The main work is
  * finding which cache block to use.
  */
-static int pre_cache_to_cache(struct mq_policy *mq,
-			      struct entry *e,
+static int pre_cache_to_cache(struct mq_policy *mq, struct entry *e,
 			      struct policy_result *result)
 {
 	dm_cblock_t cblock;
@@ -644,12 +643,9 @@ static int pre_cache_to_cache(struct mq_policy *mq,
 	return 0;
 }
 
-static int pre_cache_entry_found(struct mq_policy *mq,
-				 struct entry *e,
-				 bool can_migrate,
-				 bool discarded_oblock,
-				 int data_dir,
-				 struct policy_result *result)
+static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
+				 bool can_migrate, bool discarded_oblock,
+				 int data_dir, struct policy_result *result)
 {
 	int r = 0;
 	bool updated = updated_this_tick(mq, e);
@@ -692,8 +688,7 @@ static void insert_in_pre_cache(struct mq_policy *mq,
 	push(mq, e);
 }
 
-static void insert_in_cache(struct mq_policy *mq,
-			    dm_oblock_t oblock,
+static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 			    struct policy_result *result)
 {
 	struct entry *e;
@@ -722,12 +717,9 @@ static void insert_in_cache(struct mq_policy *mq,
 	result->cblock = e->cblock;
 }
 
-static int no_entry_found(struct mq_policy *mq,
-			  dm_oblock_t oblock,
-			  bool can_migrate,
-			  bool discarded_oblock,
-			  int data_dir,
-			  struct policy_result *result)
+static int no_entry_found(struct mq_policy *mq, dm_oblock_t oblock,
+			  bool can_migrate, bool discarded_oblock,
+			  int data_dir, struct policy_result *result)
 {
 	if (adjusted_promote_threshold(mq, discarded_oblock, data_dir) == 1) {
 		if (can_migrate) {
@@ -747,12 +739,9 @@ static int no_entry_found(struct mq_policy *mq,
  * Looks the oblock up in the hash table, then decides whether to put in
  * pre_cache, or cache etc.
  */
-static int map(struct mq_policy *mq,
-	       dm_oblock_t oblock,
-	       bool can_migrate,
-	       bool discarded_oblock,
-	       int data_dir,
-	       struct policy_result *result)
+static int map(struct mq_policy *mq, dm_oblock_t oblock,
+	       bool can_migrate, bool discarded_oblock,
+	       int data_dir, struct policy_result *result)
 {
 	int r = 0;
 	struct entry *e = hash_lookup(mq, oblock);
@@ -822,7 +811,8 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	copy_tick(mq);
 
 	iot_examine_bio(&mq->tracker, bio);
-	r = map(mq, oblock, can_migrate, discarded_oblock, bio_data_dir(bio), result);
+	r = map(mq, oblock, can_migrate, discarded_oblock,
+		bio_data_dir(bio), result);
 
 	mutex_unlock(&mq->lock);
 
@@ -850,7 +840,8 @@ static int mq_load_mapping(struct dm_cache_policy *p,
 	return 0;
 }
 
-static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
+static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
+			    void *context)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 	int r = 0;
@@ -931,7 +922,8 @@ static void mq_tick(struct dm_cache_policy *p)
 }
 
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
-					 sector_t origin_size, sector_t block_size,
+					 sector_t origin_size,
+					 sector_t block_size,
 					 int argc, char **argv)
 {
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);

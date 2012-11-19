@@ -113,8 +113,7 @@ struct dm_cache_policy {
 	 */
 	int (*map)(struct dm_cache_policy *p, dm_oblock_t oblock,
 		   bool can_migrate, bool discarded_oblock,
-		   struct bio *bio,
-		   struct policy_result *result);
+		   struct bio *bio, struct policy_result *result);
 
 	/*
 	 * oblock must be a mapped block.
@@ -126,10 +125,11 @@ struct dm_cache_policy {
 	 * Called when a cache target is first created.  Used to load a
 	 * mapping from the metadata device into the policy.
 	 */
-	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock,
-			    uint32_t hint, bool hint_valid);
+	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock,
+			    dm_cblock_t cblock, uint32_t hint, bool hint_valid);
 
-	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn, void *context);
+	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn,
+			     void *context);
 
 	/*
 	 * Override functions used on the error paths of the core target.
@@ -159,7 +159,8 @@ struct dm_cache_policy {
  	/*
 	 * Status and message.
 	 */
-	int (*status) (struct dm_cache_policy *p, status_type_t type, unsigned status_flags, char *result, unsigned maxlen);
+	int (*status) (struct dm_cache_policy *p, status_type_t type,
+		       unsigned status_flags, char *result, unsigned maxlen);
 	int (*message) (struct dm_cache_policy *p, unsigned argc, char **argv);
 
 	/*
@@ -187,7 +188,8 @@ struct dm_cache_policy_type {
 	size_t hint_size;	/* in bytes, must be 0 or 4 */
 	struct module *owner;
 	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
-					  sector_t origin_size, sector_t block_size,
+					  sector_t origin_size,
+					  sector_t block_size,
 					  int argc, char **argv);
 };
 
