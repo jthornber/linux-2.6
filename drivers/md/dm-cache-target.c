@@ -120,13 +120,13 @@ struct cache {
 	 */
 	dm_cblock_t cache_size;
 
-	struct dm_cache_metadata *cmd;
-
 	/*
 	 * Fields for converting from sectors to blocks.
 	 */
 	sector_t sectors_per_block;
 	int sectors_per_block_shift;
+
+	struct dm_cache_metadata *cmd;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -135,8 +135,8 @@ struct cache {
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
 	sector_t migration_threshold;
-	wait_queue_head_t migration_wait;
 	atomic_t nr_migrations;
+	wait_queue_head_t migration_wait;
 
 	/*
 	 * cache_size entries, dirty if set
@@ -193,11 +193,6 @@ struct dm_cache_endio_hook {
 };
 
 struct dm_cache_migration {
-	bool err:1;
-	bool writeback:1;
-	bool demote:1;
-	bool promote:1;
-
 	struct list_head list;
 	struct cache *cache;
 
@@ -205,6 +200,11 @@ struct dm_cache_migration {
 	dm_oblock_t old_oblock;
 	dm_oblock_t new_oblock;
 	dm_cblock_t cblock;
+
+	bool err:1;
+	bool writeback:1;
+	bool demote:1;
+	bool promote:1;
 
 	struct dm_bio_prison_cell *old_ocell;
 	struct dm_bio_prison_cell *new_ocell;
