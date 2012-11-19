@@ -76,7 +76,6 @@ struct cache_disk_superblock {
 	__le32 data_block_size;
 	__le32 metadata_block_size;
 	__le32 cache_blocks;
-	__le32 origin_blocks;
 
 	__le32 compat_flags;
 	__le32 compat_ro_flags;
@@ -109,7 +108,6 @@ struct dm_cache_metadata {
 
 	sector_t data_block_size;
 	dm_cblock_t cache_blocks;
-	dm_oblock_t origin_blocks;
 	bool changed:1;
 	bool clean_when_opened:1;
 
@@ -285,7 +283,6 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
-	disk_super->origin_blocks = cpu_to_le32(0);
 	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(0);
@@ -323,6 +320,9 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_root);
 	if (r < 0)
 		goto bad;
+
+	cmd->discard_block_size = 0;
+	cmd->discard_nr_blocks = 0;
 
 	r = __write_initial_superblock(cmd);
 	if (r)
@@ -477,7 +477,6 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->discard_nr_blocks = to_dblock(le64_to_cpu(disk_super->discard_nr_blocks));
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
-	cmd->origin_blocks = to_oblock(le32_to_cpu(disk_super->origin_blocks));
 	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
 
 	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
@@ -571,7 +570,6 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	disk_super->discard_block_size = cpu_to_le64(cmd->discard_block_size);
 	disk_super->discard_nr_blocks = cpu_to_le64(from_dblock(cmd->discard_nr_blocks));
 	disk_super->cache_blocks = cpu_to_le32(from_cblock(cmd->cache_blocks));
-	disk_super->origin_blocks = cpu_to_le32(from_oblock(cmd->origin_blocks));
 	strncpy(disk_super->policy_name, cmd->policy_name, sizeof(disk_super->policy_name));
 
 	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
@@ -633,7 +631,6 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
-	cmd->origin_blocks = 0;
 	cmd->changed = true;
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
