@@ -546,13 +546,19 @@ static void issue(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 
-	if (bio_triggers_commit(cache, bio)) {
-		spin_lock_irqsave(&cache->lock, flags);
-		cache->commit_requested = true;
-		bio_list_add(&cache->deferred_flush_bios, bio);
-		spin_unlock_irqrestore(&cache->lock, flags);
-	} else
+	if (!bio_triggers_commit(cache, bio)) {
 		generic_make_request(bio);
+		return;
+	}
+
+	/*
+	 * Batch together any bios that trigger commits and then issue a
+	 * single commit for them in do_worker().
+	 */
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->commit_requested = true;
+	bio_list_add(&cache->deferred_flush_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
 /*----------------------------------------------------------------
