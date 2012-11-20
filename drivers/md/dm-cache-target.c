@@ -1359,24 +1359,6 @@ static sector_t get_dev_size(struct dm_dev *dev)
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
 }
 
-static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
-			bool dirty, uint32_t hint, bool hint_valid)
-{
-	int r;
-	struct cache *cache = context;
-
-	r = policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
-	if (r)
-		return r;
-
-	if (dirty)
-		set_dirty(cache, oblock, cblock);
-	else
-		clear_dirty(cache, oblock, cblock);
-
-	return 0;
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -2071,6 +2053,24 @@ static void cache_postsuspend(struct dm_target *ti)
 	stop_quiescing(cache);
 
 	(void) sync_metadata(cache);
+}
+
+static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
+			bool dirty, uint32_t hint, bool hint_valid)
+{
+	int r;
+	struct cache *cache = context;
+
+	r = policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
+	if (r)
+		return r;
+
+	if (dirty)
+		set_dirty(cache, oblock, cblock);
+	else
+		clear_dirty(cache, oblock, cblock);
+
+	return 0;
 }
 
 static int load_discard(void *context, sector_t discard_block_size,
