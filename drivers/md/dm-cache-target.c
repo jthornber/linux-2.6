@@ -2080,7 +2080,11 @@ static int load_discard(void *context, sector_t discard_block_size,
 
 	// FIXME: handle mis-matched block size
 
-	(discard ? set_discard : clear_discard)(cache, dblock);
+	if (discard)
+		set_discard(cache, dblock);
+	else
+		clear_discard(cache, dblock);
+
 	return 0;
 }
 
