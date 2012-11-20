@@ -930,7 +930,7 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
 	BUG_ON(bio->bi_size);
-	if (h->req_nr == 0)
+	if (!h->req_nr)
 		remap_to_origin(cache, bio);
 	else
 		remap_to_cache(cache, bio, 0);
@@ -1190,7 +1190,7 @@ static bool is_quiescing(struct cache *cache)
 
 static void wait_for_migrations(struct cache *cache)
 {
-	wait_event(cache->migration_wait, atomic_read(&cache->nr_migrations) == 0);
+	wait_event(cache->migration_wait, !atomic_read(&cache->nr_migrations));
 }
 
 static void stop_worker(struct cache *cache)
