@@ -1369,7 +1369,11 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
 	if (r)
 		return r;
 
-	(dirty ? set_dirty : clear_dirty)(cache, oblock, cblock);
+	if (dirty)
+		set_dirty(cache, oblock, cblock);
+	else
+		clear_dirty(cache, oblock, cblock);
+
 	return 0;
 }
 
