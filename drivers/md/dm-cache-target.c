@@ -615,19 +615,19 @@ static void migration_failure(struct dm_cache_migration *mg)
 	struct cache *cache = mg->cache;
 
 	if (mg->writeback) {
-		DMWARN("writeback failed; couldn't copy block");
+		DMWARN_LIMIT("writeback failed; couldn't copy block");
 		set_dirty(cache, mg->old_oblock, mg->cblock);
 		cell_defer(cache, mg->old_ocell, false);
 
 	} else if (mg->demote) {
-		DMWARN("demotion failed; couldn't copy block");
+		DMWARN_LIMIT("demotion failed; couldn't copy block");
 		policy_force_mapping(cache->policy, mg->new_oblock, mg->old_oblock);
 
 		cell_defer(cache, mg->old_ocell, mg->promote ? 0 : 1);
 		if (mg->promote)
 			cell_defer(cache, mg->new_ocell, 1);
 	} else {
-		DMWARN("promotion failed; couldn't copy block");
+		DMWARN_LIMIT("promotion failed; couldn't copy block");
 		policy_remove_mapping(cache->policy, mg->new_oblock);
 		cell_defer(cache, mg->new_ocell, 1);
 	}
@@ -648,7 +648,7 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 
 	} else if (mg->demote) {
 		if (dm_cache_remove_mapping(cache->cmd, mg->cblock)) {
-			DMWARN("demotion failed; couldn't update on disk metadata");
+			DMWARN_LIMIT("demotion failed; couldn't update on disk metadata");
 			policy_force_mapping(cache->policy, mg->new_oblock,
 					     mg->old_oblock);
 			if (mg->promote)
@@ -658,7 +658,7 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 		}
 	} else {
 		if (dm_cache_insert_mapping(cache->cmd, mg->cblock, mg->new_oblock)) {
-			DMWARN("promotion failed; couldn't update on disk metadata");
+			DMWARN_LIMIT("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(cache->policy, mg->new_oblock);
 			cleanup_migration(mg);
 			return;
