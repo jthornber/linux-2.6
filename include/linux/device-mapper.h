@@ -44,7 +44,7 @@ typedef void (*dm_dtr_fn) (struct dm_target *ti);
  * cache target in 'writethrough' mode will need to issue io to both the
  * fast and slow devices.
  */
-typedef unsigned (*dm_get_num_duplicates)(struct dm_target *ti, struct bio *bio);
+typedef unsigned (*dm_get_num_duplicates_fn)(struct dm_target *ti, struct bio *bio);
 
 /*
  * The map function must return:
@@ -141,7 +141,7 @@ struct target_type {
 	unsigned version[3];
 	dm_ctr_fn ctr;
 	dm_dtr_fn dtr;
-	dm_get_num_duplicates get_num_duplicates;
+	dm_get_num_duplicates_fn get_num_duplicates;
 	dm_map_fn map;
 	dm_map_request_fn map_rq;
 	dm_endio_fn end_io;

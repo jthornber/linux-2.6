@@ -1189,7 +1189,7 @@ static void __issue_target_request(struct clone_info *ci, struct dm_target *ti,
 	__alloc_tio_and_map_bio(ci, ti, clone, request_nr);
 }
 
-static unsigned num_duplicates_needed(struct dm_target *ti, struct bio *bio)
+static unsigned num_duplicate_bios_needed(struct dm_target *ti, struct bio *bio)
 {
 	if (bio->bi_rw & REQ_FLUSH)
 		return ti->num_flush_requests;
@@ -1206,7 +1206,7 @@ static unsigned num_duplicates_needed(struct dm_target *ti, struct bio *bio)
 static void __issue_target_requests(struct clone_info *ci, struct dm_target *ti,
 				    sector_t len)
 {
-	unsigned i, num_requests = num_duplicates_needed(ti, ci->bio);
+	unsigned i, num_requests = num_duplicate_bios_needed(ti, ci->bio);
 
 	for (i = 0; i < num_requests; i++)
 		__issue_target_request(ci, ti, i, len);
@@ -1225,14 +1225,14 @@ static int __clone_and_map_empty_flush(struct clone_info *ci)
 }
 
 static void __issue_bio_to_target(struct clone_info *ci, struct dm_target *ti,
-				  struct bio *bio,
-				  sector_t sector, unsigned short idx, unsigned bv_count,
+				  struct bio *bio, sector_t sector,
+				  unsigned short idx, unsigned bv_count,
 				  unsigned len, struct bio_set *bs)
 {
-	unsigned i, num_duplicates = num_duplicates_needed(ti, bio);
+	unsigned i, num_duplicate_bios = num_duplicate_bios_needed(ti, bio);
 	struct bio *clone;
 
-	for (i = 0; i < num_duplicates; i++) {
+	for (i = 0; i < num_duplicate_bios; i++) {
 		clone = clone_bio(bio, sector, idx, bv_count, len, bs);
 		__alloc_tio_and_map_bio(ci, ti, clone, i);
 	}
@@ -1322,9 +1322,8 @@ static int __clone_and_map(struct clone_info *ci)
 			len += bv_len;
 		}
 
-		__issue_bio_to_target(ci, ti, bio, ci->sector,
-				      ci->idx, i - ci->idx, len,
-				      ci->md->bs);
+		__issue_bio_to_target(ci, ti, bio, ci->sector, ci->idx,
+				      i - ci->idx, len, ci->md->bs);
 
 		ci->sector += len;
 		ci->sector_count -= len;
