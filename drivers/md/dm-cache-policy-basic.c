@@ -1381,30 +1381,33 @@ static void hint_to_counts(uint32_t val, unsigned *read, unsigned *write)
 
 }
 
+static void sort_in_cache_entry(struct policy *p, struct basic_cache_entry *e)
+{
+	struct list_head *elt;
+	struct basic_cache_entry *cur;
+
+	list_for_each(elt, &p->queues.used) {
+		cur = list_entry(elt, struct basic_cache_entry, ce.list);
+	 	if (e->ce.count[T_HITS][0] > cur->ce.count[T_HITS][0])
+			break;
+	}
+
+	if (elt == &p->queues.used)
+		list_add_tail(&e->ce.list, elt);
+	else
+		list_add(&e->ce.list, elt);
+}
+
 static int basic_load_mapping(struct dm_cache_policy *pe,
 			      dm_oblock_t oblock, dm_cblock_t cblock,
 			      uint32_t hint, bool hint_valid)
 {
-	int r = 0;
 	struct policy *p = to_policy(pe);
 	struct basic_cache_entry *e;
-	bool is_multiqueue = (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p));
-
-	/* FIXME: if we can't allocate the array, just add the mapping? */
-	if (!is_multiqueue &&
-	    !p->tmp_entries) {
-		p->tmp_entries = vzalloc(sizeof(*p->tmp_entries) * p->cache_size);
-		if (!p->tmp_entries)
-			return -ENOMEM;
-	}
-
-	mutex_lock(&p->lock);
 
 	e = alloc_cache_entry(p);
-	if (!e) {
-		r = -ENOMEM;
-		goto bad;
-	}
+	if (!e)
+		return -ENOMEM;
 
 	e->cblock = cblock;
 	e->ce.oblock = oblock;
@@ -1424,35 +1427,13 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 			p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
 
 		} else
-			p->tmp_entries[reads] = e;
+			sort_in_cache_entry(p, e);
 	}
 
-bad:
-	mutex_unlock(&p->lock);
-
-	return r;
+	return 0;
 }
 
-static void basic_load_mappings_completed(struct dm_cache_policy *pe)
-{
-	struct policy *p = to_policy(pe);
-
-	if (p->tmp_entries) {
-		unsigned u;
-
-		for (u = 0; u < p->cache_size; p++) {
-			if (p->tmp_entries[u]) {
-				add_cache_entry(p, p->tmp_entries[u]);
-				p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-			}
-		}
-
-		vfree(p->tmp_entries);
-		p->tmp_entries = NULL;
-	}
-}
-
-/* Walk queues for lfu, mfu, lfu_ws, mfu_ws, multiqueue, multiqueue_ws, twoqueue */
+/* Walk mappings */
 static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn,
 			       void *context)
 {
