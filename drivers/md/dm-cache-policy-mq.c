@@ -15,6 +15,8 @@
 
 #define DM_MSG_PREFIX "cache-policy-mq"
 
+static struct kmem_cache *mq_entry_cache;
+
 /*----------------------------------------------------------------*/
 
 static unsigned next_power(unsigned n, unsigned min)
@@ -125,6 +127,7 @@ static void iot_examine_bio(struct io_tracker *t, struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
+
 /*
  * This queue is divided up into different levels.  Allowing us to push
  * entries to the back of any of the levels.  Think of it as a partially
@@ -191,6 +194,16 @@ static struct list_head *queue_pop(struct queue *q)
 		}
 
 	return NULL;
+}
+
+static struct list_head *list_pop(struct list_head *lh)
+{
+	struct list_head *r = lh->next;
+
+	BUG_ON(!r);
+	list_del_init(r);
+
+	return r;
 }
 
 /*----------------------------------------------------------------*/
@@ -271,7 +284,7 @@ struct mq_policy {
 	 */
 	unsigned nr_entries;
 	unsigned nr_entries_allocated;
-	struct entry *entries;
+	struct list_head free;
 
 	/*
 	 * Cache blocks may be unallocated.  We store this info in a
@@ -288,6 +301,48 @@ struct mq_policy {
 	dm_block_t hash_bits;
 	struct hlist_head *table;
 };
+
+/*----------------------------------------------------------------*/
+/* Free/alloc mq cache entry structures. */
+static void takeout_queue(struct list_head *lh, struct queue *q)
+{
+	unsigned level;
+
+	for (level = 0; level < NR_QUEUE_LEVELS; level++)
+		list_splice(q->qs + level, lh);
+}
+
+static void free_entries(struct mq_policy *mq)
+{
+	struct entry *e, *tmp;
+
+	takeout_queue(&mq->free, &mq->pre_cache);
+	takeout_queue(&mq->free, &mq->cache);
+
+	list_for_each_entry_safe(e, tmp, &mq->free, list)
+		kmem_cache_free(mq_entry_cache, e);
+}
+
+static int alloc_entries(struct mq_policy *mq, unsigned elts)
+{
+	unsigned u;
+
+	INIT_LIST_HEAD(&mq->free);
+	mq->nr_entries_allocated = 0;
+
+	for (u = 0; u < mq->nr_entries; u++) {
+		struct entry *e = kmem_cache_alloc(mq_entry_cache, GFP_KERNEL);
+
+		if (!e) {
+			free_entries(mq);
+			return -ENOMEM;
+		}
+
+		list_add(&e->list, &mq->free);
+	}
+
+	return 0;
+}
 
 /*----------------------------------------------------------------*/
 
@@ -334,10 +389,12 @@ static struct entry *alloc_entry(struct mq_policy *mq)
 {
 	struct entry *e;
 
-	if (mq->nr_entries_allocated >= mq->nr_entries)
+	if (mq->nr_entries_allocated >= mq->nr_entries) {
+		BUG_ON(!list_empty(&mq->free));
 		return NULL;
+	}
 
-	e = mq->entries + mq->nr_entries_allocated;
+	e = list_entry(list_pop(&mq->free), struct entry, list);
 	INIT_LIST_HEAD(&e->list);
 	INIT_HLIST_NODE(&e->hlist);
 
@@ -782,7 +839,7 @@ static void mq_destroy(struct dm_cache_policy *p)
 
 	free_bitset(mq->allocation_bitset);
 	kfree(mq->table);
-	vfree(mq->entries);
+	free_entries(mq);
 	kfree(mq);
 }
 
@@ -926,7 +983,9 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t block_size,
 					 int argc, char **argv)
 {
+	int r;
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+
 	if (!mq)
 		return NULL;
 
@@ -956,11 +1015,9 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024U);
 
 	mq->nr_entries = 2 * from_cblock(cache_size);
-	mq->entries = vzalloc(sizeof(*mq->entries) * mq->nr_entries);
-	if (!mq->entries) {
-		kfree(mq);
-		return NULL;
-	}
+	r = alloc_entries(mq, mq->nr_entries);
+	if (r)
+		goto bad_cache_alloc;
 
 	mq->nr_entries_allocated = 0;
 	mq->nr_cblocks_allocated = 0;
@@ -968,21 +1025,23 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->nr_buckets = next_power(from_cblock(cache_size) / 2, 16);
 	mq->hash_bits = ffs(mq->nr_buckets) - 1;
 	mq->table = kzalloc(sizeof(*mq->table) * mq->nr_buckets, GFP_KERNEL);
-	if (!mq->table) {
-		vfree(mq->entries);
-		kfree(mq);
-		return NULL;
-	}
+	if (!mq->table)
+		goto bad_alloc_table;
 
 	mq->allocation_bitset = alloc_bitset(from_cblock(cache_size));
-	if (!mq->allocation_bitset) {
-		kfree(mq->table);
-		vfree(mq->entries);
-		kfree(mq);
-		return NULL;
-	}
+	if (!mq->allocation_bitset)
+		goto bad_alloc_bitset;
 
 	return &mq->policy;
+
+bad_alloc_bitset:
+	kfree(mq->table);
+bad_alloc_table:
+	free_entries(mq);
+bad_cache_alloc:
+	kfree(mq);
+
+	return NULL;
 }
 
 /*----------------------------------------------------------------*/
@@ -1005,17 +1064,33 @@ static int __init mq_init(void)
 {
 	int r;
 
+	mq_entry_cache = kmem_cache_create("dm_mq_policy_cache_entry",
+					   sizeof(struct entry),
+					   __alignof__(struct entry),
+					   0, NULL);
+	if (!mq_entry_cache)
+		goto bad;
+
 	r = dm_cache_policy_register(&mq_policy_type);
 	if (r)
-		return r;
+		goto bad_register_mq;
 
-	return dm_cache_policy_register(&default_policy_type);
+	r = dm_cache_policy_register(&default_policy_type);
+	if (!r)
+		return 0;
+
+	dm_cache_policy_unregister(&mq_policy_type);
+bad_register_mq:
+	kmem_cache_destroy(mq_entry_cache);
+bad:
+	return -ENOMEM;
 }
 
 static void __exit mq_exit(void)
 {
 	dm_cache_policy_unregister(&mq_policy_type);
 	dm_cache_policy_unregister(&default_policy_type);
+	kmem_cache_destroy(mq_entry_cache);
 }
 
 module_init(mq_init);

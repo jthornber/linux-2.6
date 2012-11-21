@@ -973,11 +973,18 @@ static bool may_migrate(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
+static bool is_writethrough_io(struct cache *cache, struct bio *bio, dm_cblock_t cblock)
+{
+	return bio_data_dir(bio) == WRITE &&
+		cache->features.write_through &&
+		!is_dirty(cache, cblock);
+}
+
 static void process_bio(struct cache *cache, struct prealloc *structs,
 			struct bio *bio)
 {
 	int r;
-	int release_cell = 1;
+	bool release_cell = true;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
@@ -999,7 +1006,18 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		atomic_inc(bio_data_dir(bio) == READ ?
 			   &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-		remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+
+		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
+			/*
+			 * No need to mark anything dirty in write through
+			 * mode.
+			 */
+			h->req_nr == 0 ?
+				remap_to_cache(cache, bio, lookup_result.cblock) :
+				remap_to_origin(cache, bio);
+		} else
+			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+
 		issue(cache, bio);
 		break;
 
@@ -1007,14 +1025,24 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		atomic_inc(bio_data_dir(bio) == READ ?
 			   &cache->read_miss : &cache->write_miss);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-		remap_to_origin_dirty(cache, bio, block);
-		issue(cache, bio);
+
+		if (h->req_nr != 0) {
+			/*
+			 * This is a duplicate writethrough io that is no
+			 * longer needed because the block has been
+			 * demoted.
+			 */
+			bio_endio(bio, 0);
+		} else {
+			remap_to_origin_dirty(cache, bio, block);
+			issue(cache, bio);
+		}
 		break;
 
 	case POLICY_NEW:
 		atomic_inc(&cache->promotion);
 		promote(cache, structs, block, lookup_result.cblock, new_ocell);
-		release_cell = 0;
+		release_cell = false;
 		break;
 
 	case POLICY_REPLACE:
@@ -1037,7 +1065,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		demote_then_promote(cache, structs, lookup_result.old_oblock,
 				    block, lookup_result.cblock,
 				    old_ocell, new_ocell);
-		release_cell = 0;
+		release_cell = false;
 		break;
 
 	default:
@@ -1847,6 +1875,18 @@ static struct dm_cache_endio_hook *hook_endio(struct cache *cache,
 	return h;
 }
 
+static unsigned cache_get_num_duplicates(struct dm_target *ti,
+					 struct bio *bio)
+{
+	struct cache *cache = ti->private;
+	struct policy_result lookup_result;
+	dm_oblock_t block = get_bio_block(cache, bio);
+
+	policy_map(cache->policy, block, false, false, bio, &lookup_result);
+	return (lookup_result.op == POLICY_HIT &&
+		is_writethrough_io(cache, bio, lookup_result.cblock)) ? 2 : 1;
+}
+
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		     union map_info *map_context)
 {
@@ -1906,9 +1946,20 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 			   &cache->read_hit : &cache->write_hit);
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		// FIXME: policy_set_dirty can block!
-		remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
-		cell_defer(cache, cell, false);
+		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
+			/*
+			 * No need to mark anything dirty in write through
+			 * mode.
+			 */
+			h->req_nr == 0 ?
+				remap_to_cache(cache, bio, lookup_result.cblock) :
+				remap_to_origin(cache, bio);
+			cell_defer(cache, cell, false);
+		} else {
+			// FIXME: policy_set_dirty can block!
+			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+			cell_defer(cache, cell, false);
+		}
 		break;
 
 	case POLICY_MISS:
@@ -1917,8 +1968,19 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		// FIXME: policy_set_dirty can block!
-		remap_to_origin_dirty(cache, bio, block);
-		cell_defer(cache, cell, false);
+		if (h->req_nr != 0) {
+			/*
+			 * This is a duplicate writethrough io that is no
+			 * longer needed because the block has been
+			 * demoted.
+			 */
+			bio_endio(bio, 0);
+			cell_defer(cache, cell, false);
+			return DM_MAPIO_SUBMITTED;
+		} else {
+			remap_to_origin_dirty(cache, bio, block);
+			cell_defer(cache, cell, false);
+		}
 		break;
 
 	default:
@@ -2300,6 +2362,7 @@ static struct target_type cache_target = {
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
+	.get_num_duplicates = cache_get_num_duplicates,
 	.map = cache_map,
 	.end_io = cache_end_io,
 	.postsuspend = cache_postsuspend,

@@ -1101,21 +1101,36 @@ static struct bio *split_bvec(struct bio *bio, sector_t sector,
 /*
  * Creates a bio that consists of range of complete bvecs.
  */
-static struct bio *clone_bio(struct bio *bio, sector_t sector,
-			     unsigned short idx, unsigned short bv_count,
-			     unsigned int len, struct bio_set *bs)
+
+static void bio_setup_sector(struct bio *bio, sector_t sector, sector_t len)
+{
+	bio->bi_sector = sector;
+	bio->bi_size = to_bytes(len);
+}
+
+static struct bio *clone_bio_basic(struct bio *bio, struct bio_set *bs)
 {
 	struct bio *clone;
 
 	clone = bio_alloc_bioset(GFP_NOIO, bio->bi_max_vecs, bs);
 	__bio_clone(clone, bio);
 	clone->bi_destructor = dm_bio_destructor;
-	clone->bi_sector = sector;
-	clone->bi_idx = idx;
-	clone->bi_vcnt = idx + bv_count;
-	clone->bi_size = to_bytes(len);
-	clone->bi_flags &= ~(1 << BIO_SEG_VALID);
 
+	return clone;
+}
+
+static void bio_setup_bv(struct bio *bio,
+			 unsigned short idx, unsigned short bv_count)
+{
+	bio->bi_idx = idx;
+	bio->bi_vcnt = idx + bv_count;
+	bio->bi_flags &= ~(1 << BIO_SEG_VALID);
+}
+
+static void clone_bio_integrity(struct bio *bio, struct bio *clone,
+				unsigned short idx, unsigned len,
+				struct bio_set *bs)
+{
 	if (bio_integrity(bio)) {
 		bio_integrity_clone(clone, bio, GFP_NOIO, bs);
 
@@ -1123,6 +1138,18 @@ static struct bio *clone_bio(struct bio *bio, sector_t sector,
 			bio_integrity_trim(clone,
 					   bio_sector_offset(bio, idx, 0), len);
 	}
+}
+
+static struct bio *clone_bio(struct bio *bio, sector_t sector,
+			     unsigned short idx, unsigned short bv_count,
+			     unsigned int len, struct bio_set *bs)
+{
+	struct bio *clone;
+
+	clone = clone_bio_basic(bio, bs);
+	bio_setup_sector(clone, sector, len);
+	bio_setup_bv(clone, idx, bv_count);
+	clone_bio_integrity(bio, clone, idx, len, bs);
 
 	return clone;
 }
@@ -1139,37 +1166,50 @@ static struct dm_target_io *alloc_tio(struct clone_info *ci,
 	return tio;
 }
 
+static void __alloc_tio_and_map_bio(struct clone_info *ci, struct dm_target *ti,
+				    struct bio *clone, unsigned request_nr)
+{
+	struct dm_target_io *tio = alloc_tio(ci, ti);
+	tio->info.target_request_nr = request_nr;
+	__map_bio(ti, clone, tio);
+}
+
 static void __issue_target_request(struct clone_info *ci, struct dm_target *ti,
 				   unsigned request_nr, sector_t len)
 {
-	struct dm_target_io *tio = alloc_tio(ci, ti);
-	struct bio *clone;
-
-	tio->info.target_request_nr = request_nr;
 
 	/*
 	 * Discard requests require the bio's inline iovecs be initialized.
 	 * ci->bio->bi_max_vecs is BIO_INLINE_VECS anyway, for both flush
 	 * and discard, so no need for concern about wasted bvec allocations.
 	 */
-	clone = bio_alloc_bioset(GFP_NOIO, ci->bio->bi_max_vecs, ci->md->bs);
-	__bio_clone(clone, ci->bio);
-	clone->bi_destructor = dm_bio_destructor;
-	if (len) {
-		clone->bi_sector = ci->sector;
-		clone->bi_size = to_bytes(len);
-	}
+	struct bio *clone = clone_bio_basic(ci->bio, ci->md->bs);
+	if (len)
+		bio_setup_sector(clone, ci->sector, len);
+	__alloc_tio_and_map_bio(ci, ti, clone, request_nr);
+}
 
-	__map_bio(ti, clone, tio);
+static unsigned num_duplicates_needed(struct dm_target *ti, struct bio *bio)
+{
+	if (bio->bi_rw & REQ_FLUSH)
+		return ti->num_flush_requests;
+
+	if (bio->bi_rw & REQ_DISCARD)
+		return ti->num_discard_requests;
+
+	if (ti->type->get_num_duplicates)
+		return ti->type->get_num_duplicates(ti, bio);
+
+	return 1;
 }
 
 static void __issue_target_requests(struct clone_info *ci, struct dm_target *ti,
-				    unsigned num_requests, sector_t len)
+				    sector_t len)
 {
-	unsigned request_nr;
+	unsigned i, num_requests = num_duplicates_needed(ti, ci->bio);
 
-	for (request_nr = 0; request_nr < num_requests; request_nr++)
-		__issue_target_request(ci, ti, request_nr, len);
+	for (i = 0; i < num_requests; i++)
+		__issue_target_request(ci, ti, i, len);
 }
 
 static int __clone_and_map_empty_flush(struct clone_info *ci)
@@ -1179,9 +1219,23 @@ static int __clone_and_map_empty_flush(struct clone_info *ci)
 
 	BUG_ON(bio_has_data(ci->bio));
 	while ((ti = dm_table_get_target(ci->map, target_nr++)))
-		__issue_target_requests(ci, ti, ti->num_flush_requests, 0);
+		__issue_target_requests(ci, ti, 0);
 
 	return 0;
+}
+
+static void __issue_bio_to_target(struct clone_info *ci, struct dm_target *ti,
+				  struct bio *bio,
+				  sector_t sector, unsigned short idx, unsigned bv_count,
+				  unsigned len, struct bio_set *bs)
+{
+	unsigned i, num_duplicates = num_duplicates_needed(ti, bio);
+	struct bio *clone;
+
+	for (i = 0; i < num_duplicates; i++) {
+		clone = clone_bio(bio, sector, idx, bv_count, len, bs);
+		__alloc_tio_and_map_bio(ci, ti, clone, i);
+	}
 }
 
 /*
@@ -1189,14 +1243,9 @@ static int __clone_and_map_empty_flush(struct clone_info *ci)
  */
 static void __clone_and_map_simple(struct clone_info *ci, struct dm_target *ti)
 {
-	struct bio *clone, *bio = ci->bio;
-	struct dm_target_io *tio;
-
-	tio = alloc_tio(ci, ti);
-	clone = clone_bio(bio, ci->sector, ci->idx,
-			  bio->bi_vcnt - ci->idx, ci->sector_count,
-			  ci->md->bs);
-	__map_bio(ti, clone, tio);
+	__issue_bio_to_target(ci, ti, ci->bio, ci->sector, ci->idx,
+			      ci->bio->bi_vcnt - ci->idx, ci->sector_count,
+			      ci->md->bs);
 	ci->sector_count = 0;
 }
 
@@ -1224,7 +1273,7 @@ static int __clone_and_map_discard(struct clone_info *ci)
 		else
 			len = min(ci->sector_count, max_io_len(ci->sector, ti));
 
-		__issue_target_requests(ci, ti, ti->num_discard_requests, len);
+		__issue_target_requests(ci, ti, len);
 
 		ci->sector += len;
 	} while (ci->sector_count -= len);
@@ -1237,7 +1286,6 @@ static int __clone_and_map(struct clone_info *ci)
 	struct bio *clone, *bio = ci->bio;
 	struct dm_target *ti;
 	sector_t len = 0, max;
-	struct dm_target_io *tio;
 
 	if (unlikely(bio->bi_rw & REQ_DISCARD))
 		return __clone_and_map_discard(ci);
@@ -1274,10 +1322,9 @@ static int __clone_and_map(struct clone_info *ci)
 			len += bv_len;
 		}
 
-		tio = alloc_tio(ci, ti);
-		clone = clone_bio(bio, ci->sector, ci->idx, i - ci->idx, len,
-				  ci->md->bs);
-		__map_bio(ti, clone, tio);
+		__issue_bio_to_target(ci, ti, bio, ci->sector,
+				      ci->idx, i - ci->idx, len,
+				      ci->md->bs);
 
 		ci->sector += len;
 		ci->sector_count -= len;
@@ -1302,12 +1349,11 @@ static int __clone_and_map(struct clone_info *ci)
 
 			len = min(remaining, max);
 
-			tio = alloc_tio(ci, ti);
 			clone = split_bvec(bio, ci->sector, ci->idx,
 					   bv->bv_offset + offset, len,
 					   ci->md->bs);
 
-			__map_bio(ti, clone, tio);
+			__alloc_tio_and_map_bio(ci, ti, clone, 0);
 
 			ci->sector += len;
 			ci->sector_count -= len;
