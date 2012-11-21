@@ -546,13 +546,19 @@ static void issue(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 
-	if (bio_triggers_commit(cache, bio)) {
-		spin_lock_irqsave(&cache->lock, flags);
-		cache->commit_requested = true;
-		bio_list_add(&cache->deferred_flush_bios, bio);
-		spin_unlock_irqrestore(&cache->lock, flags);
-	} else
+	if (!bio_triggers_commit(cache, bio)) {
 		generic_make_request(bio);
+		return;
+	}
+
+	/*
+	 * Batch together any bios that trigger commits and then issue a
+	 * single commit for them in do_worker().
+	 */
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->commit_requested = true;
+	bio_list_add(&cache->deferred_flush_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
 /*----------------------------------------------------------------
@@ -609,19 +615,19 @@ static void migration_failure(struct dm_cache_migration *mg)
 	struct cache *cache = mg->cache;
 
 	if (mg->writeback) {
-		DMWARN("writeback failed; couldn't copy block");
+		DMWARN_LIMIT("writeback failed; couldn't copy block");
 		set_dirty(cache, mg->old_oblock, mg->cblock);
 		cell_defer(cache, mg->old_ocell, false);
 
 	} else if (mg->demote) {
-		DMWARN("demotion failed; couldn't copy block");
+		DMWARN_LIMIT("demotion failed; couldn't copy block");
 		policy_force_mapping(cache->policy, mg->new_oblock, mg->old_oblock);
 
 		cell_defer(cache, mg->old_ocell, mg->promote ? 0 : 1);
 		if (mg->promote)
 			cell_defer(cache, mg->new_ocell, 1);
 	} else {
-		DMWARN("promotion failed; couldn't copy block");
+		DMWARN_LIMIT("promotion failed; couldn't copy block");
 		policy_remove_mapping(cache->policy, mg->new_oblock);
 		cell_defer(cache, mg->new_ocell, 1);
 	}
@@ -642,7 +648,7 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 
 	} else if (mg->demote) {
 		if (dm_cache_remove_mapping(cache->cmd, mg->cblock)) {
-			DMWARN("demotion failed; couldn't update on disk metadata");
+			DMWARN_LIMIT("demotion failed; couldn't update on disk metadata");
 			policy_force_mapping(cache->policy, mg->new_oblock,
 					     mg->old_oblock);
 			if (mg->promote)
@@ -652,7 +658,7 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 		}
 	} else {
 		if (dm_cache_insert_mapping(cache->cmd, mg->cblock, mg->new_oblock)) {
-			DMWARN("promotion failed; couldn't update on disk metadata");
+			DMWARN_LIMIT("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(cache->policy, mg->new_oblock);
 			cleanup_migration(mg);
 			return;
@@ -924,7 +930,7 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
 	BUG_ON(bio->bi_size);
-	if (h->req_nr == 0)
+	if (!h->req_nr)
 		remap_to_origin(cache, bio);
 	else
 		remap_to_cache(cache, bio, 0);
@@ -1212,7 +1218,7 @@ static bool is_quiescing(struct cache *cache)
 
 static void wait_for_migrations(struct cache *cache)
 {
-	wait_event(cache->migration_wait, atomic_read(&cache->nr_migrations) == 0);
+	wait_event(cache->migration_wait, !atomic_read(&cache->nr_migrations));
 }
 
 static void stop_worker(struct cache *cache)
@@ -1379,20 +1385,6 @@ static void cache_dtr(struct dm_target *ti)
 static sector_t get_dev_size(struct dm_dev *dev)
 {
 	return i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
-}
-
-static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
-			bool dirty, uint32_t hint, bool hint_valid)
-{
-	int r;
-	struct cache *cache = context;
-
-	r = policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
-	if (r)
-		return r;
-
-	(dirty ? set_dirty : clear_dirty)(cache, oblock, cblock);
-	return 0;
 }
 
 /*----------------------------------------------------------------*/
@@ -2125,6 +2117,24 @@ static void cache_postsuspend(struct dm_target *ti)
 	(void) sync_metadata(cache);
 }
 
+static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
+			bool dirty, uint32_t hint, bool hint_valid)
+{
+	int r;
+	struct cache *cache = context;
+
+	r = policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
+	if (r)
+		return r;
+
+	if (dirty)
+		set_dirty(cache, oblock, cblock);
+	else
+		clear_dirty(cache, oblock, cblock);
+
+	return 0;
+}
+
 static int load_discard(void *context, sector_t discard_block_size,
 			dm_dblock_t dblock, bool discard)
 {
@@ -2132,7 +2142,11 @@ static int load_discard(void *context, sector_t discard_block_size,
 
 	// FIXME: handle mis-matched block size
 
-	(discard ? set_discard : clear_discard)(cache, dblock);
+	if (discard)
+		set_discard(cache, dblock);
+	else
+		clear_discard(cache, dblock);
+
 	return 0;
 }
 
