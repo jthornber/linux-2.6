@@ -973,11 +973,11 @@ static bool may_migrate(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
-static bool is_writethrough_io(struct cache *cache, struct bio *bio, dm_cblock_t cblock)
+static bool is_writethrough_io(struct cache *cache, struct bio *bio,
+			       dm_cblock_t cblock)
 {
 	return bio_data_dir(bio) == WRITE &&
-		cache->features.write_through &&
-		!is_dirty(cache, cblock);
+		cache->features.write_through && !is_dirty(cache, cblock);
 }
 
 static void process_bio(struct cache *cache, struct prealloc *structs,
@@ -1009,8 +1009,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
 			/*
-			 * No need to mark anything dirty in write through
-			 * mode.
+			 * No need to mark anything dirty in write through mode.
 			 */
 			h->req_nr == 0 ?
 				remap_to_cache(cache, bio, lookup_result.cblock) :
@@ -1029,8 +1028,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		if (h->req_nr != 0) {
 			/*
 			 * This is a duplicate writethrough io that is no
-			 * longer needed because the block has been
-			 * demoted.
+			 * longer needed because the block has been demoted.
 			 */
 			bio_endio(bio, 0);
 		} else {
@@ -1971,8 +1969,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		if (h->req_nr != 0) {
 			/*
 			 * This is a duplicate writethrough io that is no
-			 * longer needed because the block has been
-			 * demoted.
+			 * longer needed because the block has been demoted.
 			 */
 			bio_endio(bio, 0);
 			cell_defer(cache, cell, false);
