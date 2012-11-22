@@ -840,17 +840,6 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 	return r;
 }
 
-static int lookup(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
-{
-	struct entry *e = hash_lookup(mq, oblock);
-	if (e && e->in_cache) {
-		*cblock = e->cblock;
-		return 1;
-	}
-
-	return 0;
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -903,20 +892,6 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	r = map(mq, oblock, can_migrate, discarded_oblock,
 		bio_data_dir(bio), result);
 
-	mutex_unlock(&mq->lock);
-
-	return r;
-}
-
-static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
-{
-	int r;
-	struct mq_policy *mq = to_mq_policy(p);
-
-	if (!mutex_trylock(&mq->lock))
-		return -EWOULDBLOCK;
-
-	r = lookup(mq, oblock, cblock);
 	mutex_unlock(&mq->lock);
 
 	return r;
@@ -1109,7 +1084,6 @@ static void init_policy_functions(struct mq_policy *mq)
 {
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
-	mq->policy.lookup = mq_lookup;
 	mq->policy.load_mapping = mq_load_mapping;
 	mq->policy.walk_mappings = mq_walk_mappings;
 	mq->policy.remove_mapping = mq_remove_mapping;
@@ -1242,5 +1216,7 @@ module_exit(mq_exit);
 MODULE_AUTHOR("Joe Thornber");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("mq cache policy");
+
+MODULE_ALIAS("dm-cache-default");
 
 /*----------------------------------------------------------------*/
