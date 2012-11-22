@@ -391,9 +391,12 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
  */
 static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 {
-	dm_block_t b = (__force dm_block_t) oblock;
-	do_div(b, cache->discard_block_size);
-	return (__force dm_dblock_t) b;
+	sector_t tmp = cache->discard_block_size;
+	dm_block_t b = from_oblock(oblock);
+
+	do_div(tmp, cache->sectors_per_block);
+	do_div(b, tmp);
+	return to_dblock(b);
 }
 
 static void set_discard(struct cache *cache, dm_dblock_t b)
@@ -953,11 +956,11 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
-	dm_block_t start_block = bio->bi_sector;
+	dm_block_t start_block = dm_sector_div_up(bio->bi_sector,
+						  cache->discard_block_size);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
-	do_div(start_block, cache->discard_block_size);
 	do_div(end_block, cache->discard_block_size);
 
 	for (b = start_block; b < end_block; b++)
@@ -1657,14 +1660,26 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
  * of the cache block size, and have no more than 2^14 discard blocks
  * across the origin.
  */
+#define MAX_DISCARD_BLOCKS (1 << 14)
+
+static bool too_many_discard_blocks(sector_t block_size,
+				    sector_t origin_size)
+{
+	do_div(origin_size, block_size);
+	return origin_size < MAX_DISCARD_BLOCKS;
+}
+
 static sector_t calculate_discard_block_size(sector_t cache_block_size,
 					     sector_t origin_size)
 {
 	sector_t r = roundup_pow_of_two(cache_block_size);
-	sector_t max_blocks = 1 << 14;
 
-	while ((r * max_blocks) < origin_size)
+	while (too_many_discard_blocks(r, origin_size))
 		r *= 2;
+
+	pr_alert("cache_block_size = %u, discard_block_size = %u\n",
+		 (unsigned) cache_block_size,
+		 (unsigned) r);
 
 	return r;
 }
