@@ -49,8 +49,8 @@ static void free_bitset(unsigned long *bits)
  * The two thresholds are hard coded for now.  I'd like them to be
  * accessible through a sysfs interface, rather than via the target line.
  */
-#define RANDOM_THRESHOLD 4
-#define SEQUENTIAL_THRESHOLD 512
+#define RANDOM_THRESHOLD_DEFAULT 4
+#define SEQUENTIAL_THRESHOLD_DEFAULT 512
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -62,15 +62,19 @@ struct io_tracker {
 
 	unsigned nr_seq_samples;
 	unsigned nr_rand_samples;
+	int thresholds[2];
 
 	dm_oblock_t last_end_oblock;
 };
 
-static void iot_init(struct io_tracker *t)
+static void iot_init(struct io_tracker *t,
+		     int sequential_threshold, int random_threshold)
 {
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
@@ -104,14 +108,14 @@ static void iot_check_for_pattern_switch(struct io_tracker *t)
 {
 	switch (t->pattern) {
 	case PATTERN_SEQUENTIAL:
-		if (t->nr_rand_samples >= RANDOM_THRESHOLD) {
+		if (t->nr_rand_samples >= t->thresholds[PATTERN_RANDOM]) {
 			t->pattern = PATTERN_RANDOM;
 			t->nr_seq_samples = t->nr_rand_samples = 0;
 		}
 		break;
 
 	case PATTERN_RANDOM:
-		if (t->nr_seq_samples >= SEQUENTIAL_THRESHOLD) {
+		if (t->nr_seq_samples >= t->thresholds[PATTERN_SEQUENTIAL]) {
 			t->pattern = PATTERN_SEQUENTIAL;
 			t->nr_seq_samples = t->nr_rand_samples = 0;
 		}
@@ -231,6 +235,7 @@ struct mq_policy {
 	struct mutex lock;
 	dm_cblock_t cache_size;
 	struct io_tracker tracker;
+	unsigned seq_threshold;
 
 	/*
 	 * We maintain two queues of entries.  The cache proper contains
@@ -300,6 +305,8 @@ struct mq_policy {
 	unsigned nr_buckets;
 	dm_block_t hash_bits;
 	struct hlist_head *table;
+
+	int threshold_args[2];
 };
 
 /*----------------------------------------------------------------*/
@@ -978,6 +985,86 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
+static int process_config_option(struct mq_policy *mq, int *args, char **argv)
+{
+	bool seq;
+	unsigned long tmp;
+
+	if (strcasecmp(argv[0], "sequential_threshold"))
+		seq = true;
+	else if (strcasecmp(argv[0], "random_threshold"))
+		seq = false;
+	else
+		return -EINVAL;
+
+	if (kstrtoul(argv[1], 10, &tmp))
+		return -EINVAL;
+
+	args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+
+	return 0;
+}
+
+static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+
+	if (argc != 3)
+		return -EINVAL;
+
+	if (strcasecmp(argv[0], "set_config")) {
+		int r = process_config_option(mq, mq->tracker.thresholds, argv + 1);
+
+		if (r < 0)
+			return r;
+	}
+
+	return 0;
+}
+
+static int mq_status(struct dm_cache_policy *p, status_type_t type,
+		     unsigned status_flags, char *result, unsigned maxlen)
+{
+	ssize_t sz = 0;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%u %u",
+		       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
+		       mq->tracker.thresholds[PATTERN_RANDOM]);
+		break;
+
+	case STATUSTYPE_TABLE:
+		if (mq->threshold_args[PATTERN_SEQUENTIAL] > -1)
+			DMEMIT("sequential_threshold %u ", mq->threshold_args[PATTERN_SEQUENTIAL]);
+
+		if (mq->threshold_args[PATTERN_RANDOM] > -1)
+			DMEMIT("random_threshold %u ", mq->threshold_args[PATTERN_RANDOM]);
+	}
+
+	return 0;
+}
+
+static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
+{
+	unsigned u;
+
+	if (argc != 2 && argc != 4)
+		return -EINVAL;
+
+	mq->threshold_args[0] = mq->threshold_args[1] = -1;
+
+	for (u = 0; u < argc; u += 2) {
+		int r = process_config_option(mq, mq->threshold_args, argv + u);
+
+		if (r)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
 					 sector_t block_size,
@@ -998,8 +1085,15 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
+	mq->policy.status = mq_status;
+	mq->policy.message = mq_message;
 
-	iot_init(&mq->tracker);
+	/* Need to do that before iot_init(). */
+	r = process_policy_args(mq, argc, argv);
+	if (r)
+		goto bad_free_policy;
+
+	iot_init(&mq->tracker, mq->threshold_args[PATTERN_RANDOM], mq->threshold_args[PATTERN_SEQUENTIAL]);
 
 	mq->cache_size = cache_size;
 	mq->tick_protected = 0;
@@ -1038,6 +1132,7 @@ bad_alloc_bitset:
 	kfree(mq->table);
 bad_alloc_table:
 	free_entries(mq);
+bad_free_policy:
 bad_cache_alloc:
 	kfree(mq);
 

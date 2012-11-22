@@ -49,8 +49,8 @@
  * The io_tracker tries to spot when the io is in
  * one of these sequential modes.
  */
-#define RANDOM_THRESHOLD 1
-#define SEQUENTIAL_THRESHOLD 2
+#define RANDOM_THRESHOLD_DEFAULT 1
+#define SEQUENTIAL_THRESHOLD_DEFAULT 2
 
 static struct kmem_cache *basic_entry_cache;
 static struct kmem_cache *track_entry_cache;
@@ -65,12 +65,16 @@ struct io_tracker {
 
 	unsigned nr_rand_samples;
 	enum io_pattern pattern;
+
+	int thresholds[2];
 };
 
-static void iot_init(struct io_tracker *t)
+static void iot_init(struct io_tracker *t, int sequential_threshold, int random_threshold)
 {
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_sectors = t->nr_rand_samples = t->next_start_osector = 0;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
 }
 
 static bool iot_sequential_pattern(struct io_tracker *t)
@@ -102,9 +106,8 @@ static void iot_update_stats(struct io_tracker *t, struct bio *bio)
 static void iot_check_for_pattern_switch(struct io_tracker *t,
 					 sector_t block_size)
 {
-	bool reset = iot_sequential_pattern(t) ?
-		(t->nr_rand_samples >= RANDOM_THRESHOLD) :
-		(t->nr_seq_sectors >= SEQUENTIAL_THRESHOLD * block_size);
+	bool reset = iot_sequential_pattern(t) ? (t->nr_rand_samples >= t->thresholds[PATTERN_RANDOM]) :
+						 (t->nr_seq_sectors >= t->thresholds[PATTERN_SEQUENTIAL] * block_size);
 	if (reset)
 		t->nr_seq_sectors = t->nr_rand_samples = 0;
 }
@@ -261,6 +264,8 @@ struct policy {
 	dm_cblock_t nr_cblocks_allocated;
 
 	struct basic_cache_entry **tmp_entries;
+
+	int threshold_args[2];
 };
 
 /*----------------------------------------------------------------------------*/
@@ -1533,6 +1538,87 @@ static void basic_tick(struct dm_cache_policy *pe)
 	atomic_inc(&to_policy(pe)->tick.t_ext);
 }
 
+
+static int process_config_option(struct policy *p, int *args, char **argv)
+{
+	bool seq;
+	unsigned long tmp;
+
+	if (strcmp(argv[0], "sequential_threshold"))
+		seq = true;
+	else if (strcmp(argv[0], "random_threshold"))
+		seq = false;
+	else
+		return -EINVAL;
+
+
+	if (kstrtoul(argv[1], 10, &tmp))
+		return -EINVAL;
+
+	args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+
+	return 0;
+}
+
+static int basic_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
+{
+	struct policy *p = to_policy(pe);
+
+	if (argc != 3)
+		return -EINVAL;
+
+	if (strcmp(argv[0], "set_config")) {
+		int r = process_config_option(p, p->tracker.thresholds, argv + 1);
+
+		if (r < 0)
+			return r;
+	}
+
+	return 0;
+}
+
+static int basic_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+{
+	ssize_t sz = 0;
+	struct policy *p = to_policy(pe);
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("%u %u",
+		       p->tracker.thresholds[PATTERN_SEQUENTIAL],
+		       p->tracker.thresholds[PATTERN_RANDOM]);
+		break;
+
+	case STATUSTYPE_TABLE:
+		if (p->threshold_args[PATTERN_SEQUENTIAL] > -1)
+			DMEMIT("sequential_threshold %u ", p->threshold_args[PATTERN_SEQUENTIAL]);
+
+		if (p->threshold_args[PATTERN_RANDOM] > -1)
+			DMEMIT("random_threshold %u ", p->threshold_args[PATTERN_RANDOM]);
+	}
+
+	return 0;
+}
+
+static int process_policy_args(struct policy *p, int argc, char **argv)
+{
+	unsigned u;
+
+	if (argc != 2 && argc != 4)
+		return -EINVAL;
+
+	p->threshold_args[0] = p->threshold_args[1] = -1;
+
+	for (u = 0; u < argc; u += 2) {  
+		int r = process_config_option(p, p->threshold_args, argv + u);
+
+		if (r)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
@@ -1545,6 +1631,8 @@ static void init_policy_functions(struct policy *p)
 	p->policy.force_mapping = basic_force_mapping;
 	p->policy.residency = basic_residency;
 	p->policy.tick = basic_tick;
+	p->policy.status = basic_status;
+	p->policy.message = basic_message;
 }
 
 static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
@@ -1586,7 +1674,13 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	p->queues.fns = queue_fns + type;
 
 	init_policy_functions(p);
-	iot_init(&p->tracker);
+
+	/* Need to do that before iot_init(). */
+	r = process_policy_args(p, argc, argv);
+	if (r)
+		goto bad_free_policy;
+
+	iot_init(&p->tracker, p->threshold_args[PATTERN_SEQUENTIAL], p->threshold_args[PATTERN_SEQUENTIAL]);
 
 	p->cache_size = cache_size;
 	p->cache_nr_words = dm_sector_div_up(from_cblock(cache_size), BITS_PER_LONG);
