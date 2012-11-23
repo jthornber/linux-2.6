@@ -1625,13 +1625,13 @@ static int process_policy_args(struct policy *p, int argc, char **argv)
 {
 	unsigned u;
 
+	p->threshold_args[0] = p->threshold_args[1] = -1;
+
 	if (!argc)
 		return 0;
 
 	if (argc != 2 && argc != 4)
 		return -EINVAL;
-
-	p->threshold_args[0] = p->threshold_args[1] = -1;
 
 	for (u = 0; u < argc; u += 2) {  
 		int r = process_config_option(p, p->threshold_args, argv + u);
