@@ -1888,6 +1888,7 @@ static struct dm_cache_endio_hook *hook_endio(struct cache *cache,
 	return h;
 }
 
+#if 0
 static unsigned cache_get_num_duplicates(struct dm_target *ti,
 					 struct bio *bio)
 {
@@ -1899,6 +1900,7 @@ static unsigned cache_get_num_duplicates(struct dm_target *ti,
 	return (lookup_result.op == POLICY_HIT &&
 		is_writethrough_io(cache, bio, lookup_result.cblock)) ? 2 : 1;
 }
+#endif
 
 static int cache_map(struct dm_target *ti, struct bio *bio,
 		     union map_info *map_context)
@@ -2374,7 +2376,9 @@ static struct target_type cache_target = {
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
+#if 0
 	.get_num_duplicates = cache_get_num_duplicates,
+#endif
 	.map = cache_map,
 	.end_io = cache_end_io,
 	.postsuspend = cache_postsuspend,

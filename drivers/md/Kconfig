@@ -220,7 +220,8 @@ config DM_BIO_PRISON
        tristate
        depends on BLK_DEV_DM && EXPERIMENTAL
        ---help---
-         Some bio locking schemes used by device-mapper targets.
+	 Some bio locking schemes used by other device-mapper targets
+	 including thin provisioning.
 
 source "drivers/md/persistent-data/Kconfig"
 

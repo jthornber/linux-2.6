@@ -189,7 +189,6 @@ out:
 	return r;
 }
 
-
 int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_cell_key *key,
 		  struct bio *inmate,
