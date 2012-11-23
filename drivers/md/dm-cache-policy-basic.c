@@ -342,7 +342,7 @@ static void free_cache_entries(struct policy *p)
 {
 	struct basic_cache_entry *e, *tmp;
 
-	list_splice(&p->queues.free, &p->queues.used);
+	list_splice(&p->queues.used, &p->queues.free);
 	list_for_each_entry_safe(e, tmp, &p->queues.free, ce.list)
 		kmem_cache_free(basic_entry_cache, e);
 }
@@ -388,7 +388,7 @@ static void free_track_queue(struct track_queue *q)
 	if (q->hash.table)
 		free_hash(&q->hash);
 
-	list_splice(&q->free, &q->used);
+	list_splice(&q->used, &q->free);
 	list_for_each_entry_safe(tqe, tmp, &q->free, ce.list)
 		kmem_cache_free(track_entry_cache, tqe);
 } 
