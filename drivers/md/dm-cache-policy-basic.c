@@ -34,7 +34,7 @@
 #include <linux/slab.h>
 
 /* "multiqueue" policy defines. */
-#define	MQ_QUEUE_TMO	(10UL * HZ)	/* MQ_QUEUE_TMO seconds queue maximum lifetime per entry. */
+#define	MQ_QUEUE_TMO	(10UL * HZ)	/* MQ_QUEUE_TMO seconds queue maximum lifetime per entry. FIXME: dynamic? */
 
 /* Cache input queue defines. */
 #define	READ_PROMOTE_THRESHOLD	1U	/* Minimum read cache in queue promote per element threshold. */
@@ -255,7 +255,8 @@ struct policy {
 	 */
 	/* FIXME: unify with track_queue? */
 	dm_cblock_t cache_size;
-	unsigned cache_nr_words;
+	unsigned find_free_nr_words;
+	unsigned find_free_last_word;
 	struct hash chash;
 	unsigned cache_count[2][2];
 
@@ -342,7 +343,7 @@ static void free_cache_entries(struct policy *p)
 {
 	struct basic_cache_entry *e, *tmp;
 
-	list_splice(&p->queues.used, &p->queues.free);
+	list_splice(&p->queues.walk, &p->queues.free);
 	list_for_each_entry_safe(e, tmp, &p->queues.free, ce.list)
 		kmem_cache_free(basic_entry_cache, e);
 }
@@ -350,12 +351,12 @@ static void free_cache_entries(struct policy *p)
 static int alloc_cache_blocks_with_hash(struct policy *p, unsigned cache_size)
 {
 	int r = -ENOMEM;
-	unsigned elts = cache_size;
+	unsigned u = cache_size;
 
 	queue_init(&p->queues.free);
 	p->nr_cblocks_allocated = to_cblock(0);
 
-	while (elts--) {
+	while (u--) {
 		struct basic_cache_entry *e = kmem_cache_alloc(basic_entry_cache, GFP_KERNEL);
 
 		if (!e)
@@ -1108,22 +1109,42 @@ static struct list_head *queue_evict_q2_twoqueue(struct policy *p)
 /*
  * This doesn't allocate the block.
  */
-static int find_free_cblock(struct policy *p, dm_cblock_t *result)
+static int __find_free_cblock(struct policy *p, unsigned begin, unsigned end, dm_cblock_t *result, unsigned *word)
 {
+	int r = -ENOSPC;
 	unsigned w;
 
-	for (w = 0; w < p->cache_nr_words; w++) {
+	for (w = *word = begin; w < end; w++) {
 		/*
 		 * ffz is undefined if no zero exists
 		 */
 		if (p->allocation_bitset[w] != ~0UL) {
+			*word = w;
 			*result = to_cblock((w * BITS_PER_LONG) + ffz(p->allocation_bitset[w]));
+			if (from_cblock(*result) < from_cblock(p->cache_size))
+				r = 0;
 
-			return (from_cblock(*result) < from_cblock(p->cache_size)) ? 0 : -ENOSPC;
+			break;
 		}
 	}
 
-	return -ENOSPC;
+	return r;
+}
+
+static int find_free_cblock(struct policy *p, dm_cblock_t *result)
+{
+	int r;
+	unsigned word;
+
+	if (!any_free_cblocks(p))
+		return -ENOSPC;
+
+	r = __find_free_cblock(p, p->find_free_last_word, p->find_free_nr_words, result, &word);
+	if (r)
+		r = __find_free_cblock(p, 0, p->find_free_last_word, result, &word);
+
+	p->find_free_last_word = word;
+	return r;
 }
 
 static void add_cache_entry(struct policy *p, struct basic_cache_entry *e)
@@ -1686,7 +1707,8 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	iot_init(&p->tracker, p->threshold_args[PATTERN_SEQUENTIAL], p->threshold_args[PATTERN_SEQUENTIAL]);
 
 	p->cache_size = cache_size;
-	p->cache_nr_words = dm_sector_div_up(from_cblock(cache_size), BITS_PER_LONG);
+	p->find_free_nr_words = dm_sector_div_up(from_cblock(cache_size), BITS_PER_LONG);
+	p->find_free_last_word = 0;
 	p->block_size = block_size;
 	p->origin_size = origin_size;
 	p->calc_threshold_hits = from_cblock(max(cache_size >> 2, (dm_cblock_t) 128));
