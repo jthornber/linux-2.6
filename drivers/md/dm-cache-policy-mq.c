@@ -1061,13 +1061,13 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 {
 	unsigned u;
 
+	mq->threshold_args[0] = mq->threshold_args[1] = -1;
+
 	if (!argc)
 		return 0;
 
 	if (argc != 2 && argc != 4)
 		return -EINVAL;
-
-	mq->threshold_args[0] = mq->threshold_args[1] = -1;
 
 	for (u = 0; u < argc; u += 2) {
 		int r = process_config_option(mq, mq->threshold_args, argv + u);
