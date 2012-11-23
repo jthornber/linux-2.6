@@ -33,8 +33,7 @@ static int zero_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 /*
  * Return zeros only on reads
  */
-static int zero_map(struct dm_target *ti, struct bio *bio,
-		      union map_info *map_context)
+static int zero_map(struct dm_target *ti, struct bio *bio)
 {
 	switch(bio_rw(bio)) {
 	case READ:

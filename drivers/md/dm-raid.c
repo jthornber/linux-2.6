@@ -1216,7 +1216,7 @@ static void raid_dtr(struct dm_target *ti)
 	context_free(rs);
 }
 
-static int raid_map(struct dm_target *ti, struct bio *bio, union map_info *map_context)
+static int raid_map(struct dm_target *ti, struct bio *bio)
 {
 	struct raid_set *rs = ti->private;
 	struct mddev *mddev = &rs->md;

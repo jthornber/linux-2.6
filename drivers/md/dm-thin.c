@@ -165,7 +165,6 @@ struct pool {
 
 	struct dm_thin_new_mapping *next_mapping;
 	mempool_t *mapping_pool;
-	mempool_t *endio_hook_pool;
 
 	process_bio_fn process_bio;
 	process_bio_fn process_discard;
@@ -357,7 +356,7 @@ static void __requeue_bio_list(struct thin_c *tc, struct bio_list *master)
 	bio_list_init(master);
 
 	while ((bio = bio_list_pop(&bios))) {
-		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		if (h->tc == tc)
 			bio_endio(bio, DM_ENDIO_REQUEUE);
@@ -527,7 +526,7 @@ static void copy_complete(int read_err, unsigned long write_err, void *context)
 static void overwrite_endio(struct bio *bio, int err)
 {
 	unsigned long flags;
-	struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 	struct dm_thin_new_mapping *m = h->overwrite_mapping;
 	struct pool *pool = m->tc->pool;
 
@@ -760,7 +759,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	 * bio immediately. Otherwise we use kcopyd to clone the data first.
 	 */
 	if (io_overwrites_block(pool, bio)) {
-		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		h->overwrite_mapping = m;
 		m->bio = bio;
@@ -829,7 +828,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 		process_prepared_mapping(m);
 
 	else if (io_overwrites_block(pool, bio)) {
-		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		h->overwrite_mapping = m;
 		m->bio = bio;
@@ -943,7 +942,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
  */
 static void retry_on_resume(struct bio *bio)
 {
-	struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 	struct thin_c *tc = h->tc;
 	struct pool *pool = tc->pool;
 	unsigned long flags;
@@ -1092,7 +1091,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	if (bio_data_dir(bio) == WRITE && bio->bi_size)
 		break_sharing(tc, bio, block, &key, lookup_result, cell);
 	else {
-		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
 
@@ -1264,7 +1263,7 @@ static void process_deferred_bios(struct pool *pool)
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	while ((bio = bio_list_pop(&bios))) {
-		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 		struct thin_c *tc = h->tc;
 
 		/*
@@ -1397,24 +1396,21 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 	wake_worker(pool);
 }
 
-static struct dm_thin_endio_hook *thin_hook_bio(struct thin_c *tc, struct bio *bio)
+static void thin_hook_bio(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
-	struct dm_thin_endio_hook *h = mempool_alloc(pool->endio_hook_pool, GFP_NOIO);
+	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
 	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
 	h->overwrite_mapping = NULL;
-
-	return h;
 }
 
 /*
  * Non-blocking function called from the thin target's map function.
  */
-static int thin_bio_map(struct dm_target *ti, struct bio *bio,
-			union map_info *map_context)
+static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 {
 	int r;
 	struct thin_c *tc = ti->private;
@@ -1422,7 +1418,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 	struct dm_thin_device *td = tc->td;
 	struct dm_thin_lookup_result result;
 
-	map_context->ptr = thin_hook_bio(tc, bio);
+	thin_hook_bio(tc, bio);
 
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
 		bio_io_error(bio);
@@ -1623,14 +1619,12 @@ static void __pool_destroy(struct pool *pool)
 	if (pool->next_mapping)
 		mempool_free(pool->next_mapping, pool->mapping_pool);
 	mempool_destroy(pool->mapping_pool);
-	mempool_destroy(pool->endio_hook_pool);
 	dm_deferred_set_destroy(pool->shared_read_ds);
 	dm_deferred_set_destroy(pool->all_io_ds);
 	kfree(pool);
 }
 
 static struct kmem_cache *_new_mapping_cache;
-static struct kmem_cache *_endio_hook_cache;
 
 static struct pool *pool_create(struct mapped_device *pool_md,
 				struct block_device *metadata_dev,
@@ -1724,13 +1718,6 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		goto bad_mapping_pool;
 	}
 
-	pool->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
-							 _endio_hook_cache);
-	if (!pool->endio_hook_pool) {
-		*error = "Error creating pool's endio_hook mempool";
-		err_p = ERR_PTR(-ENOMEM);
-		goto bad_endio_hook_pool;
-	}
 	pool->ref_count = 1;
 	pool->last_commit_jiffies = jiffies;
 	pool->pool_md = pool_md;
@@ -1739,8 +1726,6 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 
 	return pool;
 
-bad_endio_hook_pool:
-	mempool_destroy(pool->mapping_pool);
 bad_mapping_pool:
 	dm_deferred_set_destroy(pool->all_io_ds);
 bad_all_io_ds:
@@ -2023,8 +2008,7 @@ out_unlock:
 	return r;
 }
 
-static int pool_map(struct dm_target *ti, struct bio *bio,
-		    union map_info *map_context)
+static int pool_map(struct dm_target *ti, struct bio *bio)
 {
 	int r;
 	struct pool_c *pt = ti->private;
@@ -2633,6 +2617,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->num_flush_requests = 1;
 	ti->flush_supported = true;
+	ti->per_request_data = sizeof(struct dm_thin_endio_hook);
 
 	/* In case the pool supports discards, pass them on. */
 	if (tc->pool->pf.discard_enabled) {
@@ -2666,20 +2651,17 @@ out_unlock:
 	return r;
 }
 
-static int thin_map(struct dm_target *ti, struct bio *bio,
-		    union map_info *map_context)
+static int thin_map(struct dm_target *ti, struct bio *bio)
 {
 	bio->bi_sector = dm_target_offset(ti, bio->bi_sector);
 
-	return thin_bio_map(ti, bio, map_context);
+	return thin_bio_map(ti, bio);
 }
 
-static int thin_endio(struct dm_target *ti,
-		      struct bio *bio, int err,
-		      union map_info *map_context)
+static int thin_endio(struct dm_target *ti, struct bio *bio, int err)
 {
 	unsigned long flags;
-	struct dm_thin_endio_hook *h = map_context->ptr;
+	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 	struct list_head work;
 	struct dm_thin_new_mapping *m, *tmp;
 	struct pool *pool = h->tc->pool;
@@ -2705,8 +2687,6 @@ static int thin_endio(struct dm_target *ti,
 			list_add(&m->list, &pool->prepared_discards);
 		spin_unlock_irqrestore(&pool->lock, flags);
 	}
-
-	mempool_free(h, pool->endio_hook_pool);
 
 	return 0;
 }
@@ -2836,14 +2816,8 @@ static int __init dm_thin_init(void)
 	if (!_new_mapping_cache)
 		goto bad_new_mapping_cache;
 
-	_endio_hook_cache = KMEM_CACHE(dm_thin_endio_hook, 0);
-	if (!_endio_hook_cache)
-		goto bad_endio_hook_cache;
-
 	return 0;
 
-bad_endio_hook_cache:
-	kmem_cache_destroy(_new_mapping_cache);
 bad_new_mapping_cache:
 	dm_unregister_target(&pool_target);
 bad_pool_target:
@@ -2858,7 +2832,6 @@ static void dm_thin_exit(void)
 	dm_unregister_target(&pool_target);
 
 	kmem_cache_destroy(_new_mapping_cache);
-	kmem_cache_destroy(_endio_hook_cache);
 }
 
 module_init(dm_thin_init);

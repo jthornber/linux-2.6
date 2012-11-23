@@ -271,21 +271,20 @@ static int stripe_map_discard(struct stripe_c *sc, struct bio *bio,
 	}
 }
 
-static int stripe_map(struct dm_target *ti, struct bio *bio,
-		      union map_info *map_context)
+static int stripe_map(struct dm_target *ti, struct bio *bio)
 {
 	struct stripe_c *sc = ti->private;
 	uint32_t stripe;
 	unsigned target_request_nr;
 
 	if (bio->bi_rw & REQ_FLUSH) {
-		target_request_nr = map_context->target_request_nr;
+		target_request_nr = dm_bio_get_target_request_nr(bio);
 		BUG_ON(target_request_nr >= sc->stripes);
 		bio->bi_bdev = sc->stripe[target_request_nr].dev->bdev;
 		return DM_MAPIO_REMAPPED;
 	}
 	if (unlikely(bio->bi_rw & REQ_DISCARD)) {
-		target_request_nr = map_context->target_request_nr;
+		target_request_nr = dm_bio_get_target_request_nr(bio);
 		BUG_ON(target_request_nr >= sc->stripes);
 		return stripe_map_discard(sc, bio, target_request_nr);
 	}
@@ -342,8 +341,7 @@ static int stripe_status(struct dm_target *ti, status_type_t type,
 	return 0;
 }
 
-static int stripe_end_io(struct dm_target *ti, struct bio *bio,
-			 int error, union map_info *map_context)
+static int stripe_end_io(struct dm_target *ti, struct bio *bio, int error)
 {
 	unsigned i;
 	char major_minor[16];

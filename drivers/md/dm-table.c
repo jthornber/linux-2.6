@@ -967,13 +967,23 @@ bool dm_table_request_based(struct dm_table *t)
 int dm_table_alloc_md_mempools(struct dm_table *t)
 {
 	unsigned type = dm_table_get_type(t);
+	unsigned per_request_data = 0;
 
 	if (unlikely(type == DM_TYPE_NONE)) {
 		DMWARN("no table type is set, can't allocate mempools");
 		return -EINVAL;
 	}
 
-	t->mempools = dm_alloc_md_mempools(type, t->integrity_supported);
+	if (type == DM_TYPE_BIO_BASED) {
+		unsigned i;
+		for (i = 0; i < t->num_targets; i++) {
+			struct dm_target *tgt = t->targets + i;
+			if (tgt->per_request_data > per_request_data)
+				per_request_data = tgt->per_request_data;
+		}
+	}
+
+	t->mempools = dm_alloc_md_mempools(type, t->integrity_supported, per_request_data);
 	if (!t->mempools)
 		return -ENOMEM;
 
