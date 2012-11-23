@@ -162,7 +162,6 @@ struct cache {
 	struct dm_bio_prison *prison;
 	struct dm_deferred_set *all_io_ds;
 
-	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
@@ -187,7 +186,7 @@ struct cache {
 	atomic_t commit_count;
 };
 
-struct dm_cache_endio_hook {
+struct per_req_data {
 	bool tick:1;
 	unsigned req_nr:2;
 	struct dm_deferred_entry *all_io_entry;
@@ -468,6 +467,27 @@ static void save_stats(struct cache *cache)
 }
 
 /*----------------------------------------------------------------
+ * Per request data
+ *--------------------------------------------------------------*/
+static struct per_req_data *get_pr_data(struct bio *bio)
+{
+	struct per_req_data *r = dm_bio_get_per_request_data(bio, sizeof(struct per_req_data));
+	BUG_ON(!r);
+	return r;
+}
+
+static struct per_req_data *init_pr_data(struct bio *bio)
+{
+	struct per_req_data *pr = get_pr_data(bio);
+
+	pr->tick = false;
+	pr->req_nr = dm_bio_get_target_request_nr(bio);
+	pr->all_io_entry = NULL;
+
+	return pr;
+}
+
+/*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
 static bool block_size_is_power_of_two(struct cache *cache)
@@ -497,12 +517,12 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct per_req_data *pr = get_pr_data(bio);
 
 	spin_lock_irqsave(&cache->lock, flags);
 	if (cache->need_tick_bio &&
 	    !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
-		h->tick = true;
+		pr->tick = true;
 		cache->need_tick_bio = false;
 	}
 	spin_unlock_irqrestore(&cache->lock, flags);
@@ -827,16 +847,16 @@ static void queue_quiesced_migrations(struct cache *cache, struct list_head *wor
 }
 
 static void check_for_quiesced_migrations(struct cache *cache,
-					  struct dm_cache_endio_hook *h)
+					  struct per_req_data *pr)
 {
 	struct list_head work;
 
-	if (!h->all_io_entry)
+	if (!pr->all_io_entry)
 		return;
 
 	INIT_LIST_HEAD(&work);
-	if (h->all_io_entry)
-		dm_deferred_entry_dec(h->all_io_entry, &work);
+	if (pr->all_io_entry)
+		dm_deferred_entry_dec(pr->all_io_entry, &work);
 
 	if (!list_empty(&work))
 		queue_quiesced_migrations(cache, &work);
@@ -930,10 +950,10 @@ static void defer_bio(struct cache *cache, struct bio *bio)
 
 static void process_flush_bio(struct cache *cache, struct bio *bio)
 {
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct per_req_data *pr = get_pr_data(bio);
 
 	BUG_ON(bio->bi_size);
-	if (!h->req_nr)
+	if (!pr->req_nr)
 		remap_to_origin(cache, bio);
 	else
 		remap_to_cache(cache, bio, 0);
@@ -991,7 +1011,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	dm_oblock_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct per_req_data *pr = get_pr_data(bio);
 	bool can_migrate = may_migrate(cache);
 	bool discarded_block = is_discarded_oblock(cache, block);
 
@@ -1008,13 +1028,13 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ?
 			   &cache->read_hit : &cache->write_hit);
-		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
 			/*
 			 * No need to mark anything dirty in write through mode.
 			 */
-			h->req_nr == 0 ?
+			pr->req_nr == 0 ?
 				remap_to_cache(cache, bio, lookup_result.cblock) :
 				remap_to_origin(cache, bio);
 		} else
@@ -1026,9 +1046,9 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	case POLICY_MISS:
 		atomic_inc(bio_data_dir(bio) == READ ?
 			   &cache->read_miss : &cache->write_miss);
-		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (h->req_nr != 0) {
+		if (pr->req_nr != 0) {
 			/*
 			 * This is a duplicate writethrough io that is no
 			 * longer needed because the block has been demoted.
@@ -1325,9 +1345,6 @@ static void destroy(struct cache *cache)
 
 	if (cache->migration_pool)
 		mempool_destroy(cache->migration_pool);
-
-	if (cache->endio_hook_pool)
-		mempool_destroy(cache->endio_hook_pool);
 
 	if (cache->all_io_ds)
 		dm_deferred_set_destroy(cache->all_io_ds);
@@ -1637,7 +1654,6 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 // FIXME: get rid of these
 static struct kmem_cache *_migration_cache;
-static struct kmem_cache *_endio_hook_cache;
 
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
@@ -1700,6 +1716,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->ti = ca->ti;
 	ti->private = cache;
+	ti->per_request_data = sizeof(struct per_req_data);
 	ti->num_flush_requests = 2;
 	ti->flush_supported = true;
 
@@ -1805,13 +1822,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
-							  _endio_hook_cache);
-	if (!cache->endio_hook_pool) {
-		*error = "Error creating cache's endio_hook mempool";
-		goto bad;
-	}
-
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
@@ -1875,19 +1885,6 @@ out:
 	return r;
 }
 
-static struct dm_cache_endio_hook *hook_endio(struct cache *cache,
-					      struct bio *bio, unsigned req_nr)
-{
-	struct dm_cache_endio_hook *h =
-		mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
-
-	h->tick = false;
-	h->req_nr = req_nr;
-	h->all_io_entry = NULL;
-
-	return h;
-}
-
 #if 0
 static unsigned cache_get_num_duplicates(struct dm_target *ti,
 					 struct bio *bio)
@@ -1902,8 +1899,7 @@ static unsigned cache_get_num_duplicates(struct dm_target *ti,
 }
 #endif
 
-static int cache_map(struct dm_target *ti, struct bio *bio,
-		     union map_info *map_context)
+static int cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache *cache = ti->private;
 
@@ -1913,7 +1909,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	bool discarded_block;
 	struct dm_bio_prison_cell *cell;
 	struct policy_result lookup_result;
-	struct dm_cache_endio_hook *h;
+	struct per_req_data *pr;
 
 	if (from_oblock(block) > from_oblock(cache->origin_blocks)) {
 		/*
@@ -1925,8 +1921,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		return DM_MAPIO_REMAPPED;
 	}
 
-	h = map_context->ptr = hook_endio(cache, bio,
-					  map_context->target_request_nr);
+	pr = init_pr_data(bio);
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD)) {
 		defer_bio(cache, bio);
@@ -1959,14 +1954,14 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ?
 			   &cache->read_hit : &cache->write_hit);
-		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
 			/*
 			 * No need to mark anything dirty in write through
 			 * mode.
 			 */
-			h->req_nr == 0 ?
+			pr->req_nr == 0 ?
 				remap_to_cache(cache, bio, lookup_result.cblock) :
 				remap_to_origin(cache, bio);
 			cell_defer(cache, cell, false);
@@ -1980,10 +1975,10 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	case POLICY_MISS:
 		atomic_inc(bio_data_dir(bio) == READ ?
 			   &cache->read_miss : &cache->write_miss);
-		h->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		// FIXME: policy_set_dirty can block!
-		if (h->req_nr != 0) {
+		if (pr->req_nr != 0) {
 			/*
 			 * This is a duplicate writethrough io that is no
 			 * longer needed because the block has been demoted.
@@ -2005,14 +2000,13 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	return DM_MAPIO_REMAPPED;
 }
 
-static int cache_end_io(struct dm_target *ti, struct bio *bio,
-			int error, union map_info *info)
+static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 {
 	struct cache *cache = ti->private;
 	unsigned long flags;
-	struct dm_cache_endio_hook *h = info->ptr;
+	struct per_req_data *pr = get_pr_data(bio);
 
-	if (h->tick) {
+	if (pr->tick) {
 		policy_tick(cache->policy);
 
 		spin_lock_irqsave(&cache->lock, flags);
@@ -2020,8 +2014,7 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 		spin_unlock_irqrestore(&cache->lock, flags);
 	}
 
-	check_for_quiesced_migrations(cache, h);
-	mempool_free(h, cache->endio_hook_pool);
+	check_for_quiesced_migrations(cache, pr);
 	return 0;
 }
 
@@ -2402,29 +2395,18 @@ static int __init dm_cache_init(void)
 	r = -ENOMEM;
 
 	_migration_cache = KMEM_CACHE(dm_cache_migration, 0);
-	if (!_migration_cache)
-		goto bad_migration_cache;
-
-	_endio_hook_cache = KMEM_CACHE(dm_cache_endio_hook, 0);
-	if (!_endio_hook_cache)
-		goto bad_endio_hook_cache;
+	if (!_migration_cache) {
+		dm_unregister_target(&cache_target);
+		return r;
+	}
 
 	return 0;
-
-bad_endio_hook_cache:
-	kmem_cache_destroy(_migration_cache);
-bad_migration_cache:
-	dm_unregister_target(&cache_target);
-
-	return r;
 }
 
 static void dm_cache_exit(void)
 {
 	dm_unregister_target(&cache_target);
-
 	kmem_cache_destroy(_migration_cache);
-	kmem_cache_destroy(_endio_hook_cache);
 }
 
 module_init(dm_cache_init);
