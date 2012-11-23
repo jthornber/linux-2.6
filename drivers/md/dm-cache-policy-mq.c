@@ -1062,7 +1062,7 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 		int r = process_config_option(mq, mq->threshold_args, argv + u);
 
 		if (r)
-			return -EINVAL;
+			return r;
 	}
 
 	return 0;
