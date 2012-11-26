@@ -347,6 +347,8 @@ static int alloc_entries(struct mq_policy *mq, unsigned elts)
 			return -ENOMEM;
 		}
 
+
+		memset(e, 0, sizeof(*e));
 		list_add(&e->list, &mq->free);
 	}
 
