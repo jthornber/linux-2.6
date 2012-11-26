@@ -335,7 +335,8 @@ static int alloc_hash(struct hash *hash, unsigned elts)
 
 static void free_hash(struct hash *hash)
 {
-	vfree(hash->table);
+	if (hash->table)
+		vfree(hash->table);
 }
 
 /* Free/alloc basic cache entry structures. */
@@ -343,8 +344,10 @@ static void free_cache_entries(struct policy *p)
 {
 	struct basic_cache_entry *e, *tmp;
 
-	list_splice(&p->queues.walk, &p->queues.free);
 	list_for_each_entry_safe(e, tmp, &p->queues.free, ce.list)
+		kmem_cache_free(basic_entry_cache, e);
+
+	list_for_each_entry_safe(e, tmp, &p->queues.walk, walk)
 		kmem_cache_free(basic_entry_cache, e);
 }
 
@@ -353,7 +356,6 @@ static int alloc_cache_blocks_with_hash(struct policy *p, unsigned cache_size)
 	int r = -ENOMEM;
 	unsigned u = cache_size;
 
-	queue_init(&p->queues.free);
 	p->nr_cblocks_allocated = to_cblock(0);
 
 	while (u--) {
@@ -362,6 +364,7 @@ static int alloc_cache_blocks_with_hash(struct policy *p, unsigned cache_size)
 		if (!e)
 			goto bad_cache_alloc;
 
+		memset(e, 0, sizeof(*e));
 		queue_add(&p->queues.free, &e->ce.list);
 	}
 
@@ -386,8 +389,7 @@ static void free_track_queue(struct track_queue *q)
 {
 	struct track_queue_entry *tqe, *tmp;
 
-	if (q->hash.table)
-		free_hash(&q->hash);
+	free_hash(&q->hash);
 
 	list_splice(&q->used, &q->free);
 	list_for_each_entry_safe(tqe, tmp, &q->free, ce.list)
@@ -398,9 +400,6 @@ static int alloc_track_queue_with_hash(struct track_queue *q, unsigned elts)
 {
 	int r = -ENOMEM;
 	unsigned u = elts;
-
-	queue_init(&q->free);
-	queue_init(&q->used);
 
 	while (u--) {
 		struct track_queue_entry *tqe = kmem_cache_alloc(track_entry_cache, GFP_KERNEL);
@@ -485,9 +484,14 @@ static bool any_free_cblocks(struct policy *p)
 
 /*----------------------------------------------------------------*/
 
+static unsigned bit_set_nr_words(unsigned nr_cblocks)
+{
+	return dm_div_up(nr_cblocks, BITS_PER_LONG);
+}
+
 static unsigned long *alloc_bitset(unsigned nr_cblocks)
 {
-	return vzalloc(sizeof(unsigned long) * dm_sector_div_up(nr_cblocks, BITS_PER_LONG));
+	return vzalloc(sizeof(unsigned long) * bit_set_nr_words(nr_cblocks));
 }
 
 static void free_bitset(unsigned long *bits)
@@ -1109,17 +1113,18 @@ static struct list_head *queue_evict_q2_twoqueue(struct policy *p)
 /*
  * This doesn't allocate the block.
  */
-static int __find_free_cblock(struct policy *p, unsigned begin, unsigned end, dm_cblock_t *result, unsigned *word)
+static int __find_free_cblock(struct policy *p, unsigned begin, unsigned end,
+			      dm_cblock_t *result, unsigned *last_word)
 {
 	int r = -ENOSPC;
 	unsigned w;
 
-	for (w = *word = begin; w < end; w++) {
+	for (w = begin; w < end; w++) {
 		/*
 		 * ffz is undefined if no zero exists
 		 */
-		if (p->allocation_bitset[w] != ~0UL) {
-			*word = w;
+		if (p->allocation_bitset[w] != ULONG_MAX) {
+			*last_word = w;
 			*result = to_cblock((w * BITS_PER_LONG) + ffz(p->allocation_bitset[w]));
 			if (from_cblock(*result) < from_cblock(p->cache_size))
 				r = 0;
@@ -1133,17 +1138,11 @@ static int __find_free_cblock(struct policy *p, unsigned begin, unsigned end, dm
 
 static int find_free_cblock(struct policy *p, dm_cblock_t *result)
 {
-	int r;
-	unsigned word;
+	int r = __find_free_cblock(p, p->find_free_last_word, p->find_free_nr_words, result, &p->find_free_last_word);
 
-	if (!any_free_cblocks(p))
-		return -ENOSPC;
+	if (r == -ENOSPC && p->find_free_last_word)
+		r = __find_free_cblock(p, 0, p->find_free_last_word, result, &p->find_free_last_word);
 
-	r = __find_free_cblock(p, p->find_free_last_word, p->find_free_nr_words, result, &word);
-	if (r)
-		r = __find_free_cblock(p, 0, p->find_free_last_word, result, &word);
-
-	p->find_free_last_word = word;
 	return r;
 }
 
@@ -1154,6 +1153,13 @@ static void add_cache_entry(struct policy *p, struct basic_cache_entry *e)
 	insert_cache_hash_entry(p, e);
 }
 
+static void remove_cache_entry(struct policy *p, struct basic_cache_entry *e)
+{
+	remove_cache_hash_entry(p, e);
+	free_cblock(p, e->cblock);
+	sub_cache_count(p, &e->ce);
+}
+
 static struct basic_cache_entry *evict_cache_entry(struct policy *p)
 {
 	struct basic_cache_entry *r;
@@ -1161,9 +1167,7 @@ static struct basic_cache_entry *evict_cache_entry(struct policy *p)
 
 	if (elt) {
 		r = list_entry(elt, struct basic_cache_entry, ce.list);
-		remove_cache_hash_entry(p, r);
-		free_cblock(p, r->cblock);
-		sub_cache_count(p, &r->ce);
+		remove_cache_entry(p, r);
 	} else
 		r = NULL;
 
@@ -1503,9 +1507,8 @@ static struct basic_cache_entry *__basic_force_remove_mapping(struct policy *p,
 
 	BUG_ON(!r);
 
-	free_cblock(p, r->cblock);
 	p->queues.fns->del(p, &r->ce.list);
-	remove_cache_hash_entry(p, r);
+	remove_cache_entry(p, r);
 
 	return r;
 }
@@ -1518,6 +1521,7 @@ static void basic_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 	mutex_lock(&p->lock);
 	e = __basic_force_remove_mapping(p, oblock);
 	queue_add_tail(&p->queues.free, &e->ce.list);
+	sub_cache_count(p, &e->ce);
 
 	if (!IS_DUMB(p)) {
 		get_any_counts_from_track_queue(&p->queues.pre, &tmp, oblock);
@@ -1539,6 +1543,7 @@ static void basic_force_mapping(struct dm_cache_policy *pe,
 	e = __basic_force_remove_mapping(p, current_oblock);
 	e->ce.oblock = oblock;
 	add_cache_entry(p, e);
+	add_cache_count(p, &e->ce);
 	mutex_unlock(&p->lock);
 }
 
@@ -1707,7 +1712,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	iot_init(&p->tracker, p->threshold_args[PATTERN_SEQUENTIAL], p->threshold_args[PATTERN_SEQUENTIAL]);
 
 	p->cache_size = cache_size;
-	p->find_free_nr_words = dm_sector_div_up(from_cblock(cache_size), BITS_PER_LONG);
+	p->find_free_nr_words = bit_set_nr_words(from_cblock(cache_size));
 	p->find_free_last_word = 0;
 	p->block_size = block_size;
 	p->origin_size = origin_size;
@@ -1717,8 +1722,13 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	p->promote_threshold[1] = ctype_threshold(p, WRITE_PROMOTE_THRESHOLD);
 	atomic_set(&p->tick.t_ext, 0);
 	mutex_init(&p->lock);
+	queue_init(&p->queues.free);
 	queue_init(&p->queues.used);
 	queue_init(&p->queues.walk);
+	queue_init(&p->queues.pre.free);
+	queue_init(&p->queues.pre.used);
+	queue_init(&p->queues.post.free);
+	queue_init(&p->queues.post.used);
 
 	if (IS_NOOP(p))
 		goto out;
@@ -1733,22 +1743,23 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	if (!p->allocation_bitset)
 		goto bad_free_cache_blocks_and_hash;
 
-	if (!IS_DUMB(p)) {
-		/*
-		 * Create in queue to track entries waiting for the
-		 * cache in order to stear their promotion.
-		 */
-		r = alloc_track_queue_with_hash(&p->queues.pre,
-						from_cblock(max(cache_size, (dm_cblock_t) 128)));
-		if (r)
-			goto bad_free_allocation_bitset;
+	if (IS_DUMB(p))
+		goto out;
 
-		/* Create cache_size queue to track evicted cache entries. */
-		r = alloc_track_queue_with_hash(&p->queues.post,
-						from_cblock(max(cache_size >> 1, (dm_cblock_t) 128)));
-		if (r)
-			goto bad_free_track_queue_pre;
-	}
+	/*
+	 * Create in queue to track entries waiting for the
+	 * cache in order to stear their promotion.
+	 */
+	r = alloc_track_queue_with_hash(&p->queues.pre,
+					from_cblock(max(cache_size, (dm_cblock_t) 128)));
+	if (r)
+		goto bad_free_allocation_bitset;
+
+	/* Create cache_size queue to track evicted cache entries. */
+	r = alloc_track_queue_with_hash(&p->queues.post,
+					from_cblock(max(cache_size >> 1, (dm_cblock_t) 128)));
+	if (r)
+		goto bad_free_track_queue_pre;
 
 	if (IS_LFU_MFU_WS(p)) {
 		/* FIXME: replace with priority heap. */
@@ -1875,28 +1886,28 @@ static int __init basic_init(void)
 					      __alignof__(struct basic_cache_entry),
 					      0, NULL);
 	if (!basic_entry_cache)
-		goto bad;
+		goto bad_basic_entry_cache;
 
 	track_entry_cache = kmem_cache_create("dm_cache_basic_policy_tq",
 					      sizeof(struct track_queue_entry),
 					      __alignof__(struct track_queue_entry),
 					      0, NULL);
 	if (!track_entry_cache)
-		goto bad_tracking_create;
+		goto bad_track_entry_cache;
 
 	while (i--) {
 		r = dm_cache_policy_register(policy_types[i]);
 		if (r)
-			break;
+			goto bad_policy;
 	}
 
-	if (!r)
-		return 0;
+	return 0;
 
+bad_policy:
 	kmem_cache_destroy(track_entry_cache);
-bad_tracking_create:
+bad_track_entry_cache:
 	kmem_cache_destroy(basic_entry_cache);
-bad:
+bad_basic_entry_cache:
 	return -ENOMEM;
 }
 
