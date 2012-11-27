@@ -1068,17 +1068,17 @@ static int mq_status(struct dm_cache_policy *p, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("%u %u",
+		DMEMIT(" %u %u",
 		       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
 		       mq->tracker.thresholds[PATTERN_RANDOM]);
 		break;
 
 	case STATUSTYPE_TABLE:
 		if (mq->threshold_args[PATTERN_SEQUENTIAL] > -1)
-			DMEMIT("sequential_threshold %u ", mq->threshold_args[PATTERN_SEQUENTIAL]);
+			DMEMIT(" sequential_threshold %u", mq->threshold_args[PATTERN_SEQUENTIAL]);
 
 		if (mq->threshold_args[PATTERN_RANDOM] > -1)
-			DMEMIT("random_threshold %u ", mq->threshold_args[PATTERN_RANDOM]);
+			DMEMIT(" random_threshold %u", mq->threshold_args[PATTERN_RANDOM]);
 	}
 
 	return 0;

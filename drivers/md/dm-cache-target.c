@@ -2283,7 +2283,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 static int process_config_option(struct cache *cache, char **argv)
 {
-	if (strcmp(argv[1], "migration_threshold")) {
+	if (!strcasecmp(argv[1], "migration_threshold")) {
 		unsigned long tmp;
 
 		if (kstrtoul(argv[2], 10, &tmp))
@@ -2305,16 +2305,11 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 	if (argc != 3)
 		return -EINVAL;
 
-	if (strcmp(argv[0], "set_config")) {
-		r = process_config_option(cache, argv);
-		if (r < 0)
-			goto bad;
-	}
+	r = !strcasecmp(argv[0], "set_config") ? process_config_option(cache, argv) : 1;
 
-	if (r)
+	if (r == 1) /* Message is for the target -> hand over to policy plugin. */
 		r = policy_message(cache->policy, argc, argv);
 
-bad:
 	return r;
 }
 
