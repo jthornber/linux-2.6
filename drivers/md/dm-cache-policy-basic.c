@@ -33,13 +33,13 @@
 #include <linux/random.h>
 #include <linux/slab.h>
 
-/* "multiqueue" policy defines. */
-#define	MQ_QUEUE_TMO	(10UL * HZ)	/* MQ_QUEUE_TMO seconds queue maximum lifetime per entry. FIXME: dynamic? */
-
 /* Cache input queue defines. */
 #define	READ_PROMOTE_THRESHOLD	1U	/* Minimum read cache in queue promote per element threshold. */
 #define	WRITE_PROMOTE_THRESHOLD	4U	/* Minimum write cache in queue promote per element threshold. */
 #define DISCARDED_PROMOTE_THRESHOLD 1U	/* The target has discarded the block -> lowest promotion prioritiy. */
+
+/* "multiqueue" policy defines. */
+#define	MQ_QUEUE_TMO_DEFAULT	(20UL * HZ)	/* Default seconds queue maximum lifetime per entry. FIXME: dynamic? */
 
 /*----------------------------------------------------------------------------*/
 /*
@@ -66,7 +66,7 @@ struct io_tracker {
 	unsigned nr_rand_samples;
 	enum io_pattern pattern;
 
-	int thresholds[2];
+	unsigned long thresholds[2];
 };
 
 static void iot_init(struct io_tracker *t, int sequential_threshold, int random_threshold)
@@ -219,6 +219,7 @@ struct policy {
 
 		/* Multiqueue policies. */
 		struct list_head *mq;
+		unsigned long mq_tmo;
 
 		/* Pre- and post-cache queues. */
 		struct track_queue pre, post;
@@ -267,6 +268,7 @@ struct policy {
 	struct basic_cache_entry **tmp_entries;
 
 	int threshold_args[2];
+	int mq_tmo_arg;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -831,7 +833,7 @@ static unsigned __get_twoqueue(struct policy *p, struct basic_cache_entry *e)
 
 static unsigned long __queue_tmo_multiqueue(struct policy *p)
 {
-	return p->jiffies + MQ_QUEUE_TMO;
+	return p->jiffies + p->queues.mq_tmo;
 }
 
 static void add_cache_count(struct policy *p, struct common_entry *ce)
@@ -868,15 +870,16 @@ static void adjust_entry_counters(struct policy *p, struct common_entry *ce,
 static void demote_multiqueues(struct policy *p)
 {
 	struct basic_cache_entry *e;
-	struct list_head *cur = p->queues.mq, *end = cur + p->queues.nr_mqueues;
+	struct list_head *cur = p->queues.mq, *end;
 
-	if (!queue_empty(&p->queues.free) || !queue_empty(cur))
+	if (!queue_empty(cur))
 		return;
 
 	/*
 	 * Start with 2nd queue, because we conditionally move
 	 * from queue to queue - 1
 	 */
+	end = cur + p->queues.nr_mqueues;
 	while (++cur < end) {
 		while (!queue_empty(cur)) {
 			/* Reference head element. */
@@ -1322,7 +1325,7 @@ static int map(struct policy *p, dm_oblock_t oblock,
 		;
 
 	else if (!can_migrate)
-		return -EWOULDBLOCK;
+		;
 
 	else if (IS_DUMB(p) ||
 		 should_promote(p, oblock, discarded_oblock, bio, result))
@@ -1559,25 +1562,58 @@ static void basic_tick(struct dm_cache_policy *pe)
 }
 
 
-static int process_config_option(struct policy *p, int *args, char **argv)
+/* ctr/message optional argument parsing. */
+static int process_threshold_option(struct policy *p, char **argv, bool seq, bool set_ctr_arg)
 {
-	bool seq;
 	unsigned long tmp;
-
-	if (strcasecmp(argv[0], "sequential_threshold"))
-		seq = true;
-	else if (strcasecmp(argv[0], "random_threshold"))
-		seq = false;
-	else
-		return -EINVAL;
-
 
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+	p->tracker.thresholds[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+
+	if (set_ctr_arg)
+		p->threshold_args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
 
 	return 0;
+}
+
+static int process_multiqueue_timeout_option(struct policy *p, char **argv, bool set_ctr_arg)
+{
+	unsigned long tmp;
+
+	/* multiqueue timeout in milliseconds. */
+	if (kstrtoul(argv[1], 10, &tmp) ||
+	    tmp < 1 || tmp > 24*3600*1000) /* 1 day max :) */
+		return -EINVAL;
+
+	if (IS_MULTIQUEUE(p)) {
+		unsigned long ticks = tmp * HZ / 1000;
+
+		/* Ensure one tick timeout minimum. */
+		p->queues.mq_tmo = ticks ? ticks : 1;
+
+		if (set_ctr_arg)
+			p->mq_tmo_arg = tmp;
+
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int process_config_option(struct policy *p, char **argv, bool set_ctr_arg)
+{
+	if (!strcasecmp(argv[0], "sequential_threshold"))
+		return process_threshold_option(p, argv, true, set_ctr_arg);
+
+	else if (!strcasecmp(argv[0], "random_threshold"))
+		return process_threshold_option(p, argv, false, set_ctr_arg);
+
+	else if (!strcasecmp(argv[0], "multiqueue_timeout"))
+		return process_multiqueue_timeout_option(p, argv, set_ctr_arg);
+
+	return -EINVAL;
 }
 
 static int basic_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
@@ -1587,14 +1623,12 @@ static int basic_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
 	if (argc != 3)
 		return -EINVAL;
 
-	if (strcasecmp(argv[0], "set_config")) {
-		int r = process_config_option(p, p->tracker.thresholds, argv + 1);
+	if (!strcasecmp(argv[0], "set_config"))
+{
+		return process_config_option(p, argv + 1, false);
+}
 
-		if (r < 0)
-			return r;
-	}
-
-	return 0;
+	return -EINVAL;
 }
 
 static int basic_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
@@ -1604,17 +1638,21 @@ static int basic_status(struct dm_cache_policy *pe, status_type_t type, unsigned
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("%u %u",
+		DMEMIT(" %lu %lu %lu",
 		       p->tracker.thresholds[PATTERN_SEQUENTIAL],
-		       p->tracker.thresholds[PATTERN_RANDOM]);
+		       p->tracker.thresholds[PATTERN_RANDOM],
+		       p->queues.mq_tmo * 1000 / HZ);
 		break;
 
 	case STATUSTYPE_TABLE:
 		if (p->threshold_args[PATTERN_SEQUENTIAL] > -1)
-			DMEMIT("sequential_threshold %u ", p->threshold_args[PATTERN_SEQUENTIAL]);
+			DMEMIT(" sequential_threshold %u", p->threshold_args[PATTERN_SEQUENTIAL]);
 
 		if (p->threshold_args[PATTERN_RANDOM] > -1)
-			DMEMIT("random_threshold %u ", p->threshold_args[PATTERN_RANDOM]);
+			DMEMIT(" random_threshold %u", p->threshold_args[PATTERN_RANDOM]);
+
+		if (p->mq_tmo_arg > -1)
+			DMEMIT(" multiqueue_timeout %d", p->mq_tmo_arg);
 	}
 
 	return 0;
@@ -1624,16 +1662,16 @@ static int process_policy_args(struct policy *p, int argc, char **argv)
 {
 	unsigned u;
 
-	p->threshold_args[0] = p->threshold_args[1] = -1;
+	p->threshold_args[0] = p->threshold_args[1] = p->mq_tmo_arg = -1;
 
 	if (!argc)
 		return 0;
 
-	if (argc != 2 && argc != 4)
+	if (argc != 2 && argc != 4 && argc != 6)
 		return -EINVAL;
 
 	for (u = 0; u < argc; u += 2) {  
-		int r = process_config_option(p, p->threshold_args, argv + u);
+		int r = process_config_option(p, argv + u, true);
 
 		if (r)
 			return r;
@@ -1783,6 +1821,9 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 					      (dm_cblock_t) 8),
 					  cache_size));
 		p->jiffies = get_jiffies_64();
+
+		if (p->mq_tmo_arg < 0)
+			p->queues.mq_tmo = MQ_QUEUE_TMO_DEFAULT;
 	}
 
 
