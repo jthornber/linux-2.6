@@ -1104,17 +1104,9 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 	return 0;
 }
 
-static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
-					 sector_t origin_size,
-					 sector_t block_size,
-					 int argc, char **argv)
+/* Init the policy plugin interface function pointers. */
+static void init_policy_functions(struct mq_policy *mq)
 {
-	int r;
-	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
-
-	if (!mq)
-		return NULL;
-
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.lookup = mq_lookup;
@@ -1127,6 +1119,20 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->policy.tick = mq_tick;
 	mq->policy.status = mq_status;
 	mq->policy.message = mq_message;
+}
+
+static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
+					 sector_t origin_size,
+					 sector_t block_size,
+					 int argc, char **argv)
+{
+	int r;
+	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+
+	if (!mq)
+		return NULL;
+
+	init_policy_functions(mq);
 
 	/* Need to do that before iot_init(). */
 	r = process_policy_args(mq, argc, argv);
