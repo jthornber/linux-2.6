@@ -158,27 +158,9 @@ static int __bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 	}
 
 	/*
-	 * Allocate a new cell
+	 * Use @memory for the new cell
 	 */
-	spin_unlock_irqrestore(&prison->lock, flags);
-	cell2 = memory;
-	spin_lock_irqsave(&prison->lock, flags);
-
-	/*
-	 * We've been unlocked, so we have to double check that
-	 * nobody else has inserted this cell in the meantime.
-	 */
-	cell = __search_bucket(prison->cells + hash, key);
-	if (cell) {
-		if (inmate)
-			bio_list_add(&cell->bios, inmate);
-		goto out;
-	}
-
-	/*
-	 * Use new cell.
-	 */
-	cell = cell2;
+	cell = memory;
 
 	BUG_ON(cell->prison != prison);
 	memcpy(&cell->key, key, sizeof(cell->key));

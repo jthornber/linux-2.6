@@ -235,10 +235,9 @@ static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bi
 		return -ENOMEM;
 
 	r = dm_bio_detain(pool->prison, key, bio, cell, result);
-
 	if (r)
 		/*
-		 * We reused an old cell, or errored; we can get rid of
+		 * We reused an old cell or errored; must free
 		 * the new one.
 		 */
 		dm_bio_prison_free_cell(cell);
