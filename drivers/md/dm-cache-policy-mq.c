@@ -890,6 +890,8 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
+	result->op = POLICY_MISS;
+
 	if (can_migrate)
 		mutex_lock(&mq->lock);
 	else
