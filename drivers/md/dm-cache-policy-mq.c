@@ -1021,14 +1021,14 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
-static int process_config_option(struct mq_policy *mq, int *args, char **argv)
+static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr_arg)
 {
 	bool seq;
 	unsigned long tmp;
 
-	if (strcasecmp(argv[0], "sequential_threshold"))
+	if (!strcasecmp(argv[0], "sequential_threshold"))
 		seq = true;
-	else if (strcasecmp(argv[0], "random_threshold"))
+	else if (!strcasecmp(argv[0], "random_threshold"))
 		seq = false;
 	else
 		return -EINVAL;
@@ -1036,26 +1036,26 @@ static int process_config_option(struct mq_policy *mq, int *args, char **argv)
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+	mq->tracker.thresholds[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+
+	if (set_ctr_arg)
+		mq->threshold_args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
 
 	return 0;
 }
 
 static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
 {
+	int r = -EINVAL;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	if (argc != 3)
 		return -EINVAL;
 
-	if (strcasecmp(argv[0], "set_config")) {
-		int r = process_config_option(mq, mq->tracker.thresholds, argv + 1);
+	if (!strcasecmp(argv[0], "set_config"))
+		r = process_config_option(mq, argv + 1, false);
 
-		if (r < 0)
-			return r;
-	}
-
-	return 0;
+	return r;
 }
 
 static int mq_status(struct dm_cache_policy *p, status_type_t type,
@@ -1084,6 +1084,7 @@ static int mq_status(struct dm_cache_policy *p, status_type_t type,
 
 static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 {
+	int r;
 	unsigned u;
 
 	mq->threshold_args[0] = mq->threshold_args[1] = -1;
@@ -1094,14 +1095,10 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 	if (argc != 2 && argc != 4)
 		return -EINVAL;
 
-	for (u = 0; u < argc; u += 2) {
-		int r = process_config_option(mq, mq->threshold_args, argv + u);
+	for (r = u = 0; u < argc && !r; u += 2)
+		r = process_config_option(mq, argv + u, true);
 
-		if (r)
-			return r;
-	}
-
-	return 0;
+	return r;
 }
 
 /* Init the policy plugin interface function pointers. */
