@@ -144,7 +144,7 @@ static int __bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 	int r = 1;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
-	struct dm_bio_prison_cell *cell, *cell2;
+	struct dm_bio_prison_cell *cell;
 
 	BUG_ON(hash > prison->nr_buckets);
 
