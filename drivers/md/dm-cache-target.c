@@ -63,7 +63,6 @@ static void free_bitset(unsigned long *bits)
 /*----------------------------------------------------------------*/
 
 #define PRISON_CELLS 1024
-#define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
 #define MIGRATION_COUNT_WINDOW 10
@@ -1652,7 +1651,7 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 /*----------------------------------------------------------------*/
 
-// FIXME: get rid of these
+// FIXME: get rid of this
 static struct kmem_cache *_migration_cache;
 
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
@@ -1885,7 +1884,6 @@ out:
 	return r;
 }
 
-#if 0
 static unsigned cache_get_num_duplicates(struct dm_target *ti,
 					 struct bio *bio)
 {
@@ -1897,7 +1895,6 @@ static unsigned cache_get_num_duplicates(struct dm_target *ti,
 	return (lookup_result.op == POLICY_HIT &&
 		is_writethrough_io(cache, bio, lookup_result.cblock)) ? 2 : 1;
 }
-#endif
 
 static int cache_map(struct dm_target *ti, struct bio *bio)
 {
@@ -1958,8 +1955,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 
 		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
 			/*
-			 * No need to mark anything dirty in write through
-			 * mode.
+			 * No need to mark anything dirty in write through mode.
 			 */
 			pr->req_nr == 0 ?
 				remap_to_cache(cache, bio, lookup_result.cblock) :
@@ -2369,9 +2365,7 @@ static struct target_type cache_target = {
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
-#if 0
 	.get_num_duplicates = cache_get_num_duplicates,
-#endif
 	.map = cache_map,
 	.end_io = cache_end_io,
 	.postsuspend = cache_postsuspend,

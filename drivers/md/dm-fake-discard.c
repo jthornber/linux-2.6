@@ -171,8 +171,7 @@ static void discard_dtr(struct dm_target *ti)
 	kfree(fd);
 }
 
-static int discard_map(struct dm_target *ti, struct bio *bio,
-		       union map_info *map_context)
+static int discard_map(struct dm_target *ti, struct bio *bio)
 {
 	struct fake_discard *fd = ti->private;
 

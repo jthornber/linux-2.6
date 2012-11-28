@@ -205,14 +205,13 @@ static bool is_bio_tracked(struct bio *bio)
 static void track_chunk(struct dm_snapshot *s, struct bio *bio, chunk_t chunk)
 {
 	struct dm_snap_tracked_chunk *c = dm_bio_get_per_request_data(bio, sizeof(struct dm_snap_tracked_chunk));
-	unsigned long flags;
 
 	c->chunk = chunk;
 
-	spin_lock_irqsave(&s->tracked_chunk_lock, flags);
+	spin_lock_irq(&s->tracked_chunk_lock);
 	hlist_add_head(&c->node,
 		       &s->tracked_chunk_hash[DM_TRACKED_CHUNK_HASH(chunk)]);
-	spin_unlock_irqrestore(&s->tracked_chunk_lock, flags);
+	spin_unlock_irq(&s->tracked_chunk_lock);
 }
 
 static void stop_tracking_chunk(struct dm_snapshot *s, struct bio *bio)
