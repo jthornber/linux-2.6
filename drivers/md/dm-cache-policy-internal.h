@@ -21,6 +21,12 @@ static inline int policy_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return p->map(p, oblock, can_migrate, discarded_oblock, bio, result);
 }
 
+static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
+{
+	BUG_ON(!p->lookup);
+	return p->lookup(p, oblock, cblock);
+}
+
 static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	if (p->set_dirty)
