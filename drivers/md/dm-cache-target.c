@@ -383,10 +383,6 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 
 /*----------------------------------------------------------------*/
 
-/*
- * The discard bitset is accessed from both the worker thread and the
- * cache_map function, we need to protect it.
- */
 static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 {
 	sector_t tmp = cache->discard_block_size;
