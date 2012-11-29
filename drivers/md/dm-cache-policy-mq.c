@@ -235,7 +235,6 @@ struct mq_policy {
 	struct mutex lock;
 	dm_cblock_t cache_size;
 	struct io_tracker tracker;
-	unsigned seq_threshold;
 
 	/*
 	 * We maintain two queues of entries.  The cache proper contains
@@ -340,7 +339,7 @@ static int alloc_entries(struct mq_policy *mq, unsigned elts)
 	mq->nr_entries_allocated = 0;
 
 	while (u--) {
-		struct entry *e = kmem_cache_alloc(mq_entry_cache, GFP_KERNEL);
+		struct entry *e = kmem_cache_zalloc(mq_entry_cache, GFP_KERNEL);
 
 		if (!e) {
 			free_entries(mq);
@@ -348,7 +347,6 @@ static int alloc_entries(struct mq_policy *mq, unsigned elts)
 		}
 
 
-		memset(e, 0, sizeof(*e));
 		list_add(&e->list, &mq->free);
 	}
 
@@ -841,6 +839,18 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 	return r;
 }
 
+static int lookup(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
+{
+	struct entry *e = hash_lookup(mq, oblock);
+
+	if (e && e->in_cache) {
+		*cblock = e->cblock;
+		return 1;
+	}
+
+	return 0;
+}
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -893,6 +903,20 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	r = map(mq, oblock, can_migrate, discarded_oblock,
 		bio_data_dir(bio), result);
 
+	mutex_unlock(&mq->lock);
+
+	return r;
+}
+
+static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
+{
+	int r;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	if (!mutex_trylock(&mq->lock))
+		return -EWOULDBLOCK;
+
+	r = lookup(mq, oblock, cblock);
 	mutex_unlock(&mq->lock);
 
 	return r;
@@ -1085,6 +1109,7 @@ static void init_policy_functions(struct mq_policy *mq)
 {
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
+	mq->policy.lookup = mq_lookup;
 	mq->policy.load_mapping = mq_load_mapping;
 	mq->policy.walk_mappings = mq_walk_mappings;
 	mq->policy.remove_mapping = mq_remove_mapping;
@@ -1114,7 +1139,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	if (r)
 		goto bad_free_policy;
 
-	iot_init(&mq->tracker, mq->threshold_args[PATTERN_RANDOM], mq->threshold_args[PATTERN_SEQUENTIAL]);
+	iot_init(&mq->tracker, mq->threshold_args[PATTERN_SEQUENTIAL], mq->threshold_args[PATTERN_RANDOM]);
 
 	mq->cache_size = cache_size;
 	mq->tick_protected = 0;
