@@ -116,6 +116,17 @@ struct dm_cache_policy {
 		   struct bio *bio, struct policy_result *result);
 
 	/*
+	 * Sometimes we want to see if a block is in the cache, without
+	 * triggering any update of stats.  (ie. it's not a real hit).
+	 *
+	 * Must not block.
+	 *
+	 * Returns 1 iff in cache, 0 iff not, < 0 on error (-EWOULDBLOCK
+	 * would be typical).
+	 */
+	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
+
+	/*
 	 * oblock must be a mapped block.
 	 */
 	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
