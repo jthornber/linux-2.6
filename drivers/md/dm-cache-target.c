@@ -1085,7 +1085,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		break;
 
 	default:
-		DMERR("unknown policy op returned, erroring bio\n");
+		DMERR_LIMIT("%s: erroring bio, unknown policy op: %u", __func__,
+			    (unsigned) lookup_result.op);
 		bio_io_error(bio);
 	}
 
@@ -1772,7 +1773,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
-		*error = "Couldn't allocate dirty bitset";
+		*error = "could not allocate dirty bitset";
 		goto bad;
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
@@ -1783,21 +1784,21 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->discard_nr_blocks = oblock_to_dblock(cache, cache->origin_blocks);
 	cache->discard_bitset = alloc_bitset(from_dblock(cache->discard_nr_blocks));
 	if (!cache->discard_bitset) {
-		*error = "Couldn't allocate discard bitset";
+		*error = "could not allocate discard bitset";
 		goto bad;
 	}
 	clear_bitset(cache->discard_bitset, from_dblock(cache->discard_nr_blocks));
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
-		*error = "Couldn't create kcopyd client";
+		*error = "could not create kcopyd client";
 		r = PTR_ERR(cache->copier);
 		goto bad;
 	}
 
 	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
 	if (!cache->wq) {
-		*error = "Couldn't create workqueue for metadata object";
+		*error = "could not create workqueue for metadata object";
 		goto bad;
 	}
 	INIT_WORK(&cache->worker, do_worker);
@@ -1806,13 +1807,13 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->prison = dm_bio_prison_create(PRISON_CELLS);
 	if (!cache->prison) {
-		*error = "Couldn't create bio prison";
+		*error = "could not create bio prison";
 		goto bad;
 	}
 
 	cache->all_io_ds = dm_deferred_set_create();
 	if (!cache->all_io_ds) {
-		*error = "Couldn't create all_io deferred set";
+		*error = "could not create all_io deferred set";
 		goto bad;
 	}
 
@@ -1995,8 +1996,10 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		break;
 
 	default:
-		DMERR("policy op: %u\n", (unsigned) lookup_result.op);
-		BUG();
+		DMERR_LIMIT("%s: erroring bio, unknown policy op: %u", __func__,
+			    (unsigned) lookup_result.op);
+		bio_io_error(bio);
+		return DM_MAPIO_SUBMITTED;
 	}
 
 	return DM_MAPIO_REMAPPED;
@@ -2041,7 +2044,7 @@ static int write_discard_bitset(struct cache *cache)
 	r = dm_cache_discard_bitset_resize(cache->cmd, cache->discard_block_size,
 					   cache->discard_nr_blocks);
 	if (r) {
-		DMERR("Couldn't resize on-disk discard bitset");
+		DMERR("could not resize on-disk discard bitset");
 		return r;
 	}
 
@@ -2089,17 +2092,17 @@ static bool sync_metadata(struct cache *cache)
 
 	r1 = write_dirty_bitset(cache);
 	if (r1)
-		DMERR("Couldn't write dirty bitset");
+		DMERR("could not write dirty bitset");
 
 	r2 = write_discard_bitset(cache);
 	if (r2)
-		DMERR("Couldn't write discard bitset");
+		DMERR("could not write discard bitset");
 
 	save_stats(cache);
 
 	r3 = write_hints(cache);
 	if (r3)
-		DMERR("Couldn't write hints");
+		DMERR("could not write hints");
 
 	/*
 	 * If writing the above metadata failed, we still commit, but don't
@@ -2108,7 +2111,7 @@ static bool sync_metadata(struct cache *cache)
 	 */
 	r4 = dm_cache_commit(cache->cmd, !r1 && !r2 && !r3);
 	if (r4)
-		DMERR("Couldn't write cache metadata.  Data loss may occur.");
+		DMERR("could not write cache metadata.  Data loss may occur.");
 
 	return !r1 && !r2 && !r3 && !r4;
 }
@@ -2174,7 +2177,7 @@ static int cache_preresume(struct dm_target *ti)
 
 		r = dm_cache_resize(cache->cmd, cache->cache_size);
 		if (r) {
-			DMERR("Couldn't resize cache metadata");
+			DMERR("could not resize cache metadata");
 			return r;
 		}
 
@@ -2186,7 +2189,7 @@ static int cache_preresume(struct dm_target *ti)
 					   dm_cache_policy_get_name(cache->policy),
 					   load_mapping, cache);
 		if (r) {
-			DMERR("couldn't load cache mappings");
+			DMERR("could not load cache mappings");
 			return r;
 		}
 
@@ -2196,7 +2199,7 @@ static int cache_preresume(struct dm_target *ti)
 	if (!cache->loaded_discards) {
 		r = dm_cache_load_discards(cache->cmd, load_discard, cache);
 		if (r) {
-			DMERR("couldn't load origin discards");
+			DMERR("could not load origin discards");
 			return r;
 		}
 
