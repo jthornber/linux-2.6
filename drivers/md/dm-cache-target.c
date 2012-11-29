@@ -1677,20 +1677,19 @@ static bool too_many_discard_blocks(sector_t block_size,
 				    sector_t origin_size)
 {
 	do_div(origin_size, block_size);
-	return origin_size < MAX_DISCARD_BLOCKS;
+	return origin_size > MAX_DISCARD_BLOCKS;
 }
 
 static sector_t calculate_discard_block_size(sector_t cache_block_size,
 					     sector_t origin_size)
 {
-	sector_t r = roundup_pow_of_two(cache_block_size);
+	sector_t r;
 
-	while (too_many_discard_blocks(r, origin_size))
-		r *= 2;
+	r = roundup_pow_of_two(cache_block_size);
 
-	pr_alert("cache_block_size = %u, discard_block_size = %u\n",
-		 (unsigned) cache_block_size,
-		 (unsigned) r);
+	if (origin_size)
+		while (too_many_discard_blocks(r, origin_size))
+			r *= 2;
 
 	return r;
 }
@@ -1891,11 +1890,16 @@ static unsigned cache_get_num_duplicates(struct dm_target *ti,
 	if (bio_data_dir(bio) != WRITE || !cache->features.write_through)
 		return 1;
 
+#if 0
 	r = policy_lookup(cache->policy, block, &cblock);
 	if (r < 0)
-		return 2;
+		return 2;	/* assume the worst */
 
-	return !is_dirty(cache, cblock) ? 2 : 1;
+	return (r && !is_dirty(cache, cblock)) ? 2 : 1;
+#else
+	// testing the failure case
+	return 2;
+#endif
 }
 
 static int cache_map(struct dm_target *ti, struct bio *bio)

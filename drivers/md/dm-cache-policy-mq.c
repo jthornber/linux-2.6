@@ -824,7 +824,7 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 static int lookup(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
 {
 	struct entry *e = hash_lookup(mq, oblock);
-	if (e) {
+	if (e && e->in_cache) {
 		*cblock = e->cblock;
 		return 1;
 	}
