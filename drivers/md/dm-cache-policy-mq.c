@@ -1217,4 +1217,6 @@ MODULE_AUTHOR("Joe Thornber");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("mq cache policy");
 
+MODULE_ALIAS("dm-cache-default");
+
 /*----------------------------------------------------------------*/
