@@ -610,8 +610,8 @@ static void init_promote_threshold(struct policy *p, bool cache_full)
 	p->promote_threshold[1] = ctype_threshold(p, WRITE_PROMOTE_THRESHOLD);
 
 	if (cache_full) {
-		p->promote_threshold[0] += (p->cache_count[p->queues.ctype][0] << 5) / from_cblock(p->cache_size);
-		p->promote_threshold[1] += (p->cache_count[p->queues.ctype][1] << 5) / from_cblock(p->cache_size);
+		p->promote_threshold[0] += ((p->cache_count[p->queues.ctype][0] * READ_PROMOTE_THRESHOLD) << 5) / from_cblock(p->cache_size);
+		p->promote_threshold[1] += ((p->cache_count[p->queues.ctype][1] * WRITE_PROMOTE_THRESHOLD)<< 5) / from_cblock(p->cache_size);
 	}
 }
 
