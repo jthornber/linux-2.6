@@ -49,8 +49,7 @@ int dm_get_cell(struct dm_bio_prison *prison, struct dm_cell_key *key,
 /*
  * An atomic op that combines retrieving a cell, and adding a bio to it.
  *
- * Returns 1 if the cell was already held, 0 if @inmate is the new holder
- * and new cell created using @memory.
+ * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
  */
 int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 		  struct bio *inmate, struct dm_bio_prison_cell *memory,

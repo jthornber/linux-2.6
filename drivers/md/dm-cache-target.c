@@ -309,6 +309,7 @@ static int bio_detain_(struct cache *cache,
 
 	build_key(oblock, &key);
 	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
+
 	if (r)
 		dm_bio_prison_free_cell(cell);
 
@@ -327,6 +328,7 @@ static int bio_detain(struct cache *cache, struct prealloc *structs,
 
 	build_key(oblock, &key);
 	r = dm_bio_detain(cache->prison, &key, bio, *cell, result);
+
 	if (!r)
 		/* cell was used */
 		*cell = NULL;
@@ -347,8 +349,8 @@ static int get_cell(struct cache *cache,
 
 	build_key(oblock, &key);
 	r = dm_get_cell(cache->prison, &key, *cell, result);
+
 	if (!r)
-		/* cell was used */
 		*cell = NULL;
 
 	return r;
