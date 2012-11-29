@@ -705,11 +705,10 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 				 int data_dir, struct policy_result *result)
 {
 	int r = 0;
-	bool updated = updated_this_tick(mq, e);
 
 	requeue_and_update_tick(mq, e);
 
-	if (updated || !should_promote(mq, e, discarded_oblock, data_dir))
+	if (!should_promote(mq, e, discarded_oblock, data_dir))
 		result->op = POLICY_MISS;
 
 	else if (!can_migrate)
