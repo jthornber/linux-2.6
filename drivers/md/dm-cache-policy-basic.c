@@ -1297,6 +1297,28 @@ static int basic_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return r;
 }
 
+static int basic_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t *cblock)
+{
+	int r;
+	struct policy *p = to_policy(pe);
+	struct basic_cache_entry *e;
+
+	if (!mutex_trylock(&p->lock))
+		return -EWOULDBLOCK;
+
+	e = lookup_cache_entry(p, oblock);
+	if (e) {
+		*cblock = e->cblock;
+		r = 1;
+
+	} else
+		r = 0;
+
+	mutex_unlock(&p->lock);
+
+	return r;
+}
+
 static void basic_destroy(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
@@ -1630,6 +1652,7 @@ static void init_policy_functions(struct policy *p)
 {
 	p->policy.destroy = basic_destroy;
 	p->policy.map = basic_map;
+	p->policy.lookup = basic_lookup;
 	p->policy.load_mapping = basic_load_mapping;
 	p->policy.walk_mappings = basic_walk_mappings;
 	p->policy.remove_mapping = basic_remove_mapping;
