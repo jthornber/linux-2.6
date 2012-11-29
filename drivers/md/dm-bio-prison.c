@@ -129,62 +129,52 @@ static struct dm_bio_prison_cell *__search_bucket(struct hlist_head *bucket,
 	return NULL;
 }
 
+static void __setup_new_cell(struct dm_bio_prison *prison,
+			     struct dm_cell_key *key,
+			     struct bio *holder,
+			     uint32_t hash,
+			     struct dm_bio_prison_cell *cell)
+{
+	memcpy(&cell->key, key, sizeof(cell->key));
+	cell->holder = holder;
+	bio_list_init(&cell->bios);
+	hlist_add_head(&cell->list, prison->cells + hash);
+}
+
 static int __bio_detain(struct dm_bio_prison *prison,
 			struct dm_cell_key *key,
 			struct bio *inmate,
 			struct dm_bio_prison_cell *memory,
 			struct dm_bio_prison_cell **ref)
 {
-	int r = 1;
-	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
-	struct dm_bio_prison_cell *cell, *cell2;
-
-	BUG_ON(hash > prison->nr_buckets);
-
-	spin_lock_irqsave(&prison->lock, flags);
+	struct dm_bio_prison_cell *cell;
 
 	cell = __search_bucket(prison->cells + hash, key);
 	if (cell) {
 		if (inmate)
 			bio_list_add(&cell->bios, inmate);
-		goto out;
+		*ref = cell;
+		return 1;
 	}
 
-	/*
-	 * Allocate a new cell
-	 */
-	spin_unlock_irqrestore(&prison->lock, flags);
-	cell2 = memory;
+	__setup_new_cell(prison, key, inmate, hash, memory);
+	*ref = memory;
+	return 0;
+}
+
+static int bio_detain(struct dm_bio_prison *prison,
+		      struct dm_cell_key *key,
+		      struct bio *inmate,
+		      struct dm_bio_prison_cell *memory,
+		      struct dm_bio_prison_cell **ref)
+{
+	int r;
+	unsigned long flags;
+
 	spin_lock_irqsave(&prison->lock, flags);
-
-	/*
-	 * We've been unlocked, so we have to double check that
-	 * nobody else has inserted this cell in the meantime.
-	 */
-	cell = __search_bucket(prison->cells + hash, key);
-	if (cell) {
-		if (inmate)
-			bio_list_add(&cell->bios, inmate);
-		goto out;
-	}
-
-	/*
-	 * Use new cell.
-	 */
-	cell = cell2;
-
-	memcpy(&cell->key, key, sizeof(cell->key));
-	cell->holder = inmate;
-	bio_list_init(&cell->bios);
-	hlist_add_head(&cell->list, prison->cells + hash);
-
-	r = 0;
-
-out:
+	r = __bio_detain(prison, key, inmate, memory, ref);
 	spin_unlock_irqrestore(&prison->lock, flags);
-
-	*ref = cell;
 
 	return r;
 }
@@ -195,7 +185,7 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_bio_prison_cell *memory,
 		  struct dm_bio_prison_cell **ref)
 {
-	return __bio_detain(prison, key, inmate, memory, ref);
+	return bio_detain(prison, key, inmate, memory, ref);
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain);
 
@@ -204,7 +194,7 @@ int dm_get_cell(struct dm_bio_prison *prison,
 		struct dm_bio_prison_cell *memory,
 		struct dm_bio_prison_cell **ref)
 {
-	return __bio_detain(prison, key, NULL, memory, ref);
+	return bio_detain(prison, key, NULL, memory, ref);
 }
 EXPORT_SYMBOL_GPL(dm_get_cell);
 
