@@ -138,7 +138,7 @@ static int __bio_detain(struct dm_bio_prison *prison,
 	int r = 1;
 	unsigned long flags;
 	uint32_t hash = hash_key(prison, key);
-	struct dm_bio_prison_cell *cell, *cell2;
+	struct dm_bio_prison_cell *cell;
 
 	BUG_ON(hash > prison->nr_buckets);
 
@@ -152,27 +152,9 @@ static int __bio_detain(struct dm_bio_prison *prison,
 	}
 
 	/*
-	 * Allocate a new cell
-	 */
-	spin_unlock_irqrestore(&prison->lock, flags);
-	cell2 = memory;
-	spin_lock_irqsave(&prison->lock, flags);
-
-	/*
-	 * We've been unlocked, so we have to double check that
-	 * nobody else has inserted this cell in the meantime.
-	 */
-	cell = __search_bucket(prison->cells + hash, key);
-	if (cell) {
-		if (inmate)
-			bio_list_add(&cell->bios, inmate);
-		goto out;
-	}
-
-	/*
 	 * Use new cell.
 	 */
-	cell = cell2;
+	cell = memory;
 
 	memcpy(&cell->key, key, sizeof(cell->key));
 	cell->holder = inmate;
