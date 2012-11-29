@@ -255,10 +255,10 @@ static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 static void prealloc_free_structs(struct cache *cache, struct prealloc *p)
 {
 	if (p->cell2)
-		dm_bio_prison_free_cell(p->cell2);
+		dm_bio_prison_free_cell(cache->prison, p->cell2);
 
 	if (p->cell1)
-		dm_bio_prison_free_cell(p->cell1);
+		dm_bio_prison_free_cell(cache->prison, p->cell1);
 
 	if (p->mg)
 		mempool_free(p->mg, cache->migration_pool);
@@ -311,7 +311,7 @@ static int bio_detain_(struct cache *cache,
 	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
 
 	if (r)
-		dm_bio_prison_free_cell(cell);
+		dm_bio_prison_free_cell(cache->prison, cell);
 
 	return r;
 }
@@ -609,11 +609,9 @@ static void dec_nr_migrations(struct cache *cache)
 static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
 			 bool holder)
 {
-	if (holder)
-		dm_cell_release(cell, &cache->deferred_bios);
-	else
-		dm_cell_release_no_holder(cell, &cache->deferred_bios);
-	dm_bio_prison_free_cell(cell);
+	(holder ? dm_cell_release : dm_cell_release_no_holder)
+		(cache->prison, cell, &cache->deferred_bios);
+	dm_bio_prison_free_cell(cache->prison, cell);
 }
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
