@@ -74,7 +74,7 @@ static void iot_init(struct io_tracker *t,
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
 	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
-	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : RANDOM_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
@@ -722,12 +722,10 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 				 int data_dir, struct policy_result *result)
 {
 	int r = 0;
-	bool updated = updated_this_tick(mq, e);
 
 	requeue_and_update_tick(mq, e);
 
-	if ((!discarded_oblock && updated) ||
-	    !should_promote(mq, e, discarded_oblock, data_dir))
+	if (!should_promote(mq, e, discarded_oblock, data_dir))
 		result->op = POLICY_MISS;
 
 	else if (!can_migrate)
