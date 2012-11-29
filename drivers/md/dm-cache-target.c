@@ -1883,13 +1883,21 @@ out:
 static unsigned cache_get_num_duplicates(struct dm_target *ti,
 					 struct bio *bio)
 {
+#if 0
 	struct cache *cache = ti->private;
 	struct policy_result lookup_result;
 	dm_oblock_t block = get_bio_block(cache, bio);
 
+	/*
+	 * FIXME: we need a lookup that doesn't trigger any book keeping
+	 * (this isn't a real hit).  Also the lookup *cannot* block (tougher).
+	 */
 	policy_map(cache->policy, block, false, false, bio, &lookup_result);
 	return (lookup_result.op == POLICY_HIT &&
 		is_writethrough_io(cache, bio, lookup_result.cblock)) ? 2 : 1;
+#else
+	return 1;
+#endif
 }
 
 static int cache_map(struct dm_target *ti, struct bio *bio)
