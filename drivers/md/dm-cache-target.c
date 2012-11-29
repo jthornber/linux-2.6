@@ -183,6 +183,7 @@ struct cache {
 	atomic_t copies_avoided;
 	atomic_t cache_cell_clash;
 	atomic_t commit_count;
+	atomic_t discard_count;
 };
 
 struct per_req_data {
@@ -396,6 +397,8 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 static void set_discard(struct cache *cache, dm_dblock_t b)
 {
 	unsigned long flags;
+
+	atomic_inc(&cache->discard_count);
 
 	spin_lock_irqsave(&cache->lock, flags);
 	set_bit(from_dblock(b), cache->discard_bitset);
@@ -1391,6 +1394,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&cache->copies_avoided));
 	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->cache_cell_clash));
 	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->commit_count));
+	pr_alert("discards:\t\t%u\n", (unsigned) atomic_read(&cache->discard_count));
 
 	destroy(cache);
 }
@@ -1845,6 +1849,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	atomic_set(&cache->copies_avoided, 0);
 	atomic_set(&cache->cache_cell_clash, 0);
 	atomic_set(&cache->commit_count, 0);
+	atomic_set(&cache->discard_count, 0);
 
 	*result = cache;
 	return 0;
