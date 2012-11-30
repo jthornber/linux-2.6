@@ -175,6 +175,8 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 
+	result->op = POLICY_MISS;
+
 	if (can_block)
 		mutex_lock(&p->lock);
 
@@ -186,8 +188,7 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 		result->op = POLICY_HIT;
 		result->cblock = e->cblock;
 
-	} else
-		result->op = POLICY_MISS;
+	}
 
 	mutex_unlock(&p->lock);
 

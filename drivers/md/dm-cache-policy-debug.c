@@ -432,7 +432,9 @@ static int debug_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	struct policy *p = to_policy(pe);
 	struct debug_entry *e;
 
-	if (can_migrate)
+	result->op = POLICY_MISS;
+
+	if (can_block)
 		mutex_lock(&p->lock);
 
 	else if (!mutex_trylock(&p->lock))
