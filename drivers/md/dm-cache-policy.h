@@ -97,10 +97,14 @@ struct dm_cache_policy {
 	 * See large comment above.
 	 *
 	 * oblock      - the origin block we're interested in.
+	 *
+	 * can_block - indicates whether the current thread is allowed to
+	 *             block.  -EWOULDBLOCK returned if it can't and would.
+	 *
 	 * can_migrate - gives permission for POLICY_NEW or POLICY_REPLACE
 	 *               instructions.  If denied and the policy would have
 	 *               returned one of these instructions it should
-	 *               return -EWOULDBLOCK *and* set result->op to POLICY_MISS.
+	 *               return -EWOULDBLOCK.
 	 *
 	 * discarded_oblock - indicates whether the whole origin block is
 	 *               in a discarded state (FIXME: better to tell the
@@ -112,7 +116,7 @@ struct dm_cache_policy {
 	 * May only return 0, or -EWOULDBLOCK (if !can_migrate)
 	 */
 	int (*map)(struct dm_cache_policy *p, dm_oblock_t oblock,
-		   bool can_migrate, bool discarded_oblock,
+		   bool can_block, bool can_migrate, bool discarded_oblock,
 		   struct bio *bio, struct policy_result *result);
 
 	/*

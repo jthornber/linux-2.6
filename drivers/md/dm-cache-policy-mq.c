@@ -883,15 +883,15 @@ static void copy_tick(struct mq_policy *mq)
 }
 
 static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
-		  bool can_migrate, bool discarded_oblock, struct bio *bio,
-		  struct policy_result *result)
+		  bool can_block, bool can_migrate, bool discarded_oblock,
+		  struct bio *bio, struct policy_result *result)
 {
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	result->op = POLICY_MISS;
 
-	if (can_migrate)
+	if (can_block)
 		mutex_lock(&mq->lock);
 	else
 		if (!mutex_trylock(&mq->lock))

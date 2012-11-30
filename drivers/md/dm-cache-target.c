@@ -1020,8 +1020,13 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	if (r > 0)
 		return;
 
-	policy_map(cache->policy, block, can_migrate, discarded_block,
-		   bio, &lookup_result);
+	r = policy_map(cache->policy, block, true, can_migrate, discarded_block,
+		       bio, &lookup_result);
+
+	if (r == -EWOULDBLOCK)
+		/* migration has been denied */
+		lookup_result.op = POLICY_MISS;
+
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ?
@@ -1950,14 +1955,16 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 
 	discarded_block = is_discarded_oblock(cache, block);
 
-	r = policy_map(cache->policy, block, can_migrate, discarded_block,
+	r = policy_map(cache->policy, block, false, can_migrate, discarded_block,
 		       bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
 		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
+	} else if (r) {
+		DMERR("Bug in policy\n");
+		bio_io_error(bio);
+		return DM_MAPIO_SUBMITTED;
 	}
-
-	BUG_ON(r);
 
 	switch (lookup_result.op) {
 	case POLICY_HIT:

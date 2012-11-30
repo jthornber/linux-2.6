@@ -1273,7 +1273,7 @@ static int map(struct policy *p, dm_oblock_t oblock,
 
 /* Public interface (see dm-cache-policy.h */
 static int basic_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
-		     bool can_migrate, bool discarded_oblock,
+		     bool can_block, bool can_migrate, bool discarded_oblock,
 		     struct bio *bio, struct policy_result *result)
 {
 	int r;
@@ -1281,7 +1281,7 @@ static int basic_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 
 	result->op = POLICY_MISS;
 
-	if (can_migrate)
+	if (can_block)
 		mutex_lock(&p->lock);
 
 	else if (!mutex_trylock(&p->lock))
@@ -1449,7 +1449,7 @@ static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn,
 			reads = nr++;
 
 			if (IS_FILO_MRU(p))
-				reads = p->cache_size - reads - 1;
+				reads = from_cblock(p->cache_size) - reads - 1;
 
 			writes = 0;
 		}

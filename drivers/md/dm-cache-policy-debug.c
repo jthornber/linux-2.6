@@ -425,7 +425,7 @@ static void log_stats(struct policy *p)
 
 /* Public interface (see dm-cache-policy.h */
 static int debug_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
-		     bool can_migrate, bool discarded_oblock,
+		     bool can_block, bool can_migrate, bool discarded_oblock,
 		     struct bio *bio, struct policy_result *result)
 {
 	int r;
@@ -438,7 +438,8 @@ static int debug_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	else if (!mutex_trylock(&p->lock))
 		return -EWOULDBLOCK;
 
-	r = policy_map(p->debug_policy, oblock, can_migrate, discarded_oblock, bio, result);
+	r = policy_map(p->debug_policy, oblock, can_block, can_migrate,
+		       discarded_oblock, bio, result);
 	e = analyse_map_result(p, oblock, r, result);
 	log_stats(p);
 	mutex_unlock(&p->lock);
