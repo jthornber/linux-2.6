@@ -1507,7 +1507,7 @@ static void basic_force_mapping(struct dm_cache_policy *pe,
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
 {
 	/* FIXME: lock mutex, not sure we can block here. */
-	return from_cblock(to_policy(pe)->nr_cblocks_allocated);
+	return to_policy(pe)->nr_cblocks_allocated;
 }
 
 /* ctr/message optional argument parsing. */
