@@ -36,7 +36,6 @@
 /* Cache input queue defines. */
 #define	READ_PROMOTE_THRESHOLD	1U	/* Minimum read cache in queue promote per element threshold. */
 #define	WRITE_PROMOTE_THRESHOLD	4U	/* Minimum write cache in queue promote per element threshold. */
-#define DISCARDED_PROMOTE_THRESHOLD 1U	/* The target has discarded the block -> lowest promotion prioritiy. */
 
 /* Default "multiqueue" queue timeout. */
 #define	MQ_QUEUE_TMO_DEFAULT	(5UL * HZ)	/* Default seconds queue maximum lifetime per entry. FIXME: dynamic? */
@@ -73,8 +72,8 @@ static void iot_init(struct io_tracker *t, int sequential_threshold, int random_
 {
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_sectors = t->nr_rand_samples = t->next_start_osector = 0;
-	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
-	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : RANDOM_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold < 0 ? SEQUENTIAL_THRESHOLD_DEFAULT : sequential_threshold;
+	t->thresholds[PATTERN_RANDOM] = random_threshold < 0 ? RANDOM_THRESHOLD_DEFAULT : random_threshold;
 }
 
 static bool iot_sequential_pattern(struct io_tracker *t)
