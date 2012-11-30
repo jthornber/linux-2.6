@@ -194,6 +194,29 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return 0;
 }
 
+static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t *cblock)
+{
+	int r;
+	struct policy *p = to_policy(pe);
+	struct wb_cache_entry *e;
+
+	if (!mutex_trylock(&p->lock))
+		return -EWOULDBLOCK;
+
+	e = lookup_cache_entry(p, oblock);
+	if (e) {
+		*cblock = e->cblock;
+		r = 0;
+
+	} else
+		r = -ENOENT;
+
+	mutex_unlock(&p->lock);
+
+	return r;
+}
+
+
 static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
 {
 	struct policy *p = to_policy(pe);
@@ -377,6 +400,7 @@ static void init_policy_functions(struct policy *p)
 {
 	p->policy.destroy = wb_destroy;
 	p->policy.map = wb_map;
+	p->policy.lookup = wb_lookup;
 	p->policy.set_dirty = wb_set_dirty;
 	p->policy.clear_dirty = wb_clear_dirty;
 	p->policy.load_mapping = wb_load_mapping;

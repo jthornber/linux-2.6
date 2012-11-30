@@ -447,6 +447,41 @@ static int debug_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	return r;
 }
 
+static int debug_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t *cblock)
+{
+	int r;
+	struct policy *p = to_policy(pe);
+	struct debug_entry *ec = NULL;
+
+	if (!mutex_trylock(&p->lock))
+		return -EWOULDBLOCK;
+
+	r = policy_lookup(p->debug_policy, oblock, cblock);
+	if (!r)
+		ec = lookup_debug_entry_by_cache_block(p, *cblock);
+
+	mutex_unlock(&p->lock);
+
+	if (r) {
+		switch (r) {
+		case -ENOENT:
+		case -EWOULDBLOCK:
+			break;
+
+		default:
+			DMWARN("Invalid lookup code %u", r);
+		}
+
+	} else if (ec) {
+		if (*cblock != ec->cblock)
+			DMWARN("lookup returned invalid cblock=%llu; %llu expected!", (LLU) from_cblock(*cblock), (LLU) from_cblock(ec->cblock));
+
+	} else
+			DMWARN("lookup returned non-existing cblock=%llu!", (LLU) from_cblock(*cblock));
+
+	return r;
+}
+
 static void debug_destroy(struct dm_cache_policy *pe)
 {
 	struct policy *p = to_policy(pe);
@@ -620,6 +655,7 @@ static void init_policy_functions(struct policy *p)
 {
 	p->policy.destroy = debug_destroy;
 	p->policy.map = debug_map;
+	p->policy.lookup = debug_lookup;
 	p->policy.load_mapping = debug_load_mapping;
 	p->policy.walk_mappings = debug_walk_mappings;
 	p->policy.remove_mapping = debug_remove_mapping;

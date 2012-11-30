@@ -1308,10 +1308,10 @@ static int basic_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cbloc
 	e = lookup_cache_entry(p, oblock);
 	if (e) {
 		*cblock = e->cblock;
-		r = 1;
+		r = 0;
 
 	} else
-		r = 0;
+		r = -ENOENT;
 
 	mutex_unlock(&p->lock);
 

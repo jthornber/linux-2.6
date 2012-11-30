@@ -844,18 +844,6 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 	return r;
 }
 
-static int lookup(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
-{
-	struct entry *e = hash_lookup(mq, oblock);
-
-	if (e && e->in_cache) {
-		*cblock = e->cblock;
-		return 1;
-	}
-
-	return 0;
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -917,11 +905,19 @@ static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t 
 {
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
+	struct entry *e;
 
 	if (!mutex_trylock(&mq->lock))
 		return -EWOULDBLOCK;
 
-	r = lookup(mq, oblock, cblock);
+	e = hash_lookup(mq, oblock);
+	if (e && e->in_cache) {
+		*cblock = e->cblock;
+		r = 0;
+
+	} else
+		r = -ENOENT;
+
 	mutex_unlock(&mq->lock);
 
 	return r;

@@ -1909,7 +1909,7 @@ static unsigned cache_get_num_duplicates(struct dm_target *ti,
 	if (r < 0)
 		return 2;	/* assume the worst */
 
-	return (r && !is_dirty(cache, cblock)) ? 2 : 1;
+	return (!r && !is_dirty(cache, cblock)) ? 2 : 1;
 #else
 	// testing the failure case
 	return 2;
