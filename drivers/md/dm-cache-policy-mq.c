@@ -49,8 +49,8 @@ static void free_bitset(unsigned long *bits)
  * The two thresholds are hard coded for now.  I'd like them to be
  * accessible through a sysfs interface, rather than via the target line.
  */
-#define RANDOM_THRESHOLD 4
-#define SEQUENTIAL_THRESHOLD 512
+#define RANDOM_THRESHOLD_DEFAULT 4
+#define SEQUENTIAL_THRESHOLD_DEFAULT 512
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -62,15 +62,19 @@ struct io_tracker {
 
 	unsigned nr_seq_samples;
 	unsigned nr_rand_samples;
+	int thresholds[2];
 
 	dm_oblock_t last_end_oblock;
 };
 
-static void iot_init(struct io_tracker *t)
+static void iot_init(struct io_tracker *t,
+		     int sequential_threshold, int random_threshold)
 {
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : RANDOM_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
@@ -104,14 +108,14 @@ static void iot_check_for_pattern_switch(struct io_tracker *t)
 {
 	switch (t->pattern) {
 	case PATTERN_SEQUENTIAL:
-		if (t->nr_rand_samples >= RANDOM_THRESHOLD) {
+		if (t->nr_rand_samples >= t->thresholds[PATTERN_RANDOM]) {
 			t->pattern = PATTERN_RANDOM;
 			t->nr_seq_samples = t->nr_rand_samples = 0;
 		}
 		break;
 
 	case PATTERN_RANDOM:
-		if (t->nr_seq_samples >= SEQUENTIAL_THRESHOLD) {
+		if (t->nr_seq_samples >= t->thresholds[PATTERN_SEQUENTIAL]) {
 			t->pattern = PATTERN_SEQUENTIAL;
 			t->nr_seq_samples = t->nr_rand_samples = 0;
 		}
@@ -292,6 +296,8 @@ struct mq_policy {
 	 */
 	unsigned long *allocation_bitset;
 	unsigned nr_cblocks_allocated;
+	unsigned find_free_nr_words;
+	unsigned find_free_last_word;
 
 	/*
 	 * The hash table allows us to quickly find an entry by origin
@@ -300,6 +306,8 @@ struct mq_policy {
 	unsigned nr_buckets;
 	dm_block_t hash_bits;
 	struct hlist_head *table;
+
+	int threshold_args[2];
 };
 
 /*----------------------------------------------------------------*/
@@ -325,18 +333,19 @@ static void free_entries(struct mq_policy *mq)
 
 static int alloc_entries(struct mq_policy *mq, unsigned elts)
 {
-	unsigned u;
+	unsigned u = mq->nr_entries;
 
 	INIT_LIST_HEAD(&mq->free);
 	mq->nr_entries_allocated = 0;
 
-	for (u = 0; u < mq->nr_entries; u++) {
-		struct entry *e = kmem_cache_alloc(mq_entry_cache, GFP_KERNEL);
+	while (u--) {
+		struct entry *e = kmem_cache_zalloc(mq_entry_cache, GFP_KERNEL);
 
 		if (!e) {
 			free_entries(mq);
 			return -ENOMEM;
 		}
+
 
 		list_add(&e->list, &mq->free);
 	}
@@ -432,32 +441,40 @@ static bool any_free_cblocks(struct mq_policy *mq)
  * Fills result out with a cache block that isn't in use, or return
  * -ENOSPC.  This does _not_ mark the cblock as allocated, the caller is
  * reponsible for that.
- *
- * FIXME: this is slow, we can't leave it like this.
  */
-static int find_free_cblock(struct mq_policy *mq, dm_cblock_t *result)
+static int __find_free_cblock(struct mq_policy *mq, unsigned begin, unsigned end,
+			      dm_cblock_t *result, unsigned *last_word)
 {
 	int r = -ENOSPC;
-	unsigned nr_words = dm_div_up(from_cblock(mq->cache_size), BITS_PER_LONG);
-	unsigned w, b;
+	unsigned w;
 
-	if (!any_free_cblocks(mq))
-		return -ENOSPC;
-
-	for (w = 0; w < nr_words; w++) {
+	for (w = begin; w < end; w++) {
 		/*
 		 * ffz is undefined if no zero exists
 		 */
 		if (mq->allocation_bitset[w] != ~0UL) {
-			b = ffz(mq->allocation_bitset[w]);
-
-			*result = to_cblock((w * BITS_PER_LONG) + b);
+			*last_word = w;
+			*result = to_cblock((w * BITS_PER_LONG) + ffz(mq->allocation_bitset[w]));
 			if (from_cblock(*result) < from_cblock(mq->cache_size))
 				r = 0;
 
 			break;
 		}
 	}
+
+	return r;
+}
+
+static int find_free_cblock(struct mq_policy *mq, dm_cblock_t *result)
+{
+	int r;
+
+	if (!any_free_cblocks(mq))
+		return -ENOSPC;
+
+	r = __find_free_cblock(mq, mq->find_free_last_word, mq->find_free_nr_words, result, &mq->find_free_last_word);
+	if (r == -ENOSPC && mq->find_free_last_word)
+		r = __find_free_cblock(mq, 0, mq->find_free_last_word, result, &mq->find_free_last_word);
 
 	return r;
 }
@@ -825,6 +842,7 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 static int lookup(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
 {
 	struct entry *e = hash_lookup(mq, oblock);
+
 	if (e && e->in_cache) {
 		*cblock = e->cblock;
 		return 1;
@@ -870,6 +888,8 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 {
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
+
+	result->op = POLICY_MISS;
 
 	if (can_migrate)
 		mutex_lock(&mq->lock);
@@ -1004,6 +1024,103 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
+static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr_arg)
+{
+	bool seq;
+	unsigned long tmp;
+
+	if (!strcasecmp(argv[0], "sequential_threshold"))
+		seq = true;
+	else if (!strcasecmp(argv[0], "random_threshold"))
+		seq = false;
+	else
+		return -EINVAL;
+
+	if (kstrtoul(argv[1], 10, &tmp))
+		return -EINVAL;
+
+	mq->tracker.thresholds[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+
+	if (set_ctr_arg)
+		mq->threshold_args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+
+	return 0;
+}
+
+static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
+{
+	int r = -EINVAL;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	if (argc != 3)
+		return -EINVAL;
+
+	if (!strcasecmp(argv[0], "set_config"))
+		r = process_config_option(mq, argv + 1, false);
+
+	return r;
+}
+
+static int mq_status(struct dm_cache_policy *p, status_type_t type,
+		     unsigned status_flags, char *result, unsigned maxlen)
+{
+	ssize_t sz = 0;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		DMEMIT(" %u %u",
+		       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
+		       mq->tracker.thresholds[PATTERN_RANDOM]);
+		break;
+
+	case STATUSTYPE_TABLE:
+		if (mq->threshold_args[PATTERN_SEQUENTIAL] > -1)
+			DMEMIT(" sequential_threshold %u", mq->threshold_args[PATTERN_SEQUENTIAL]);
+
+		if (mq->threshold_args[PATTERN_RANDOM] > -1)
+			DMEMIT(" random_threshold %u", mq->threshold_args[PATTERN_RANDOM]);
+	}
+
+	return 0;
+}
+
+static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
+{
+	int r;
+	unsigned u;
+
+	mq->threshold_args[0] = mq->threshold_args[1] = -1;
+
+	if (!argc)
+		return 0;
+
+	if (argc != 2 && argc != 4)
+		return -EINVAL;
+
+	for (r = u = 0; u < argc && !r; u += 2)
+		r = process_config_option(mq, argv + u, true);
+
+	return r;
+}
+
+/* Init the policy plugin interface function pointers. */
+static void init_policy_functions(struct mq_policy *mq)
+{
+	mq->policy.destroy = mq_destroy;
+	mq->policy.map = mq_map;
+	mq->policy.lookup = mq_lookup;
+	mq->policy.load_mapping = mq_load_mapping;
+	mq->policy.walk_mappings = mq_walk_mappings;
+	mq->policy.remove_mapping = mq_remove_mapping;
+	mq->policy.writeback_work = NULL;
+	mq->policy.force_mapping = mq_force_mapping;
+	mq->policy.residency = mq_residency;
+	mq->policy.tick = mq_tick;
+	mq->policy.status = mq_status;
+	mq->policy.message = mq_message;
+}
+
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
 					 sector_t block_size,
@@ -1015,18 +1132,14 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	if (!mq)
 		return NULL;
 
-	mq->policy.destroy = mq_destroy;
-	mq->policy.map = mq_map;
-	mq->policy.lookup = mq_lookup;
-	mq->policy.load_mapping = mq_load_mapping;
-	mq->policy.walk_mappings = mq_walk_mappings;
-	mq->policy.remove_mapping = mq_remove_mapping;
-	mq->policy.writeback_work = NULL;
-	mq->policy.force_mapping = mq_force_mapping;
-	mq->policy.residency = mq_residency;
-	mq->policy.tick = mq_tick;
+	init_policy_functions(mq);
 
-	iot_init(&mq->tracker);
+	/* Need to do that before iot_init(). */
+	r = process_policy_args(mq, argc, argv);
+	if (r)
+		goto bad_free_policy;
+
+	iot_init(&mq->tracker, mq->threshold_args[PATTERN_SEQUENTIAL], mq->threshold_args[PATTERN_RANDOM]);
 
 	mq->cache_size = cache_size;
 	mq->tick_protected = 0;
@@ -1036,6 +1149,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->promote_threshold = 0;
 	mutex_init(&mq->lock);
 	spin_lock_init(&mq->tick_lock);
+	mq->find_free_nr_words = dm_div_up(from_cblock(mq->cache_size), BITS_PER_LONG);
+	mq->find_free_last_word = 0;
 
 	queue_init(&mq->pre_cache);
 	queue_init(&mq->cache);
@@ -1065,6 +1180,7 @@ bad_alloc_bitset:
 	kfree(mq->table);
 bad_alloc_table:
 	free_entries(mq);
+bad_free_policy:
 bad_cache_alloc:
 	kfree(mq);
 
@@ -1126,5 +1242,7 @@ module_exit(mq_exit);
 MODULE_AUTHOR("Joe Thornber");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("mq cache policy");
+
+MODULE_ALIAS("dm-cache-default");
 
 /*----------------------------------------------------------------*/

@@ -183,6 +183,7 @@ struct cache {
 	atomic_t copies_avoided;
 	atomic_t cache_cell_clash;
 	atomic_t commit_count;
+	atomic_t discard_count;
 };
 
 struct per_req_data {
@@ -396,6 +397,8 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 static void set_discard(struct cache *cache, dm_dblock_t b)
 {
 	unsigned long flags;
+
+	atomic_inc(&cache->discard_count);
 
 	spin_lock_irqsave(&cache->lock, flags);
 	set_bit(from_dblock(b), cache->discard_bitset);
@@ -1392,6 +1395,7 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&cache->copies_avoided));
 	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->cache_cell_clash));
 	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->commit_count));
+	pr_alert("discards:\t\t%u\n", (unsigned) atomic_read(&cache->discard_count));
 
 	destroy(cache);
 }
@@ -1846,6 +1850,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	atomic_set(&cache->copies_avoided, 0);
 	atomic_set(&cache->cache_cell_clash, 0);
 	atomic_set(&cache->commit_count, 0);
+	atomic_set(&cache->discard_count, 0);
 
 	*result = cache;
 	return 0;
@@ -2271,7 +2276,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
 
 		DMEMIT("1 %s ", cache->features.write_through ?
-		       "write-through" : "write-back");
+		       "writethrough" : "writeback");
 
 		DMEMIT("%s %u ", dm_cache_policy_get_name(cache->policy),
 		       cache->policy_nr_args);
@@ -2286,7 +2291,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 static int process_config_option(struct cache *cache, char **argv)
 {
-	if (strcmp(argv[1], "migration_threshold")) {
+	if (!strcasecmp(argv[1], "migration_threshold")) {
 		unsigned long tmp;
 
 		if (kstrtoul(argv[2], 10, &tmp))
@@ -2308,16 +2313,11 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 	if (argc != 3)
 		return -EINVAL;
 
-	if (strcmp(argv[0], "set_config")) {
-		r = process_config_option(cache, argv);
-		if (r < 0)
-			goto bad;
-	}
+	r = !strcasecmp(argv[0], "set_config") ? process_config_option(cache, argv) : 1;
 
-	if (r)
+	if (r == 1) /* Message is for the target -> hand over to policy plugin. */
 		r = policy_message(cache->policy, argc, argv);
 
-bad:
 	return r;
 }
 
