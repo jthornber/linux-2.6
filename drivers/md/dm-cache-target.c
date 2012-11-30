@@ -1948,7 +1948,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	cell = dm_bio_prison_alloc_cell(cache->prison, GFP_ATOMIC);
+	cell = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
 	r = bio_detain(cache, block, bio, cell,
 		       (cell_free_fn) dm_bio_prison_free_cell,
 		       cache->prison, &cell);
