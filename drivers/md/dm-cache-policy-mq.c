@@ -581,12 +581,15 @@ static void check_generation(struct mq_policy *mq)
 			nr++;
 			total += e->hit_count;
 
-			if (++count > MAX_TO_AVERAGE)
+			if (++count >= MAX_TO_AVERAGE)
 				break;
 		}
 
 		mq->promote_threshold = nr ? total / nr : 1;
-		pr_alert("promote threshold = %u\n", mq->promote_threshold);
+		if (mq->promote_threshold * nr < total)
+			mq->promote_threshold++;
+
+		pr_alert("promote threshold = %u, nr = %u\n", mq->promote_threshold, nr);
 	}
 }
 
@@ -605,7 +608,7 @@ static void requeue_and_update_tick(struct mq_policy *mq, struct entry *e)
 
 	/* generation adjustment, to stop the counts increasing forever. */
 	/* FIXME: divide? */
-	e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation);
+	//e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation);
 	e->generation = mq->generation;
 
 	del(mq, e);
