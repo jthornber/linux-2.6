@@ -275,16 +275,33 @@ static struct dm_cache_migration *prealloc_get_migration(struct prealloc *p)
 	return mg;
 }
 
-static struct dm_bio_prison_cell **prealloc_get_cell(struct prealloc *p)
+static struct dm_bio_prison_cell *prealloc_get_cell(struct prealloc *p)
 {
-	if (p->cell1)
-		return &p->cell1;
+	struct dm_bio_prison_cell *r = NULL;
 
-	if (p->cell2)
-		return &p->cell2;
+	if (p->cell1) {
+		r = p->cell1;
+		p->cell1 = NULL;
 
-	BUG();
-	return NULL;
+	} else if (p->cell2) {
+		r = p->cell2;
+		p->cell2 = NULL;
+	} else
+		BUG();
+
+	return r;
+}
+
+static void prealloc_put_cell(struct prealloc *p, struct dm_bio_prison_cell *cell)
+{
+	if (!p->cell2)
+		p->cell2 = cell;
+
+	else if (!p->cell1)
+		p->cell1 = cell;
+
+	else
+		BUG();
 }
 
 /*----------------------------------------------------------------*/
@@ -296,63 +313,44 @@ static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
 	key->block = from_oblock(oblock);
 }
 
-// FIXME: refactor these three
-static int bio_detain_(struct cache *cache,
-		       dm_oblock_t oblock, struct bio *bio,
-		       gfp_t gfp,
-		       struct dm_bio_prison_cell **result)
-{
-	int r;
-	struct dm_cell_key key;
-	struct dm_bio_prison_cell *cell;
+/*
+ * The caller hands in a preallocated cell, and a free function for it.
+ * The cell will be freed if there's an error, or if it wasn't used because
+ * a cell with that key already exists.
+ */
+typedef void (*cell_free_fn)(void *context, struct dm_bio_prison_cell *cell);
 
-	cell = dm_bio_prison_alloc_cell(cache->prison, gfp);
-
-	build_key(oblock, &key);
-	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
-
-	if (r)
-		dm_bio_prison_free_cell(cache->prison, cell);
-
-	return r;
-}
-
-static int bio_detain(struct cache *cache, struct prealloc *structs,
-		      dm_oblock_t oblock, struct bio *bio,
+static int bio_detain(struct cache *cache, dm_oblock_t oblock,
+		      struct bio *bio, struct dm_bio_prison_cell *cell,
+		      cell_free_fn free_fn, void *free_context,
 		      struct dm_bio_prison_cell **result)
 {
 	int r;
 	struct dm_cell_key key;
-	struct dm_bio_prison_cell **cell;
-
-	cell = prealloc_get_cell(structs);
 
 	build_key(oblock, &key);
-	r = dm_bio_detain(cache->prison, &key, bio, *cell, result);
-
-	if (!r)
-		/* cell was used */
-		*cell = NULL;
+	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
+	if (r)
+		free_fn(free_context, cell);
 
 	return r;
 }
 
 static int get_cell(struct cache *cache,
-		    struct prealloc *structs,
 		    dm_oblock_t oblock,
+		    struct prealloc *structs,
 		    struct dm_bio_prison_cell **result)
 {
 	int r;
 	struct dm_cell_key key;
-	struct dm_bio_prison_cell **cell;
+	struct dm_bio_prison_cell *cell;
 
 	cell = prealloc_get_cell(structs);
 
 	build_key(oblock, &key);
-	r = dm_get_cell(cache->prison, &key, *cell, result);
-
-	if (!r)
-		*cell = NULL;
+	r = dm_get_cell(cache->prison, &key, cell, result);
+	if (r)
+		prealloc_put_cell(structs, cell);
 
 	return r;
 }
@@ -1007,7 +1005,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	int r;
 	bool release_cell = true;
 	dm_oblock_t block = get_bio_block(cache, bio);
-	struct dm_bio_prison_cell *old_ocell, *new_ocell;
+	struct dm_bio_prison_cell *cell, *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct per_req_data *pr = get_pr_data(bio);
 	bool can_migrate = may_migrate(cache);
@@ -1016,7 +1014,10 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	r = bio_detain(cache, structs, block, bio, &new_ocell);
+	cell = prealloc_get_cell(structs);
+	r = bio_detain(cache, block, bio, cell,
+		       (cell_free_fn) prealloc_put_cell,
+		       structs, &new_ocell);
 	if (r > 0)
 		return;
 
@@ -1070,8 +1071,10 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		break;
 
 	case POLICY_REPLACE:
-		r = bio_detain(cache, structs, lookup_result.old_oblock,
-			       bio, &old_ocell);
+		cell = prealloc_get_cell(structs);
+		r = bio_detain(cache, block, bio, cell,
+			       (cell_free_fn) prealloc_put_cell,
+			       structs, &old_ocell);
 		if (r > 0) {
 			/*
 			 * We have to be careful to avoid lock inversion of
@@ -1196,7 +1199,7 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 		if (r)
 			break;
 
-		r = get_cell(cache, &structs, oblock, &old_ocell);
+		r = get_cell(cache, oblock, &structs, &old_ocell);
 		if (r) {
 			policy_set_dirty(cache->policy, oblock);
 			break;
@@ -1945,7 +1948,10 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	r = bio_detain_(cache, block, bio, GFP_ATOMIC, &cell);
+	cell = dm_bio_prison_alloc_cell(cache->prison, GFP_ATOMIC);
+	r = bio_detain(cache, block, bio, cell,
+		       (cell_free_fn) dm_bio_prison_free_cell,
+		       cache->prison, &cell);
 	if (r) {
 		if (r < 0)
 			defer_bio(cache, bio);
