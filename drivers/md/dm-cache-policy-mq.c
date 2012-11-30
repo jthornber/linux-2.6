@@ -566,7 +566,7 @@ static bool updated_this_tick(struct mq_policy *mq, struct entry *e)
 
 static void check_generation(struct mq_policy *mq)
 {
-	unsigned total = 0, nr = 0, count = 0;
+	unsigned total = 0, nr = 0, count = 0, level;
 	struct list_head *head;
 	struct entry *e;
 
@@ -576,13 +576,15 @@ static void check_generation(struct mq_policy *mq)
 		mq->hit_count = 0;
 		mq->generation++;
 
-		head = mq->cache.qs;
-		list_for_each_entry (e, head, list) {
-			nr++;
-			total += e->hit_count;
+		for (level = 0; level < NR_QUEUE_LEVELS && count < MAX_TO_AVERAGE; level++) {
+			head = mq->cache.qs + level;
+			list_for_each_entry (e, head, list) {
+				nr++;
+				total += e->hit_count;
 
-			if (++count >= MAX_TO_AVERAGE)
-				break;
+				if (++count >= MAX_TO_AVERAGE)
+					break;
+			}
 		}
 
 		mq->promote_threshold = nr ? total / nr : 1;
@@ -655,8 +657,8 @@ static dm_cblock_t demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
  * haven't been dirtied.
  */
 #define DISCARDED_PROMOTE_THRESHOLD 1
-#define READ_PROMOTE_THRESHOLD 1
-#define WRITE_PROMOTE_THRESHOLD 4
+#define READ_PROMOTE_THRESHOLD 0
+#define WRITE_PROMOTE_THRESHOLD 0
 
 static unsigned adjusted_promote_threshold(struct mq_policy *mq,
 					   bool discarded_oblock, int data_dir)
