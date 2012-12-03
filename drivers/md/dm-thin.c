@@ -2687,10 +2687,13 @@ static int thin_endio(struct dm_target *ti, struct bio *bio, int err)
 	if (h->all_io_entry) {
 		INIT_LIST_HEAD(&work);
 		dm_deferred_entry_dec(h->all_io_entry, &work);
-		spin_lock_irqsave(&pool->lock, flags);
-		list_for_each_entry_safe(m, tmp, &work, list)
-			list_add(&m->list, &pool->prepared_discards);
-		spin_unlock_irqrestore(&pool->lock, flags);
+		if (!list_empty(&work)) {
+			spin_lock_irqsave(&pool->lock, flags);
+			list_for_each_entry_safe(m, tmp, &work, list)
+				list_add(&m->list, &pool->prepared_discards);
+			spin_unlock_irqrestore(&pool->lock, flags);
+			wake_worker(pool);
+		}
 	}
 
 	return 0;
