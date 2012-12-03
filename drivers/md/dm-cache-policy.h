@@ -135,7 +135,7 @@ struct dm_cache_policy {
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
 
 	/*
-	 * oblock must be a mapped block.  Can block.
+	 * oblock must be a mapped block.  Must not block.
 	 */
 	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
