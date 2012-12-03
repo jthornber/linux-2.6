@@ -230,22 +230,20 @@ static void wake_worker(struct cache *cache)
 
 static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 {
-	// FIXME: given we're doing this, can we get rid of the mempools?
-
 	if (!p->mg) {
-		p->mg = mempool_alloc(cache->migration_pool, GFP_ATOMIC);
+		p->mg = mempool_alloc(cache->migration_pool, GFP_NOWAIT);
 		if (!p->mg)
 			return -ENOMEM;
 	}
 
 	if (!p->cell1) {
-		p->cell1 = dm_bio_prison_alloc_cell(cache->prison, GFP_ATOMIC);
+		p->cell1 = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
 		if (!p->cell1)
 			return -ENOMEM;
 	}
 
 	if (!p->cell2) {
-		p->cell2 = dm_bio_prison_alloc_cell(cache->prison, GFP_ATOMIC);
+		p->cell2 = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
 		if (!p->cell2)
 			return -ENOMEM;
 	}
