@@ -592,12 +592,15 @@ static void free_migration(struct dm_cache_migration *mg)
 static void inc_nr_migrations(struct cache *cache)
 {
 	atomic_inc(&cache->nr_migrations);
-	wake_up(&cache->migration_wait); /* FIXME: why is there a wakeup here? */
 }
 
 static void dec_nr_migrations(struct cache *cache)
 {
 	atomic_dec(&cache->nr_migrations);
+
+	/*
+	 * Wake the worker in case we're suspending the target.
+	 */
 	wake_up(&cache->migration_wait);
 }
 
