@@ -994,6 +994,18 @@ static bool is_writethrough_io(struct cache *cache, struct bio *bio,
 		cache->features.write_through && !is_dirty(cache, cblock);
 }
 
+static void inc_hit_counter(struct cache *cache, struct bio *bio)
+{
+	atomic_inc(bio_data_dir(bio) == READ ?
+		   &cache->read_hit : &cache->write_hit);
+}
+
+static void inc_miss_counter(struct cache *cache, struct bio *bio)
+{
+	atomic_inc(bio_data_dir(bio) == READ ?
+		   &cache->read_miss : &cache->write_miss);
+}
+
 static void process_bio(struct cache *cache, struct prealloc *structs,
 			struct bio *bio)
 {
@@ -1025,8 +1037,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		atomic_inc(bio_data_dir(bio) == READ ?
-			   &cache->read_hit : &cache->write_hit);
+		inc_hit_counter(cache, bio);
 		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
@@ -1043,8 +1054,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		break;
 
 	case POLICY_MISS:
-		atomic_inc(bio_data_dir(bio) == READ ?
-			   &cache->read_miss : &cache->write_miss);
+		inc_miss_counter(cache, bio);
 		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		if (pr->req_nr != 0) {
@@ -1186,7 +1196,7 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 
 	memset(&structs, 0, sizeof(structs));
 
-	while (may_migrate(cache)) {
+	while (spare_migration_bandwidth(cache)) {
 		if (prealloc_data_structs(cache, &structs))
 			break;
 
@@ -1970,8 +1980,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		atomic_inc(bio_data_dir(bio) == READ ?
-			   &cache->read_hit : &cache->write_hit);
+		inc_hit_counter(cache, bio);
 		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
@@ -1990,8 +1999,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		break;
 
 	case POLICY_MISS:
-		atomic_inc(bio_data_dir(bio) == READ ?
-			   &cache->read_miss : &cache->write_miss);
+		inc_miss_counter(cache, bio);
 		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 		if (pr->req_nr != 0) {
