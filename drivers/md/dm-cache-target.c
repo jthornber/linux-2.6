@@ -710,14 +710,8 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			list_add_tail(&mg->list, &cache->quiesced_migrations);
 			spin_unlock_irqrestore(&cache->lock, flags);
 
-			// FIXME: this mapping no longer in policy so can't call.
-			clear_dirty(cache, mg->old_oblock, mg->cblock);
-
-		} else {
-			// FIXME: this mapping no longer in policy so can't call.
-			clear_dirty(cache, mg->old_oblock, mg->cblock);
+		} else
 			cleanup_migration(mg);
-		}
 
 	} else {
 		cell_defer(cache, mg->new_ocell, true);
