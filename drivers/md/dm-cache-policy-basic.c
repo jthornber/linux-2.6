@@ -48,8 +48,8 @@
  * The io_tracker tries to spot when the io is in
  * one of these sequential modes.
  */
-#define RANDOM_THRESHOLD_DEFAULT 1
-#define SEQUENTIAL_THRESHOLD_DEFAULT 2
+#define RANDOM_THRESHOLD_DEFAULT 4
+#define SEQUENTIAL_THRESHOLD_DEFAULT 512 
 
 static struct kmem_cache *basic_entry_cache;
 static struct kmem_cache *track_entry_cache;
@@ -1604,10 +1604,11 @@ static int basic_status(struct dm_cache_policy *pe, status_type_t type, unsigned
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT(" %lu %lu %lu",
+		DMEMIT(" %lu %lu %lu %u",
 		       p->tracker.thresholds[PATTERN_SEQUENTIAL],
 		       p->tracker.thresholds[PATTERN_RANDOM],
-		       p->queues.mq_tmo * 1000 / HZ);
+		       p->queues.mq_tmo * 1000 / HZ,
+		       p->queues.ctype);
 		break;
 
 	case STATUSTYPE_TABLE:
