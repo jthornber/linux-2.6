@@ -980,7 +980,7 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 	bio_endio(bio, 0);
 }
 
-static bool may_migrate(struct cache *cache)
+static bool spare_migration_bandwidth(struct cache *cache)
 {
 	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) *
 		cache->sectors_per_block;
@@ -1003,8 +1003,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	struct dm_bio_prison_cell *cell, *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct per_req_data *pr = get_pr_data(bio);
-	bool can_migrate = may_migrate(cache);
 	bool discarded_block = is_discarded_oblock(cache, block);
+	bool can_migrate = discarded_block || spare_migration_bandwidth(cache);
 
 	/*
 	 * Check to see if that block is currently migrating.
