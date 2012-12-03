@@ -88,6 +88,10 @@ typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
  * (ie. use container_of()).
  */
 struct dm_cache_policy {
+
+	// FIXME: make it clear which methods are optional, and which may
+	// block.
+
 	/*
 	 * Destroys this object.
 	 */
@@ -131,7 +135,7 @@ struct dm_cache_policy {
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
 
 	/*
-	 * oblock must be a mapped block.
+	 * oblock must be a mapped block.  Can block.
 	 */
 	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);

@@ -522,7 +522,7 @@ static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static void remap_to_origin_dirty(struct cache *cache, struct bio *bio,
+static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
 				  dm_oblock_t oblock)
 {
 	check_if_tick_bio_needed(cache, bio);
@@ -1035,7 +1035,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 			 */
 			pr->req_nr == 0 ?
 				remap_to_cache(cache, bio, lookup_result.cblock) :
-				remap_to_origin(cache, bio);
+				remap_to_origin_clear_discard(cache, bio, block);
 		} else
 			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
 
@@ -1054,7 +1054,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 			 */
 			bio_endio(bio, 0);
 		} else {
-			remap_to_origin_dirty(cache, bio, block);
+			remap_to_origin_clear_discard(cache, bio, block);
 			issue(cache, bio);
 		}
 		break;
@@ -1655,7 +1655,6 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 /*----------------------------------------------------------------*/
 
-// FIXME: get rid of this
 static struct kmem_cache *_migration_cache;
 
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
@@ -1929,7 +1928,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		 * the end of the origin device.  We don't cache these.
 		 * Just remap to the origin and carry on.
 		 */
-		remap_to_origin(cache, bio);
+		remap_to_origin_clear_discard(cache, bio, block);
 		return DM_MAPIO_REMAPPED;
 	}
 
@@ -1979,7 +1978,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 			 */
 			pr->req_nr == 0 ?
 				remap_to_cache(cache, bio, lookup_result.cblock) :
-				remap_to_origin(cache, bio);
+				remap_to_origin_clear_discard(cache, bio, block);
 			cell_defer(cache, cell, false);
 		} else {
 			// FIXME: policy_set_dirty can block!
@@ -1993,7 +1992,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 			   &cache->read_miss : &cache->write_miss);
 		pr->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		// FIXME: policy_set_dirty can block!
 		if (pr->req_nr != 0) {
 			/*
 			 * This is a duplicate writethrough io that is no
@@ -2003,7 +2001,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 			cell_defer(cache, cell, false);
 			return DM_MAPIO_SUBMITTED;
 		} else {
-			remap_to_origin_dirty(cache, bio, block);
+			remap_to_origin_clear_discard(cache, bio, block);
 			cell_defer(cache, cell, false);
 		}
 		break;
