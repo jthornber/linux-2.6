@@ -35,7 +35,7 @@ struct hash {
 
 struct policy {
 	struct dm_cache_policy policy;
-	struct mutex lock;
+	spinlock_t lock;
 
 	struct list_head free;
 	struct list_head clean;
@@ -174,13 +174,14 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 {
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
+	unsigned long flags;
 
 	result->op = POLICY_MISS;
 
 	if (can_block)
-		mutex_lock(&p->lock);
+		spin_lock_irqsave(&p->lock, flags);
 
-	else if (!mutex_trylock(&p->lock))
+	else if (!spin_trylock_irqsave(&p->lock, flags))
 		return -EWOULDBLOCK;
 
 	e = lookup_cache_entry(p, oblock);
@@ -190,7 +191,7 @@ static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 
 	}
 
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 
 	return 0;
 }
@@ -200,8 +201,9 @@ static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t
 	int r;
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
+	unsigned long flags;
 
-	if (!mutex_trylock(&p->lock))
+	if (!spin_trylock_irqsave(&p->lock, flags))
 		return -EWOULDBLOCK;
 
 	e = lookup_cache_entry(p, oblock);
@@ -212,7 +214,7 @@ static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t
 	} else
 		r = -ENOENT;
 
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 
 	return r;
 }
@@ -244,19 +246,21 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
 	struct policy *p = to_policy(pe);
+	unsigned long flags;
 
-	mutex_lock(&p->lock);
+	spin_lock_irqsave(&p->lock, flags);
 	__set_clear_dirty(pe, oblock, true);
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 }
 
 static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
 	struct policy *p = to_policy(pe);
+	unsigned long flags;
 
-	mutex_lock(&p->lock);
+	spin_lock_irqsave(&p->lock, flags);
 	__set_clear_dirty(pe, oblock, false);
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 }
 
 static void add_cache_entry(struct policy *p, struct wb_cache_entry *e)
@@ -313,13 +317,14 @@ static void wb_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 {
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
+	unsigned long flags;
 
-	mutex_lock(&p->lock);
+	spin_lock_irqsave(&p->lock, flags);
 	e = __wb_force_remove_mapping(p, oblock);
 	list_add_tail(&e->list, &p->free);
 	BUG_ON(!from_cblock(p->nr_cblocks_allocated));
 	p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) - 1);
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 }
 
 static void wb_force_mapping(struct dm_cache_policy *pe,
@@ -327,12 +332,13 @@ static void wb_force_mapping(struct dm_cache_policy *pe,
 {
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
+	unsigned long flags;
 
-	mutex_lock(&p->lock);
+	spin_lock_irqsave(&p->lock, flags);
 	e = __wb_force_remove_mapping(p, current_oblock);
 	e->oblock = oblock;
 	add_cache_entry(p, e);
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 }
 
 static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
@@ -357,8 +363,9 @@ static int wb_writeback_work(struct dm_cache_policy *pe,
 	int r = -ENOENT;
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
+	unsigned long flags;
 
-	mutex_lock(&p->lock);
+	spin_lock_irqsave(&p->lock, flags);
 
 	e = get_next_dirty_entry(p);
 	if (e) {
@@ -367,7 +374,7 @@ static int wb_writeback_work(struct dm_cache_policy *pe,
 		r = 0;
 	}
 
-	mutex_unlock(&p->lock);
+	spin_unlock_irqrestore(&p->lock, flags);
 
 	return r;
 }
@@ -435,7 +442,7 @@ static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 	INIT_LIST_HEAD(&p->dirty);
 
 	p->cache_size = cache_size;
-	mutex_init(&p->lock);
+	spin_lock_init(&p->lock);
 
 	/* Allocate cache entry structs and add them to free list. */
 	r = alloc_cache_blocks_with_hash(p, cache_size);
