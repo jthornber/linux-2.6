@@ -22,13 +22,19 @@
  * subsequently unlocked the bios become available.
  */
 struct dm_bio_prison;
-struct dm_bio_prison_cell;
 
 /* FIXME: this needs to be more abstract */
 struct dm_cell_key {
 	int virtual;
 	dm_thin_id dev;
 	dm_block_t block;
+};
+
+struct dm_bio_prison_cell {
+	struct hlist_node list;
+	struct dm_cell_key key;
+	struct bio *holder;
+	struct bio_list bios;
 };
 
 struct dm_bio_prison *dm_bio_prison_create(unsigned nr_cells);
