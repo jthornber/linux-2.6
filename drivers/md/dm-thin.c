@@ -1477,25 +1477,25 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			 * shared flag will be set in their case.
 			 */
 			thin_defer_bio(tc, bio);
-			r = DM_MAPIO_SUBMITTED;
-		} else {
-			build_virtual_key(tc->td, block, &key);
-			if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
-				break;
-
-			build_data_key(tc->td, result.block, &key);
-			if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
-				cell_defer_except_no_free(tc, &cell1);
-				break;
-			}
-
-			get_all_io_entry(tc->pool, bio);
-			cell_defer_except_no_free(tc, &cell2);
-			cell_defer_except_no_free(tc, &cell1);
-
-			remap(tc, bio, result.block);
-			r = DM_MAPIO_REMAPPED;
+			return DM_MAPIO_SUBMITTED;
 		}
+
+		build_virtual_key(tc->td, block, &key);
+		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
+			break;
+
+		build_data_key(tc->td, result.block, &key);
+		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
+			cell_defer_except_no_free(tc, &cell1);
+			break;
+		}
+
+		get_all_io_entry(tc->pool, bio);
+		cell_defer_except_no_free(tc, &cell2);
+		cell_defer_except_no_free(tc, &cell1);
+
+		remap(tc, bio, result.block);
+		r = DM_MAPIO_REMAPPED;
 		break;
 
 	case -ENODATA:
