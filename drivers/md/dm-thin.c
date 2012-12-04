@@ -1482,11 +1482,13 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 
 		build_virtual_key(tc->td, block, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
+			r = DM_MAPIO_SUBMITTED;
 			break;
 
 		build_data_key(tc->td, result.block, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
 			cell_defer_except_no_free(tc, &cell1);
+			r = DM_MAPIO_SUBMITTED;
 			break;
 		}
 
