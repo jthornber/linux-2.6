@@ -420,10 +420,18 @@ static int bio_triggers_commit(struct thin_c *tc, struct bio *bio)
 		dm_thin_changed_this_transaction(tc->td);
 }
 
+static void get_all_io_entry(struct pool *pool, struct bio *bio)
+{
+	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
+	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
+}
+
 static void issue(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
+
+	get_all_io_entry(pool, bio);
 
 	if (!bio_triggers_commit(tc, bio)) {
 		generic_make_request(bio);
@@ -1015,6 +1023,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 				spin_unlock_irqrestore(&pool->lock, flags);
 				wake_worker(pool);
 			}
+
 		} else {
 			/*
 			 * The DM core makes sure that the discard doesn't span
@@ -1403,12 +1412,11 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 
 static void thin_hook_bio(struct thin_c *tc, struct bio *bio)
 {
-	struct pool *pool = tc->pool;
 	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
-	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
+	h->all_io_entry = NULL;
 	h->overwrite_mapping = NULL;
 }
 
@@ -1460,6 +1468,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			thin_defer_bio(tc, bio);
 			r = DM_MAPIO_SUBMITTED;
 		} else {
+			get_all_io_entry(tc->pool, bio);
 			remap(tc, bio, result.block);
 			r = DM_MAPIO_REMAPPED;
 		}
