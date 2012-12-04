@@ -1710,7 +1710,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	if (r)
 		goto bad_free_policy;
 
-	iot_init(&p->tracker, p->threshold_args[PATTERN_SEQUENTIAL], p->threshold_args[RANDOM_SEQUENTIAL]);
+	iot_init(&p->tracker, p->threshold_args[PATTERN_SEQUENTIAL], p->threshold_args[PATTERN_RANDOM]);
 
 	p->cache_size = cache_size;
 	p->find_free_nr_words = bit_set_nr_words(from_cblock(cache_size));
