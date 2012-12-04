@@ -420,10 +420,18 @@ static int bio_triggers_commit(struct thin_c *tc, struct bio *bio)
 		dm_thin_changed_this_transaction(tc->td);
 }
 
+static void get_all_io_entry(struct pool *pool, struct bio *bio)
+{
+	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
+	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
+}
+
 static void issue(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
+
+	get_all_io_entry(pool, bio);
 
 	if (!bio_triggers_commit(tc, bio)) {
 		generic_make_request(bio);
@@ -570,14 +578,23 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
  */
 static void cell_defer_except(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
-	struct bio_list bios;
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
-	bio_list_init(&bios);
-
 	spin_lock_irqsave(&pool->lock, flags);
 	cell_release_no_holder(pool, cell, &pool->deferred_bios);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	wake_worker(pool);
+}
+
+static void cell_defer_except_no_free(struct thin_c *tc, struct dm_bio_prison_cell *cell)
+{
+	struct pool *pool = tc->pool;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+	dm_cell_release_no_holder(pool->prison, cell, &pool->deferred_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_worker(pool);
@@ -1015,6 +1032,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 				spin_unlock_irqrestore(&pool->lock, flags);
 				wake_worker(pool);
 			}
+
 		} else {
 			/*
 			 * The DM core makes sure that the discard doesn't span
@@ -1403,12 +1421,11 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 
 static void thin_hook_bio(struct thin_c *tc, struct bio *bio)
 {
-	struct pool *pool = tc->pool;
 	struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
-	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
+	h->all_io_entry = NULL;
 	h->overwrite_mapping = NULL;
 }
 
@@ -1422,6 +1439,8 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_device *td = tc->td;
 	struct dm_thin_lookup_result result;
+	struct dm_cell_key key;
+	struct dm_bio_prison_cell cell1, cell2, *cell_result;
 
 	thin_hook_bio(tc, bio);
 
@@ -1460,6 +1479,20 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			thin_defer_bio(tc, bio);
 			r = DM_MAPIO_SUBMITTED;
 		} else {
+			build_virtual_key(tc->td, block, &key);
+			if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
+				break;
+
+			build_data_key(tc->td, result.block, &key);
+			if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
+				cell_defer_except_no_free(tc, &cell1);
+				break;
+			}
+
+			get_all_io_entry(tc->pool, bio);
+			cell_defer_except_no_free(tc, &cell2);
+			cell_defer_except_no_free(tc, &cell1);
+
 			remap(tc, bio, result.block);
 			r = DM_MAPIO_REMAPPED;
 		}
