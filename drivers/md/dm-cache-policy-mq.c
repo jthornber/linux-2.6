@@ -1027,23 +1027,23 @@ static void mq_tick(struct dm_cache_policy *p)
 
 static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr_arg)
 {
-	bool seq;
+	enum io_pattern pattern;
 	unsigned long tmp;
 
 	if (!strcasecmp(argv[0], "sequential_threshold"))
-		seq = true;
+		pattern = PATTERN_SEQUENTIAL;
 	else if (!strcasecmp(argv[0], "random_threshold"))
-		seq = false;
+		pattern = PATTERN_RANDOM;
 	else
 		return -EINVAL;
 
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	mq->tracker.thresholds[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+	mq->tracker.thresholds[pattern] = tmp;
 
 	if (set_ctr_arg)
-		mq->threshold_args[seq ? PATTERN_SEQUENTIAL : PATTERN_RANDOM] = tmp;
+		mq->threshold_args[pattern] = tmp;
 
 	return 0;
 }
