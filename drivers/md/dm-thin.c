@@ -1186,27 +1186,18 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		/*
-		 * We can release this cell now.  This thread is the only
-		 * one that puts bios into a cell, and we know there were
-		 * no preceding bios.
-		 */
-		/*
-		 * TODO: this will probably have to change when discard goes
-		 * back in.
-		 */
-		cell_defer_no_holder(tc, cell);
-
 		if (lookup_result.shared)
 			process_shared_bio(tc, bio, block, &lookup_result);
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
+
+		cell_defer_no_holder(tc, cell);
 		break;
 
 	case -ENODATA:
 		if (bio_data_dir(bio) == READ && tc->origin_dev) {
-			cell_defer_no_holder(tc, cell);
 			remap_to_origin_and_issue(tc, bio);
+			cell_defer_no_holder(tc, cell);
 		} else
 			provision_block(tc, bio, block, cell);
 		break;
