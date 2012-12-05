@@ -558,8 +558,7 @@ static void overwrite_endio(struct bio *bio, int err)
 /*
  * This sends the bios in the cell back to the deferred_bios list.
  */
-static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
-		       dm_block_t data_block)
+static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
@@ -645,7 +644,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		cell_defer_no_holder(tc, m->cell);
 		bio_endio(bio, 0);
 	} else
-		cell_defer(tc, m->cell, m->data_block);
+		cell_defer(tc, m->cell);
 
 out:
 	list_del(&m->list);
@@ -1191,6 +1190,10 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
 
+		/*
+		 * We can release this cell now.  But there may be other
+		 * other bios in the cell from the thin_map function.
+		 */
 		cell_defer_no_holder(tc, cell);
 		break;
 
@@ -1478,8 +1481,8 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 
 		build_data_key(tc->td, result.block, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &tc->cell2, &cell_result)) {
-			spin_unlock(&tc->lock);
 			cell_defer_no_holder_no_free(tc, &tc->cell1);
+			spin_unlock(&tc->lock);
 			return DM_MAPIO_SUBMITTED;
 		}
 
