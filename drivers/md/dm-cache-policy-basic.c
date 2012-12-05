@@ -1519,10 +1519,14 @@ static int process_threshold_option(struct policy *p, char **argv,
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	p->tracker.thresholds[pattern] = tmp;
+	if (set_ctr_arg) {
+		if (p->threshold_args[pattern] > -1)
+			return -EINVAL;
 
-	if (set_ctr_arg)
 		p->threshold_args[pattern] = tmp;
+	}
+
+	p->tracker.thresholds[pattern] = tmp;
 
 	return 0;
 }
@@ -1539,11 +1543,15 @@ static int process_multiqueue_timeout_option(struct policy *p, char **argv, bool
 	if (IS_MULTIQUEUE(p)) {
 		unsigned long ticks = tmp * HZ / 1000;
 
+		if (set_ctr_arg) {
+			if (p->mq_tmo_arg > -1)
+				return -EINVAL;
+
+			p->mq_tmo_arg = tmp;
+		}
+
 		/* Ensure one tick timeout minimum. */
 		p->queues.mq_tmo = ticks ? ticks : 1;
-
-		if (set_ctr_arg)
-			p->mq_tmo_arg = tmp;
 
 		return 0;
 	}
@@ -1562,8 +1570,11 @@ static int process_hits_option(struct policy *p, char **argv, bool set_ctr_arg)
 	if (kstrtoul(argv[1], 10, &tmp) || tmp > 1)
 		return -EINVAL;
 
-	p->queues.ctype = tmp ? T_HITS : T_SECTORS;
+	if (p->ctype_arg > -1)
+		return -EINVAL;
+
 	p->ctype_arg = tmp;
+	p->queues.ctype = tmp ? T_HITS : T_SECTORS;
 
 	return 0;
 }

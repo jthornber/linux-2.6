@@ -1040,10 +1040,15 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-	mq->tracker.thresholds[pattern] = tmp;
 
-	if (set_ctr_arg)
+	if (set_ctr_arg) {
+		if (mq->threshold_args[pattern] > -1)
+			return -EINVAL;
+
 		mq->threshold_args[pattern] = tmp;
+	}
+
+	mq->tracker.thresholds[pattern] = tmp;
 
 	return 0;
 }
