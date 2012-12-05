@@ -1037,12 +1037,13 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			 * a block boundary.  So we submit the discard of a
 			 * partial block appropriately.
 			 */
-			cell_defer_no_holder(tc, cell);
-			cell_defer_no_holder(tc, cell2);
 			if ((!lookup_result.shared) && pool->pf.discard_passdown)
 				remap_and_issue(tc, bio, lookup_result.block);
 			else
 				bio_endio(bio, 0);
+
+			cell_defer_no_holder(tc, cell);
+			cell_defer_no_holder(tc, cell2);
 		}
 		break;
 
@@ -1112,9 +1113,8 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
-
-		cell_defer_no_holder(tc, cell);
 		remap_and_issue(tc, bio, lookup_result->block);
+		cell_defer_no_holder(tc, cell);
 	}
 }
 
@@ -1129,8 +1129,8 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
 	if (!bio->bi_size) {
-		cell_defer_no_holder(tc, cell);
 		remap_and_issue(tc, bio, 0);
+		cell_defer_no_holder(tc, cell);
 		return;
 	}
 
