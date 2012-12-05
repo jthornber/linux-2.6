@@ -262,14 +262,6 @@ static void cell_release_no_holder(struct pool *pool,
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
-static void cell_release_singleton(struct pool *pool,
-				   struct dm_bio_prison_cell *cell,
-				   struct bio *bio)
-{
-	dm_cell_release_singleton(pool->prison, cell, bio);
-	dm_bio_prison_free_cell(pool->prison, cell);
-}
-
 static void cell_error(struct pool *pool,
 		       struct dm_bio_prison_cell *cell)
 {
@@ -990,7 +982,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		 */
 		build_data_key(tc->td, lookup_result.block, &key2);
 		if (bio_detain(tc->pool, &key2, bio, &cell2)) {
-			cell_release_singleton(pool, cell, bio);
+			cell_defer_no_holder(tc, cell);
 			break;
 		}
 
@@ -1021,8 +1013,8 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			 * a block boundary.  So we submit the discard of a
 			 * partial block appropriately.
 			 */
-			cell_release_singleton(pool, cell, bio);
-			cell_release_singleton(pool, cell2, bio);
+			cell_defer_no_holder(tc, cell);
+			cell_defer_no_holder(tc, cell2);
 			if ((!lookup_result.shared) && pool->pf.discard_passdown)
 				remap_and_issue(tc, bio, lookup_result.block);
 			else
@@ -1034,14 +1026,14 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 		/*
 		 * It isn't provisioned, just forget it.
 		 */
-		cell_release_singleton(pool, cell, bio);
+		cell_defer_no_holder(tc, cell);
 		bio_endio(bio, 0);
 		break;
 
 	default:
 		DMERR_LIMIT("%s: dm_thin_find_block() failed, error = %d",
 			    __func__, r);
-	        cell_release_singleton(pool, cell, bio);
+	        cell_defer_no_holder(tc, cell);
 		bio_io_error(bio);
 		break;
 	}
@@ -1097,7 +1089,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 
 		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
 
-		cell_release_singleton(pool, cell, bio);
+		cell_defer_no_holder(tc, cell);
 		remap_and_issue(tc, bio, lookup_result->block);
 	}
 }
@@ -1113,7 +1105,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
 	if (!bio->bi_size) {
-		cell_release_singleton(pool, cell, bio);
+		cell_defer_no_holder(tc, cell);
 		remap_and_issue(tc, bio, 0);
 		return;
 	}
@@ -1123,7 +1115,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 */
 	if (bio_data_dir(bio) == READ) {
 		zero_fill_bio(bio);
-		cell_release_singleton(pool, cell, bio);
+		cell_defer_no_holder(tc, cell);
 		bio_endio(bio, 0);
 		return;
 	}
@@ -1179,7 +1171,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		 * TODO: this will probably have to change when discard goes
 		 * back in.
 		 */
-		cell_release_singleton(pool, cell, bio);
+		cell_defer_no_holder(tc, cell);
 
 		if (lookup_result.shared)
 			process_shared_bio(tc, bio, block, &lookup_result);
@@ -1189,7 +1181,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 
 	case -ENODATA:
 		if (bio_data_dir(bio) == READ && tc->origin_dev) {
-			cell_release_singleton(pool, cell, bio);
+			cell_defer_no_holder(tc, cell);
 			remap_to_origin_and_issue(tc, bio);
 		} else
 			provision_block(tc, bio, block, cell);
@@ -1198,7 +1190,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	default:
 		DMERR_LIMIT("%s: dm_thin_find_block() failed, error = %d",
 			    __func__, r);
-		cell_release_singleton(pool, cell, bio);
+		cell_defer_no_holder(tc, cell);
 		bio_io_error(bio);
 		break;
 	}
