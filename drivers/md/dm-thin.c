@@ -1450,10 +1450,10 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			 * shared flag will be set in their case.
 			 */
 			thin_defer_bio(tc, bio);
-			r = DM_MAPIO_SUBMITTED;
+			return DM_MAPIO_SUBMITTED;
 		} else {
 			remap(tc, bio, result.block);
-			r = DM_MAPIO_REMAPPED;
+			return DM_MAPIO_REMAPPED;
 		}
 		break;
 
@@ -1464,8 +1464,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			 * of doing so.  Just error it.
 			 */
 			bio_io_error(bio);
-			r = DM_MAPIO_SUBMITTED;
-			break;
+			return DM_MAPIO_SUBMITTED;
 		}
 		/* fall through */
 
@@ -1475,21 +1474,16 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		 * provide the hint to load the metadata into cache.
 		 */
 		thin_defer_bio(tc, bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
-
-	default:
-		/*
-		 * Must always call bio_io_error on failure.
-		 * dm_thin_find_block can fail with -EINVAL if the
-		 * pool is switched to fail-io mode.
-		 */
-		bio_io_error(bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
+		return DM_MAPIO_SUBMITTED;
 	}
 
-	return r;
+	/*
+	 * Must always call bio_io_error on failure.
+	 * dm_thin_find_block can fail with -EINVAL if the
+	 * pool is switched to fail-io mode.
+	 */
+	bio_io_error(bio);
+	return DM_MAPIO_SUBMITTED;
 }
 
 static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
