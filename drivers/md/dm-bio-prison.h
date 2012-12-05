@@ -74,9 +74,6 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 void dm_cell_release(struct dm_bio_prison *prison,
 		     struct dm_bio_prison_cell *cell,
 		     struct bio_list *bios);
-void dm_cell_release_singleton(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell,
-			       struct bio *bio); // FIXME: bio arg not needed
 void dm_cell_release_no_holder(struct dm_bio_prison *prison,
 			       struct dm_bio_prison_cell *cell,
 			       struct bio_list *inmates);
