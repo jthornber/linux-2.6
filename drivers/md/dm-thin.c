@@ -562,11 +562,8 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
  */
 static void cell_defer_no_holder(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
-	struct bio_list bios;
 	struct pool *pool = tc->pool;
 	unsigned long flags;
-
-	bio_list_init(&bios);
 
 	spin_lock_irqsave(&pool->lock, flags);
 	cell_release_no_holder(pool, cell, &pool->deferred_bios);
