@@ -1491,11 +1491,11 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			cell_defer_no_holder_no_free(tc, &tc->cell1);
 			return DM_MAPIO_SUBMITTED;
 		}
-		spin_unlock(&tc->lock);
 
 		inc_all_io_entry(tc->pool, bio);
 		cell_defer_no_holder_no_free(tc, &tc->cell2);
 		cell_defer_no_holder_no_free(tc, &tc->cell1);
+		spin_unlock(&tc->lock);
 
 		remap(tc, bio, result.block);
 		return DM_MAPIO_REMAPPED;
