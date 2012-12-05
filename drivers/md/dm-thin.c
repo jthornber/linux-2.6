@@ -565,10 +565,10 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
 }
 
 /*
- * Same as cell_defer above, except it omits one particular detainee,
- * a write bio that covers the block and has already been processed.
+ * Same as cell_defer above, except it omits the original holder of the
+ * cell.
  */
-static void cell_defer_except(struct thin_c *tc, struct dm_bio_prison_cell *cell)
+static void cell_defer_no_holder(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	struct bio_list bios;
 	struct pool *pool = tc->pool;
@@ -626,7 +626,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	 * the bios in the cell.
 	 */
 	if (bio) {
-		cell_defer_except(tc, m->cell);
+		cell_defer_no_holder(tc, m->cell);
 		bio_endio(bio, 0);
 	} else
 		cell_defer(tc, m->cell, m->data_block);
@@ -641,8 +641,8 @@ static void process_prepared_discard_fail(struct dm_thin_new_mapping *m)
 	struct thin_c *tc = m->tc;
 
 	bio_io_error(m->bio);
-	cell_defer_except(tc, m->cell);
-	cell_defer_except(tc, m->cell2);
+	cell_defer_no_holder(tc, m->cell);
+	cell_defer_no_holder(tc, m->cell2);
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -655,8 +655,8 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 	else
 		bio_endio(m->bio, 0);
 
-	cell_defer_except(tc, m->cell);
-	cell_defer_except(tc, m->cell2);
+	cell_defer_no_holder(tc, m->cell);
+	cell_defer_no_holder(tc, m->cell2);
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
