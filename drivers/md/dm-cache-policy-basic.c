@@ -1650,7 +1650,7 @@ static int process_policy_args(struct policy *p, int argc, char **argv)
 	if (!argc)
 		return 0;
 
-	if (argc != 2 && argc != 4 && argc != 6)
+	if (argc != 2 && argc != 4 && argc != 6 && argc != 8)
 		return -EINVAL;
 
 	for (r = u = 0; u < argc && !r; u += 2)
