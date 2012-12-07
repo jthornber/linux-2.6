@@ -430,8 +430,6 @@ static void issue(struct thin_c *tc, struct bio *bio)
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
-	inc_all_io_entry(pool, bio);
-
 	if (!bio_triggers_commit(tc, bio)) {
 		generic_make_request(bio);
 		return;
@@ -665,13 +663,15 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 {
 	struct thin_c *tc = m->tc;
 
+	inc_all_io_entry(tc->pool, m->bio);
+	cell_defer_no_holder(tc, m->cell);
+	cell_defer_no_holder(tc, m->cell2);
+
 	if (m->pass_discard)
 		remap_and_issue(tc, m->bio, m->data_block);
 	else
 		bio_endio(m->bio, 0);
 
-	cell_defer_no_holder(tc, m->cell);
-	cell_defer_no_holder(tc, m->cell2);
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -779,6 +779,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 		h->overwrite_mapping = m;
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
+		inc_all_io_entry(pool, bio);
 		remap_and_issue(tc, bio, data_dest);
 	} else {
 		struct dm_io_region from, to;
@@ -848,6 +849,7 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 		h->overwrite_mapping = m;
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
+		inc_all_io_entry(pool, bio);
 		remap_and_issue(tc, bio, data_block);
 	} else {
 		int r;
@@ -1031,18 +1033,19 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 				wake_worker(pool);
 			}
 		} else {
+			inc_all_io_entry(pool, bio);
+			cell_defer_no_holder(tc, cell);
+			cell_defer_no_holder(tc, cell2);
+
 			/*
 			 * The DM core makes sure that the discard doesn't span
 			 * a block boundary.  So we submit the discard of a
 			 * partial block appropriately.
 			 */
-			if ((!lookup_result.shared) && pool->pf.discard_passdown)
+			if ((!lookup_result.shared) && pool->pf.discard_passdown) {
 				remap_and_issue(tc, bio, lookup_result.block);
-			else
+			} else
 				bio_endio(bio, 0);
-
-			cell_defer_no_holder(tc, cell);
-			cell_defer_no_holder(tc, cell2);
 		}
 		break;
 
@@ -1112,8 +1115,10 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 		struct dm_thin_endio_hook *h = dm_bio_get_per_request_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
-		remap_and_issue(tc, bio, lookup_result->block);
+		inc_all_io_entry(pool, bio);
 		cell_defer_no_holder(tc, cell);
+
+		remap_and_issue(tc, bio, lookup_result->block);
 	}
 }
 
@@ -1128,8 +1133,10 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
 	if (!bio->bi_size) {
-		remap_and_issue(tc, bio, 0);
+		inc_all_io_entry(pool, bio);
 		cell_defer_no_holder(tc, cell);
+
+		remap_and_issue(tc, bio, 0);
 		return;
 	}
 
@@ -1185,22 +1192,23 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		if (lookup_result.shared)
+		if (lookup_result.shared) {
 			process_shared_bio(tc, bio, block, &lookup_result);
-		else
-			remap_and_issue(tc, bio, lookup_result.block);
+			cell_defer_no_holder(tc, cell); /* FIXME: pass this cell into process_shared? */
+		} else {
+			inc_all_io_entry(pool, bio);
+			cell_defer_no_holder(tc, cell);
 
-		/*
-		 * We can release this cell now.  But there may be other
-		 * other bios in the cell from the thin_map function.
-		 */
-		cell_defer_no_holder(tc, cell);
+			remap_and_issue(tc, bio, lookup_result.block);
+		}
 		break;
 
 	case -ENODATA:
 		if (bio_data_dir(bio) == READ && tc->origin_dev) {
-			remap_to_origin_and_issue(tc, bio);
+			inc_all_io_entry(pool, bio);
 			cell_defer_no_holder(tc, cell);
+
+			remap_to_origin_and_issue(tc, bio);
 		} else
 			provision_block(tc, bio, block, cell);
 		break;
@@ -1226,8 +1234,10 @@ static void process_bio_read_only(struct thin_c *tc, struct bio *bio)
 	case 0:
 		if (lookup_result.shared && (rw == WRITE) && bio->bi_size)
 			bio_io_error(bio);
-		else
+		else {
+			inc_all_io_entry(tc->pool, bio);
 			remap_and_issue(tc, bio, lookup_result.block);
+		}
 		break;
 
 	case -ENODATA:
@@ -1237,6 +1247,7 @@ static void process_bio_read_only(struct thin_c *tc, struct bio *bio)
 		}
 
 		if (tc->origin_dev) {
+			inc_all_io_entry(tc->pool, bio);
 			remap_to_origin_and_issue(tc, bio);
 			break;
 		}
