@@ -1499,8 +1499,8 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 
 		build_data_key(tc->td, result.block, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &tc->cell2, &cell_result)) {
-			spin_unlock(&tc->lock);
 			cell_defer_no_holder_no_free(tc, &tc->cell1);
+			spin_unlock(&tc->lock);
 			return DM_MAPIO_SUBMITTED;
 		}
 
