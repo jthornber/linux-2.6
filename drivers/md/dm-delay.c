@@ -274,8 +274,7 @@ static void delay_resume(struct dm_target *ti)
 	atomic_set(&dc->may_delay, 1);
 }
 
-static int delay_map(struct dm_target *ti, struct bio *bio,
-		     union map_info *map_context)
+static int delay_map(struct dm_target *ti, struct bio *bio)
 {
 	struct delay_c *dc = ti->private;
 
