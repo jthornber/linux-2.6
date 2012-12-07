@@ -967,23 +967,22 @@ bool dm_table_request_based(struct dm_table *t)
 int dm_table_alloc_md_mempools(struct dm_table *t)
 {
 	unsigned type = dm_table_get_type(t);
-	unsigned per_request_data = 0;
+	unsigned per_bio_data_size = 0;
+	struct dm_target *tgt;
+	unsigned i;
 
 	if (unlikely(type == DM_TYPE_NONE)) {
 		DMWARN("no table type is set, can't allocate mempools");
 		return -EINVAL;
 	}
 
-	if (type == DM_TYPE_BIO_BASED) {
-		unsigned i;
+	if (type == DM_TYPE_BIO_BASED)
 		for (i = 0; i < t->num_targets; i++) {
-			struct dm_target *tgt = t->targets + i;
-			if (tgt->per_request_data > per_request_data)
-				per_request_data = tgt->per_request_data;
+			tgt = t->targets + i;
+			per_bio_data_size = max(per_bio_data_size, tgt->per_bio_data_size);
 		}
-	}
 
-	t->mempools = dm_alloc_md_mempools(type, t->integrity_supported, per_request_data);
+	t->mempools = dm_alloc_md_mempools(type, t->integrity_supported, per_bio_data_size);
 	if (!t->mempools)
 		return -ENOMEM;
 
@@ -1384,9 +1383,6 @@ static bool dm_table_discard_zeroes_data(struct dm_table *t)
 	while (i < dm_table_get_num_targets(t)) {
 		ti = dm_table_get_target(t, i++);
 
-		if (ti->pretend_discard_zeroes_data)
-			return 1;
-
 		if (ti->discard_zeroes_data_unsupported)
 			return 0;
 	}
@@ -1633,9 +1629,6 @@ bool dm_table_supports_discards(struct dm_table *t)
 
 		if (!ti->num_discard_requests)
 			continue;
-
-		if (ti->discards_unsupported)
-			return 0;
 
 		if (ti->discards_supported)
 			return 1;

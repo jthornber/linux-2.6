@@ -349,7 +349,7 @@ static void complete_io(unsigned long error, void *context)
 	struct dm_kcopyd_client *kc = job->kc;
 
 	if (error) {
-		if (job->rw == WRITE)
+		if (job->rw & WRITE)
 			job->write_err |= error;
 		else
 			job->read_err = 1;
@@ -361,7 +361,7 @@ static void complete_io(unsigned long error, void *context)
 		}
 	}
 
-	if (job->rw == WRITE)
+	if (job->rw & WRITE)
 		push(&kc->complete_jobs, job);
 
 	else {
@@ -432,7 +432,7 @@ static int process_jobs(struct list_head *jobs, struct dm_kcopyd_client *kc,
 
 		if (r < 0) {
 			/* error this rogue job */
-			if (job->rw == WRITE)
+			if (job->rw & WRITE)
 				job->write_err = (unsigned long) -1L;
 			else
 				job->read_err = 1;
@@ -608,10 +608,22 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 		job->pages = NULL;
 		job->rw = READ;
 	} else {
+		int i;
+
 		memset(&job->source, 0, sizeof job->source);
 		job->source.count = job->dests[0].count;
 		job->pages = &zero_page_list;
 		job->rw = WRITE;
+		/*
+		 * Optimize zeroing via WRITE SAME if all dests support it.
+		 */
+		job->rw |= REQ_WRITE_SAME;
+		for (i = 0; i < job->num_dests; i++) {
+			if (!bdev_write_same(job->dests[i].bdev)) {
+				job->rw &= ~REQ_WRITE_SAME;
+				break;
+			}
+		}
 	}
 
 	job->fn = fn;

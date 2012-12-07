@@ -57,8 +57,8 @@ static int array_block_check(struct dm_block_validator *v,
 	__le32 csum_disk;
 
 	if (dm_block_location(b) != le64_to_cpu(bh_le->blocknr)) {
-		DMERR("array_block_check failed blocknr %llu wanted %llu",
-		      le64_to_cpu(bh_le->blocknr), dm_block_location(b));
+		DMERR_LIMIT("array_block_check failed: blocknr %llu != wanted %llu",
+			    le64_to_cpu(bh_le->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
 
@@ -66,8 +66,8 @@ static int array_block_check(struct dm_block_validator *v,
 					       block_size - sizeof(__le32),
 					       CSUM_XOR));
 	if (csum_disk != bh_le->csum) {
-		DMERR("array_block_check failed csum %u wanted %u",
-		      le32_to_cpu(csum_disk), le32_to_cpu(bh_le->csum));
+		DMERR_LIMIT("array_block_check failed: csum %u != wanted %u",
+			    le32_to_cpu(csum_disk), le32_to_cpu(bh_le->csum));
 		return -EILSEQ;
 	}
 
@@ -584,7 +584,7 @@ static void block_dec(void *context, const void *value)
 
 	r = dm_tm_ref(info->btree_info.tm, b, &ref_count);
 	if (r) {
-		DMERR("couldn't get reference count");
+		DMERR_LIMIT("couldn't get reference count");
 		return;
 	}
 
@@ -595,7 +595,7 @@ static void block_dec(void *context, const void *value)
 		 */
 		r = get_ablock(info, b, &block, &ab);
 		if (r) {
-			DMERR("couldn't get array block");
+			DMERR_LIMIT("couldn't get array block");
 			return;
 		}
 

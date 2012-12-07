@@ -39,7 +39,7 @@ static int index_check(struct dm_block_validator *v,
 	__le32 csum_disk;
 
 	if (dm_block_location(b) != le64_to_cpu(mi_le->blocknr)) {
-		DMERR_LIMIT("index_check failed blocknr %llu wanted %llu",
+		DMERR_LIMIT("index_check failed: blocknr %llu != wanted %llu",
 			    le64_to_cpu(mi_le->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
@@ -48,7 +48,7 @@ static int index_check(struct dm_block_validator *v,
 					       block_size - sizeof(__le32),
 					       INDEX_CSUM_XOR));
 	if (csum_disk != mi_le->csum) {
-		DMERR_LIMIT("index_check failed csum %u wanted %u",
+		DMERR_LIMIT("index_check failed: csum %u != wanted %u",
 			    le32_to_cpu(csum_disk), le32_to_cpu(mi_le->csum));
 		return -EILSEQ;
 	}
@@ -89,7 +89,7 @@ static int bitmap_check(struct dm_block_validator *v,
 	__le32 csum_disk;
 
 	if (dm_block_location(b) != le64_to_cpu(disk_header->blocknr)) {
-		DMERR_LIMIT("bitmap check failed blocknr %llu wanted %llu",
+		DMERR_LIMIT("bitmap check failed: blocknr %llu != wanted %llu",
 			    le64_to_cpu(disk_header->blocknr), dm_block_location(b));
 		return -ENOTBLK;
 	}
@@ -98,7 +98,7 @@ static int bitmap_check(struct dm_block_validator *v,
 					       block_size - sizeof(__le32),
 					       BITMAP_CSUM_XOR));
 	if (csum_disk != disk_header->csum) {
-		DMERR_LIMIT("bitmap check failed csum %u wanted %u",
+		DMERR_LIMIT("bitmap check failed: csum %u != wanted %u",
 			    le32_to_cpu(csum_disk), le32_to_cpu(disk_header->csum));
 		return -EILSEQ;
 	}

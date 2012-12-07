@@ -218,7 +218,7 @@ static int flakey_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
-	ti->per_request_data = sizeof(struct per_bio_data);
+	ti->per_bio_data_size = sizeof(struct per_bio_data);
 	ti->private = fc;
 	return 0;
 
@@ -274,7 +274,7 @@ static int flakey_map(struct dm_target *ti, struct bio *bio)
 {
 	struct flakey_c *fc = ti->private;
 	unsigned elapsed;
-	struct per_bio_data *pb = dm_bio_get_per_request_data(bio, sizeof(struct per_bio_data));
+	struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
 	pb->bio_submitted = false;
 
 	/* Are we alive ? */
@@ -323,7 +323,7 @@ map_bio:
 static int flakey_end_io(struct dm_target *ti, struct bio *bio, int error)
 {
 	struct flakey_c *fc = ti->private;
-	struct per_bio_data *pb = dm_bio_get_per_request_data(bio, sizeof(struct per_bio_data));
+	struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
 
 	/*
 	 * Corrupt successful READs while in down state.

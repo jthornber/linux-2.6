@@ -1074,7 +1074,7 @@ static int mirror_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ti->num_flush_requests = 1;
 	ti->num_discard_requests = 1;
-	ti->per_request_data = sizeof(struct dm_raid1_bio_record);
+	ti->per_bio_data_size = sizeof(struct dm_raid1_bio_record);
 	ti->discard_zeroes_data_unsupported = true;
 
 	ms->kmirrord_wq = alloc_workqueue("kmirrord",
@@ -1149,7 +1149,7 @@ static int mirror_map(struct dm_target *ti, struct bio *bio)
 	struct mirror_set *ms = ti->private;
 	struct dm_dirty_log *log = dm_rh_dirty_log(ms->rh);
 	struct dm_raid1_bio_record *bio_record =
-	  dm_bio_get_per_request_data(bio, sizeof(struct dm_raid1_bio_record));
+	  dm_per_bio_data(bio, sizeof(struct dm_raid1_bio_record));
 
 	bio_record->details.bi_bdev = NULL;
 
@@ -1185,6 +1185,7 @@ static int mirror_map(struct dm_target *ti, struct bio *bio)
 
 	dm_bio_record(&bio_record->details, bio);
 	bio_record->m = m;
+
 	map_bio(m, bio);
 
 	return DM_MAPIO_REMAPPED;
@@ -1197,7 +1198,7 @@ static int mirror_end_io(struct dm_target *ti, struct bio *bio, int error)
 	struct mirror *m = NULL;
 	struct dm_bio_details *bd = NULL;
 	struct dm_raid1_bio_record *bio_record =
-	  dm_bio_get_per_request_data(bio, sizeof(struct dm_raid1_bio_record));
+	  dm_per_bio_data(bio, sizeof(struct dm_raid1_bio_record));
 
 	/*
 	 * We need to dec pending if this was a write.

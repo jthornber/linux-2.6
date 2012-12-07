@@ -192,19 +192,19 @@ struct dm_snap_tracked_chunk {
 
 static void init_tracked_chunk(struct bio *bio)
 {
-	struct dm_snap_tracked_chunk *c = dm_bio_get_per_request_data(bio, sizeof(struct dm_snap_tracked_chunk));
+	struct dm_snap_tracked_chunk *c = dm_per_bio_data(bio, sizeof(struct dm_snap_tracked_chunk));
 	INIT_HLIST_NODE(&c->node);
 }
 
 static bool is_bio_tracked(struct bio *bio)
 {
-	struct dm_snap_tracked_chunk *c = dm_bio_get_per_request_data(bio, sizeof(struct dm_snap_tracked_chunk));
+	struct dm_snap_tracked_chunk *c = dm_per_bio_data(bio, sizeof(struct dm_snap_tracked_chunk));
 	return !hlist_unhashed(&c->node);
 }
 
 static void track_chunk(struct dm_snapshot *s, struct bio *bio, chunk_t chunk)
 {
-	struct dm_snap_tracked_chunk *c = dm_bio_get_per_request_data(bio, sizeof(struct dm_snap_tracked_chunk));
+	struct dm_snap_tracked_chunk *c = dm_per_bio_data(bio, sizeof(struct dm_snap_tracked_chunk));
 
 	c->chunk = chunk;
 
@@ -216,7 +216,7 @@ static void track_chunk(struct dm_snapshot *s, struct bio *bio, chunk_t chunk)
 
 static void stop_tracking_chunk(struct dm_snapshot *s, struct bio *bio)
 {
-	struct dm_snap_tracked_chunk *c = dm_bio_get_per_request_data(bio, sizeof(struct dm_snap_tracked_chunk));
+	struct dm_snap_tracked_chunk *c = dm_per_bio_data(bio, sizeof(struct dm_snap_tracked_chunk));
 	unsigned long flags;
 
 	spin_lock_irqsave(&s->tracked_chunk_lock, flags);
@@ -1129,7 +1129,7 @@ static int snapshot_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ti->private = s;
 	ti->num_flush_requests = num_flush_requests;
-	ti->per_request_data = sizeof(struct dm_snap_tracked_chunk);
+	ti->per_bio_data_size = sizeof(struct dm_snap_tracked_chunk);
 
 	/* Add snapshot to the list of snapshots for this origin */
 	/* Exceptions aren't triggered till snapshot_resume() is called */

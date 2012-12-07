@@ -49,7 +49,7 @@
  * one of these sequential modes.
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
-#define SEQUENTIAL_THRESHOLD_DEFAULT 512 
+#define SEQUENTIAL_THRESHOLD_DEFAULT 512
 
 static struct kmem_cache *basic_entry_cache;
 static struct kmem_cache *track_entry_cache;
@@ -818,7 +818,7 @@ static void demote_multiqueues(struct policy *p)
 	while (++cur < end) {
 		while (!queue_empty(cur)) {
 			/* Reference head element. */
-			e = list_first_entry(cur, struct basic_cache_entry, ce.list);				
+			e = list_first_entry(cur, struct basic_cache_entry, ce.list);
 
 			/*
 			 * If expired, move entry from head of higher prio
@@ -1381,7 +1381,7 @@ static void sort_in_cache_entry(struct policy *p, struct basic_cache_entry *e)
 
 	list_for_each(elt, &p->queues.used) {
 		cur = list_entry(elt, struct basic_cache_entry, ce.list);
-	 	if (e->ce.count[T_HITS][0] > cur->ce.count[T_HITS][0])
+		if (e->ce.count[T_HITS][0] > cur->ce.count[T_HITS][0])
 			break;
 	}
 
@@ -1441,8 +1441,8 @@ static int basic_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn,
 		unsigned reads, writes;
 
 		if (IS_MULTIQUEUE_Q2_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
- 			reads = e->ce.count[T_HITS][0];
- 			writes = e->ce.count[T_HITS][1];
+			reads = e->ce.count[T_HITS][0];
+			writes = e->ce.count[T_HITS][1];
 
 		} else {
 			reads = nr++;
@@ -1771,8 +1771,8 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 
 	else if (IS_TWOQUEUE(p)) {
 		/*
- 		 * Just 2 prio queues.
- 		 *
+		 * Just 2 prio queues.
+		 *
 		 * Only allow 25% of the total cache size maximum in queue 0 (hit count 1).
 		 * Ie. 75% minimum is reserved for cblocks with multiple hits.
 		 */

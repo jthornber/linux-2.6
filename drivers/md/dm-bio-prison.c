@@ -86,9 +86,8 @@ dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
 }
 EXPORT_SYMBOL_GPL(dm_bio_prison_alloc_cell);
 
-void
-dm_bio_prison_free_cell(struct dm_bio_prison *prison,
-			struct dm_bio_prison_cell *cell)
+void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
+			     struct dm_bio_prison_cell *cell)
 {
 	mempool_free(cell, prison->cell_pool);
 }
@@ -194,7 +193,8 @@ EXPORT_SYMBOL_GPL(dm_get_cell);
 /*
  * @inmates must have been initialised prior to this call
  */
-static void __cell_release(struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+static void __cell_release(struct dm_bio_prison_cell *cell,
+			   struct bio_list *inmates)
 {
 	hlist_del(&cell->list);
 
@@ -220,14 +220,16 @@ EXPORT_SYMBOL_GPL(dm_cell_release);
 /*
  * Sometimes we don't want the holder, just the additional bios.
  */
-static void __cell_release_no_holder(struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+static void __cell_release_no_holder(struct dm_bio_prison_cell *cell,
+				     struct bio_list *inmates)
 {
 	hlist_del(&cell->list);
 	bio_list_merge(inmates, &cell->bios);
 }
 
 void dm_cell_release_no_holder(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell, struct bio_list *inmates)
+			       struct dm_bio_prison_cell *cell,
+			       struct bio_list *inmates)
 {
 	unsigned long flags;
 

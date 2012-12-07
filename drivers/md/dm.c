@@ -728,8 +728,14 @@ static void rq_completed(struct mapped_device *md, int rw, int run_queue)
 	if (!md_in_flight(md))
 		wake_up(&md->wait);
 
+	/*
+	 * Run this off this callpath, as drivers could invoke end_io while
+	 * inside their request_fn (and holding the queue lock). Calling
+	 * back into ->request_fn() could deadlock attempting to grab the
+	 * queue lock again.
+	 */
 	if (run_queue)
-		blk_run_queue(md->queue);
+		blk_run_queue_async(md->queue);
 
 	/*
 	 * dm_put() must be at the end of this function. See the comment above
@@ -2750,7 +2756,7 @@ int dm_noflush_suspending(struct dm_target *ti)
 }
 EXPORT_SYMBOL_GPL(dm_noflush_suspending);
 
-struct dm_md_mempools *dm_alloc_md_mempools(unsigned type, unsigned integrity, unsigned per_request_data)
+struct dm_md_mempools *dm_alloc_md_mempools(unsigned type, unsigned integrity, unsigned per_bio_data_size)
 {
 	struct dm_md_mempools *pools = kmalloc(sizeof(*pools), GFP_KERNEL);
 	unsigned int pool_size = (type == DM_TYPE_BIO_BASED) ? 16 : MIN_IOS;
@@ -2758,7 +2764,7 @@ struct dm_md_mempools *dm_alloc_md_mempools(unsigned type, unsigned integrity, u
 	if (!pools)
 		return NULL;
 
-	per_request_data = roundup(per_request_data, __alignof__(struct dm_target_io));
+	per_bio_data_size = roundup(per_bio_data_size, __alignof__(struct dm_target_io));
 
 	pools->io_pool = (type == DM_TYPE_BIO_BASED) ?
 			 mempool_create_slab_pool(MIN_IOS, _io_cache) :
@@ -2775,7 +2781,7 @@ struct dm_md_mempools *dm_alloc_md_mempools(unsigned type, unsigned integrity, u
 
 	pools->bs = (type == DM_TYPE_BIO_BASED) ?
 		bioset_create(pool_size,
-			      per_request_data + offsetof(struct dm_target_io, clone)) :
+			      per_bio_data_size + offsetof(struct dm_target_io, clone)) :
 		bioset_create(pool_size,
 			      offsetof(struct dm_rq_clone_bio_info, clone));
 	if (!pools->bs)

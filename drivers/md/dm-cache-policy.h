@@ -175,7 +175,7 @@ struct dm_cache_policy {
 	 */
 	void (*tick)(struct dm_cache_policy *p);
 
- 	/*
+	/*
 	 * Status and message.
 	 */
 	int (*status) (struct dm_cache_policy *p, status_type_t type,
