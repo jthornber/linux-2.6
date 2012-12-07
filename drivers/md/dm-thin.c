@@ -510,8 +510,7 @@ static void overwrite_endio(struct bio *bio, int err)
 /*
  * This sends the bios in the cell back to the deferred_bios list.
  */
-static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
-		       dm_block_t data_block)
+static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
@@ -529,11 +528,8 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
 static void cell_defer_no_holder(struct thin_c *tc,
 				 struct dm_bio_prison_cell *cell)
 {
-	struct bio_list bios;
 	struct pool *pool = tc->pool;
 	unsigned long flags;
-
-	bio_list_init(&bios);
 
 	spin_lock_irqsave(&pool->lock, flags);
 	dm_cell_release_no_holder(cell, &pool->deferred_bios);
@@ -587,7 +583,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		cell_defer_no_holder(tc, m->cell);
 		bio_endio(bio, 0);
 	} else
-		cell_defer(tc, m->cell, m->data_block);
+		cell_defer(tc, m->cell);
 
 out:
 	list_del(&m->list);
@@ -1448,8 +1444,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 			 * of doing so.  Just error it.
 			 */
 			bio_io_error(bio);
-			r = DM_MAPIO_SUBMITTED;
-			break;
+			return DM_MAPIO_SUBMITTED;
 		}
 		/* fall through */
 
@@ -1459,21 +1454,16 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 		 * provide the hint to load the metadata into cache.
 		 */
 		thin_defer_bio(tc, bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
-
-	default:
-		/*
-		 * Must always call bio_io_error on failure.
-		 * dm_thin_find_block can fail with -EINVAL if the
-		 * pool is switched to fail-io mode.
-		 */
-		bio_io_error(bio);
-		r = DM_MAPIO_SUBMITTED;
-		break;
+		return DM_MAPIO_SUBMITTED;
 	}
 
-	return r;
+	/*
+	 * Must always call bio_io_error on failure.
+	 * dm_thin_find_block can fail with -EINVAL if the
+	 * pool is switched to fail-io mode.
+	 */
+	bio_io_error(bio);
+	return DM_MAPIO_SUBMITTED;
 }
 
 static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
