@@ -11,6 +11,11 @@ dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
+dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
+dm-cache-mq-y   += dm-cache-policy-mq.o
+dm-cache-basic-y += dm-cache-policy-basic.o
+dm-cache-writeback-y += dm-cache-policy-writeback.o
+dm-cache-debug-y += dm-cache-policy-debug.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -43,7 +48,13 @@ obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
+obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
+obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
+obj-$(CONFIG_DM_CACHE_BASIC)	+= dm-cache-basic.o
+obj-$(CONFIG_DM_CACHE_DEBUG)	+= dm-cache-debug.o
+obj-$(CONFIG_DM_CACHE_WRITEBACK) += dm-cache-writeback.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
+obj-$(CONFIG_DM_FAKE_DISCARD)	+= dm-fake-discard.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o

@@ -1,0 +1,108 @@
+* Overview of given cache replacement policies
+
+  o dm-cache-policy-mq.c with 'mq' aka 'default' policy:
+    multiqueue policy with two times 16 queues, one set for entries waiting
+    for the cache and another one for those in the cache, aging cache entries
+    in those queues based on logical time. Queue selection is based on hit
+    count on entry; aims to take different cache miss costs into account and
+    to adjust to varying load patterns automatically;
+    prefered, thus default replacement policy unless specific loads need
+    better addressing by other policies described below
+
+  o dm-cache-policy-basic.c with the following shared infrastructure policies:
+    provides two tracking queues for entries waiting for cache blocks and
+    entries evicted frm the cache; the former queue allows for prioritizing
+    entries to get promoted to the cache based on hit count or working set
+    size (ie. how many sectors read/written tfrom/to an entry), the latter
+    queue allows to retrieve hit count/working set size on cache reentry,
+    thus prioritizing formerly evicted entries over completely new ones
+    by adding their former counts back in;
+    aims to take different cache miss costs into account
+
+    x fifo:
+      first in first out (same as 'last in last out');
+      suits loads where the oldest entry is likely to be _unreferenced_
+
+    x filo:
+      first in last out (same as 'last in first out')
+      suits loads where the oldest entry is likely to be _referenced_
+
+    x lru:
+      least recently used;
+      cache entries are being ordered by access;
+      any single access moves the entry to the top of the list;
+      suits loads where the least recently used entry is unlikely to
+      get reused shortly
+
+    x mru:
+      most recently used;
+      cache entries are being ordered by access;
+      any single access moves the entry to the top of the list;
+      suits loads where the most recently used entry is unlikely to
+      get reused shortly
+
+    x lfu:
+      least frequently used;
+      keeps hit count with each cache entry;
+      the entry with the lowest hit count gets evicted;
+      enhances on lru and suits loads where the least frequently used
+      entry is unlikely to get reused shortly
+
+    x mfu:
+      most frequently used;
+      keeps hit count with each cache entry;
+      the entry with the highest hit count gets evicted;
+      enhances on mru and suits loads where the most frequently used
+      entry is unlikely to get reused shortly
+
+    x lfu_ws:
+      least frequently used work set;
+      keeps sector count (amount of data) with each cache entry;
+      the entry with the lowest sector count gets evicted;
+      enhances on lfu and suits loads where the least frequently used
+      entry is unlikely to get reused shortly;
+      suits varying io sizes better than mfu
+
+    x mfu_ws:
+      most frequently used work set;
+      keeps sector count (amount of data) with each cache entry;
+      the entry with the highest sector count gets evicted;
+      enhances on lfu and suits loads where the least
+      frequently used entry is unlikely to get reused shortly;
+      suits varying io sizes better than mfu
+
+    x multiqueue:
+      multi queue;
+      allocates a variable number of queues depending on the amout of
+      total cache entries;
+      queue selection on entry based on hit count;
+      expiring of cache entries based on real time thresholds rather than
+      logical time ones as with 'mq';
+      like 'mq' automatically adjusts to varying load patterns
+
+    x multiqueue_ws:
+      multi queue work set;
+      like multiqueue but queue insertions and priorities based on sector count
+      rether than hit count;
+      suits varying io sizes better
+
+    x random:
+      randomly picks an entry;
+      admits stochastic replacement, thus suitable to varying loads
+
+    Experimental ones:
+    x q2:
+      single lru queue; similar to lru
+
+    x twoqueue:
+      two queues where a maximum of 25% is allowed on the first queue
+
+    x noop:
+      no operation, just one fifo list and no in/out queue tracking of entries,
+      thus no prioritization on cache entry/eviction
+
+    x miss:
+      does what it says for testing/performance comparison;
+      no caching or tracking at all;
+      always reports cache miss thus causing direct io to/from
+      the origin device
