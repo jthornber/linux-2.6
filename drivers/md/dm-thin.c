@@ -2445,7 +2445,9 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		else
 			DMEMIT("rw ");
 
-		if (pool->pf.discard_enabled && pool->pf.discard_passdown)
+		if (!pool->pf.discard_enabled)
+			DMEMIT("ignore_discard");
+		else if (pool->pf.discard_passdown)
 			DMEMIT("discard_passdown");
 		else
 			DMEMIT("no_discard_passdown");
