@@ -19,7 +19,7 @@
 * Target interface
 
  cache <metadata dev> <origin dev> <cache dev> <block size> <policy>
- 			[<#feature args> [<arg>]*]
+			[<#feature args> [<arg>]*]
 
  metadata dev    : fast device holding the persistent metadata
  origin dev	 : slow device holding original data blocks
@@ -136,4 +136,3 @@
 
      Don't do this until we've got some idea how fragmented
      dirty/clean becomes with real work loads.
-
