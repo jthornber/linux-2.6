@@ -1076,7 +1076,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 	case POLICY_REPLACE:
 		cell = prealloc_get_cell(structs);
-		r = bio_detain(cache, block, bio, cell,
+		r = bio_detain(cache, lookup_result.old_oblock, bio, cell,
 			       (cell_free_fn) prealloc_put_cell,
 			       structs, &old_ocell);
 		if (r > 0) {
