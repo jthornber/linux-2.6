@@ -555,8 +555,7 @@ static dm_oblock_t get_bio_block(struct cache *cache, struct bio *bio)
 
 static int bio_triggers_commit(struct cache *cache, struct bio *bio)
 {
-	return (bio->bi_rw & (REQ_FLUSH | REQ_FUA)) &&
-		dm_cache_changed_this_transaction(cache->cmd);
+	return bio->bi_rw & (REQ_FLUSH | REQ_FUA);
 }
 
 static void issue(struct cache *cache, struct bio *bio)
@@ -1118,7 +1117,8 @@ static int need_commit_due_to_time(struct cache *cache)
 
 static int commit_if_needed(struct cache *cache)
 {
-	if (cache->commit_requested || need_commit_due_to_time(cache)) {
+	if (dm_cache_changed_this_transaction(cache->cmd) &&
+	    (cache->commit_requested || need_commit_due_to_time(cache))) {
 		atomic_inc(&cache->commit_count);
 		cache->last_commit_jiffies = jiffies;
 		cache->commit_requested = false;
@@ -1972,6 +1972,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	if (r == -EWOULDBLOCK) {
 		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
+
 	} else if (r) {
 		DMERR("Bug in policy\n");
 		bio_io_error(bio);
