@@ -75,7 +75,7 @@ not complete until has hit both the origin and cache device.  Clean
 blocks should remain clean.
 
 A simple cleaner policy is provided, which will clean all dirty blocks
-in a cache.  FIXME: confusingly this policy is called 'writeback'.
+in a cache.  Useful for decommissioning a cache.
 
 ** Migration throttling
 
