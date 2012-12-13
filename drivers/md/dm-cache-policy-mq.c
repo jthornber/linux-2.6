@@ -663,7 +663,7 @@ static dm_cblock_t demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 static unsigned adjusted_promote_threshold(struct mq_policy *mq,
 					   bool discarded_oblock, int data_dir)
 {
-	if (discarded_oblock && any_free_cblocks(mq))
+	if (discarded_oblock && any_free_cblocks(mq) && data_dir == WRITE)
 		/*
 		 * We don't need to do any copying at all, so give this a
 		 * very low threshold.  In practice this only triggers
