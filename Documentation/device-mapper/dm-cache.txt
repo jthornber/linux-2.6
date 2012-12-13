@@ -46,7 +46,7 @@ other params detailed later):
 
   This information could be put on the cache device, but having it
   separate allows the volume manager to configure it differently.  eg,
-  as a mirror for extra rebustness.
+  as a mirror for extra robustness.
 
 
 ** Fixed block size
@@ -101,7 +101,7 @@ system crashes all cache blocks will be assumed dirty when restarted.
 
 ** per block policy hints
 
-Policy pug-ins can store a chunk of data per cache block.  It's up to
+Policy plug-ins can store a chunk of data per cache block.  It's up to
 the policy how big this chunk is (please keep it small).  Like the
 dirty flags this data is lost if there's a crash so a safe fallback
 value should always be possible.
@@ -135,8 +135,8 @@ which is just for the smaller cache device).
 ** Target interface
 
  cache <metadata dev>
-       <origin dev>
        <cache dev>
+       <origin dev>
        <block size>
        <#feature args> [<feature arg>]*
        <policy>
@@ -144,8 +144,8 @@ which is just for the smaller cache device).
        [policy args]*
 
  metadata dev    : fast device holding the persistent metadata
- origin dev	 : slow device holding original data blocks
  cache dev	 : fast device holding cached data blocks
+ origin dev	 : slow device holding original data blocks
  block size      : cache unit size in sectors
  policy          : the replacement policy to use
 
@@ -165,18 +165,18 @@ The test suite can be found here:
 
 https://github.com/jthornber/thinp-test-suite
 
-writing table: 0 41943040 cache /dev/mapper/metadata /dev/mapper/origin /dev/mapper/ssd 512 1 writeback writeback 0
+writing table: 0 41943040 cache /dev/mapper/metadata /dev/mapper/ssd /dev/mapper/origin 512 1 writeback cleaner 0
 
 * Policy interface
 
-- Try and keep transactionality out of it.  The core is careful to
+- Try to keep transactionality out of it.  The core is careful to
   avoid asking about anything that is migrating.  This is a pain, but
   makes it easier to write the policies.
 
 - Mappings are loaded into the policy at construction time.
 
 - Every bio that is mapped by the target is referred to the policy, it
-  can give a simle HIT or MISS or issue a migration.
+  can give a simple HIT or MISS or issue a migration.
 
 - Currently there's no way for the policy to issue background work,
   eg, start writing back dirty blocks that are soon going to be evicted.
