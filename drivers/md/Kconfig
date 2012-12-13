@@ -268,6 +268,28 @@ config DM_DEBUG_BLOCK_STACK_TRACING
 
 	  If unsure, say N.
 
+config DM_CACHE
+       tristate "Cache target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       select DM_PERSISTENT_DATA
+       select DM_PRISON
+       ---help---
+         Use an SSD to speed up a slower device.
+
+config DM_CACHE_MQ
+       tristate "MQ Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         Under development
+
+config DM_CACHE_CLEANER
+       tristate "Cleaner Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         Under development
+
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM
