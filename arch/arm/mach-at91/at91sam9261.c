@@ -19,10 +19,10 @@
 #include <asm/system_misc.h>
 #include <mach/cpu.h>
 #include <mach/at91sam9261.h>
-#include <mach/at91_aic.h>
 #include <mach/at91_pmc.h>
-#include <mach/at91_rstc.h>
 
+#include "at91_aic.h"
+#include "at91_rstc.h"
 #include "soc.h"
 #include "generic.h"
 #include "clock.h"
@@ -334,10 +334,10 @@ static unsigned int at91sam9261_default_irq_priority[NR_AIC_IRQS] __initdata = {
 	0,	/* Advanced Interrupt Controller */
 };
 
-struct at91_init_soc __initdata at91sam9261_soc = {
+AT91_SOC_START(sam9261)
 	.map_io = at91sam9261_map_io,
 	.default_irq_priority = at91sam9261_default_irq_priority,
 	.ioremap_registers = at91sam9261_ioremap_registers,
 	.register_clocks = at91sam9261_register_clocks,
 	.init = at91sam9261_initialize,
-};
+AT91_SOC_END

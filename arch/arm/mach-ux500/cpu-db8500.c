@@ -17,14 +17,15 @@
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/mfd/abx500/ab8500.h>
+#include <linux/platform_data/usb-musb-ux500.h>
+#include <linux/platform_data/pinctrl-nomadik.h>
+#include <linux/random.h>
 
 #include <asm/pmu.h>
 #include <asm/mach/map.h>
-#include <plat/gpio-nomadik.h>
 #include <mach/hardware.h>
 #include <mach/setup.h>
 #include <mach/devices.h>
-#include <linux/platform_data/usb-musb-ux500.h>
 #include <mach/db8500-regs.h>
 
 #include "devices-db8500.h"
@@ -158,7 +159,7 @@ static void __init db8500_add_gpios(struct device *parent)
 
 	dbx500_add_gpios(parent, ARRAY_AND_SIZE(db8500_gpio_base),
 			 IRQ_DB8500_GPIO0, &pdata);
-	dbx500_add_pinctrl(parent, "pinctrl-db8500");
+	dbx500_add_pinctrl(parent, "pinctrl-db8500", U8500_PRCMU_BASE);
 }
 
 static int usb_db8500_rx_dma_cfg[] = {
@@ -187,6 +188,8 @@ static const char *db8500_read_soc_id(void)
 {
 	void __iomem *uid = __io_address(U8500_BB_UID_BASE);
 
+	/* Throw these device-specific numbers into the entropy pool */
+	add_device_randomness(uid, 0x14);
 	return kasprintf(GFP_KERNEL, "%08x%08x%08x%08x%08x",
 			 readl((u32 *)uid+1),
 			 readl((u32 *)uid+1), readl((u32 *)uid+2),
@@ -214,9 +217,6 @@ struct device * __init u8500_init_devices(struct ab8500_platform_data *ab8500)
 	db8500_add_gpios(parent);
 	db8500_add_usb(parent, usb_db8500_rx_dma_cfg, usb_db8500_tx_dma_cfg);
 
-	platform_device_register_data(parent,
-		"cpufreq-u8500", -1, NULL, 0);
-
 	for (i = 0; i < ARRAY_SIZE(platform_devs); i++)
 		platform_devs[i]->dev.parent = parent;
 
@@ -235,9 +235,6 @@ struct device * __init u8500_of_init_devices(void)
 	parent = db8500_soc_device_init();
 
 	db8500_add_usb(parent, usb_db8500_rx_dma_cfg, usb_db8500_tx_dma_cfg);
-
-	platform_device_register_data(parent,
-		"cpufreq-u8500", -1, NULL, 0);
 
 	u8500_dma40_device.dev.parent = parent;
 
