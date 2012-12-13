@@ -161,9 +161,11 @@ the policy we currently think is giving best all round performance.
 
 * Example usage
 
+The test suite can be found here:
 
+https://github.com/jthornber/thinp-test-suite
 
-
+writing table: 0 41943040 cache /dev/mapper/metadata /dev/mapper/origin /dev/mapper/ssd 512 1 writeback writeback 0
 
 * Policy interface
 
