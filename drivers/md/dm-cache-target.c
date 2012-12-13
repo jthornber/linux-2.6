@@ -1570,6 +1570,12 @@ static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 		*error = "Invalid data block size";
 		return -EINVAL;
 	}
+
+	if (tmp > ca->cache_sectors) {
+		*error = "Data block size is larger than the cache device";
+		return -EINVAL;
+	}
+
 	ca->block_size = tmp;
 
 	return 0;
