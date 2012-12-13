@@ -456,7 +456,7 @@ static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 /*----------------------------------------------------------------------------*/
 
 static struct dm_cache_policy_type wb_policy_type = {
-	.name = "writeback",
+	.name = "cleaner",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
         .create = wb_create
@@ -477,6 +477,6 @@ module_exit(wb_exit);
 
 MODULE_AUTHOR("Heinz Mauelshagen");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("writeback cache policy");
+MODULE_DESCRIPTION("cleaner cache policy");
 
 /*----------------------------------------------------------------------------*/
