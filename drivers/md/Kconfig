@@ -283,6 +283,26 @@ config DM_CACHE_MQ
        ---help---
          Under development
 
+config DM_CACHE_BASIC
+       tristate "Basic Cache Policies - a list of replacement policies (EXPERIMENTAL)"
+       depends on DM_CACHE
+       select BTREE
+       default y
+       ---help---
+         Under development
+         A cache replacement policy module providing
+         FIFO, FILO, LRU, MRU, LFU, MFU, LFU_WS, MFU_WS, MULTIQUEUE, MULTIQUEUE_WS, Q2, TWOQUEUE and RANDOM policies
+
+config DM_CACHE_DEBUG
+       tristate "Debug Cache Policies (EXPERIMENTAL)"
+       depends on DM_CACHE
+       select DM_CACHE_BASIC
+       select DM_CACHE_MQ
+       select DM_CACHE_MKFS
+       default y
+       ---help---
+         Under development
+
 config DM_CACHE_CLEANER
        tristate "Cleaner Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
