@@ -1450,8 +1450,6 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 		alloc_cblock_insert_cache_and_count_entry(p, e);
 	}
 
-	p->nr_cblocks_allocated = to_cblock(from_cblock(p->nr_cblocks_allocated) + 1);
-
 	return 0;
 }
 
