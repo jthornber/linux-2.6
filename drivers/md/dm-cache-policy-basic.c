@@ -47,6 +47,9 @@
  *
  * The io_tracker tries to spot when the io is in
  * one of these sequential modes.
+ *
+ * Two thresholds to switch between random and sequential io mode are defaulting
+ * as follows and can be adjusted via the constructor and message interfaces.
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512

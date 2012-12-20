@@ -46,8 +46,8 @@ static void free_bitset(unsigned long *bits)
  * The io_tracker tries to spot when the io is in one of these sequential
  * modes.
  *
- * The two thresholds are hard coded for now.  I'd like them to be
- * accessible through a sysfs interface, rather than via the target line.
+ * Two thresholds to switch between random and sequential io mode are defaulting
+ * as follows and can be adjusted via the constructor and message interfaces.
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512
