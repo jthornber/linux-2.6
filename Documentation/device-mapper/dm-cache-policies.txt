@@ -15,12 +15,12 @@
     provides two tracking queues for entries waiting for cache blocks and
     entries evicted frm the cache; the former queue allows for prioritizing
     entries based on variable thresholds to get promoted to the cache either
-    on hit count or working set size (see respective plicy description underneath)
+    on hit count or working set size (see respective policy description below)
     (ie. how many read/write hits an entry takes or how many sectors
     are read/written from/to an entry), the latter queue allows to retrieve
     hit count/working set size on cache reentry, thus prioritizing formerly
-    evicted entries over completely new ones by adding their former counts back in;
-    aims to take different cache miss costs into account
+    evicted entries over completely new ones by adding their former counts
+    back in; aims to take different cache miss costs into account
 
     x fifo:
       first in first out (same as 'last in last out');
@@ -125,26 +125,28 @@
     spindles tend to have good bandwidth. The io_tracker tries to spot when
     the io is in one of these sequential modes.
   
-    Message/constructor argument pairs are 'sequential_threshold #nr_sequential'
-    and 'random_threshold #nr_random'
+    Message/constructor argument pairs are 'sequential_threshold <#nr_sequential>'
+    and 'random_threshold <#nr_random>'
   
-    Message syntax using the dmsetup command is eg. 
+    Message syntax using the dmsetup command is, eg.:
     dmsetup message <mapped device> 0 set_config sequential_threshold 1024
     - or -
     dmsetup message <mapped device> 0 set_config random_threshold 8
   
     Constructor syntax is:
-    "cache <metadata dev> <cache dev> <origin dev> <block size> <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
+    cache <metadata dev> <cache dev> <origin dev> <block size>
+          <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
   
     Eg. "cache /dev/sdb /dev/sdc /dev/sdd 512 0 mq 4 sequential_threshold 1024 random_threshold 8", ie. with dmsetup command
-    dmsetup create bla --table "0 268435456 cache /dev/sdb /dev/sdc /dev/sdd 512 0 mq 4 sequential_threshold 1024 random_threshold 8"
-    would create a 128GB large mapped device named 'bla' with those two policy argument pairs applied.
+    dmsetup create blah --table "0 268435456 cache /dev/sdb /dev/sdc /dev/sdd 512 0 mq 4 sequential_threshold 1024 random_threshold 8"
+    would create a 128GB large mapped device named 'blah' with those two
+    policy argument pairs applied.
 
- o multiqueue and multiqueue_ws:
-   support the 'multiqueue_timout #milliseconds' message and construcor argument pair
-   allowing to set the lifetime in any of the multiple queues.
+  o multiqueue and multiqueue_ws:
+    support the 'multiqueue_timout #milliseconds' message and constructor
+    argument pair allowing to set the lifetime in any of the multiple queues.
 
- o all module policies but 'mq' (aka 'default'), 'noop' and 'dump':
-   support the 'hits [01]' message and constructor argument pair to disable/enable
-   hits or work set size (ie. sum of sectors read/written whilst on the pre cache queue)
-   based cache promotion threshold processing
+  o all module policies but 'mq' (aka 'default'), 'noop' and 'dump':
+    support the 'hits [01]' message and constructor argument pair to
+    disable/enable hits or work set size (ie. sum of sectors read/written
+    whilst on the pre cache queue) based cache promotion threshold processing.
