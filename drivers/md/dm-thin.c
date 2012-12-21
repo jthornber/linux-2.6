@@ -452,7 +452,7 @@ static void inc_all_io_entry(struct pool *pool, struct bio *bio)
 	if (bio->bi_rw & REQ_DISCARD)
 		return;
 
-	h = dm_get_mapinfo(bio)->ptr;
+	h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
 	h->all_io_entry = dm_deferred_entry_inc(pool->all_io_ds);
 }
 
