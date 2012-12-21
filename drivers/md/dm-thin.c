@@ -374,7 +374,7 @@ static void inc_all_io_entry(struct pool *pool, struct bio *bio)
 	if (bio->bi_rw & REQ_DISCARD)
 		return;
 
-	h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
+	h = dm_get_mapinfo(bio)->ptr;
 	h->all_io_entry = dm_deferred_entry_inc(pool->all_io_ds);
 }
 
@@ -524,8 +524,7 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 /*
  * Same as cell_defer except it omits the original holder of the cell.
  */
-static void cell_defer_no_holder(struct thin_c *tc,
-				 struct dm_bio_prison_cell *cell)
+static void cell_defer_no_holder(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
@@ -1455,15 +1454,16 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		 */
 		thin_defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
-	}
 
-	/*
-	 * Must always call bio_io_error on failure.
-	 * dm_thin_find_block can fail with -EINVAL if the
-	 * pool is switched to fail-io mode.
-	 */
-	bio_io_error(bio);
-	return DM_MAPIO_SUBMITTED;
+	default:
+		/*
+		 * Must always call bio_io_error on failure.
+		 * dm_thin_find_block can fail with -EINVAL if the
+		 * pool is switched to fail-io mode.
+		 */
+		bio_io_error(bio);
+		return DM_MAPIO_SUBMITTED;
+	}
 }
 
 static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
@@ -2468,7 +2468,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 5, 0},
+	.version = {1, 6, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -2758,7 +2758,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 5, 0},
+	.version = {1, 6, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
