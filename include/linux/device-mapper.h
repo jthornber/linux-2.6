@@ -211,6 +211,12 @@ struct dm_target {
 	unsigned num_discard_requests;
 
 	/*
+	 * The number of WRITE SAME requests that will be submitted to the target.
+	 * The request number can be accessed with dm_bio_get_target_request_nr.
+	 */
+	unsigned num_write_same_requests;
+
+	/*
 	 * The minimum number of extra bytes allocated in each bio for the
 	 * target to use.  dm_per_bio_data returns the data location.
 	 */
