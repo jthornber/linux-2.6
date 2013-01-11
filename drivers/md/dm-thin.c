@@ -408,20 +408,14 @@ static void requeue_io(struct thin_c *tc)
  * target.
  */
 
-static bool block_size_is_power_of_two(struct pool *pool)
-{
-	return pool->sectors_per_block_shift >= 0;
-}
-
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
-	struct pool *pool = tc->pool;
 	sector_t block_nr = bio->bi_sector;
 
-	if (block_size_is_power_of_two(pool))
-		block_nr >>= pool->sectors_per_block_shift;
+	if (tc->pool->sectors_per_block_shift < 0)
+		(void) sector_div(block_nr, tc->pool->sectors_per_block);
 	else
-		(void) sector_div(block_nr, pool->sectors_per_block);
+		block_nr >>= tc->pool->sectors_per_block_shift;
 
 	return block_nr;
 }
@@ -432,12 +426,12 @@ static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 	sector_t bi_sector = bio->bi_sector;
 
 	bio->bi_bdev = tc->pool_dev->bdev;
-	if (block_size_is_power_of_two(pool))
-		bio->bi_sector = (block << pool->sectors_per_block_shift) |
-				(bi_sector & (pool->sectors_per_block - 1));
-	else
+	if (tc->pool->sectors_per_block_shift < 0)
 		bio->bi_sector = (block * pool->sectors_per_block) +
 				 sector_div(bi_sector, pool->sectors_per_block);
+	else
+		bio->bi_sector = (block << pool->sectors_per_block_shift) |
+				(bi_sector & (pool->sectors_per_block - 1));
 }
 
 static void remap_to_origin(struct thin_c *tc, struct bio *bio)
@@ -2497,6 +2491,11 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
+static bool block_size_is_power_of_two(struct pool *pool)
+{
+	return pool->sectors_per_block_shift >= 0;
+}
+
 static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 {
 	struct pool *pool = pt->pool;
@@ -2510,8 +2509,15 @@ static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 	if (pt->adjusted_pf.discard_passdown) {
 		data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
 		limits->discard_granularity = data_limits->discard_granularity;
-	} else
+	} else if (block_size_is_power_of_two(pool))
 		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+	else
+		/*
+		 * Use largest power of 2 that is a factor of sectors_per_block
+		 * but at least DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
+		 */
+		limits->discard_granularity = max(1 << (ffs(pool->sectors_per_block) - 1),
+						  DATA_DEV_BLOCK_SIZE_MIN_SECTORS) << SECTOR_SHIFT;
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
