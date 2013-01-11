@@ -47,6 +47,9 @@
  *
  * The io_tracker tries to spot when the io is in
  * one of these sequential modes.
+ *
+ * Two thresholds to switch between random and sequential io mode are defaulting
+ * as follows and can be adjusted via the constructor and message interfaces.
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512
@@ -275,6 +278,14 @@ static struct policy *to_policy(struct dm_cache_policy *p)
 	return container_of(p, struct policy, policy);
 }
 
+<<<<<<< HEAD
+=======
+static int to_rw(struct bio *bio)
+{
+	return (bio_data_dir(bio) == WRITE) ? 1 : 0;
+}
+
+>>>>>>> cache-patches
 /*----------------------------------------------------------------------------*/
 /* Low-level queue functions. */
 static void queue_init(struct list_head *q)
@@ -610,7 +621,11 @@ static void init_promote_threshold(struct policy *p, bool cache_full)
 
 	if (cache_full) {
 		p->promote_threshold[0] += ((p->cache_count[p->queues.ctype][0] * READ_PROMOTE_THRESHOLD) << 5) / from_cblock(p->cache_size);
+<<<<<<< HEAD
 		p->promote_threshold[1] += ((p->cache_count[p->queues.ctype][1] * WRITE_PROMOTE_THRESHOLD)<< 5) / from_cblock(p->cache_size);
+=======
+		p->promote_threshold[1] += ((p->cache_count[p->queues.ctype][1] * WRITE_PROMOTE_THRESHOLD)<< 6) / from_cblock(p->cache_size);
+>>>>>>> cache-patches
 	}
 }
 
@@ -1083,6 +1098,7 @@ static int find_free_cblock(struct policy *p, dm_cblock_t *result)
 	return r;
 }
 
+<<<<<<< HEAD
 static void add_cache_entry(struct policy *p, struct basic_cache_entry *e)
 {
 	unsigned t, u, end = ARRAY_SIZE(e->ce.count[T_HITS]);
@@ -1091,11 +1107,32 @@ static void add_cache_entry(struct policy *p, struct basic_cache_entry *e)
 	alloc_cblock(p, e->cblock);
 	insert_cache_hash_entry(p, e);
 
+=======
+static void alloc_cblock_insert_cache_and_count_entry(struct policy *p, struct basic_cache_entry *e)
+{
+	unsigned t, u, end = ARRAY_SIZE(e->ce.count[T_HITS]);
+
+	alloc_cblock(p, e->cblock);
+	insert_cache_hash_entry(p, e);
+
+	if (IS_DUMB(p) || IS_NOOP(p))
+		return;
+
+>>>>>>> cache-patches
 	for (t = 0; t < end; t++)
 		for (u = 0; u < end; u++)
 			p->cache_count[t][u] += e->ce.count[t][u];
 }
 
+<<<<<<< HEAD
+=======
+static void add_cache_entry(struct policy *p, struct basic_cache_entry *e)
+{
+	p->queues.fns->add(p, &e->ce.list);
+	alloc_cblock_insert_cache_and_count_entry(p, e);
+}
+
+>>>>>>> cache-patches
 static void remove_cache_entry(struct policy *p, struct basic_cache_entry *e)
 {
 	unsigned t, u, end = ARRAY_SIZE(e->ce.count[T_HITS]);
@@ -1103,6 +1140,12 @@ static void remove_cache_entry(struct policy *p, struct basic_cache_entry *e)
 	remove_cache_hash_entry(p, e);
 	free_cblock(p, e->cblock);
 
+<<<<<<< HEAD
+=======
+	if (IS_DUMB(p) || IS_NOOP(p))
+		return;
+
+>>>>>>> cache-patches
 	for (t = 0; t < end; t++)
 		for (u = 0; u < end; u++)
 			p->cache_count[t][u] -= e->ce.count[t][u];
@@ -1130,10 +1173,17 @@ static void update_cache_entry(struct policy *p, struct basic_cache_entry *e,
 	result->op = POLICY_HIT;
 	result->cblock = e->cblock;
 
+<<<<<<< HEAD
 	if (IS_DUMB(p))
 		return;
 
 	rw = (bio_data_dir(bio) == WRITE ? 1 : 0);
+=======
+	if (IS_DUMB(p) || IS_NOOP(p))
+		return;
+
+	rw = to_rw(bio);
+>>>>>>> cache-patches
 
 	e->ce.count[T_HITS][rw]++;
 	e->ce.count[T_SECTORS][rw] += bio_sectors(bio);
@@ -1151,7 +1201,11 @@ static void update_cache_entry(struct policy *p, struct basic_cache_entry *e,
 static void get_cache_block(struct policy *p, dm_oblock_t oblock, struct bio *bio,
 			    struct policy_result *result)
 {
+<<<<<<< HEAD
 	int rw = (bio_data_dir(bio) == WRITE ? 1 : 0);
+=======
+	int rw = to_rw(bio);
+>>>>>>> cache-patches
 	struct basic_cache_entry *e;
 
 	if (queue_empty(&p->queues.free)) {
@@ -1205,10 +1259,33 @@ static void get_cache_block(struct policy *p, dm_oblock_t oblock, struct bio *bi
 	add_cache_entry(p, e);
 }
 
+<<<<<<< HEAD
 static bool is_promotion_candidate(struct policy *p,
 				   struct track_queue_entry *tqe,
 				   bool discarded_oblock, int rw)
 {
+=======
+static bool in_cache(struct policy *p, dm_block_t oblock, struct bio *bio, struct policy_result *result)
+{
+	struct basic_cache_entry *e = lookup_cache_entry(p, oblock);
+
+	if (e) {
+		/* Cache hit: update entry on queues, increment its hit count */
+		update_cache_entry(p, e, bio, result);
+		return true;
+	}
+
+	return false;
+}
+
+static bool should_promote(struct policy *p, struct track_queue_entry *tqe,
+			   dm_oblock_t oblock, int rw, bool discarded_oblock,
+			   struct policy_result *result)
+{
+	BUG_ON(!tqe);
+	calc_rw_threshold(p);
+
+>>>>>>> cache-patches
 	if (discarded_oblock && any_free_cblocks(p))
 		/*
 		 * We don't need to do any copying at all, so give this a
@@ -1220,6 +1297,7 @@ static bool is_promotion_candidate(struct policy *p,
 	return tqe->ce.count[p->queues.ctype][rw] >= p->promote_threshold[rw];
 }
 
+<<<<<<< HEAD
 static bool should_promote(struct policy *p, dm_oblock_t oblock,
 			   bool discarded_oblock, struct bio *bio,
 			   struct policy_result *result)
@@ -1232,6 +1310,8 @@ static bool should_promote(struct policy *p, dm_oblock_t oblock,
 	return is_promotion_candidate(p, tqe, discarded_oblock, rw);
 }
 
+=======
+>>>>>>> cache-patches
 static void map_prerequisites(struct policy *p, struct bio *bio)
 {
 	/* Update io tracker. */
@@ -1244,27 +1324,50 @@ static void map_prerequisites(struct policy *p, struct bio *bio)
 }
 
 static int map(struct policy *p, dm_oblock_t oblock,
+<<<<<<< HEAD
 	       bool can_migrate, bool discarded_oblock,
 	       struct bio *bio, struct policy_result *result)
 {
 	struct basic_cache_entry *e;
+=======
+	       bool can_block, bool can_migrate, bool discarded_oblock,
+	       struct bio *bio, struct policy_result *result)
+{
+	int rw = to_rw(bio);
+	struct track_queue_entry *tqe;
+>>>>>>> cache-patches
 
 	if (IS_NOOP(p))
 		return 0;
 
+<<<<<<< HEAD
 	e = lookup_cache_entry(p, oblock);
 	if (e)
 		/* Cache hit: update entry on queues, increment its hit count */
 		update_cache_entry(p, e, bio, result);
 
 	else if (!can_migrate)
+=======
+	if (in_cache(p, oblock, bio, result))
+		return 0;
+
+	if (!IS_DUMB(p))
+		/* Record hits on pre cache track queue. */
+		tqe = update_track_queue(p, &p->queues.pre, oblock, rw, 1, bio_sectors(bio));
+
+	if (!can_migrate)
+>>>>>>> cache-patches
 		return -EWOULDBLOCK;
 
 	else if (!IS_DUMB(p) && iot_sequential_pattern(&p->tracker))
 		;
 
+<<<<<<< HEAD
 	else if (IS_DUMB(p) ||
 		 should_promote(p, oblock, discarded_oblock, bio, result))
+=======
+	else if (IS_DUMB(p) || should_promote(p, tqe, oblock, rw, discarded_oblock, result))
+>>>>>>> cache-patches
 		get_cache_block(p, oblock, bio, result);
 
 	return 0;
@@ -1289,7 +1392,11 @@ static int basic_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
 	if (!IS_DUMB(p) && !IS_NOOP(p))
 		map_prerequisites(p, bio);
 
+<<<<<<< HEAD
 	r = map(p, oblock, can_migrate, discarded_oblock, bio, result);
+=======
+	r = map(p, oblock, can_block, can_migrate, discarded_oblock, bio, result);
+>>>>>>> cache-patches
 
 	mutex_unlock(&p->lock);
 
@@ -1389,6 +1496,11 @@ static void sort_in_cache_entry(struct policy *p, struct basic_cache_entry *e)
 		list_add_tail(&e->ce.list, elt);
 	else
 		list_add(&e->ce.list, elt);
+<<<<<<< HEAD
+=======
+
+	queue_add_tail(&p->queues.walk, &e->walk);
+>>>>>>> cache-patches
 }
 
 static int basic_load_mapping(struct dm_cache_policy *pe,
@@ -1409,6 +1521,7 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 		unsigned reads, writes;
 
 		hint_to_counts(hint, &reads, &writes);
+<<<<<<< HEAD
 
 		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
 			/* FIXME: store also in larger hints rather than making up. */
@@ -1421,6 +1534,23 @@ static int basic_load_mapping(struct dm_cache_policy *pe,
 
 		} else
 			sort_in_cache_entry(p, e);
+=======
+		e->ce.count[T_HITS][0] = reads;
+		e->ce.count[T_HITS][1] = writes;
+
+		if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p)) {
+			/* FIXME: store also in larger hints rather than making up. */
+			e->ce.count[T_SECTORS][0] = reads << p->block_shift;
+			e->ce.count[T_SECTORS][1] = writes << p->block_shift;
+		}
+	}
+
+	if (IS_MULTIQUEUE(p) || IS_TWOQUEUE(p) || IS_LFU_MFU_WS(p))
+		add_cache_entry(p, e);
+	else {
+		sort_in_cache_entry(p, e);
+		alloc_cblock_insert_cache_and_count_entry(p, e);
+>>>>>>> cache-patches
 	}
 
 	return 0;

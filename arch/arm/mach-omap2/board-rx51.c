@@ -24,7 +24,7 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
-#include <plat-omap/dma-omap.h>
+#include <linux/omap-dma.h>
 
 #include "common.h"
 #include "mux.h"
@@ -33,8 +33,6 @@
 #include "sdram-nokia.h"
 
 #define RX51_GPIO_SLEEP_IND 162
-
-extern void rx51_video_mem_init(void);
 
 static struct gpio_led gpio_leds[] = {
 	{
@@ -112,7 +110,6 @@ static void __init rx51_init(void)
 
 static void __init rx51_reserve(void)
 {
-	rx51_video_mem_init();
 	omap_reserve();
 }
 

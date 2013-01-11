@@ -26,9 +26,8 @@
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/console.h>
-
-#include <plat/omap-serial.h>
-#include <plat-omap/dma-omap.h>
+#include <linux/omap-dma.h>
+#include <linux/platform_data/serial-omap.h>
 
 #include "common.h"
 #include "omap_hwmod.h"

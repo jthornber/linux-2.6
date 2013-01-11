@@ -223,10 +223,10 @@ struct thin_c {
 	struct pool *pool;
 	struct dm_thin_device *td;
 
-	 /*
-	  * The cell structures are too big to put on the stack, so we have
-	  * a couple here for use by the main mapping function.
-	  */
+	/*
+	 * The cell structures are too big to put on the stack, so we have
+	 * a couple here for use by the main mapping function.
+	 */
 	spinlock_t lock;
 	struct dm_bio_prison_cell cell1, cell2;
 };
@@ -269,6 +269,77 @@ static void cell_release_no_holder(struct pool *pool,
 {
 	dm_cell_release_no_holder(pool->prison, cell, bios);
 	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
+static void cell_error(struct pool *pool,
+		       struct dm_bio_prison_cell *cell)
+{
+	dm_cell_error(pool->prison, cell);
+	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
+/*----------------------------------------------------------------*/
+
+/*
+ * wake_worker() is used when new work is queued and when pool_resume is
+ * ready to continue deferred IO processing.
+ */
+static void wake_worker(struct pool *pool)
+{
+	queue_work(pool->wq, &pool->worker);
+}
+
+/*----------------------------------------------------------------*/
+
+static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bio,
+		      struct dm_bio_prison_cell **result)
+{
+	int r;
+	struct dm_bio_prison_cell *cell;
+
+	cell = dm_bio_prison_alloc_cell(pool->prison, GFP_NOIO);
+	if (!cell)
+		return -ENOMEM;
+
+	r = dm_bio_detain(pool->prison, key, bio, cell, result);
+
+	if (r)
+		/*
+		 * We reused an old cell, or errored; we can get rid of
+		 * the new one.
+		 */
+		dm_bio_prison_free_cell(pool->prison, cell);
+
+	return r;
+}
+
+static void cell_release(struct pool *pool,
+			 struct dm_bio_prison_cell *cell,
+			 struct bio_list *bios)
+{
+	dm_cell_release(pool->prison, cell, bios);
+	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
+static void cell_release_no_holder(struct pool *pool,
+				   struct dm_bio_prison_cell *cell,
+				   struct bio_list *bios)
+{
+	dm_cell_release_no_holder(pool->prison, cell, bios);
+	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
+static void cell_defer_no_holder_no_free(struct thin_c *tc,
+					 struct dm_bio_prison_cell *cell)
+{
+	struct pool *pool = tc->pool;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+	dm_cell_release_no_holder(pool->prison, cell, &pool->deferred_bios);
+	spin_unlock_irqrestore(&pool->lock, flags);
+
+	wake_worker(pool);
 }
 
 static void cell_error(struct pool *pool,
@@ -384,14 +455,20 @@ static void requeue_io(struct thin_c *tc)
  * target.
  */
 
+static bool block_size_is_power_of_two(struct pool *pool)
+{
+	return pool->sectors_per_block_shift >= 0;
+}
+
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
+	struct pool *pool = tc->pool;
 	sector_t block_nr = bio->bi_sector;
 
-	if (tc->pool->sectors_per_block_shift < 0)
-		(void) sector_div(block_nr, tc->pool->sectors_per_block);
+	if (block_size_is_power_of_two(pool))
+		block_nr >>= pool->sectors_per_block_shift;
 	else
-		block_nr >>= tc->pool->sectors_per_block_shift;
+		(void) sector_div(block_nr, pool->sectors_per_block);
 
 	return block_nr;
 }
@@ -402,12 +479,12 @@ static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 	sector_t bi_sector = bio->bi_sector;
 
 	bio->bi_bdev = tc->pool_dev->bdev;
-	if (tc->pool->sectors_per_block_shift < 0)
-		bio->bi_sector = (block * pool->sectors_per_block) +
-				 sector_div(bi_sector, pool->sectors_per_block);
-	else
+	if (block_size_is_power_of_two(pool))
 		bio->bi_sector = (block << pool->sectors_per_block_shift) |
 				(bi_sector & (pool->sectors_per_block - 1));
+	else
+		bio->bi_sector = (block * pool->sectors_per_block) +
+				 sector_div(bi_sector, pool->sectors_per_block);
 }
 
 static void remap_to_origin(struct thin_c *tc, struct bio *bio)
@@ -472,15 +549,6 @@ static void remap_and_issue(struct thin_c *tc, struct bio *bio,
 {
 	remap(tc, bio, block);
 	issue(tc, bio);
-}
-
-/*
- * wake_worker() is used when new work is queued and when pool_resume is
- * ready to continue deferred IO processing.
- */
-static void wake_worker(struct pool *pool)
-{
-	queue_work(pool->wq, &pool->worker);
 }
 
 /*----------------------------------------------------------------*/
@@ -578,27 +646,13 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 /*
  * Same as cell_defer above, except it omits the original holder of the cell.
  */
-static void cell_defer_no_holder(struct thin_c *tc,
-				 struct dm_bio_prison_cell *cell)
+static void cell_defer_no_holder(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
 	spin_lock_irqsave(&pool->lock, flags);
 	cell_release_no_holder(pool, cell, &pool->deferred_bios);
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	wake_worker(pool);
-}
-
-static void cell_defer_no_holder_no_free(struct thin_c *tc,
-					 struct dm_bio_prison_cell *cell)
-{
-	struct pool *pool = tc->pool;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	dm_cell_release_no_holder(pool->prison, cell, &pool->deferred_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	wake_worker(pool);
@@ -1530,15 +1584,16 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		 */
 		thin_defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
-	}
 
-	/*
-	 * Must always call bio_io_error on failure.
-	 * dm_thin_find_block can fail with -EINVAL if the
-	 * pool is switched to fail-io mode.
-	 */
-	bio_io_error(bio);
-	return DM_MAPIO_SUBMITTED;
+	default:
+		/*
+		 * Must always call bio_io_error on failure.
+		 * dm_thin_find_block can fail with -EINVAL if the
+		 * pool is switched to fail-io mode.
+		 */
+		bio_io_error(bio);
+		return DM_MAPIO_SUBMITTED;
+	}
 }
 
 static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
@@ -2489,11 +2544,6 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-static bool block_size_is_power_of_two(struct pool *pool)
-{
-	return pool->sectors_per_block_shift >= 0;
-}
-
 static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 {
 	struct pool *pool = pt->pool;
@@ -2507,15 +2557,8 @@ static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 	if (pt->adjusted_pf.discard_passdown) {
 		data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
 		limits->discard_granularity = data_limits->discard_granularity;
-	} else if (block_size_is_power_of_two(pool))
+	} else
 		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-	else
-		/*
-		 * Use largest power of 2 that is a factor of sectors_per_block
-		 * but at least DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
-		 */
-		limits->discard_granularity = max(1 << (ffs(pool->sectors_per_block) - 1),
-						  DATA_DEV_BLOCK_SIZE_MIN_SECTORS) << SECTOR_SHIFT;
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -2543,7 +2586,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 5, 0},
+	.version = {1, 6, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -2835,7 +2878,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 5, 0},
+	.version = {1, 6, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,

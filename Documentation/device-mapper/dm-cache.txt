@@ -1,7 +1,7 @@
 * Introduction
 
 dm-cache is a device mapper target written by Joe Thornber, Heinz
-Maueslhagen, and Mike Snitzer.
+Mauelshagen, and Mike Snitzer.
 
 It aims to improve performance of a block device (eg, a spindle) by
 dynamically migrating some of its data to a faster, smaller device
@@ -46,7 +46,7 @@ other params detailed later):
 
   This information could be put on the cache device, but having it
   separate allows the volume manager to configure it differently.  eg,
-  as a mirror for extra rebustness.
+  as a mirror for extra robustness.
 
 
 ** Fixed block size
@@ -85,6 +85,16 @@ migrations occuring at any one time.  Currently we're not taking any
 account of normal io traffic going to the devs.  More work needs to be
 done here to avoid migrating during those peak io moments.
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+For the time being, a message "set_config migration_threshold <#sectors>"
+can be used to set the maximum number of sectors being migrated;
+default being 204800 sectors (or 100MB).
+
+>>>>>>> github-mike/dm-devel-cache
+>>>>>>> cache-patches
 ** Updating on disk metadata
 
 On disk metadata is committed everytime a REQ_SYNC or REQ_FUA bio is
@@ -101,7 +111,11 @@ system crashes all cache blocks will be assumed dirty when restarted.
 
 ** per block policy hints
 
+<<<<<<< HEAD
 Policy pug-ins can store a chunk of data per cache block.  It's up to
+=======
+Policy plug-ins can store a chunk of data per cache block.  It's up to
+>>>>>>> cache-patches
 the policy how big this chunk is (please keep it small).  Like the
 dirty flags this data is lost if there's a crash so a safe fallback
 value should always be possible.
@@ -115,13 +129,34 @@ Policy hints effect performance, not correctness.
 
 ** Policy messaging
 
+<<<<<<< HEAD
 Policies will have different tunables, specific to each one.  So we
 need a generic way of getting and setting these.  One way would be
 through a sysfs interface; much as we do with a block device's queue
+=======
+<<<<<<< HEAD
+Policies will have different tunables, specific to each one.  So we
+need a generic way of getting and setting these.  One way would be
+through a sysfs interface; much as we do with a block device's queue
+=======
+Policies have different tunables, specific to each one, so we need a
+generic way of getting and setting these.  One way would be through
+a sysfs interface; much as we do with a block device's queue
+>>>>>>> github-mike/dm-devel-cache
+>>>>>>> cache-patches
 parameters.  Another is to use the device-mapper message facility.
 We're using that latter method currently, though don't feel strongly
 one way or the other.
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+See dm-cache-policies.txt for details on the attributes and config
+options of the various cache replacement policies.
+
+>>>>>>> github-mike/dm-devel-cache
+>>>>>>> cache-patches
 ** discard bitset resolution
 
 We can avoid copying data during migration if we know the block has
@@ -135,8 +170,13 @@ which is just for the smaller cache device).
 ** Target interface
 
  cache <metadata dev>
+<<<<<<< HEAD
        <origin dev>
        <cache dev>
+=======
+       <cache dev>
+       <origin dev>
+>>>>>>> cache-patches
        <block size>
        <#feature args> [<feature arg>]*
        <policy>
@@ -144,8 +184,13 @@ which is just for the smaller cache device).
        [policy args]*
 
  metadata dev    : fast device holding the persistent metadata
+<<<<<<< HEAD
  origin dev	 : slow device holding original data blocks
  cache dev	 : fast device holding cached data blocks
+=======
+ cache dev	 : fast device holding cached data blocks
+ origin dev	 : slow device holding original data blocks
+>>>>>>> cache-patches
  block size      : cache unit size in sectors
  policy          : the replacement policy to use
 
@@ -154,29 +199,59 @@ which is just for the smaller cache device).
 
  #policy args    : an even number of arguments corresponding to
                    key/value pairs passed to the policy.
+<<<<<<< HEAD
  policy args     : key/value pairs (eg, 'migration_threshold 1024000')
+=======
+<<<<<<< HEAD
+ policy args     : key/value pairs (eg, 'migration_threshold 1024000')
+=======
+ policy args     : key/value pairs (eg, 'sequential_threshold 1024');
+                   see dm-cache-policies.txt for details
+>>>>>>> github-mike/dm-devel-cache
+>>>>>>> cache-patches
 
 A policy called 'default' is always registered.  This is an alias for
 the policy we currently think is giving best all round performance.
 
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+See dm-cache-policies.txt for details on the attributes and config
+options of this and the other various cache replacement policies.
+
+>>>>>>> github-mike/dm-devel-cache
+>>>>>>> cache-patches
 * Example usage
 
 The test suite can be found here:
 
 https://github.com/jthornber/thinp-test-suite
 
+<<<<<<< HEAD
 writing table: 0 41943040 cache /dev/mapper/metadata /dev/mapper/origin /dev/mapper/ssd 512 1 writeback writeback 0
 
 * Policy interface
 
 - Try and keep transactionality out of it.  The core is careful to
+=======
+0 41943040 cache /dev/mapper/metadata /dev/mapper/ssd /dev/mapper/origin 512 1 writeback default 0
+
+* Policy interface
+
+- Try to keep transactionality out of it.  The core is careful to
+>>>>>>> cache-patches
   avoid asking about anything that is migrating.  This is a pain, but
   makes it easier to write the policies.
 
 - Mappings are loaded into the policy at construction time.
 
 - Every bio that is mapped by the target is referred to the policy, it
+<<<<<<< HEAD
   can give a simle HIT or MISS or issue a migration.
+=======
+  can give a simple HIT or MISS or issue a migration.
+>>>>>>> cache-patches
 
 - Currently there's no way for the policy to issue background work,
   eg, start writing back dirty blocks that are soon going to be evicted.
@@ -206,4 +281,11 @@ writing table: 0 41943040 cache /dev/mapper/metadata /dev/mapper/origin /dev/map
 				     unsigned int seq_io_thresh);
 
 	void (*tick)(struct dm_cache_policy *p);
+<<<<<<< HEAD
 
+=======
+<<<<<<< HEAD
+
+=======
+>>>>>>> github-mike/dm-devel-cache
+>>>>>>> cache-patches

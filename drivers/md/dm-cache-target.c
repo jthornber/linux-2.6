@@ -21,7 +21,6 @@
 #include <linux/slab.h>
 
 #define DM_MSG_PREFIX "cache"
-#define DAEMON "cached"
 
 /*----------------------------------------------------------------*/
 
@@ -461,7 +460,7 @@ static void save_stats(struct cache *cache)
 }
 
 /*----------------------------------------------------------------
- * Per request data
+ * Per bio data
  *--------------------------------------------------------------*/
 static struct per_bio_data *get_per_bio_data(struct bio *bio)
 {
@@ -1820,7 +1819,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
+	cache->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
 	if (!cache->wq) {
 		*error = "could not create workqueue for metadata object";
 		goto bad;
@@ -1844,7 +1843,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
-		*error = "Error creating cache's endio_hook mempool";
+		*error = "Error creating cache's migration mempool";
 		goto bad;
 	}
 
@@ -1980,7 +1979,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 
 	} else if (r) {
-		DMERR("Bug in policy\n");
+		DMERR_LIMIT("Unexpected return from cache replacement policy: %d", r);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
