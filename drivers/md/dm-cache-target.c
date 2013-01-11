@@ -474,7 +474,7 @@ static struct per_bio_data *init_per_bio_data(struct bio *bio)
 	struct per_bio_data *pb = get_per_bio_data(bio);
 
 	pb->tick = false;
-	pb->req_nr = dm_bio_get_target_request_nr(bio);
+	pb->req_nr = dm_bio_get_target_bio_nr(bio);
 	pb->all_io_entry = NULL;
 
 	return pb;
@@ -1735,10 +1735,10 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->ti = ca->ti;
 	ti->private = cache;
 	ti->per_bio_data_size = sizeof(struct per_bio_data);
-	ti->num_flush_requests = 2;
+	ti->num_flush_bios = 2;
 	ti->flush_supported = true;
 
-	ti->num_discard_requests = 1;
+	ti->num_discard_bios = 1;
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
