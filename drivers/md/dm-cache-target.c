@@ -227,6 +227,17 @@ static void wake_worker(struct cache *cache)
 
 /*----------------------------------------------------------------*/
 
+static struct dm_bio_prison_cell *alloc_prison_cell(struct cache *cache)
+{
+	// FIXME: change to use a local slab.
+	return dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+}
+
+static void free_prison_cell(struct cache *cache, struct dm_bio_prison_cell *cell)
+{
+	dm_bio_prison_free_cell(cache->prison, cell);
+}
+
 static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 {
 	if (!p->mg) {
@@ -236,13 +247,13 @@ static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 	}
 
 	if (!p->cell1) {
-		p->cell1 = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+		p->cell1 = alloc_prison_cell(cache);
 		if (!p->cell1)
 			return -ENOMEM;
 	}
 
 	if (!p->cell2) {
-		p->cell2 = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+		p->cell2 = alloc_prison_cell(cache);
 		if (!p->cell2)
 			return -ENOMEM;
 	}
@@ -253,10 +264,10 @@ static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 static void prealloc_free_structs(struct cache *cache, struct prealloc *p)
 {
 	if (p->cell2)
-		dm_bio_prison_free_cell(cache->prison, p->cell2);
+		free_prison_cell(cache, p->cell2);
 
 	if (p->cell1)
-		dm_bio_prison_free_cell(cache->prison, p->cell1);
+		free_prison_cell(cache, p->cell1);
 
 	if (p->mg)
 		mempool_free(p->mg, cache->migration_pool);
@@ -607,7 +618,7 @@ static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
 {
 	(holder ? dm_cell_release : dm_cell_release_no_holder)
 		(cache->prison, cell, &cache->deferred_bios);
-	dm_bio_prison_free_cell(cache->prison, cell);
+	free_prison_cell(cache, cell);
 }
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
@@ -1959,10 +1970,15 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	cell = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+	cell = alloc_prison_cell(cache);
+	if (!cell) {
+		defer_bio(cache, bio);
+		return DM_MAPIO_SUBMITTED;
+	}
+
 	r = bio_detain(cache, block, bio, cell,
-		       (cell_free_fn) dm_bio_prison_free_cell,
-		       cache->prison, &cell);
+		       (cell_free_fn) free_prison_cell,
+		       cache, &cell);
 	if (r) {
 		if (r < 0)
 			defer_bio(cache, bio);
