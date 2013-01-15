@@ -1,7 +1,7 @@
 * Introduction
 
 dm-cache is a device mapper target written by Joe Thornber, Heinz
-Mauelshagen, and Mike Snitzer.
+Maueslhagen, and Mike Snitzer.
 
 It aims to improve performance of a block device (eg, a spindle) by
 dynamically migrating some of its data to a faster, smaller device
@@ -85,10 +85,6 @@ migrations occuring at any one time.  Currently we're not taking any
 account of normal io traffic going to the devs.  More work needs to be
 done here to avoid migrating during those peak io moments.
 
-For the time being, a message "set_config migration_threshold <#sectors>"
-can be used to set the maximum number of sectors being migrated;
-default being 204800 sectors (or 100MB).
-
 ** Updating on disk metadata
 
 On disk metadata is committed everytime a REQ_SYNC or REQ_FUA bio is
@@ -119,15 +115,12 @@ Policy hints effect performance, not correctness.
 
 ** Policy messaging
 
-Policies have different tunables, specific to each one, so we need a
-generic way of getting and setting these.  One way would be through
-a sysfs interface; much as we do with a block device's queue
+Policies will have different tunables, specific to each one.  So we
+need a generic way of getting and setting these.  One way would be
+through a sysfs interface; much as we do with a block device's queue
 parameters.  Another is to use the device-mapper message facility.
 We're using that latter method currently, though don't feel strongly
 one way or the other.
-
-See dm-cache-policies.txt for details on the attributes and config
-options of the various cache replacement policies.
 
 ** discard bitset resolution
 
@@ -161,14 +154,10 @@ which is just for the smaller cache device).
 
  #policy args    : an even number of arguments corresponding to
                    key/value pairs passed to the policy.
- policy args     : key/value pairs (eg, 'sequential_threshold 1024');
-                   see dm-cache-policies.txt for details
+ policy args     : key/value pairs (eg, 'migration_threshold 1024000')
 
 A policy called 'default' is always registered.  This is an alias for
 the policy we currently think is giving best all round performance.
-
-See dm-cache-policies.txt for details on the attributes and config
-options of this and the other various cache replacement policies.
 
 * Example usage
 
@@ -214,6 +203,7 @@ https://github.com/jthornber/thinp-test-suite
 
 	dm_block_t (*residency)(struct dm_cache_policy *p);
 	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
-				     unsigned int seq_io_thresh);
+				     unsigned seq_io_thresh);
 
 	void (*tick)(struct dm_cache_policy *p);
+

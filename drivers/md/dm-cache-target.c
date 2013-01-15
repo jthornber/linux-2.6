@@ -1502,10 +1502,12 @@ static int ensure_args__(struct dm_arg_set *as,
 	return 0;
 }
 
-#define ensure_args(n) \
-	r = ensure_args__(as, n, error); \
-	if (r) \
-		return r;
+#define ensure_args(n)					\
+	do {						\
+		r = ensure_args__(as, n, error);	\
+		if (r)					\
+			return r;			\
+	} while (0)
 
 static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 			      char **error)
@@ -1666,10 +1668,12 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	as.argc = argc;
 	as.argv = argv;
 
-#define parse(name) \
-	r = parse_ ## name(ca, &as, error); \
-	if (r) \
-		return r;
+#define parse(name)					\
+	do {						\
+		r = parse_ ## name(ca, &as, error);	\
+		if (r)					\
+			return r;			\
+	} while (0)
 
 	parse(metadata_dev);
 	parse(cache_dev);
@@ -1732,6 +1736,8 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 
 #define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
 
+static unsigned cache_num_write_bios(struct dm_target *ti, struct bio *bio);
+
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
 	int r = 0;
@@ -1756,14 +1762,18 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
+	if (cache->features.write_through)
+		ti->num_write_bios = cache_num_write_bios;
+
 	cache->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
 
-#define consume(n) n; n = NULL;
+	cache->metadata_dev = ca->metadata_dev;
+	cache->origin_dev = ca->origin_dev;
+	cache->cache_dev = ca->cache_dev;
 
-	cache->metadata_dev = consume(ca->metadata_dev);
-	cache->origin_dev = consume(ca->origin_dev);
-	cache->cache_dev = consume(ca->cache_dev);
+	ca->metadata_dev = ca->origin_dev = ca->cache_dev = NULL;
+
 	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 
 	// FIXME: factor out this whole section
@@ -1918,27 +1928,18 @@ out:
 	return r;
 }
 
-static unsigned cache_get_num_duplicates(struct dm_target *ti,
-					 struct bio *bio)
+static unsigned cache_num_write_bios(struct dm_target *ti, struct bio *bio)
 {
 	int r;
 	struct cache *cache = ti->private;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	dm_cblock_t cblock;
 
-	if (bio_data_dir(bio) != WRITE || !cache->features.write_through)
-		return 1;
-
-#if 0
 	r = policy_lookup(cache->policy, block, &cblock);
 	if (r < 0)
 		return 2;	/* assume the worst */
 
 	return (!r && !is_dirty(cache, cblock)) ? 2 : 1;
-#else
-	// testing the failure case
-	return 2;
-#endif
 }
 
 static int cache_map(struct dm_target *ti, struct bio *bio)
@@ -2415,7 +2416,6 @@ static struct target_type cache_target = {
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
-	.get_num_duplicates = cache_get_num_duplicates,
 	.map = cache_map,
 	.end_io = cache_end_io,
 	.postsuspend = cache_postsuspend,

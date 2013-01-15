@@ -468,7 +468,7 @@ static struct dm_cache_policy_type wb_policy_type = {
 	.name = "cleaner",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
-        .create = wb_create
+	.create = wb_create
 };
 
 static int __init wb_init(void)
@@ -484,8 +484,6 @@ static void __exit wb_exit(void)
 module_init(wb_init);
 module_exit(wb_exit);
 
-MODULE_AUTHOR("Heinz Mauelshagen");
+MODULE_AUTHOR("Heinz Mauelshagen <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("cleaner cache policy");
-
-/*----------------------------------------------------------------------------*/

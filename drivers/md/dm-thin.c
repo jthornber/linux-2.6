@@ -597,7 +597,7 @@ static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 }
 
 /*
- * Same as cell_defer except it omits the original holder of the cell.
+ * Same as cell_defer above, except it omits the original holder of the cell.
  */
 static void cell_defer_no_holder(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
@@ -1456,8 +1456,8 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_device *td = tc->td;
 	struct dm_thin_lookup_result result;
-	struct dm_bio_prison_cell *cell_result;
 	struct dm_cell_key key;
+	struct dm_bio_prison_cell *cell_result;
 
 	thin_hook_bio(tc, bio);
 

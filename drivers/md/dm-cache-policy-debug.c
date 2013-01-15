@@ -1,5 +1,4 @@
 /*
- *
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
  * Debug module for cache replacement policies.
@@ -115,7 +114,7 @@ static struct debug_entry *lookup_debug_entry_by_ ## longtype ## _block(struct p
 	struct debug_entry *cur; \
 	struct hlist_node *tmp; \
 	struct hlist_head *bucket = p->type ## hash.table + h; \
- \
+\
 	hlist_for_each_entry(cur, tmp, bucket, type ## hlist) { \
 		if (cur->type ## block == type ## block) { \
 			/* Move upfront bucket for faster access. */ \
@@ -124,7 +123,7 @@ static struct debug_entry *lookup_debug_entry_by_ ## longtype ## _block(struct p
 			return cur; \
 		} \
 	} \
- \
+\
 	return NULL; \
 }
 
@@ -762,7 +761,7 @@ bad_dm_cache_policy_create:
 static struct dm_cache_policy_type debug_policy_type = {
 	.name = "debug",
 	.owner = THIS_MODULE,
-        .create = debug_create
+	.create = debug_create
 };
 
 static int __init debug_init(void)
@@ -794,8 +793,6 @@ MODULE_PARM_DESC(policy, "name of cache replacement policy to debug");
 module_param_named(verbose, modparms.verbose, uint, S_IWUSR);
 MODULE_PARM_DESC(verbose, "verbose state output");
 
-MODULE_AUTHOR("Heinz Mauelshagen");
+MODULE_AUTHOR("Heinz Mauelshagen <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("debug module for cache replacement policies");
-
-/*----------------------------------------------------------------------------*/

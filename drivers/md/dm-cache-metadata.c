@@ -16,9 +16,6 @@
 
 /*----------------------------------------------------------------*/
 
-//#define debug(x...) pr_alert(x)
-#define debug(x...) ;
-
 #define DM_MSG_PREFIX   "cache metadata"
 
 #define CACHE_SUPERBLOCK_MAGIC 06142003
@@ -140,15 +137,15 @@ static int sb_check(struct dm_block_validator *v,
 	__le32 csum_le;
 
 	if (dm_block_location(b) != le64_to_cpu(disk_super->blocknr)) {
-		DMERR("sb_check failed: blocknr %llu: "
-		      "wanted %llu", le64_to_cpu(disk_super->blocknr),
+		DMERR("sb_check failed: blocknr %llu: wanted %llu",
+		      le64_to_cpu(disk_super->blocknr),
 		      (unsigned long long)dm_block_location(b));
 		return -ENOTBLK;
 	}
 
 	if (le64_to_cpu(disk_super->magic) != CACHE_SUPERBLOCK_MAGIC) {
-		DMERR("sb_check failed: magic %llu: "
-		      "wanted %llu", le64_to_cpu(disk_super->magic),
+		DMERR("sb_check failed: magic %llu: wanted %llu",
+		      le64_to_cpu(disk_super->magic),
 		      (unsigned long long)CACHE_SUPERBLOCK_MAGIC);
 		return -EILSEQ;
 	}
@@ -300,7 +297,6 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 {
 	int r;
 
-	debug("formatting metadata dev");
 	r = dm_tm_create_with_sm(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
 				 &cmd->tm, &cmd->metadata_sm);
 	if (r < 0) {
@@ -563,7 +559,6 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	if (mutator)
 		update_flags(disk_super, mutator);
 
-	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
 	disk_super->discard_root = cpu_to_le64(cmd->discard_root);
@@ -793,7 +788,6 @@ static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
 	int r;
 	__le64 value = pack_value(0, 0);
 
-	debug("__remove %lu\n", (unsigned long) oblock);
 	__dm_bless_for_disk(&value);
 	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
 			 &value, &cmd->root);
@@ -911,11 +905,9 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd, const char *policy_nam
 {
 	int r;
 
-	debug("> dm_cache_load_mappings\n");
 	down_read(&cmd->root_lock);
 	r = __load_mappings(cmd, policy_name, fn, context);
 	up_read(&cmd->root_lock);
-	debug("< dm_cache_load_mappings\n");
 
 	return r;
 }

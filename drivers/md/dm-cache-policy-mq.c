@@ -587,7 +587,7 @@ static void check_generation(struct mq_policy *mq)
 
 		for (level = 0; level < NR_QUEUE_LEVELS && count < MAX_TO_AVERAGE; level++) {
 			head = mq->cache.qs + level;
-			list_for_each_entry (e, head, list) {
+			list_for_each_entry(e, head, list) {
 				nr++;
 				total += e->hit_count;
 
@@ -1266,14 +1266,14 @@ static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
-        .create = mq_create
+	.create = mq_create
 };
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
-        .create = mq_create
+	.create = mq_create
 };
 
 static int __init mq_init(void)
@@ -1312,10 +1312,8 @@ static void __exit mq_exit(void)
 module_init(mq_init);
 module_exit(mq_exit);
 
-MODULE_AUTHOR("Joe Thornber");
+MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("mq cache policy");
 
 MODULE_ALIAS("dm-cache-default");
-
-/*----------------------------------------------------------------*/

@@ -39,13 +39,6 @@ typedef int (*dm_ctr_fn) (struct dm_target *target,
 typedef void (*dm_dtr_fn) (struct dm_target *ti);
 
 /*
- * Some targets need to process multiple copies of a bio.  For instance a
- * cache target in 'writethrough' mode will need to issue io to both the
- * fast and slow devices.
- */
-typedef unsigned (*dm_get_num_duplicates_fn)(struct dm_target *ti, struct bio *bio);
-
-/*
  * The map function must return:
  * < 0: error
  * = 0: The target will handle the io by resubmitting it later
@@ -138,7 +131,6 @@ struct target_type {
 	unsigned version[3];
 	dm_ctr_fn ctr;
 	dm_dtr_fn dtr;
-	dm_get_num_duplicates_fn get_num_duplicates;
 	dm_map_fn map;
 	dm_map_request_fn map_rq;
 	dm_endio_fn end_io;
