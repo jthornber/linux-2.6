@@ -129,7 +129,7 @@ struct common_entry {
 /* Cache entry struct. */
 struct basic_cache_entry {
 	struct common_entry ce;
-	struct list_head walk;
+	struct list_head walk, dirty;
 
 	dm_cblock_t cblock;
 	unsigned long access, expire;
@@ -175,6 +175,8 @@ static struct list_head *queue_evict_multiqueue(struct policy *);
 static void queue_add_noop(struct policy *, struct list_head *);
 
 #define	IS_FILO_MRU(p)			(p->queues.fns->add == &queue_add_filo_mru)
+#define	IS_MFU(p)			(p->queues.fns->del == &queue_del_mfu)
+
 #define	IS_LFU(p)			(p->queues.fns->add == &queue_add_lfu)
 #define	IS_MULTIQUEUE(p)		(p->queues.fns->evict == &queue_evict_multiqueue)
 #define	IS_Q2(p)			(p->queues.fns->add == &queue_add_q2)
@@ -185,7 +187,7 @@ static void queue_add_noop(struct policy *, struct list_head *);
 #define	IS_FIFO_FILO(p)			(p->queues.fns->del == &queue_del_fifo_filo)
 #define	IS_Q2_TWOQUEUE(p)		(p->queues.fns->evict == &queue_evict_q2_twoqueue)
 #define	IS_MULTIQUEUE_Q2_TWOQUEUE(p)	(p->queues.fns->del == &queue_del_multiqueue)
-#define	IS_LFU_MFU_WS(p)		(p->queues.fns->del == &queue_del_lfu_mfu)
+#define	IS_LFU_MFU_WS(p)		(p->queues.fns->evict == &queue_evict_lfu_mfu)
 
 static unsigned next_power(unsigned n, unsigned min)
 {
@@ -245,6 +247,7 @@ struct policy {
 		struct list_head free; /* Free cache entry list */
 		struct list_head used; /* Used cache entry list */
 		struct list_head walk; /* walk_mappings uses this list */
+		struct list_head dirty;/* next_dirty_block    " */
 	} queues;
 
 	/* MINORME: allocate only for multiqueue? */
@@ -307,7 +310,8 @@ static void queue_add_tail(struct list_head *q, struct list_head *elt)
 
 static void queue_del(struct list_head *elt)
 {
-	list_del(elt);
+	if (!list_empty(elt))
+		list_del_init(elt);
 }
 
 static struct list_head *queue_pop(struct list_head *q)
@@ -368,6 +372,7 @@ static int alloc_cache_blocks_with_hash(struct policy *p, unsigned cache_size)
 		if (!e)
 			goto bad_cache_alloc;
 
+		queue_init(&e->dirty);
 		queue_add(&p->queues.free, &e->ce.list);
 	}
 
@@ -751,7 +756,7 @@ static void __queue_add_lfu_mfu(struct policy *p, struct list_head *elt,
 	head = btree_lookup32(&p->queues.fu_head, key);
 	if (head) {
 		/* Always add to the end where we'll pop cblocks off */
-		list_add_tail(elt, head);
+		queue_add_tail(head, elt);
 
 		if (is_lfu) {
 			/*
@@ -768,7 +773,7 @@ static void __queue_add_lfu_mfu(struct policy *p, struct list_head *elt,
 		int r = btree_insert32(&p->queues.fu_head, key, (void *) elt, GFP_KERNEL);
 
 		BUG_ON(r);
-		INIT_LIST_HEAD(elt);
+		queue_init(elt);
 	}
 
 	queue_add_tail(&p->queues.walk, &e->walk);
@@ -909,7 +914,7 @@ static void queue_del_fifo_filo(struct policy *p, struct list_head *elt)
 	queue_del_default(p, elt);
 }
 
-static void queue_del_lfu_mfu(struct policy *p, struct list_head *elt)
+static void __queue_del_lfu_mfu(struct policy *p, struct list_head *elt)
 {
 	struct list_head *head;
 	struct basic_cache_entry *e = list_entry(elt, struct basic_cache_entry, ce.list);
@@ -930,16 +935,26 @@ static void queue_del_lfu_mfu(struct policy *p, struct list_head *elt)
 
 			/* Update node to point to next entry as new head. */
 			head = head->next;
-			list_del(elt);
+			queue_del(elt);
 			r = btree_update32(&p->queues.fu_head, key, (void *) head);
 			BUG_ON(r);
 		}
 
 	} else
 		/* If not head, we can simply remove the element from the list. */
-		list_del(elt);
+		queue_del(elt);
 
 	queue_del(&e->walk);
+}
+
+static void queue_del_lfu(struct policy *p, struct list_head *elt)
+{
+	return __queue_del_lfu_mfu(p, elt);
+}
+
+static void queue_del_mfu(struct policy *p, struct list_head *elt)
+{
+	return __queue_del_lfu_mfu(p, elt);
 }
 
 static void queue_del_multiqueue(struct policy *p, struct list_head *elt)
@@ -965,6 +980,7 @@ static struct list_head *queue_evict_default(struct policy *p)
 	struct basic_cache_entry *e = list_entry(r, struct basic_cache_entry, ce.list);
 
 	queue_del(&e->walk);
+	queue_del(&e->dirty);
 
 	return r;
 }
@@ -986,12 +1002,13 @@ static struct list_head *queue_evict_lfu_mfu(struct policy *p)
 		/* Retrieve last element in order to minimize btree updates. */
 		r = r->prev;
 		BUG_ON(!r);
-		list_del(r);
+		queue_del(r);
 	}
 
 	e = list_entry(r, struct basic_cache_entry, ce.list);
 	e->saved = 0;
 	queue_del(&e->walk);
+	queue_del(&e->dirty);
 
 	return r;
 }
@@ -1017,6 +1034,7 @@ static struct list_head *queue_evict_random(struct policy *p)
 	e = list_entry(r, struct basic_cache_entry, ce.list);
 	queue_del(r);
 	queue_del(&e->walk);
+	queue_del(&e->dirty);
 
 	return r;
 }
@@ -1037,6 +1055,7 @@ static struct list_head *queue_evict_multiqueue(struct policy *p)
 			r = queue_pop(cur);
 			e = list_entry(r, struct basic_cache_entry, ce.list);
 			queue_del(&e->walk);
+			queue_del(&e->dirty);
 
 			return r;
 		}
@@ -1221,6 +1240,7 @@ static void get_cache_block(struct policy *p, dm_oblock_t oblock, struct bio *bi
 
 	result->cblock = e->cblock;
 	e->ce.oblock = oblock;
+	queue_del(&e->dirty);
 	add_cache_entry(p, e);
 }
 
@@ -1411,11 +1431,50 @@ static void sort_in_cache_entry(struct policy *p, struct basic_cache_entry *e)
 	}
 
 	if (elt == &p->queues.used)
-		list_add_tail(&e->ce.list, elt);
+		queue_add_tail(elt, &e->ce.list);
 	else
-		list_add(&e->ce.list, elt);
+		queue_add(elt, &e->ce.list);
 
 	queue_add_tail(&p->queues.walk, &e->walk);
+}
+
+static void add_dirty_entry(struct policy *p, struct basic_cache_entry *e)
+{
+	if (IS_FILO_MRU(p) || IS_MFU(p))
+		queue_add(&p->queues.dirty, &e->dirty);
+	else
+		queue_add_tail(&p->queues.dirty, &e->dirty);
+}
+
+static int _set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool dirty)
+{
+	int r;
+	struct policy *p = to_policy(pe);
+	struct basic_cache_entry *e;
+
+	mutex_lock(&p->lock);
+
+	e = lookup_cache_entry(p, oblock);
+	BUG_ON(!e);
+	r = !list_empty(&e->dirty);
+	queue_del(&e->dirty);
+
+	if (dirty)
+		add_dirty_entry(p, e); 
+
+	mutex_unlock(&p->lock);
+
+	return r;
+}
+
+static int basic_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+{
+	return _set_clear_dirty(pe, oblock, true);
+}
+
+static int basic_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+{
+	return _set_clear_dirty(pe, oblock, false);
 }
 
 static int basic_load_mapping(struct dm_cache_policy *pe,
@@ -1513,6 +1572,7 @@ static void basic_remove_mapping(struct dm_cache_policy *pe, dm_oblock_t oblock)
 
 	mutex_lock(&p->lock);
 	e = __basic_force_remove_mapping(p, oblock);
+	queue_del(&e->dirty);
 	memset(&e->ce.count, 0, sizeof(e->ce.count));
 	queue_add_tail(&p->queues.free, &e->ce.list);
 
@@ -1528,10 +1588,40 @@ static void basic_force_mapping(struct dm_cache_policy *pe,
 	struct basic_cache_entry *e;
 
 	mutex_lock(&p->lock);
+
 	e = __basic_force_remove_mapping(p, current_oblock);
 	e->ce.oblock = oblock;
 	add_cache_entry(p, e);
+
+	if (!list_empty(&e->dirty)) {
+		list_del(&e->dirty);
+		add_dirty_entry(p, e);
+	}
+
 	mutex_unlock(&p->lock);
+}
+
+static int basic_next_dirty_block(struct dm_cache_policy *pe, dm_oblock_t *oblock, dm_cblock_t *cblock)
+{
+	int r = -ENOENT;
+	struct policy *p = to_policy(pe);
+	struct basic_cache_entry *e;
+	struct list_head *dirty = &p->queues.dirty;
+
+	mutex_lock(&p->lock);
+
+	/* FIXME: best effort with a dirty list. policy specific functions for optimization. */
+	if (!list_empty(dirty)) {
+		e = list_entry(queue_pop(dirty), struct basic_cache_entry, dirty);
+		queue_init(&e->dirty);
+		*cblock = e->cblock;
+		*oblock = e->ce.oblock;
+		r = 0;
+	}
+
+	mutex_unlock(&p->lock);
+
+	return r;
 }
 
 static dm_cblock_t basic_residency(struct dm_cache_policy *pe)
@@ -1695,10 +1785,13 @@ static void init_policy_functions(struct policy *p)
 	p->policy.destroy = basic_destroy;
 	p->policy.map = basic_map;
 	p->policy.lookup = basic_lookup;
+	p->policy.set_dirty = basic_set_dirty;
+	p->policy.clear_dirty = basic_clear_dirty;
 	p->policy.load_mapping = basic_load_mapping;
 	p->policy.walk_mappings = basic_walk_mappings;
 	p->policy.remove_mapping = basic_remove_mapping;
 	p->policy.writeback_work = NULL;
+	p->policy.next_dirty_block = basic_next_dirty_block;
 	p->policy.force_mapping = basic_force_mapping;
 	p->policy.residency = basic_residency;
 	p->policy.tick = NULL;
@@ -1721,10 +1814,10 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 		{ &queue_add_filo_mru,      &queue_del_fifo_filo,	&queue_evict_default },		/* P_filo */
 		{ &queue_add_default_tail,  &queue_del_default,		&queue_evict_default },		/* P_lru */
 		{ &queue_add_filo_mru,      &queue_del_default,		&queue_evict_default },		/* P_mru */
-		{ &queue_add_lfu,           &queue_del_lfu_mfu,		&queue_evict_lfu_mfu },		/* P_lfu */
-		{ &queue_add_lfu_ws,        &queue_del_lfu_mfu,		&queue_evict_lfu_mfu },		/* P_lfu_ws */
-		{ &queue_add_mfu,           &queue_del_lfu_mfu,		&queue_evict_lfu_mfu },		/* P_mfu */
-		{ &queue_add_mfu_ws,        &queue_del_lfu_mfu,		&queue_evict_lfu_mfu },		/* P_mfu_ws */
+		{ &queue_add_lfu,           &queue_del_lfu,		&queue_evict_lfu_mfu },		/* P_lfu */
+		{ &queue_add_lfu_ws,        &queue_del_lfu,		&queue_evict_lfu_mfu },		/* P_lfu_ws */
+		{ &queue_add_mfu,           &queue_del_mfu,		&queue_evict_lfu_mfu },		/* P_mfu */
+		{ &queue_add_mfu_ws,        &queue_del_mfu,		&queue_evict_lfu_mfu },		/* P_mfu_ws */
 		{ &queue_add_multiqueue,    &queue_del_multiqueue,	&queue_evict_multiqueue },	/* P_multiqueue */
 		{ &queue_add_multiqueue_ws, &queue_del_multiqueue,	&queue_evict_multiqueue },	/* P_multiqueue_ws */
 		{ &queue_add_noop,	    NULL,			NULL },				/* P_noop */
@@ -1766,6 +1859,7 @@ static struct dm_cache_policy *basic_policy_create(dm_cblock_t cache_size,
 	queue_init(&p->queues.free);
 	queue_init(&p->queues.used);
 	queue_init(&p->queues.walk);
+	queue_init(&p->queues.dirty);
 	queue_init(&p->queues.pre.free);
 	queue_init(&p->queues.pre.used);
 	queue_init(&p->queues.post.free);
