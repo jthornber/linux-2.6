@@ -233,53 +233,6 @@ struct thin_c {
 
 /*----------------------------------------------------------------*/
 
-static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bio,
-		      struct dm_bio_prison_cell **result)
-{
-	int r;
-	struct dm_bio_prison_cell *cell;
-
-	cell = dm_bio_prison_alloc_cell(pool->prison, GFP_NOIO);
-	if (!cell)
-		return -ENOMEM;
-
-	r = dm_bio_detain(pool->prison, key, bio, cell, result);
-
-	if (r)
-		/*
-		 * We reused an old cell, or errored; we can get rid of
-		 * the new one.
-		 */
-		dm_bio_prison_free_cell(pool->prison, cell);
-
-	return r;
-}
-
-static void cell_release(struct pool *pool,
-			 struct dm_bio_prison_cell *cell,
-			 struct bio_list *bios)
-{
-	dm_cell_release(pool->prison, cell, bios);
-	dm_bio_prison_free_cell(pool->prison, cell);
-}
-
-static void cell_release_no_holder(struct pool *pool,
-				   struct dm_bio_prison_cell *cell,
-				   struct bio_list *bios)
-{
-	dm_cell_release_no_holder(pool->prison, cell, bios);
-	dm_bio_prison_free_cell(pool->prison, cell);
-}
-
-static void cell_error(struct pool *pool,
-		       struct dm_bio_prison_cell *cell)
-{
-	dm_cell_error(pool->prison, cell);
-	dm_bio_prison_free_cell(pool->prison, cell);
-}
-
-/*----------------------------------------------------------------*/
-
 /*
  * wake_worker() is used when new work is queued and when pool_resume is
  * ready to continue deferred IO processing.
