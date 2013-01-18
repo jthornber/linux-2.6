@@ -89,8 +89,10 @@ typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
  */
 struct dm_cache_policy {
 
-	// FIXME: make it clear which methods are optional, and which may
-	// block.
+	/*
+	 * FIXME: make it clear which methods are optional, and which may
+	 * block.
+	 */
 
 	/*
 	 * Destroys this object.
