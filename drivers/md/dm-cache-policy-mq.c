@@ -73,8 +73,10 @@ static void iot_init(struct io_tracker *t,
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
-	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
-	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : RANDOM_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_SEQUENTIAL] =
+		sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] =
+		random_threshold > -1 ?	random_threshold : RANDOM_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
