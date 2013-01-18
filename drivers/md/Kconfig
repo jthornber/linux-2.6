@@ -286,14 +286,18 @@ config DM_CACHE_MQ
        depends on DM_CACHE
        default y
        ---help---
-         Under development
+         A cache policy that uses a multiqueue ordered by recent hit
+         count to select which blocks should be promoted and demoted.
+         This is meant to be a general purpose policy.  It prioritises
+         reads over writes.
 
 config DM_CACHE_CLEANER
        tristate "Cleaner Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
        default y
        ---help---
-         Under development
+         A simple cache policy that writes back all data to the
+         origin.  Used when decommissioning a dm-cache.
 
 config DM_CACHE_BASIC
        tristate "Basic Cache Policies - a list of replacement policies (EXPERIMENTAL)"
