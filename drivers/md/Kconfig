@@ -185,6 +185,8 @@ config MD_FAULTY
 
 	  In unsure, say N.
 
+source "drivers/md/bcache/Kconfig"
+
 config BLK_DEV_DM
 	tristate "Device mapper support"
 	---help---
@@ -270,7 +272,8 @@ config DM_DEBUG_BLOCK_STACK_TRACING
 
 config DM_CACHE
        tristate "Cache target (EXPERIMENTAL)"
-       depends on BLK_DEV_DM && EXPERIMENTAL
+       depends on BLK_DEV_DM
+       default n
        select DM_PERSISTENT_DATA
        select DM_PRISON
        ---help---
@@ -278,6 +281,13 @@ config DM_CACHE
 
 config DM_CACHE_MQ
        tristate "MQ Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         Under development
+
+config DM_CACHE_CLEANER
+       tristate "Cleaner Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
        default y
        ---help---
@@ -299,13 +309,6 @@ config DM_CACHE_DEBUG
        select DM_CACHE_BASIC
        select DM_CACHE_MQ
        select DM_CACHE_MKFS
-       default y
-       ---help---
-         Under development
-
-config DM_CACHE_CLEANER
-       tristate "Cleaner Cache Policy (EXPERIMENTAL)"
-       depends on DM_CACHE
        default y
        ---help---
          Under development

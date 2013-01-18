@@ -809,11 +809,11 @@ int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 EXPORT_SYMBOL_GPL(dm_btree_find_highest_key);
 
 /*
- * FIXME: we shouldn't use a recursive algorithm when we have limited stack
+ * FIXME: We shouldn't use a recursive algorithm when we have limited stack
  * space.  Also this only works for single level trees.
  */
 static int walk_node(struct ro_spine *s, dm_block_t block,
-		     int (*fn)(void *, uint64_t *keys, void *leaf),
+		     int (*fn)(void *context, uint64_t *keys, void *leaf),
 		     void *context)
 {
 	int r;
@@ -843,9 +843,9 @@ out:
 	return r;
 }
 
-
 int dm_btree_walk(struct dm_btree_info *info, dm_block_t root,
-		  int (*fn)(void *, uint64_t *keys, void *leaf), void *context)
+		  int (*fn)(void *context, uint64_t *keys, void *leaf),
+		  void *context)
 {
 	int r;
 	struct ro_spine spine;

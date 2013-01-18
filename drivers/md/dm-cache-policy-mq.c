@@ -217,7 +217,7 @@ static struct list_head *list_pop(struct list_head *lh)
  */
 struct entry {
 	struct hlist_node hlist;
-	struct list_head list;
+	struct list_head list, dirty;
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;	/* valid iff in_cache */
 
@@ -288,7 +288,7 @@ struct mq_policy {
 	 */
 	unsigned nr_entries;
 	unsigned nr_entries_allocated;
-	struct list_head free;
+	struct list_head free, dirty;
 
 	/*
 	 * Cache blocks may be unallocated.  We store this info in a
@@ -336,6 +336,7 @@ static int alloc_entries(struct mq_policy *mq, unsigned elts)
 	unsigned u = mq->nr_entries;
 
 	INIT_LIST_HEAD(&mq->free);
+	INIT_LIST_HEAD(&mq->dirty);
 	mq->nr_entries_allocated = 0;
 
 	while (u--) {
@@ -405,6 +406,7 @@ static struct entry *alloc_entry(struct mq_policy *mq)
 
 	e = list_entry(list_pop(&mq->free), struct entry, list);
 	INIT_LIST_HEAD(&e->list);
+	INIT_LIST_HEAD(&e->dirty);
 	INIT_HLIST_NODE(&e->hlist);
 
 	mq->nr_entries_allocated++;
@@ -506,10 +508,17 @@ static void push(struct mq_policy *mq, struct entry *e)
 	hash_insert(mq, e);
 
 	if (e->in_cache) {
+		if (!list_empty(&e->dirty))
+			list_move_tail(&e->dirty, &mq->dirty);
+
 		alloc_cblock(mq, e->cblock);
 		queue_push(&mq->cache, queue_level(e), &e->list);
-	} else
+	} else {
+		if (!list_empty(&e->dirty))
+			list_del_init(&e->dirty);
+
 		queue_push(&mq->pre_cache, queue_level(e), &e->list);
+	}
 }
 
 /*
@@ -578,7 +587,7 @@ static void check_generation(struct mq_policy *mq)
 
 		for (level = 0; level < NR_QUEUE_LEVELS && count < MAX_TO_AVERAGE; level++) {
 			head = mq->cache.qs + level;
-			list_for_each_entry (e, head, list) {
+			list_for_each_entry(e, head, list) {
 				nr++;
 				total += e->hit_count;
 
@@ -923,6 +932,40 @@ static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t 
 	return r;
 }
 
+static int _set_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock, bool dirty)
+{
+	int r;
+	struct mq_policy *mq = to_mq_policy(p);
+	struct entry *e;
+
+	mutex_lock(&mq->lock);
+
+	e = hash_lookup(mq, oblock);
+	BUG_ON(!e);
+	r = !list_empty(&e->dirty);
+
+	if (dirty) {
+		if (!r)
+			list_add_tail(&e->dirty, &mq->dirty);
+
+	} else if (r)
+		list_del_init(&e->dirty);
+
+	mutex_unlock(&mq->lock);
+
+	return r;
+}
+
+static int mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+{
+	return _set_clear_dirty(p, oblock, true);
+}
+
+static int mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+{
+	return _set_clear_dirty(p, oblock, false);
+}
+
 static int mq_load_mapping(struct dm_cache_policy *p,
 			   dm_oblock_t oblock, dm_cblock_t cblock,
 			   uint32_t hint, bool hint_valid)
@@ -983,6 +1026,27 @@ static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 	mutex_lock(&mq->lock);
 	remove_mapping(mq, oblock);
 	mutex_unlock(&mq->lock);
+}
+
+static int mq_next_dirty_block(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock)
+{
+	int r = -ENOENT;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+
+	if (!list_empty(&mq->dirty)) {
+		struct entry *e = list_first_entry(&mq->dirty, struct entry, dirty);
+
+		list_del_init(&e->dirty);
+		*oblock = e->oblock;
+		*cblock = e->cblock;
+		r = 0;
+	}
+
+	mutex_unlock(&mq->lock);
+
+	return r;
 }
 
 static void force_mapping(struct mq_policy *mq,
@@ -1116,10 +1180,13 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.destroy = mq_destroy;
 	mq->policy.map = mq_map;
 	mq->policy.lookup = mq_lookup;
+	mq->policy.set_dirty = mq_set_dirty;
+	mq->policy.clear_dirty = mq_clear_dirty;
 	mq->policy.load_mapping = mq_load_mapping;
 	mq->policy.walk_mappings = mq_walk_mappings;
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.writeback_work = NULL;
+	mq->policy.next_dirty_block = mq_next_dirty_block;
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
@@ -1199,14 +1266,14 @@ static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
-        .create = mq_create
+	.create = mq_create
 };
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
-        .create = mq_create
+	.create = mq_create
 };
 
 static int __init mq_init(void)
@@ -1245,10 +1312,8 @@ static void __exit mq_exit(void)
 module_init(mq_init);
 module_exit(mq_exit);
 
-MODULE_AUTHOR("Joe Thornber");
+MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("mq cache policy");
 
 MODULE_ALIAS("dm-cache-default");
-
-/*----------------------------------------------------------------*/

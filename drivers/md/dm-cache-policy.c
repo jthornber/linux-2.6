@@ -21,7 +21,7 @@ static struct dm_cache_policy_type *__find_policy(const char *name)
 {
 	struct dm_cache_policy_type *t;
 
-	list_for_each_entry (t, &register_list, list)
+	list_for_each_entry(t, &register_list, list)
 		if (!strcmp(t->name, name))
 			return t;
 
