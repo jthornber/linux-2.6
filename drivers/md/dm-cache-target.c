@@ -229,7 +229,7 @@ static void wake_worker(struct cache *cache)
 
 static struct dm_bio_prison_cell *alloc_prison_cell(struct cache *cache)
 {
-	// FIXME: change to use a local slab.
+	/* FIXME: change to use a local slab. */
 	return dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
 }
 
@@ -1776,7 +1776,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 
-	// FIXME: factor out this whole section
+	/* FIXME: factor out this whole section */
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
 	do_div(origin_blocks, ca->block_size);
 	cache->origin_blocks = to_oblock(origin_blocks);
@@ -2198,7 +2198,7 @@ static int load_discard(void *context, sector_t discard_block_size,
 {
 	struct cache *cache = context;
 
-	// FIXME: handle mis-matched block size
+	/* FIXME: handle mis-matched block size */
 
 	if (discard)
 		set_discard(cache, dblock);

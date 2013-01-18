@@ -393,7 +393,8 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 }
 
 #if 0
-static int wb_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+static int wb_status(struct dm_cache_policy *pe, status_type_t type,
+		     unsigned status_flags, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	struct policy *p = to_policy(pe);

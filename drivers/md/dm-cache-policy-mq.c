@@ -73,8 +73,10 @@ static void iot_init(struct io_tracker *t,
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
-	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
-	t->thresholds[PATTERN_RANDOM] = random_threshold > -1 ? random_threshold : RANDOM_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_SEQUENTIAL] =
+		sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+	t->thresholds[PATTERN_RANDOM] =
+		random_threshold > -1 ?	random_threshold : RANDOM_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
@@ -221,7 +223,9 @@ struct entry {
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;	/* valid iff in_cache */
 
-	// FIXME: pack these better
+	/*
+	 * FIXME: pack these better
+	 */
 	bool in_cache:1;
 	unsigned hit_count;
 	unsigned generation;
@@ -619,7 +623,7 @@ static void requeue_and_update_tick(struct mq_policy *mq, struct entry *e)
 
 	/* generation adjustment, to stop the counts increasing forever. */
 	/* FIXME: divide? */
-	//e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation);
+	/* e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation); */
 	e->generation = mq->generation;
 
 	del(mq, e);
@@ -1075,7 +1079,7 @@ static dm_cblock_t mq_residency(struct dm_cache_policy *p)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 
-	// FIXME: lock mutex, not sure we can block here
+	/* FIXME: lock mutex, not sure we can block here */
 	return to_cblock(mq->nr_cblocks_allocated);
 }
 
