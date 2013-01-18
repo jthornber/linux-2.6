@@ -27,16 +27,14 @@ static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, d
 	return p->lookup(p, oblock, cblock);
 }
 
-static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline int policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	if (p->set_dirty)
-		p->set_dirty(p, oblock);
+	return p->set_dirty ? p->set_dirty(p, oblock) : -EOPNOTSUPP;
 }
 
-static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline int policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	if (p->clear_dirty)
-		p->clear_dirty(p, oblock);
+	return p->clear_dirty ? p->clear_dirty(p, oblock) : -EOPNOTSUPP;
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p,
@@ -57,6 +55,13 @@ static inline int policy_writeback_work(struct dm_cache_policy *p,
 					dm_cblock_t *cblock)
 {
 	return p->writeback_work ? p->writeback_work(p, oblock, cblock) : -ENOENT;
+}
+
+static inline int policy_next_dirty_block(struct dm_cache_policy *p,
+					  dm_oblock_t *oblock,
+					  dm_cblock_t *cblock)
+{
+	return p->next_dirty_block ? p->next_dirty_block(p, oblock, cblock) : -ENOENT;
 }
 
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
