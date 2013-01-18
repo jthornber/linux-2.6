@@ -424,11 +424,18 @@ static void __init exynos5_init_clocks(int xtal)
 {
 	printk(KERN_DEBUG "%s: initializing clocks\n", __func__);
 
+	/* EXYNOS5440 can support only common clock framework */
+
+	if (soc_is_exynos5440())
+		return;
+
+#ifdef CONFIG_SOC_EXYNOS5250
 	s3c24xx_register_baseclocks(xtal);
 	s5p_register_clocks(xtal);
 
 	exynos5_register_clocks();
 	exynos5_setup_clocks();
+#endif
 }
 
 #define COMBINER_ENABLE_SET	0x0
@@ -679,7 +686,10 @@ void __init exynos5_init_irq(void)
 	 * Theses parameters should be NULL and 0 because EXYNOS4
 	 * uses GIC instead of VIC.
 	 */
-	s5p_init_irq(NULL, 0);
+	if (!of_machine_is_compatible("samsung,exynos5440"))
+		s5p_init_irq(NULL, 0);
+
+	gic_arch_extn.irq_set_wake = s3c_irq_wake;
 }
 
 struct bus_type exynos_subsys = {
@@ -1020,11 +1030,14 @@ static int __init exynos_init_irq_eint(void)
 	 * platforms switch over to using the pinctrl driver, the wakeup
 	 * interrupt support code here can be completely removed.
 	 */
+	static const struct of_device_id exynos_pinctrl_ids[] = {
+		{ .compatible = "samsung,pinctrl-exynos4210", },
+		{ .compatible = "samsung,pinctrl-exynos4x12", },
+	};
 	struct device_node *pctrl_np, *wkup_np;
-	const char *pctrl_compat = "samsung,pinctrl-exynos4210";
 	const char *wkup_compat = "samsung,exynos4210-wakeup-eint";
 
-	for_each_compatible_node(pctrl_np, NULL, pctrl_compat) {
+	for_each_matching_node(pctrl_np, exynos_pinctrl_ids) {
 		if (of_device_is_available(pctrl_np)) {
 			wkup_np = of_find_compatible_node(pctrl_np, NULL,
 							wkup_compat);

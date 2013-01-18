@@ -230,7 +230,7 @@ static struct se_node_acl *tcm_vhost_alloc_fabric_acl(
 
 	nacl = kzalloc(sizeof(struct tcm_vhost_nacl), GFP_KERNEL);
 	if (!nacl) {
-		pr_err("Unable to alocate struct tcm_vhost_nacl\n");
+		pr_err("Unable to allocate struct tcm_vhost_nacl\n");
 		return NULL;
 	}
 
@@ -538,10 +538,6 @@ static void tcm_vhost_submission_work(struct work_struct *work)
 
 	if (tv_cmd->tvc_sgl_count) {
 		sg_ptr = tv_cmd->tvc_sgl;
-		/*
-		 * For BIDI commands, pass in the extra READ buffer
-		 * to transport_generic_map_mem_to_cmd() below..
-		 */
 /* FIXME: Fix BIDI operation in tcm_vhost_submission_work() */
 #if 0
 		if (se_cmd->se_cmd_flags & SCF_BIDI) {

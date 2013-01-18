@@ -55,10 +55,10 @@
 			compatible = "fsl,aipi-bus", "simple-bus";
 			#address-cells = <1>;
 			#size-cells = <1>;
-			reg = <0x10000000 0x10000000>;
+			reg = <0x10000000 0x20000>;
 			ranges;
 
-			wdog@10002000 {
+			wdog: wdog@10002000 {
 				compatible = "fsl,imx27-wdt", "fsl,imx21-wdt";
 				reg = <0x10002000 0x4000>;
 				interrupts = <27>;
@@ -211,6 +211,15 @@
 				status = "disabled";
 			};
 
+		};
+
+		aipi@10020000 { /* AIPI2 */
+			compatible = "fsl,aipi-bus", "simple-bus";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0x10020000 0x20000>;
+			ranges;
+
 			fec: ethernet@1002b000 {
 				compatible = "fsl,imx27-fec";
 				reg = <0x1002b000 0x4000>;
@@ -218,7 +227,8 @@
 				status = "disabled";
 			};
 		};
-		nand@d8000000 {
+
+		nfc: nand@d8000000 {
 			#address-cells = <1>;
 			#size-cells = <1>;
 

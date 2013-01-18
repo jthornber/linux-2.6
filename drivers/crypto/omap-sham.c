@@ -37,7 +37,7 @@
 #include <crypto/hash.h>
 #include <crypto/internal/hash.h>
 
-#include <plat-omap/dma-omap.h>
+#include <linux/omap-dma.h>
 #include <mach/irqs.h>
 
 #define SHA_REG_DIGEST(x)		(0x00 + ((x) * 0x04))
@@ -1137,7 +1137,7 @@ static void omap_sham_dma_cleanup(struct omap_sham_dev *dd)
 	}
 }
 
-static int __devinit omap_sham_probe(struct platform_device *pdev)
+static int omap_sham_probe(struct platform_device *pdev)
 {
 	struct omap_sham_dev *dd;
 	struct device *dev = &pdev->dev;
@@ -1250,7 +1250,7 @@ data_err:
 	return err;
 }
 
-static int __devexit omap_sham_remove(struct platform_device *pdev)
+static int omap_sham_remove(struct platform_device *pdev)
 {
 	static struct omap_sham_dev *dd;
 	int i;
