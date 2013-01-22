@@ -79,8 +79,7 @@ void dm_bio_prison_destroy(struct dm_bio_prison *prison)
 }
 EXPORT_SYMBOL_GPL(dm_bio_prison_destroy);
 
-struct dm_bio_prison_cell *
-dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
+struct dm_bio_prison_cell *dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
 {
 	return mempool_alloc(prison->cell_pool, gfp);
 }
@@ -136,8 +135,8 @@ static void __setup_new_cell(struct dm_bio_prison *prison,
 static int __bio_detain(struct dm_bio_prison *prison,
 			struct dm_cell_key *key,
 			struct bio *inmate,
-			struct dm_bio_prison_cell *memory,
-			struct dm_bio_prison_cell **ref)
+			struct dm_bio_prison_cell *cell_prealloc,
+			struct dm_bio_prison_cell **cell_result)
 {
 	uint32_t hash = hash_key(prison, key);
 	struct dm_bio_prison_cell *cell;
@@ -146,26 +145,26 @@ static int __bio_detain(struct dm_bio_prison *prison,
 	if (cell) {
 		if (inmate)
 			bio_list_add(&cell->bios, inmate);
-		*ref = cell;
+		*cell_result = cell;
 		return 1;
 	}
 
-	__setup_new_cell(prison, key, inmate, hash, memory);
-	*ref = memory;
+	__setup_new_cell(prison, key, inmate, hash, cell_prealloc);
+	*cell_result = cell_prealloc;
 	return 0;
 }
 
 static int bio_detain(struct dm_bio_prison *prison,
 		      struct dm_cell_key *key,
 		      struct bio *inmate,
-		      struct dm_bio_prison_cell *memory,
-		      struct dm_bio_prison_cell **ref)
+		      struct dm_bio_prison_cell *cell_prealloc,
+		      struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __bio_detain(prison, key, inmate, memory, ref);
+	r = __bio_detain(prison, key, inmate, cell_prealloc, cell_result);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
@@ -174,10 +173,10 @@ static int bio_detain(struct dm_bio_prison *prison,
 int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_cell_key *key,
 		  struct bio *inmate,
-		  struct dm_bio_prison_cell *memory,
-		  struct dm_bio_prison_cell **ref)
+		  struct dm_bio_prison_cell *cell_prealloc,
+		  struct dm_bio_prison_cell **cell_result)
 {
-	return bio_detain(prison, key, inmate, memory, ref);
+	return bio_detain(prison, key, inmate, cell_prealloc, cell_result);
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain);
 

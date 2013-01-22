@@ -44,6 +44,11 @@ struct dm_bio_prison_cell {
 struct dm_bio_prison *dm_bio_prison_create(unsigned nr_cells);
 void dm_bio_prison_destroy(struct dm_bio_prison *prison);
 
+/*
+ * Although this is using a mempool to allocate from, it's using GFP_NOIO
+ * which is an alias for GFP_NOWAIT.  If I read the mempool code correctly
+ * this _can_ fail.
+ */
 struct dm_bio_prison_cell *dm_bio_prison_alloc_cell(struct dm_bio_prison *prison,
 						    gfp_t gfp);
 void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
@@ -53,12 +58,12 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
  * Creates, or retrieves a cell for the given key.
  *
  * Returns 1 if pre-existing cell returned, zero if new cell created using
- * @memory.
+ * @cell_prealloc.
  */
 int dm_get_cell(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
-		struct dm_bio_prison_cell *memory,
-		struct dm_bio_prison_cell **ref);
+		struct dm_bio_prison_cell *cell_prealloc,
+		struct dm_bio_prison_cell **cell_result);
 
 /*
  * An atomic op that combines retrieving a cell, and adding a bio to it.
