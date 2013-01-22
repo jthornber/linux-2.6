@@ -44,6 +44,11 @@ struct dm_bio_prison_cell {
 struct dm_bio_prison *dm_bio_prison_create(unsigned nr_cells);
 void dm_bio_prison_destroy(struct dm_bio_prison *prison);
 
+/*
+ * Although this is using a mempool to allocate from, it's using GFP_NOIO
+ * which is an alias for GFP_NOWAIT.  If I read the mempool code correctly
+ * this _can_ fail.
+ */
 struct dm_bio_prison_cell *dm_bio_prison_alloc_cell(struct dm_bio_prison *prison,
 						    gfp_t gfp);
 void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
