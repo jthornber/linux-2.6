@@ -329,17 +329,17 @@ static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
 typedef void (*cell_free_fn)(void *context, struct dm_bio_prison_cell *cell);
 
 static int bio_detain(struct cache *cache, dm_oblock_t oblock,
-		      struct bio *bio, struct dm_bio_prison_cell *cell,
+		      struct bio *bio, struct dm_bio_prison_cell *cell_prealloc,
 		      cell_free_fn free_fn, void *free_context,
-		      struct dm_bio_prison_cell **result)
+		      struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	struct dm_cell_key key;
 
 	build_key(oblock, &key);
-	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
+	r = dm_bio_detain(cache->prison, &key, bio, cell_prealloc, cell_result);
 	if (r)
-		free_fn(free_context, cell);
+		free_fn(free_context, cell_prealloc);
 
 	return r;
 }
@@ -347,18 +347,18 @@ static int bio_detain(struct cache *cache, dm_oblock_t oblock,
 static int get_cell(struct cache *cache,
 		    dm_oblock_t oblock,
 		    struct prealloc *structs,
-		    struct dm_bio_prison_cell **result)
+		    struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	struct dm_cell_key key;
-	struct dm_bio_prison_cell *cell;
+	struct dm_bio_prison_cell *cell_prealloc;
 
-	cell = prealloc_get_cell(structs);
+	cell_prealloc = prealloc_get_cell(structs);
 
 	build_key(oblock, &key);
-	r = dm_get_cell(cache->prison, &key, cell, result);
+	r = dm_get_cell(cache->prison, &key, cell_prealloc, cell_result);
 	if (r)
-		prealloc_put_cell(structs, cell);
+		prealloc_put_cell(structs, cell_prealloc);
 
 	return r;
 }
@@ -1021,7 +1021,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	int r;
 	bool release_cell = true;
 	dm_oblock_t block = get_bio_block(cache, bio);
-	struct dm_bio_prison_cell *cell, *old_ocell, *new_ocell;
+	struct dm_bio_prison_cell *cell_prealloc, *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct per_bio_data *pb = get_per_bio_data(bio);
 	bool discarded_block = is_discarded_oblock(cache, block);
@@ -1030,8 +1030,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	cell = prealloc_get_cell(structs);
-	r = bio_detain(cache, block, bio, cell,
+	cell_prealloc = prealloc_get_cell(structs);
+	r = bio_detain(cache, block, bio, cell_prealloc,
 		       (cell_free_fn) prealloc_put_cell,
 		       structs, &new_ocell);
 	if (r > 0)
@@ -1085,8 +1085,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		break;
 
 	case POLICY_REPLACE:
-		cell = prealloc_get_cell(structs);
-		r = bio_detain(cache, lookup_result.old_oblock, bio, cell,
+		cell_prealloc = prealloc_get_cell(structs);
+		r = bio_detain(cache, lookup_result.old_oblock, bio, cell_prealloc,
 			       (cell_free_fn) prealloc_put_cell,
 			       structs, &old_ocell);
 		if (r > 0) {

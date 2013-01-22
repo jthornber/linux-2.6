@@ -73,8 +73,8 @@ int dm_get_cell(struct dm_bio_prison *prison,
 int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_cell_key *key,
 		  struct bio *inmate,
-		  struct dm_bio_prison_cell *memory,
-		  struct dm_bio_prison_cell **ref);
+		  struct dm_bio_prison_cell *cell_prealloc,
+		  struct dm_bio_prison_cell **cell_result);
 
 void dm_cell_release(struct dm_bio_prison *prison,
 		     struct dm_bio_prison_cell *cell,
