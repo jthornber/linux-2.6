@@ -79,8 +79,7 @@ void dm_bio_prison_destroy(struct dm_bio_prison *prison)
 }
 EXPORT_SYMBOL_GPL(dm_bio_prison_destroy);
 
-struct dm_bio_prison_cell *
-dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
+struct dm_bio_prison_cell *dm_bio_prison_alloc_cell(struct dm_bio_prison *prison, gfp_t gfp)
 {
 	return mempool_alloc(prison->cell_pool, gfp);
 }
