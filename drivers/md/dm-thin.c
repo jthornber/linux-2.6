@@ -245,23 +245,20 @@ static void wake_worker(struct pool *pool)
 /*----------------------------------------------------------------*/
 
 static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bio,
-		      struct dm_bio_prison_cell **result)
+		      struct dm_bio_prison_cell **cell_result)
 {
 	int r;
-	struct dm_bio_prison_cell *cell;
+	struct dm_bio_prison_cell *cell_prealloc;
 
-	cell = dm_bio_prison_alloc_cell(pool->prison, GFP_NOIO);
-	if (!cell)
-		return -ENOMEM;
+	cell_prealloc = dm_bio_prison_alloc_cell(pool->prison, GFP_NOIO);
 
-	r = dm_bio_detain(pool->prison, key, bio, cell, result);
-
+	r = dm_bio_detain(pool->prison, key, bio, cell_prealloc, cell_result);
 	if (r)
 		/*
 		 * We reused an old cell, or errored; we can get rid of
 		 * the new one.
 		 */
-		dm_bio_prison_free_cell(pool->prison, cell);
+		dm_bio_prison_free_cell(pool->prison, cell_prealloc);
 
 	return r;
 }

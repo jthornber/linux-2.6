@@ -182,10 +182,10 @@ EXPORT_SYMBOL_GPL(dm_bio_detain);
 
 int dm_get_cell(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
-		struct dm_bio_prison_cell *memory,
-		struct dm_bio_prison_cell **ref)
+		struct dm_bio_prison_cell *cell_prealloc,
+		struct dm_bio_prison_cell **cell_result)
 {
-	return bio_detain(prison, key, NULL, memory, ref);
+	return bio_detain(prison, key, NULL, cell_prealloc, cell_result);
 }
 EXPORT_SYMBOL_GPL(dm_get_cell);
 
