@@ -53,12 +53,12 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
  * Creates, or retrieves a cell for the given key.
  *
  * Returns 1 if pre-existing cell returned, zero if new cell created using
- * @memory.
+ * @cell_prealloc.
  */
 int dm_get_cell(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
-		struct dm_bio_prison_cell *memory,
-		struct dm_bio_prison_cell **ref);
+		struct dm_bio_prison_cell *cell_prealloc,
+		struct dm_bio_prison_cell **cell_result);
 
 /*
  * An atomic op that combines retrieving a cell, and adding a bio to it.
