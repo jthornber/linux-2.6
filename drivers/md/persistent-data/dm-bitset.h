@@ -56,4 +56,4 @@ int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root,
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif /* _LINUX_DM_BITSET_H */

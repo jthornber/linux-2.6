@@ -163,4 +163,4 @@ int dm_array_walk(struct dm_array_info *info, dm_block_t root,
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif /* _LINUX_DM_ARRAY_H */
