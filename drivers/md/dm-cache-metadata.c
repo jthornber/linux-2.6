@@ -229,10 +229,10 @@ static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 	vt.inc = NULL;
 	vt.dec = NULL;
 	vt.equal = NULL;
-	dm_setup_array_info(&cmd->info, cmd->tm, &vt);
+	dm_array_info_init(&cmd->info, cmd->tm, &vt);
 
 	vt.size = sizeof(__le32);
-	dm_setup_array_info(&cmd->hint_info, cmd->tm, &vt);
+	dm_array_info_init(&cmd->hint_info, cmd->tm, &vt);
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -789,8 +789,8 @@ static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
 	__le64 value = pack_value(0, 0);
 
 	__dm_bless_for_disk(&value);
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
-			 &value, &cmd->root);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
+			       &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -816,8 +816,8 @@ static int __insert(struct dm_cache_metadata *cmd,
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
-			 &value, &cmd->root);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
+			       &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -871,8 +871,8 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 
 	if (flags & M_VALID) {
 		if (thunk->hints_valid) {
-			r = dm_array_get(&cmd->hint_info, cmd->hint_root,
-					 cblock, &hint_value);
+			r = dm_array_get_value(&cmd->hint_info, cmd->hint_root,
+					       cblock, &hint_value);
 			if (r && r != -ENODATA)
 				return r;
 		}
@@ -960,7 +960,7 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 	dm_oblock_t oblock;
 	__le64 value;
 
-	r = dm_array_get(&cmd->info, cmd->root, from_cblock(cblock), &value);
+	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(cblock), &value);
 	if (r)
 		return r;
 
@@ -973,8 +973,8 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 	value = pack_value(oblock, flags | (dirty ? M_DIRTY : 0));
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
-			 &value, &cmd->root);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
+			       &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -1107,8 +1107,8 @@ static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock,
 	__le32 value = cpu_to_le32(hint);
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->hint_info, cmd->hint_root,
-			 from_cblock(cblock), &value, &cmd->hint_root);
+	r = dm_array_set_value(&cmd->hint_info, cmd->hint_root,
+			       from_cblock(cblock), &value, &cmd->hint_root);
 	cmd->changed = true;
 
 	return r;

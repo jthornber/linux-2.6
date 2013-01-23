@@ -13,21 +13,57 @@
 /*
  * The dm-array is a persistent version of an array.  It packs the data
  * more efficiently than a btree which will result in less disk space use,
- * and a performance boost.  The get and set operations are still O(ln(n)),
- * but with a much smaller constant.
+ * and a performance boost.  The element get and set operations are still
+ * O(ln(n)), but with a much smaller constant.
  *
  * The value type structure is reused from the btree type to support proper
  * reference counting of values.
  *
  * The arrays implicitly know their length, and bounds are checked for
- * lookups and updates.  It doesn't store this in an accessible place
+ * lookups and updated.  It doesn't store this in an accessible place
  * because it would waste a whole metadata block.  Make sure you store the
  * size along with the array root in your encompassing data.
+ *
+ * Array entries are indexed via an unsigned integer starting from zero.
+ * Arrays are not sparse; if you resize an array to have 'n' entries then
+ * 'n - 1' will be the last valid index.
+ *
+ * Typical use:
+ *
+ * a) initialise a dm_array_info structure.  This describes the array
+ *    values and ties it into a specific transaction manager.  It holds no
+ *    instance data; the same info can be used for many similar arrays if
+ *    you wish.
+ *
+ * b) Get yourself a root.  The root is the index of a block of data on the
+ *    disk that holds a particular instance of an array.  You may have a
+ *    pre existing root in your metadata that you wish to use, or you may
+ *    want to create a brand new, empty array with dm_array_empty().
+ *
+ * Like the other data structures in this library, dm_array objects are
+ * immutable between transactions.  Update functions will return you the
+ * root for a _new_ array.  If you've incremented the old root, via
+ * dm_tm_inc(), before calling the update function you may continue to use
+ * it in parallel with the new root.
+ *
+ * c) resize an array with dm_array_resize().
+ *
+ * d) Get a value from the array with dm_array_get_value().
+ *
+ * e) Set a value in the array with dm_array_set_value().
+ *
+ * f) Walk an array of values in index order with dm_array_walk().  More
+ *    efficient than making many calls to dm_array_get_value().
+ *
+ * g) Destroy the array with dm_array_del().  This tells the transaction
+ *    manager that you're no longer using this data structure so it can
+ *    recycle it's blocks.  (dm_array_dec() would be a better name for it,
+ *    but del is in keeping with dm_btree_del()).
  */
 
 /*
  * Describes an array.  Don't initialise this structure yourself, use the
- * setup function below.
+ * init function below.
  */
 struct dm_array_info {
 	struct dm_transaction_manager *tm;
@@ -36,18 +72,19 @@ struct dm_array_info {
 };
 
 /*
- * Sets up a dm_array_info structure.
+ * Sets up a dm_array_info structure.  You don't need to do anything with
+ * this structure when you finish using it.
  *
  * info - the structure being filled in.
  * tm   - the transaction manager that should supervise this structure.
  * vt   - describes the leaf values.
  */
-void dm_setup_array_info(struct dm_array_info *info,
-			 struct dm_transaction_manager *tm,
-			 struct dm_btree_value_type *vt);
+void dm_array_info_init(struct dm_array_info *info,
+			struct dm_transaction_manager *tm,
+			struct dm_btree_value_type *vt);
 
 /*
- * Initialise an empty array, zero length array.
+ * Create an empty, zero length array.
  *
  * info - describes the array
  * root - on success this will be filled out with the root block
@@ -59,12 +96,13 @@ int dm_array_empty(struct dm_array_info *info, dm_block_t *root);
  *
  * info - describes the array
  * root - the root block of the array on disk
- * old_size - yes, the caller is responsible for remembering the size of the array
+ * old_size - the caller is responsible for remembering the size of
+ *            the array
  * new_size - can be bigger or smaller than old_size
  * value - if we're growing the array the new entries will have this value
  * new_root - on success, points to the new root block
  *
- * If growing the inc function for value will be called the appropriate
+ * If growing the inc function for 'value' will be called the appropriate
  * number of times.  So if the caller is holding a reference they may want
  * to drop it.
  */
@@ -85,12 +123,12 @@ int dm_array_del(struct dm_array_info *info, dm_block_t root);
  * info - describes the array
  * root - root block of the array
  * index - array index
- * value - the value to be read.  Will be in on disk format of course.
+ * value - the value to be read.  Will be in on-disk format of course.
  *
  * -ENODATA will be returned if the index is out of bounds.
  */
-int dm_array_get(struct dm_array_info *info, dm_block_t root,
-		 uint32_t index, void *value);
+int dm_array_get_value(struct dm_array_info *info, dm_block_t root,
+		       uint32_t index, void *value);
 
 /*
  * Set an entry in the array.
@@ -98,8 +136,8 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
  * info - describes the array
  * root - root block of the array
  * index - array index
- * value - value to be written to disk.  Make sure you bless this before
- *         calling.
+ * value - value to be written to disk.  Make sure you confirm the value is
+ *         in on-disk format with__dm_bless_for_disk() before calling.
  * new_root - the new root block
  *
  * The old value being overwritten will be decremented, the new value
@@ -107,8 +145,8 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
  *
  * -ENODATA will be returned if the index is out of bounds.
  */
-int dm_array_set(struct dm_array_info *info, dm_block_t root,
-		 uint32_t index, const void *value, dm_block_t *new_root)
+int dm_array_set_value(struct dm_array_info *info, dm_block_t root,
+		       uint32_t index, const void *value, dm_block_t *new_root)
 	__dm_written_to_disk(value);
 
 /*
@@ -120,7 +158,7 @@ int dm_array_set(struct dm_array_info *info, dm_block_t root,
  * context - passed to the callback
  */
 int dm_array_walk(struct dm_array_info *info, dm_block_t root,
-		  int (*fn)(void *, uint64_t key, void *leaf),
+		  int (*fn)(void *context, uint64_t key, void *leaf),
 		  void *context);
 
 /*----------------------------------------------------------------*/
