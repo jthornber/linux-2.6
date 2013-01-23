@@ -28,7 +28,7 @@ static struct dm_btree_value_type bitset_bvt = {
 void dm_bitset_info_init(struct dm_transaction_manager *tm,
 			 struct dm_bitset_info *info)
 {
-	dm_setup_array_info(&info->array_info, tm, &bitset_bvt);
+	dm_array_info_init(&info->array_info, tm, &bitset_bvt);
 	info->current_index_set = false;
 }
 EXPORT_SYMBOL_GPL(dm_bitset_info_init);
@@ -71,8 +71,8 @@ int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root,
 	value = cpu_to_le64(info->current_bits);
 
 	__dm_bless_for_disk(&value);
-	r = dm_array_set(&info->array_info, root, info->current_index,
-			 &value, new_root);
+	r = dm_array_set_value(&info->array_info, root, info->current_index,
+			       &value, new_root);
 	if (r)
 		return r;
 
@@ -87,7 +87,7 @@ static int read_bits(struct dm_bitset_info *info, dm_block_t root,
 	int r;
 	__le64 value;
 
-	r = dm_array_get(&info->array_info, root, array_index, &value);
+	r = dm_array_get_value(&info->array_info, root, array_index, &value);
 	if (r)
 		return r;
 

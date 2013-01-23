@@ -613,9 +613,9 @@ static int block_equal(void *context, const void *value1, const void *value2)
 
 /*----------------------------------------------------------------*/
 
-void dm_setup_array_info(struct dm_array_info *info,
-			 struct dm_transaction_manager *tm,
-			 struct dm_btree_value_type *vt)
+void dm_array_info_init(struct dm_array_info *info,
+			struct dm_transaction_manager *tm,
+			struct dm_btree_value_type *vt)
 {
 	struct dm_btree_value_type *bvt = &info->btree_info.value_type;
 
@@ -629,7 +629,7 @@ void dm_setup_array_info(struct dm_array_info *info,
 	bvt->dec = block_dec;
 	bvt->equal = block_equal;
 }
-EXPORT_SYMBOL_GPL(dm_setup_array_info);
+EXPORT_SYMBOL_GPL(dm_array_info_init);
 
 int dm_array_empty(struct dm_array_info *info, dm_block_t *root)
 {
@@ -684,8 +684,8 @@ int dm_array_del(struct dm_array_info *info, dm_block_t root)
 }
 EXPORT_SYMBOL_GPL(dm_array_del);
 
-int dm_array_get(struct dm_array_info *info, dm_block_t root,
-		 uint32_t index, void *value_le)
+int dm_array_get_value(struct dm_array_info *info, dm_block_t root,
+		       uint32_t index, void *value_le)
 {
 	int r;
 	struct dm_block *block;
@@ -710,10 +710,10 @@ int dm_array_get(struct dm_array_info *info, dm_block_t root,
 	unlock_ablock(info, block);
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_array_get);
+EXPORT_SYMBOL_GPL(dm_array_get_value);
 
-static int array_set(struct dm_array_info *info, dm_block_t root,
-		     uint32_t index, const void *value, dm_block_t *new_root)
+static int array_set_value(struct dm_array_info *info, dm_block_t root,
+			   uint32_t index, const void *value, dm_block_t *new_root)
 {
 	int r;
 	struct dm_block *block;
@@ -753,17 +753,17 @@ out:
 	return r;
 }
 
-int dm_array_set(struct dm_array_info *info, dm_block_t root,
+int dm_array_set_value(struct dm_array_info *info, dm_block_t root,
 		 uint32_t index, const void *value, dm_block_t *new_root)
 		 __dm_written_to_disk(value)
 {
 	int r;
 
-	r = array_set(info, root, index, value, new_root);
+	r = array_set_value(info, root, index, value, new_root);
 	__dm_unbless_for_disk(value);
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_array_set);
+EXPORT_SYMBOL_GPL(dm_array_set_value);
 
 struct walk_info {
 	struct dm_array_info *info;
