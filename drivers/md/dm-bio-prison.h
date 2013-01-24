@@ -45,7 +45,11 @@ struct dm_bio_prison *dm_bio_prison_create(unsigned nr_cells);
 void dm_bio_prison_destroy(struct dm_bio_prison *prison);
 
 /*
- * Cannot fail.
+ * These two functions just wrap a mempool.  This is a transitory step,
+ * eventually all bio prison clients should manage their own cell memory.
+ *
+ * Like mempool_alloc(), dm_bio_prison_alloc_cell() can only fail if called
+ * in interrupt context or passed GFP_NOWAIT.
  */
 struct dm_bio_prison_cell *dm_bio_prison_alloc_cell(struct dm_bio_prison *prison,
 						    gfp_t gfp);
