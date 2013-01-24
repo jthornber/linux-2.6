@@ -92,7 +92,7 @@ struct dm_cache_metadata {
 
 	struct dm_array_info info;
 	struct dm_array_info hint_info;
-	struct dm_bitset_info discard_info;
+	struct dm_disk_bitset discard_info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
@@ -310,7 +310,7 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r < 0)
 		goto bad;
 
-	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+	dm_disk_bitset_init(cmd->tm, &cmd->discard_info);
 
 	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_root);
 	if (r < 0)
@@ -390,7 +390,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	}
 
 	__setup_mapping_info(cmd);
-	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+	dm_disk_bitset_init(cmd->tm, &cmd->discard_info);
 	sb_flags = le32_to_cpu(disk_super->flags);
 	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
 	return dm_bm_unlock(sblock);

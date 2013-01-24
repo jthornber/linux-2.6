@@ -25,21 +25,21 @@ static struct dm_btree_value_type bitset_bvt = {
 
 /*----------------------------------------------------------------*/
 
-void dm_bitset_info_init(struct dm_transaction_manager *tm,
-			 struct dm_bitset_info *info)
+void dm_disk_bitset_init(struct dm_transaction_manager *tm,
+			 struct dm_disk_bitset *info)
 {
 	dm_array_info_init(&info->array_info, tm, &bitset_bvt);
 	info->current_index_set = false;
 }
-EXPORT_SYMBOL_GPL(dm_bitset_info_init);
+EXPORT_SYMBOL_GPL(dm_disk_bitset_init);
 
-int dm_bitset_empty(struct dm_bitset_info *info, dm_block_t *root)
+int dm_bitset_empty(struct dm_disk_bitset *info, dm_block_t *root)
 {
 	return dm_array_empty(&info->array_info, root);
 }
 EXPORT_SYMBOL_GPL(dm_bitset_empty);
 
-int dm_bitset_resize(struct dm_bitset_info *info, dm_block_t root,
+int dm_bitset_resize(struct dm_disk_bitset *info, dm_block_t root,
 		     uint32_t old_nr_entries, uint32_t new_nr_entries,
 		     bool default_value, dm_block_t *new_root)
 {
@@ -53,13 +53,13 @@ int dm_bitset_resize(struct dm_bitset_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_bitset_resize);
 
-int dm_bitset_del(struct dm_bitset_info *info, dm_block_t root)
+int dm_bitset_del(struct dm_disk_bitset *info, dm_block_t root)
 {
 	return dm_array_del(&info->array_info, root);
 }
 EXPORT_SYMBOL_GPL(dm_bitset_del);
 
-int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root,
+int dm_bitset_flush(struct dm_disk_bitset *info, dm_block_t root,
 		    dm_block_t *new_root)
 {
 	int r;
@@ -81,7 +81,7 @@ int dm_bitset_flush(struct dm_bitset_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_bitset_flush);
 
-static int read_bits(struct dm_bitset_info *info, dm_block_t root,
+static int read_bits(struct dm_disk_bitset *info, dm_block_t root,
 		     uint32_t array_index)
 {
 	int r;
@@ -97,7 +97,7 @@ static int read_bits(struct dm_bitset_info *info, dm_block_t root,
 	return 0;
 }
 
-static int get_array_entry(struct dm_bitset_info *info, dm_block_t root,
+static int get_array_entry(struct dm_disk_bitset *info, dm_block_t root,
 			   uint32_t index, dm_block_t *new_root)
 {
 	int r;
@@ -115,7 +115,7 @@ static int get_array_entry(struct dm_bitset_info *info, dm_block_t root,
 	return read_bits(info, root, array_index);
 }
 
-int dm_bitset_set_bit(struct dm_bitset_info *info, dm_block_t root,
+int dm_bitset_set_bit(struct dm_disk_bitset *info, dm_block_t root,
 		      uint32_t index, dm_block_t *new_root)
 {
 	int r;
@@ -130,7 +130,7 @@ int dm_bitset_set_bit(struct dm_bitset_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_bitset_set_bit);
 
-int dm_bitset_clear_bit(struct dm_bitset_info *info, dm_block_t root,
+int dm_bitset_clear_bit(struct dm_disk_bitset *info, dm_block_t root,
 			uint32_t index, dm_block_t *new_root)
 {
 	int r;
@@ -145,7 +145,7 @@ int dm_bitset_clear_bit(struct dm_bitset_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_bitset_clear_bit);
 
-int dm_bitset_test_bit(struct dm_bitset_info *info, dm_block_t root,
+int dm_bitset_test_bit(struct dm_disk_bitset *info, dm_block_t root,
 		       uint32_t index, dm_block_t *new_root, bool *result)
 {
 	int r;
