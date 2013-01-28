@@ -497,65 +497,66 @@ static int shrink(struct resize *resize)
 /*
  * Grow an array.
  */
-static int grow(struct resize *resize)
+static int grow_extend_tail_block(struct resize *resize, uint32_t new_nr_entries)
 {
 	int r;
 	struct dm_block *block;
 	struct array_block *ab;
 
-	if (resize->new_nr_full_blocks > resize->old_nr_full_blocks) {
-		/*
-		 * Pad the end of the old block?
-		 */
-		if (resize->old_nr_entries_in_last_block > 0) {
-			r = shadow_ablock(resize->info, &resize->root,
-					  resize->old_nr_full_blocks, &block, &ab);
-			if (r)
-				return r;
+	r = shadow_ablock(resize->info, &resize->root,
+			  resize->old_nr_full_blocks, &block, &ab);
+	if (r)
+		return r;
 
-			fill_ablock(resize->info, ab, resize->value, resize->max_entries);
-			unlock_ablock(resize->info, block);
-		}
-
-		/*
-		 * Add the full blocks.
-		 */
-		r = insert_full_ablocks(resize->info, resize->size_of_block,
-					resize->old_nr_full_blocks,
-					resize->new_nr_full_blocks,
-					resize->max_entries, resize->value,
-					&resize->root);
-		if (r)
-			return r;
-
-		/*
-		 * Add new tail block?
-		 */
-		if (resize->new_nr_entries_in_last_block)
-			r = insert_partial_ablock(resize->info, resize->size_of_block,
-						  resize->max_entries,
-						  resize->new_nr_full_blocks,
-						  resize->new_nr_entries_in_last_block,
-						  resize->value, &resize->root);
-	} else {
-		if (!resize->old_nr_entries_in_last_block) {
-			r = insert_partial_ablock(resize->info, resize->size_of_block,
-						  resize->max_entries,
-						  resize->new_nr_full_blocks,
-						  resize->new_nr_entries_in_last_block,
-						  resize->value, &resize->root);
-		} else {
-			r = shadow_ablock(resize->info, &resize->root,
-					  resize->old_nr_full_blocks, &block, &ab);
-			if (r)
-				return r;
-
-			fill_ablock(resize->info, ab, resize->value, resize->new_nr_entries_in_last_block);
-			unlock_ablock(resize->info, block);
-		}
-	}
+	fill_ablock(resize->info, ab, resize->value, new_nr_entries);
+	unlock_ablock(resize->info, block);
 
 	return r;
+}
+
+static int grow_add_tail_block(struct resize *resize)
+{
+	return insert_partial_ablock(resize->info, resize->size_of_block,
+				     resize->max_entries,
+				     resize->new_nr_full_blocks,
+				     resize->new_nr_entries_in_last_block,
+				     resize->value, &resize->root);
+}
+
+static int grow_needs_more_blocks(struct resize *resize)
+{
+	int r;
+
+	if (resize->old_nr_entries_in_last_block > 0) {
+		r = grow_extend_tail_block(resize, resize->max_entries);
+		if (r)
+			return r;
+	}
+
+	r = insert_full_ablocks(resize->info, resize->size_of_block,
+				resize->old_nr_full_blocks,
+				resize->new_nr_full_blocks,
+				resize->max_entries, resize->value,
+				&resize->root);
+	if (r)
+		return r;
+
+	if (resize->new_nr_entries_in_last_block)
+		r = grow_add_tail_block(resize);
+
+	return r;
+}
+
+static int grow(struct resize *resize)
+{
+	if (resize->new_nr_full_blocks > resize->old_nr_full_blocks)
+		return grow_needs_more_blocks(resize);
+
+	else if (resize->old_nr_entries_in_last_block)
+		return grow_extend_tail_block(resize, resize->new_nr_entries_in_last_block);
+
+	else
+		return grow_add_tail_block(resize);
 }
 
 /*----------------------------------------------------------------*/
