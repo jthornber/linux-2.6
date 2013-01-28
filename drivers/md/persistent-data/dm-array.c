@@ -148,6 +148,7 @@ static uint32_t calc_max_entries(size_t value_size, size_t size_of_block)
  * Allocate a new array block.  The caller will need to unlock block.
  */
 static int alloc_ablock(struct dm_array_info *info, size_t size_of_block,
+			uint32_t max_entries,
 			struct dm_block **block, struct array_block **ab)
 {
 	int r;
@@ -157,8 +158,7 @@ static int alloc_ablock(struct dm_array_info *info, size_t size_of_block,
 		return r;
 
 	(*ab) = dm_block_data(*block);
-	(*ab)->max_entries =
-		cpu_to_le32(calc_max_entries(info->value_type.size, size_of_block));
+	(*ab)->max_entries = cpu_to_le32(max_entries);
 	(*ab)->nr_entries = cpu_to_le32(0);
 	(*ab)->value_size = cpu_to_le32(info->value_type.size);
 
@@ -331,7 +331,7 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t size_of_block,
 	struct array_block *ab;
 
 	while (begin_block != end_block) {
-		r = alloc_ablock(info, size_of_block, &block, &ab);
+		r = alloc_ablock(info, size_of_block, max_entries, &block, &ab);
 		if (r)
 			return r;
 
@@ -354,6 +354,7 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t size_of_block,
  * Allocate an new array block, and fill it with some values.
  */
 static int insert_partial_ablock(struct dm_array_info *info, size_t size_of_block,
+				 uint32_t max_entries,
 				 unsigned block_index, unsigned nr,
 				 const void *value, dm_block_t *root)
 {
@@ -364,7 +365,7 @@ static int insert_partial_ablock(struct dm_array_info *info, size_t size_of_bloc
 	if (nr == 0)
 		return 0;
 
-	r = alloc_ablock(info, size_of_block, &block, &ab);
+	r = alloc_ablock(info, size_of_block, max_entries, &block, &ab);
 	if (r)
 		return r;
 
@@ -532,12 +533,14 @@ static int grow(struct resize *resize)
 		 */
 		if (resize->new_nr_entries_in_last_block)
 			r = insert_partial_ablock(resize->info, resize->size_of_block,
+						  resize->max_entries,
 						  resize->new_nr_full_blocks,
 						  resize->new_nr_entries_in_last_block,
 						  resize->value, &resize->root);
 	} else {
 		if (!resize->old_nr_entries_in_last_block) {
 			r = insert_partial_ablock(resize->info, resize->size_of_block,
+						  resize->max_entries,
 						  resize->new_nr_full_blocks,
 						  resize->new_nr_entries_in_last_block,
 						  resize->value, &resize->root);
