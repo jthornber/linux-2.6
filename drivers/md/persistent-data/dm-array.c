@@ -39,19 +39,19 @@ struct array_block {
 
 static void array_block_prepare_for_write(struct dm_block_validator *v,
 					  struct dm_block *b,
-					  size_t block_size)
+					  size_t size_of_block)
 {
 	struct array_block *bh_le = dm_block_data(b);
 
 	bh_le->blocknr = cpu_to_le64(dm_block_location(b));
 	bh_le->csum = cpu_to_le32(dm_bm_checksum(&bh_le->max_entries,
-						 block_size - sizeof(__le32),
+						 size_of_block - sizeof(__le32),
 						 CSUM_XOR));
 }
 
 static int array_block_check(struct dm_block_validator *v,
 			     struct dm_block *b,
-			     size_t block_size)
+			     size_t size_of_block)
 {
 	struct array_block *bh_le = dm_block_data(b);
 	__le32 csum_disk;
@@ -63,7 +63,7 @@ static int array_block_check(struct dm_block_validator *v,
 	}
 
 	csum_disk = cpu_to_le32(dm_bm_checksum(&bh_le->max_entries,
-					       block_size - sizeof(__le32),
+					       size_of_block - sizeof(__le32),
 					       CSUM_XOR));
 	if (csum_disk != bh_le->csum) {
 		DMERR_LIMIT("array_block_check failed: csum %u != wanted %u",
@@ -137,15 +137,15 @@ static void dec_ablock_entries(struct dm_array_info *info, struct array_block *a
 /*
  * Each array block can hold this many values.
  */
-static uint32_t calc_max_entries(size_t value_size, size_t block_size)
+static uint32_t calc_max_entries(size_t value_size, size_t size_of_block)
 {
-	return (block_size - sizeof(struct array_block)) / value_size;
+	return (size_of_block - sizeof(struct array_block)) / value_size;
 }
 
 /*
  * Allocate a new array block.  The caller will need to unlock block.
  */
-static int alloc_ablock(struct dm_array_info *info, size_t block_size,
+static int alloc_ablock(struct dm_array_info *info, size_t size_of_block,
 			struct dm_block **block, struct array_block **ab)
 {
 	int r;
@@ -156,7 +156,7 @@ static int alloc_ablock(struct dm_array_info *info, size_t block_size,
 
 	(*ab) = dm_block_data(*block);
 	(*ab)->max_entries =
-		cpu_to_le32(calc_max_entries(info->value_type.size, block_size));
+		cpu_to_le32(calc_max_entries(info->value_type.size, size_of_block));
 	(*ab)->nr_entries = cpu_to_le32(0);
 	(*ab)->value_size = cpu_to_le32(info->value_type.size);
 
@@ -319,7 +319,7 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 	return r;
 }
 
-static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
+static int insert_full_ablocks(struct dm_array_info *info, size_t size_of_block,
 			       unsigned begin_block, unsigned end_block,
 			       unsigned max_entries, const void *value,
 			       dm_block_t *root)
@@ -330,7 +330,7 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 
 
 	while (begin_block != end_block) {
-		r = alloc_ablock(info, block_size, &block, &ab);
+		r = alloc_ablock(info, size_of_block, &block, &ab);
 		if (r)
 			return r;
 
@@ -352,7 +352,7 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t block_size,
 /*
  * Allocate an new array block, and fill it with some values.
  */
-static int insert_partial_ablock(struct dm_array_info *info, size_t block_size,
+static int insert_partial_ablock(struct dm_array_info *info, size_t size_of_block,
 				 unsigned block_index, unsigned nr,
 				 const void *value, dm_block_t *root)
 {
@@ -363,7 +363,7 @@ static int insert_partial_ablock(struct dm_array_info *info, size_t block_size,
 	if (nr == 0)
 		return 0;
 
-	r = alloc_ablock(info, block_size, &block, &ab);
+	r = alloc_ablock(info, size_of_block, &block, &ab);
 	if (r)
 		return r;
 
@@ -394,7 +394,7 @@ struct resize {
 	 * Metadata block size.  Used to calculate the nr entries in an
 	 * array block.
 	 */
-	size_t block_size;
+	size_t size_of_block;
 
 	/*
 	 * Maximum nr entries in an array block.
@@ -518,7 +518,7 @@ static int grow(struct resize *resize)
 		/*
 		 * Add the full blocks.
 		 */
-		r = insert_full_ablocks(resize->info, resize->block_size,
+		r = insert_full_ablocks(resize->info, resize->size_of_block,
 					resize->old_nr_full_blocks,
 					resize->new_nr_full_blocks,
 					resize->max_entries, resize->value,
@@ -530,13 +530,13 @@ static int grow(struct resize *resize)
 		 * Add new tail block?
 		 */
 		if (resize->new_nr_entries_in_last_block)
-			r = insert_partial_ablock(resize->info, resize->block_size,
+			r = insert_partial_ablock(resize->info, resize->size_of_block,
 						  resize->new_nr_full_blocks,
 						  resize->new_nr_entries_in_last_block,
 						  resize->value, &resize->root);
 	} else {
 		if (!resize->old_nr_entries_in_last_block) {
-			r = insert_partial_ablock(resize->info, resize->block_size,
+			r = insert_partial_ablock(resize->info, resize->size_of_block,
 						  resize->new_nr_full_blocks,
 						  resize->new_nr_entries_in_last_block,
 						  resize->value, &resize->root);
@@ -649,9 +649,9 @@ static int array_resize(struct dm_array_info *info, dm_block_t root,
 
 	resize.info = info;
 	resize.root = root;
-	resize.block_size = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
+	resize.size_of_block = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
 	resize.max_entries = calc_max_entries(info->value_type.size,
-					      resize.block_size);
+					      resize.size_of_block);
 
 	resize.old_nr_full_blocks = old_size / resize.max_entries;
 	resize.old_nr_entries_in_last_block = old_size % resize.max_entries;
@@ -690,11 +690,11 @@ int dm_array_get_value(struct dm_array_info *info, dm_block_t root,
 	int r;
 	struct dm_block *block;
 	struct array_block *ab;
-	size_t block_size;
+	size_t size_of_block;
 	unsigned entry, max_entries;
 
-	block_size = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
-	max_entries = calc_max_entries(info->value_type.size, block_size);
+	size_of_block = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
+	max_entries = calc_max_entries(info->value_type.size, size_of_block);
 
 	r = lookup_ablock(info, root, index / max_entries, &block, &ab);
 	if (r)
@@ -718,14 +718,14 @@ static int array_set_value(struct dm_array_info *info, dm_block_t root,
 	int r;
 	struct dm_block *block;
 	struct array_block *ab;
-	size_t block_size;
+	size_t size_of_block;
 	unsigned max_entries;
 	unsigned entry;
 	void *old_value;
 	struct dm_btree_value_type *vt = &info->value_type;
 
-	block_size = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
-	max_entries = calc_max_entries(info->value_type.size, block_size);
+	size_of_block = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
+	max_entries = calc_max_entries(info->value_type.size, size_of_block);
 
 	r = shadow_ablock(info, &root, index / max_entries, &block, &ab);
 	if (r)
