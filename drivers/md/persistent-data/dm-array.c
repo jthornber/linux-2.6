@@ -58,7 +58,8 @@ static int array_block_check(struct dm_block_validator *v,
 
 	if (dm_block_location(b) != le64_to_cpu(bh_le->blocknr)) {
 		DMERR_LIMIT("array_block_check failed: blocknr %llu != wanted %llu",
-			    le64_to_cpu(bh_le->blocknr), dm_block_location(b));
+			    (unsigned long long) le64_to_cpu(bh_le->blocknr),
+			    (unsigned long long) dm_block_location(b));
 		return -ENOTBLK;
 	}
 
@@ -67,7 +68,8 @@ static int array_block_check(struct dm_block_validator *v,
 					       CSUM_XOR));
 	if (csum_disk != bh_le->csum) {
 		DMERR_LIMIT("array_block_check failed: csum %u != wanted %u",
-			    le32_to_cpu(csum_disk), le32_to_cpu(bh_le->csum));
+			    (unsigned) le32_to_cpu(csum_disk),
+			    (unsigned) le32_to_cpu(bh_le->csum));
 		return -EILSEQ;
 	}
 
