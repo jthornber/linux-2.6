@@ -589,7 +589,8 @@ static void block_dec(void *context, const void *value)
 
 	r = dm_tm_ref(info->btree_info.tm, b, &ref_count);
 	if (r) {
-		DMERR_LIMIT("couldn't get reference count");
+		DMERR_LIMIT("couldn't get reference count for block %llu",
+			    (unsigned long long) b);
 		return;
 	}
 
@@ -600,7 +601,8 @@ static void block_dec(void *context, const void *value)
 		 */
 		r = get_ablock(info, b, &block, &ab);
 		if (r) {
-			DMERR_LIMIT("couldn't get array block");
+			DMERR_LIMIT("couldn't get array block %llu",
+				    (unsigned long long) b);
 			return;
 		}
 
