@@ -330,7 +330,6 @@ static int insert_full_ablocks(struct dm_array_info *info, size_t size_of_block,
 	struct dm_block *block;
 	struct array_block *ab;
 
-
 	while (begin_block != end_block) {
 		r = alloc_ablock(info, size_of_block, &block, &ab);
 		if (r)
