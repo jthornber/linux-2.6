@@ -321,49 +321,17 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 	return r;
 }
 
-static int insert_full_ablocks(struct dm_array_info *info, size_t size_of_block,
-			       unsigned begin_block, unsigned end_block,
-			       unsigned max_entries, const void *value,
-			       dm_block_t *root)
-{
-	int r;
-	struct dm_block *block;
-	struct array_block *ab;
-
-	while (begin_block != end_block) {
-		r = alloc_ablock(info, size_of_block, max_entries, &block, &ab);
-		if (r)
-			return r;
-
-		fill_ablock(info, ab, value, le32_to_cpu(ab->max_entries));
-
-		r = insert_ablock(info, begin_block, block, root);
-		if (r) {
-			unlock_ablock(info, block);
-			return r;
-		}
-
-		unlock_ablock(info, block);
-		begin_block++;
-	}
-
-	return 0;
-}
-
 /*
  * Allocate an new array block, and fill it with some values.
  */
-static int insert_partial_ablock(struct dm_array_info *info, size_t size_of_block,
-				 uint32_t max_entries,
-				 unsigned block_index, unsigned nr,
-				 const void *value, dm_block_t *root)
+static int insert_new_ablock(struct dm_array_info *info, size_t size_of_block,
+			     uint32_t max_entries,
+			     unsigned block_index, uint32_t nr,
+			     const void *value, dm_block_t *root)
 {
 	int r;
 	struct dm_block *block;
 	struct array_block *ab;
-
-	if (nr == 0)
-		return 0;
 
 	r = alloc_ablock(info, size_of_block, max_entries, &block, &ab);
 	if (r)
@@ -372,6 +340,19 @@ static int insert_partial_ablock(struct dm_array_info *info, size_t size_of_bloc
 	fill_ablock(info, ab, value, nr);
 	r = insert_ablock(info, block_index, block, root);
 	unlock_ablock(info, block);
+
+	return r;
+}
+
+static int insert_full_ablocks(struct dm_array_info *info, size_t size_of_block,
+			       unsigned begin_block, unsigned end_block,
+			       unsigned max_entries, const void *value,
+			       dm_block_t *root)
+{
+	int r = 0;
+
+	for (; !r && begin_block != end_block; begin_block++)
+		r = insert_new_ablock(info, size_of_block, max_entries, begin_block, max_entries, value, root);
 
 	return r;
 }
@@ -516,11 +497,11 @@ static int grow_extend_tail_block(struct resize *resize, uint32_t new_nr_entries
 
 static int grow_add_tail_block(struct resize *resize)
 {
-	return insert_partial_ablock(resize->info, resize->size_of_block,
-				     resize->max_entries,
-				     resize->new_nr_full_blocks,
-				     resize->new_nr_entries_in_last_block,
-				     resize->value, &resize->root);
+	return insert_new_ablock(resize->info, resize->size_of_block,
+				 resize->max_entries,
+				 resize->new_nr_full_blocks,
+				 resize->new_nr_entries_in_last_block,
+				 resize->value, &resize->root);
 }
 
 static int grow_needs_more_blocks(struct resize *resize)
