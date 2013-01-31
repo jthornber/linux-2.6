@@ -1100,7 +1100,7 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 	int r;
 	unsigned u;
 
-	mq->threshold_args[0] = mq->threshold_args[1] = -1;
+	mq->threshold_args[PATTERN_SEQUENTIAL] = mq->threshold_args[PATTERN_RANDOM] = -1;
 
 	if (!argc)
 		return 0;
