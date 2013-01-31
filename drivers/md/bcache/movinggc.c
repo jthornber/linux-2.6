@@ -13,8 +13,9 @@ static bool moving_pred(struct keybuf *buf, struct bkey *k)
 {
 	struct cache_set *c = container_of(buf, struct cache_set,
 					   moving_gc_keys);
+	unsigned i;
 
-	for (unsigned i = 0; i < KEY_PTRS(k); i++) {
+	for (i = 0; i < KEY_PTRS(k); i++) {
 		struct cache *ca = PTR_CACHE(c, k, i);
 		struct bucket *g = PTR_BUCKET(c, k, i);
 
@@ -74,7 +75,8 @@ static void moving_init(struct moving_io *io)
 	bio_set_prio(bio, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0));
 
 	bio->bi_size		= KEY_SIZE(&io->w->key) << 9;
-	bio->bi_max_vecs	= DIV_ROUND_UP(KEY_SIZE(&io->w->key), PAGE_SECTORS);
+	bio->bi_max_vecs	= DIV_ROUND_UP(KEY_SIZE(&io->w->key),
+					       PAGE_SECTORS);
 	bio->bi_private		= &io->s.cl;
 	bio->bi_io_vec		= bio->bi_inline_vecs;
 	bio_map(bio, NULL);
@@ -102,7 +104,7 @@ static void write_moving(struct closure *cl)
 		bkey_copy(&s->op.replace, &io->w->key);
 
 		closure_init(&s->op.cl, cl);
-		bch_insert_data(&s->op.cl);
+		bch_data_insert(&s->op.cl);
 	}
 
 	continue_at(cl, write_moving_finish, NULL);
@@ -129,7 +131,7 @@ static void read_moving(struct closure *cl)
 
 	/* XXX: if we error, background writeback could stall indefinitely */
 
-	while (!atomic_read(&c->closing)) {
+	while (!test_bit(CACHE_SET_STOPPING, &c->flags)) {
 		w = bch_keybuf_next_rescan(c, &c->moving_gc_keys, &MAX_KEY);
 		if (!w)
 			break;
@@ -180,6 +182,7 @@ void bch_moving_gc(struct closure *cl)
 	struct cache_set *c = container_of(cl, struct cache_set, gc.cl);
 	struct cache *ca;
 	struct bucket *b;
+	unsigned i;
 
 	bool bucket_cmp(struct bucket *l, struct bucket *r)
 	{
@@ -196,7 +199,7 @@ void bch_moving_gc(struct closure *cl)
 
 	mutex_lock(&c->bucket_lock);
 
-	for_each_cache(ca, c) {
+	for_each_cache(ca, c, i) {
 		unsigned sectors_to_move = 0;
 		unsigned reserve_sectors = ca->sb.bucket_size *
 			min(fifo_used(&ca->free), ca->free.size / 2);

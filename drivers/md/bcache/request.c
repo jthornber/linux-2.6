@@ -20,6 +20,7 @@
 struct kmem_cache *bch_search_cache;
 
 static void check_should_skip(struct cached_dev *, struct search *);
+static void bch_data_insert_start(struct closure *);
 
 /* Cgroup interface */
 
@@ -207,30 +208,42 @@ static void bio_csum(struct bio *bio, struct bkey *k)
 
 /* Insert data into cache */
 
-static void bio_invalidate(struct closure *cl)
+static void bch_data_insert_keys(struct closure *cl)
 {
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
-	struct bio *bio = op->cache_bio;
+	struct search *s = container_of(op, struct search, op);
 
-	pr_debug("invalidating %i sectors from %llu",
-		 bio_sectors(bio), (uint64_t) bio->bi_sector);
+	/*
+	 * If we're looping, might already be waiting on
+	 * another journal write - can't wait on more than one journal write at
+	 * a time
+	 *
+	 * XXX: this looks wrong
+	 */
+#if 0
+	while (atomic_read(&s->cl.remaining) & CLOSURE_WAITING)
+		closure_sync(&s->cl);
+#endif
 
-	while (bio_sectors(bio)) {
-		unsigned len = min(bio_sectors(bio), 1U << 14);
+	if (s->write)
+		op->journal = bch_journal(op->c, &s->insert_keys,
+					  op->flush_journal
+					  ? &s->cl : NULL);
 
-		if (bch_keylist_realloc(&op->keys, 0, op->c))
-			goto out;
-
-		bio->bi_sector	+= len;
-		bio->bi_size	-= len << 9;
-
-		bch_keylist_add(&op->keys, &KEY(op->inode, bio->bi_sector, len));
+	if (bch_btree_insert(op, op->c, &s->insert_keys)) {
+		s->error		= -ENOMEM;
+		op->insert_data_done	= true;
 	}
 
-	op->insert_data_done = true;
-	bio_put(bio);
-out:
-	continue_at(cl, bch_journal, bcache_wq);
+	if (op->journal)
+		atomic_dec_bug(op->journal);
+	op->journal = NULL;
+
+	if (!op->insert_data_done)
+		continue_at(cl, bch_data_insert_start, bcache_wq);
+
+	bch_keylist_free(&s->insert_keys);
+	closure_return(cl);
 }
 
 struct open_bucket {
@@ -254,9 +267,11 @@ void bch_open_buckets_free(struct cache_set *c)
 
 int bch_open_buckets_alloc(struct cache_set *c)
 {
+	int i;
+
 	spin_lock_init(&c->data_bucket_lock);
 
-	for (int i = 0; i < 6; i++) {
+	for (i = 0; i < 6; i++) {
 		struct open_bucket *b = kzalloc(sizeof(*b), GFP_KERNEL);
 		if (!b)
 			return -ENOMEM;
@@ -331,6 +346,7 @@ static bool bch_alloc_sectors(struct bkey *k, unsigned sectors,
 	struct open_bucket *b;
 	BKEY_PADDED(key) alloc;
 	struct closure cl, *w = NULL;
+	unsigned i;
 
 	if (s->writeback) {
 		closure_init_stack(&cl);
@@ -348,10 +364,13 @@ static bool bch_alloc_sectors(struct bkey *k, unsigned sectors,
 	spin_lock(&c->data_bucket_lock);
 
 	while (!(b = pick_data_bucket(c, k, s->task, &alloc.key))) {
+		unsigned watermark = s->op.write_prio
+			? WATERMARK_MOVINGGC
+			: WATERMARK_NONE;
+
 		spin_unlock(&c->data_bucket_lock);
 
-		if (bch_bucket_alloc_set(c, GC_MARK_RECLAIMABLE,
-					 s->op.write_prio, &alloc.key, 1, w))
+		if (bch_bucket_alloc_set(c, watermark, &alloc.key, 1, w))
 			return false;
 
 		spin_lock(&c->data_bucket_lock);
@@ -365,12 +384,12 @@ static bool bch_alloc_sectors(struct bkey *k, unsigned sectors,
 	if (KEY_PTRS(&alloc.key))
 		__bkey_put(c, &alloc.key);
 
-	for (unsigned i = 0; i < KEY_PTRS(&b->key); i++)
+	for (i = 0; i < KEY_PTRS(&b->key); i++)
 		EBUG_ON(ptr_stale(c, &b->key, i));
 
 	/* Set up the pointer to the space we're allocating: */
 
-	for (unsigned i = 0; i < KEY_PTRS(&b->key); i++)
+	for (i = 0; i < KEY_PTRS(&b->key); i++)
 		k->ptr[i] = b->key.ptr[i];
 
 	sectors = min(sectors, b->sectors_free);
@@ -389,7 +408,7 @@ static bool bch_alloc_sectors(struct bkey *k, unsigned sectors,
 
 	b->sectors_free	-= sectors;
 
-	for (unsigned i = 0; i < KEY_PTRS(&b->key); i++) {
+	for (i = 0; i < KEY_PTRS(&b->key); i++) {
 		SET_PTR_OFFSET(&b->key, i, PTR_OFFSET(&b->key, i) + sectors);
 
 		atomic_long_add(sectors,
@@ -405,16 +424,45 @@ static bool bch_alloc_sectors(struct bkey *k, unsigned sectors,
 	 * get_data_bucket()'s refcount.
 	 */
 	if (b->sectors_free)
-		for (unsigned i = 0; i < KEY_PTRS(&b->key); i++)
+		for (i = 0; i < KEY_PTRS(&b->key); i++)
 			atomic_inc(&PTR_BUCKET(c, &b->key, i)->pin);
 
 	spin_unlock(&c->data_bucket_lock);
 	return true;
 }
 
-static void bch_insert_data_error(struct closure *cl)
+static void bch_data_invalidate(struct closure *cl)
 {
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
+	struct search *s = container_of(op, struct search, op);
+	struct bio *bio = op->cache_bio;
+
+	pr_debug("invalidating %i sectors from %llu",
+		 bio_sectors(bio), (uint64_t) bio->bi_sector);
+
+	while (bio_sectors(bio)) {
+		unsigned len = min(bio_sectors(bio), 1U << 14);
+
+		if (bch_keylist_realloc(&s->insert_keys, 0, op->c))
+			goto out;
+
+		bio->bi_sector	+= len;
+		bio->bi_size	-= len << 9;
+
+		bch_keylist_add(&s->insert_keys,
+				&KEY(op->inode, bio->bi_sector, len));
+	}
+
+	op->insert_data_done = true;
+	bio_put(bio);
+out:
+	continue_at(cl, bch_data_insert_keys, bcache_wq);
+}
+
+static void bch_data_insert_error(struct closure *cl)
+{
+	struct btree_op *op = container_of(cl, struct btree_op, cl);
+	struct search *s = container_of(op, struct search, op);
 
 	/*
 	 * Our data write just errored, which means we've got a bunch of keys to
@@ -425,24 +473,24 @@ static void bch_insert_data_error(struct closure *cl)
 	 * from the keys we'll accomplish just that.
 	 */
 
-	struct bkey *src = op->keys.bottom, *dst = op->keys.bottom;
+	struct bkey *src = s->insert_keys.keys, *dst = s->insert_keys.keys;
 
-	while (src != op->keys.top) {
+	while (src != s->insert_keys.top) {
 		struct bkey *n = bkey_next(src);
 
 		SET_KEY_PTRS(src, 0);
-		bkey_copy(dst, src);
+		memmove(dst, src, bkey_bytes(src));
 
 		dst = bkey_next(dst);
 		src = n;
 	}
 
-	op->keys.top = dst;
+	s->insert_keys.top = dst;
 
-	bch_journal(cl);
+	bch_data_insert_keys(cl);
 }
 
-static void bch_insert_data_endio(struct bio *bio, int error)
+static void bch_data_insert_endio(struct bio *bio, int error)
 {
 	struct closure *cl = bio->bi_private;
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
@@ -453,7 +501,7 @@ static void bch_insert_data_endio(struct bio *bio, int error)
 		if (s->writeback)
 			s->error = error;
 		else if (s->write)
-			set_closure_fn(cl, bch_insert_data_error, bcache_wq);
+			set_closure_fn(cl, bch_data_insert_error, bcache_wq);
 		else
 			set_closure_fn(cl, NULL, NULL);
 	}
@@ -461,14 +509,14 @@ static void bch_insert_data_endio(struct bio *bio, int error)
 	bch_bbio_endio(op->c, bio, error, "writing data to cache");
 }
 
-static void bch_insert_data_loop(struct closure *cl)
+static void bch_data_insert_start(struct closure *cl)
 {
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
 	struct search *s = container_of(op, struct search, op);
 	struct bio *bio = op->cache_bio, *n;
 
 	if (op->skip)
-		return bio_invalidate(cl);
+		return bch_data_invalidate(cl);
 
 	if (atomic_sub_return(bio_sectors(bio), &op->c->sectors_to_gc) < 0) {
 		set_gc_sectors(op->c);
@@ -476,17 +524,18 @@ static void bch_insert_data_loop(struct closure *cl)
 	}
 
 	do {
+		unsigned i;
 		struct bkey *k;
 		struct bio_set *split = s->d
 			? s->d->bio_split : op->c->bio_split;
 
 		/* 1 for the device pointer and 1 for the chksum */
-		if (bch_keylist_realloc(&op->keys,
+		if (bch_keylist_realloc(&s->insert_keys,
 					1 + (op->csum ? 1 : 0),
 					op->c))
-			continue_at(cl, bch_journal, bcache_wq);
+			continue_at(cl, bch_data_insert_keys, bcache_wq);
 
-		k = op->keys.top;
+		k = s->insert_keys.top;
 		bkey_init(k);
 		SET_KEY_INODE(k, op->inode);
 		SET_KEY_OFFSET(k, bio->bi_sector);
@@ -497,16 +546,16 @@ static void bch_insert_data_loop(struct closure *cl)
 		n = bch_bio_split(bio, KEY_SIZE(k), GFP_NOIO, split);
 		if (!n) {
 			__bkey_put(op->c, k);
-			continue_at(cl, bch_insert_data_loop, bcache_wq);
+			continue_at(cl, bch_data_insert_start, bcache_wq);
 		}
 
-		n->bi_end_io	= bch_insert_data_endio;
+		n->bi_end_io	= bch_data_insert_endio;
 		n->bi_private	= cl;
 
 		if (s->writeback) {
 			SET_KEY_DIRTY(k, true);
 
-			for (unsigned i = 0; i < KEY_PTRS(k); i++)
+			for (i = 0; i < KEY_PTRS(k); i++)
 				SET_GC_MARK(PTR_BUCKET(op->c, k, i),
 					    GC_MARK_DIRTY);
 		}
@@ -516,7 +565,7 @@ static void bch_insert_data_loop(struct closure *cl)
 			bio_csum(n, k);
 
 		pr_debug("%s", pkey(k));
-		bch_keylist_push(&op->keys);
+		bch_keylist_push(&s->insert_keys);
 
 		trace_bcache_cache_insert(n, n->bi_sector, n->bi_bdev);
 		n->bi_rw |= REQ_WRITE;
@@ -524,7 +573,7 @@ static void bch_insert_data_loop(struct closure *cl)
 	} while (n != bio);
 
 	op->insert_data_done = true;
-	continue_at(cl, bch_journal, bcache_wq);
+	continue_at(cl, bch_data_insert_keys, bcache_wq);
 err:
 	/* bch_alloc_sectors() blocks if s->writeback = true */
 	BUG_ON(s->writeback);
@@ -543,7 +592,7 @@ err:
 		 * rest of the write.
 		 */
 		op->skip = true;
-		return bio_invalidate(cl);
+		return bch_data_invalidate(cl);
 	} else {
 		/*
 		 * From a cache miss, we can just insert the keys for the data
@@ -552,15 +601,15 @@ err:
 		op->insert_data_done = true;
 		bio_put(bio);
 
-		if (!bch_keylist_empty(&op->keys))
-			continue_at(cl, bch_journal, bcache_wq);
+		if (!bch_keylist_empty(&s->insert_keys))
+			continue_at(cl, bch_data_insert_keys, bcache_wq);
 		else
 			closure_return(cl);
 	}
 }
 
 /**
- * bch_insert_data - stick some data in the cache
+ * bch_data_insert - stick some data in the cache
  *
  * This is the starting point for any data to end up in a cache device; it could
  * be from a normal write, or a writeback write, or a write to a flash only
@@ -578,30 +627,14 @@ err:
  * If op->skip is true, instead of inserting the data it invalidates the region
  * of the cache represented by op->cache_bio and op->inode.
  */
-void bch_insert_data(struct closure *cl)
-{
-	struct btree_op *op = container_of(cl, struct btree_op, cl);
-
-	bch_keylist_init(&op->keys);
-	bio_get(op->cache_bio);
-	bch_insert_data_loop(cl);
-}
-
-void bch_btree_insert_async(struct closure *cl)
+void bch_data_insert(struct closure *cl)
 {
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
 	struct search *s = container_of(op, struct search, op);
 
-	if (bch_btree_insert(op, op->c)) {
-		s->error		= -ENOMEM;
-		op->insert_data_done	= true;
-	}
-
-	if (op->insert_data_done) {
-		bch_keylist_free(&op->keys);
-		closure_return(cl);
-	} else
-		continue_at(cl, bch_insert_data_loop, bcache_wq);
+	bch_keylist_init(&s->insert_keys);
+	bio_get(op->cache_bio);
+	bch_data_insert_start(cl);
 }
 
 /* Common code for the make_request functions */
@@ -681,19 +714,21 @@ static void search_free(struct closure *cl)
 static struct search *search_alloc(struct bio *bio, struct bcache_device *d)
 {
 	struct bio_vec *bv;
-	struct search *s = mempool_alloc(d->c->search, GFP_NOIO);
-	memset(s, 0, offsetof(struct search, op.keys));
+	struct search *s;
+
+	s = mempool_alloc(d->c->search, GFP_NOIO);
+	memset(s, 0, offsetof(struct search, insert_keys));
 
 	__closure_init(&s->cl, NULL);
 
-	s->op.inode		= d->id;
+	s->op.inode		= KEY_INODE(&d->inode.k);
 	s->op.c			= d->c;
 	s->d			= d;
 	s->op.lock		= -1;
 	s->task			= current;
 	s->orig_bio		= bio;
 	s->write		= (bio->bi_rw & REQ_WRITE) != 0;
-	s->op.flush_journal	= (bio->bi_rw & REQ_FLUSH) != 0;
+	s->op.flush_journal	= (bio->bi_rw & (REQ_FLUSH|REQ_FUA)) != 0;
 	s->op.skip		= (bio->bi_rw & REQ_DISCARD) != 0;
 	s->recoverable		= 1;
 	do_bio_hook(s);
@@ -714,7 +749,7 @@ static void btree_read_async(struct closure *cl)
 {
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
 
-	int ret = btree_root(search_recurse, op->c, op);
+	int ret = btree_root(search_recurse, op->c, BTREE_ID_EXTENTS, op);
 
 	if (ret == -EAGAIN)
 		continue_at(cl, btree_read_async, bcache_wq);
@@ -824,7 +859,7 @@ static void request_read_done(struct closure *cl)
 				kunmap(dst->bv_page);
 				dst++;
 				if (dst == bio_iovec_idx(s->cache_miss,
-							 s->cache_miss->bi_vcnt))
+						s->cache_miss->bi_vcnt))
 					break;
 
 				dst_offset = dst->bv_offset;
@@ -834,7 +869,7 @@ static void request_read_done(struct closure *cl)
 			if (src_offset == src->bv_offset + src->bv_len) {
 				src++;
 				if (src == bio_iovec_idx(s->op.cache_bio,
-							 s->op.cache_bio->bi_vcnt))
+						 s->op.cache_bio->bi_vcnt))
 					BUG();
 
 				src_offset = src->bv_offset;
@@ -860,9 +895,10 @@ static void request_read_done(struct closure *cl)
 
 	bio_complete(s);
 
-	if (s->op.cache_bio && !atomic_read(&s->op.c->closing)) {
+	if (s->op.cache_bio &&
+	    !test_bit(CACHE_SET_STOPPING, &s->op.c->flags)) {
 		s->op.type = BTREE_REPLACE;
-		closure_call(&s->op.cl, bch_insert_data, NULL, cl);
+		closure_call(&s->op.cl, bch_data_insert, NULL, cl);
 	}
 
 	continue_at(cl, cached_dev_read_complete, NULL);
@@ -910,7 +946,8 @@ static int cached_dev_cache_miss(struct btree *b, struct search *s,
 	    s->op.c->gc_stats.in_use >= CUTOFF_CACHE_READA)
 		reada = 0;
 	else {
-		reada = dc->readahead >> 9;
+		reada = min(dc->readahead >> 9,
+			    sectors - bio_sectors(miss));
 
 		if (bio_end(miss) + reada > bdev_sectors(miss->bi_bdev))
 			reada = bdev_sectors(miss->bi_bdev) - bio_end(miss);
@@ -992,8 +1029,10 @@ static void request_write(struct cached_dev *dc, struct search *s)
 	struct closure *cl = &s->cl;
 	struct bio *bio = &s->bio.bio;
 	struct bkey start, end;
-	start = KEY(dc->disk.id, bio->bi_sector, 0);
-	end = KEY(dc->disk.id, bio_end(bio), 0);
+	unsigned inode = KEY_INODE(&dc->disk.inode.k);
+
+	start = KEY(inode, bio->bi_sector, 0);
+	end = KEY(inode, bio_end(bio), 0);
 
 	bch_keybuf_check_overlapping(&s->op.c->moving_gc_keys, &start, &end);
 
@@ -1026,7 +1065,7 @@ static void request_write(struct cached_dev *dc, struct search *s)
 		bch_writeback_add(dc, bio_sectors(bio));
 	}
 out:
-	closure_call(&s->op.cl, bch_insert_data, NULL, cl);
+	closure_call(&s->op.cl, bch_data_insert, NULL, cl);
 	continue_at(cl, cached_dev_write_complete, NULL);
 skip:
 	s->op.skip = true;
@@ -1226,9 +1265,10 @@ static int cached_dev_congested(void *data, int bits)
 		return 1;
 
 	if (cached_dev_get(dc)) {
+		unsigned i;
 		struct cache *ca;
 
-		for_each_cache(ca, d->c) {
+		for_each_cache(ca, d->c, i) {
 			q = bdev_get_queue(ca->bdev);
 			ret |= bdi_congested(&q->backing_dev_info, bits);
 		}
@@ -1287,6 +1327,7 @@ static void flash_dev_make_request(struct request_queue *q, struct bio *bio)
 	struct search *s;
 	struct closure *cl;
 	struct bcache_device *d = bio->bi_bdev->bd_disk->private_data;
+	unsigned inode = KEY_INODE(&d->inode.k);
 
 	s = search_alloc(bio, d);
 	cl = &s->cl;
@@ -1298,13 +1339,13 @@ static void flash_dev_make_request(struct request_queue *q, struct bio *bio)
 		closure_call(&s->op.cl, btree_read_async, NULL, cl);
 	} else if (bio_has_data(bio) || s->op.skip) {
 		bch_keybuf_check_overlapping(&s->op.c->moving_gc_keys,
-					     &KEY(d->id, bio->bi_sector, 0),
-					     &KEY(d->id, bio_end(bio), 0));
+					     &KEY(inode, bio->bi_sector, 0),
+					     &KEY(inode, bio_end(bio), 0));
 
 		s->writeback	= true;
 		s->op.cache_bio	= bio;
 
-		closure_call(&s->op.cl, bch_insert_data, NULL, cl);
+		closure_call(&s->op.cl, bch_data_insert, NULL, cl);
 	} else {
 		/* No data - probably a cache flush */
 		if (s->op.flush_journal)
@@ -1325,9 +1366,10 @@ static int flash_dev_congested(void *data, int bits)
 	struct bcache_device *d = data;
 	struct request_queue *q;
 	struct cache *ca;
+	unsigned i;
 	int ret = 0;
 
-	for_each_cache(ca, d->c) {
+	for_each_cache(ca, d->c, i) {
 		q = bdev_get_queue(ca->bdev);
 		ret |= bdi_congested(&q->backing_dev_info, bits);
 	}

@@ -207,9 +207,6 @@ static inline void bkey_copy(struct bkey *dest, const struct bkey *src)
 
 static inline void bkey_copy_key(struct bkey *dest, const struct bkey *src)
 {
-	if (!src)
-		src = &KEY(0, 0, 0);
-
 	SET_KEY_INODE(dest, KEY_INODE(src));
 	SET_KEY_OFFSET(dest, KEY_OFFSET(src));
 }
@@ -223,20 +220,23 @@ static inline struct bkey *bkey_next(const struct bkey *k)
 /* Keylists */
 
 struct keylist {
-	struct bkey		*top;
 	union {
-		uint64_t		*list;
-		struct bkey		*bottom;
+		struct bkey		*keys;
+		uint64_t		*keys_p;
+	};
+	union {
+		struct bkey		*top;
+		uint64_t		*top_p;
 	};
 
 	/* Enough room for btree_split's keys without realloc */
 #define KEYLIST_INLINE		16
-	uint64_t		d[KEYLIST_INLINE];
+	uint64_t		inline_keys[KEYLIST_INLINE];
 };
 
 static inline void bch_keylist_init(struct keylist *l)
 {
-	l->top = (void *) (l->list = l->d);
+	l->top_p = l->keys_p = l->inline_keys;
 }
 
 static inline void bch_keylist_push(struct keylist *l)
@@ -252,20 +252,36 @@ static inline void bch_keylist_add(struct keylist *l, struct bkey *k)
 
 static inline bool bch_keylist_empty(struct keylist *l)
 {
-	return l->top == (void *) l->list;
+	return l->top == l->keys;
+}
+
+static inline void bch_keylist_reset(struct keylist *l)
+{
+	l->top = l->keys;
 }
 
 static inline void bch_keylist_free(struct keylist *l)
 {
-	if (l->list != l->d)
-		kfree(l->list);
+	if (l->keys_p != l->inline_keys)
+		kfree(l->keys_p);
 }
 
-void bch_keylist_copy(struct keylist *, struct keylist *);
+static inline size_t bch_keylist_nkeys(struct keylist *l)
+{
+	return l->top_p - l->keys_p;
+}
+
+static inline size_t bch_keylist_bytes(struct keylist *l)
+{
+	return bch_keylist_nkeys(l) * sizeof(uint64_t);
+}
+
 struct bkey *bch_keylist_pop(struct keylist *);
+void bch_keylist_pop_front(struct keylist *);
 int bch_keylist_realloc(struct keylist *, int, struct cache_set *);
 
-void bch_bkey_copy_single_ptr(struct bkey *, const struct bkey *, unsigned);
+void bch_bkey_copy_single_ptr(struct bkey *, const struct bkey *,
+			      unsigned);
 bool __bch_cut_front(const struct bkey *, struct bkey *);
 bool __bch_cut_back(const struct bkey *, struct bkey *);
 
@@ -282,7 +298,10 @@ static inline bool bch_cut_back(const struct bkey *where, struct bkey *k)
 }
 
 const char *bch_ptr_status(struct cache_set *, const struct bkey *);
-bool __bch_ptr_invalid(struct cache_set *, int level, const struct bkey *);
+bool bch_btree_ptr_invalid(struct cache_set *, const struct bkey *);
+bool bch_extent_ptr_invalid(struct cache_set *, const struct bkey *);
+
+bool bch_ptr_invalid(struct btree *b, const struct bkey *k);
 bool bch_ptr_bad(struct btree *, const struct bkey *);
 
 static inline uint8_t gen_after(uint8_t a, uint8_t b)
@@ -356,11 +375,29 @@ void bch_bset_fix_lookup_table(struct btree *, struct bkey *);
 struct bkey *__bch_bset_search(struct btree *, struct bset_tree *,
 			   const struct bkey *);
 
+/*
+ * Returns the first key that is strictly greater than search
+ */
 static inline struct bkey *bch_bset_search(struct btree *b, struct bset_tree *t,
 					   const struct bkey *search)
 {
 	return search ? __bch_bset_search(b, t, search) : t->data->start;
 }
+
+#define PRECEDING_KEY(_k)					\
+({								\
+	struct bkey *_ret = NULL;				\
+								\
+	if ((_k)->low || KEY_INODE_H(_k)) {			\
+		_ret = &KEY(KEY_INODE(_k), KEY_OFFSET(_k), 0);	\
+								\
+		if (!_ret->low)					\
+			_ret->high--;				\
+		_ret->low--;					\
+	}							\
+								\
+	_ret;							\
+})
 
 bool bch_bkey_try_merge(struct btree *, struct bkey *, struct bkey *);
 void bch_btree_sort_lazy(struct btree *);

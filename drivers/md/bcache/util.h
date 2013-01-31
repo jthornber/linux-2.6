@@ -132,10 +132,10 @@ do {									\
 		type *data;						\
 	} name
 
-#define fifo_for_each(c, fifo)						\
-	for (size_t _i = (fifo)->front;					\
-	     c = (fifo)->data[_i], _i != (fifo)->back;			\
-	     _i = (_i + 1) & (fifo)->mask)
+#define fifo_for_each(c, fifo, iter)					\
+	for (iter = (fifo)->front;					\
+	     c = (fifo)->data[iter], iter != (fifo)->back;		\
+	     iter = (iter + 1) & (fifo)->mask)
 
 #define __init_fifo(fifo, gfp)						\
 ({									\
@@ -291,10 +291,12 @@ do {									\
 
 #define array_allocator_init(array)					\
 do {									\
+	typeof((array)->freelist) _i;					\
+									\
 	BUILD_BUG_ON(sizeof((array)->data[0]) < sizeof(void *));	\
 	(array)->freelist = NULL;					\
 									\
-	for (typeof((array)->freelist) _i = (array)->data;		\
+	for (_i = (array)->data;					\
 	     _i < (array)->data + ARRAY_SIZE((array)->data);		\
 	     _i++)							\
 		array_free(array, _i);					\
@@ -331,7 +333,7 @@ static inline int strtoul_h(const char *cp, long *res)
 #define strtoi_h(cp, res)						\
 	(__builtin_types_compatible_p(typeof(*res), int)		\
 	? strtoint_h(cp, (void *) res)					\
-	:__builtin_types_compatible_p(typeof(*res), long)		\
+	: __builtin_types_compatible_p(typeof(*res), long)		\
 	? strtol_h(cp, (void *) res)					\
 	: __builtin_types_compatible_p(typeof(*res), long long)		\
 	? strtoll_h(cp, (void *) res)					\
@@ -345,7 +347,7 @@ static inline int strtoul_h(const char *cp, long *res)
 #define strtoul_safe(cp, var)						\
 ({									\
 	unsigned long _v;						\
-	int _r = strict_strtoul(cp, 10, &_v);				\
+	int _r = kstrtoul(cp, 10, &_v);					\
 	if (!_r)							\
 		var = _v;						\
 	_r;								\
@@ -354,7 +356,7 @@ static inline int strtoul_h(const char *cp, long *res)
 #define strtoul_safe_clamp(cp, var, min, max)				\
 ({									\
 	unsigned long _v;						\
-	int _r = strict_strtoul(cp, 10, &_v);				\
+	int _r = kstrtoul(cp, 10, &_v);					\
 	if (!_r)							\
 		var = clamp_t(typeof(var), _v, min, max);		\
 	_r;								\
@@ -569,6 +571,9 @@ static inline unsigned fract_exp_two(unsigned x, unsigned fract_bits)
 void bio_map(struct bio *bio, void *base);
 
 int bio_alloc_pages(struct bio *bio, gfp_t gfp);
+
+#define bio_alloc_pages(...)						\
+	(dynamic_fault() ? -ENOMEM	: bio_alloc_pages(__VA_ARGS__))
 
 static inline sector_t bdev_sectors(struct block_device *bdev)
 {

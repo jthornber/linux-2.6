@@ -24,14 +24,15 @@ struct search {
 	/* IO error returned to s->bio */
 	short			error;
 
-	/* Anything past op->keys won't get zeroed in do_bio_hook */
 	struct btree_op		op;
+
+	/* Anything past this point won't get zeroed in search_alloc() */
+	struct keylist		insert_keys;
 };
 
 void bch_cache_read_endio(struct bio *, int);
 int bch_get_congested(struct cache_set *);
-void bch_insert_data(struct closure *cl);
-void bch_btree_insert_async(struct closure *);
+void bch_data_insert(struct closure *cl);
 void bch_cache_read_endio(struct bio *, int);
 
 void bch_open_buckets_free(struct cache_set *);

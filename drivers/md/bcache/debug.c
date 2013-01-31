@@ -16,7 +16,9 @@ static struct dentry *debug;
 
 const char *bch_ptr_status(struct cache_set *c, const struct bkey *k)
 {
-	for (unsigned i = 0; i < KEY_PTRS(k); i++)
+	unsigned i;
+
+	for (i = 0; i < KEY_PTRS(k); i++)
 		if (ptr_available(c, k, i)) {
 			struct cache *ca = PTR_CACHE(c, k, i);
 			size_t bucket = PTR_BUCKET_NR(c, k, i);
@@ -77,11 +79,9 @@ struct keyprint_hack bch_pbtree(const struct btree *b)
 	struct keyprint_hack r;
 
 	snprintf(r.s, 40, "%li level %i/%i", PTR_BUCKET_NR(b->c, &b->key, 0),
-		 b->level, b->c->root ? b->c->root->level : -1);
+		 b->level, btree_node_root(b) ? btree_node_root(b)->level : -1);
 	return r;
 }
-
-#if defined(CONFIG_BCACHE_DEBUG) || defined(CONFIG_BCACHE_EDEBUG)
 
 static bool skipped_backwards(struct btree *b, struct bkey *k)
 {
@@ -92,11 +92,14 @@ static bool skipped_backwards(struct btree *b, struct bkey *k)
 
 static void dump_bset(struct btree *b, struct bset *i)
 {
-	for (struct bkey *k = i->start; k < end(i); k = bkey_next(k)) {
+	struct bkey *k;
+	unsigned j;
+
+	for (k = i->start; k < end(i); k = bkey_next(k)) {
 		printk(KERN_ERR "block %zu key %zi/%u: %s", index(i, b),
 		       (uint64_t *) k - i->d, i->keys, pkey(k));
 
-		for (unsigned j = 0; j < KEY_PTRS(k); j++) {
+		for (j = 0; j < KEY_PTRS(k); j++) {
 			size_t n = PTR_BUCKET_NR(b->c, k, j);
 			printk(" bucket %zu", n);
 
@@ -113,7 +116,31 @@ static void dump_bset(struct btree *b, struct bset *i)
 	}
 }
 
-#endif
+static void vdump_bucket_and_panic(struct btree *b, const char *fmt,
+				   va_list args)
+{
+	unsigned i;
+
+	console_lock();
+
+	for (i = 0; i <= b->nsets; i++)
+		dump_bset(b, b->sets[i].data);
+
+	vprintk(fmt, args);
+
+	console_unlock();
+
+	panic("at %s\n", pbtree(b));
+}
+
+void dump_bucket_and_panic(struct btree *b, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+
+	vdump_bucket_and_panic(b, fmt, args);
+	va_end(args);
+}
 
 #ifdef CONFIG_BCACHE_DEBUG
 
@@ -135,7 +162,7 @@ void bch_btree_verify(struct btree *b, struct bset *new)
 	v->written = 0;
 	v->level = b->level;
 
-	bch_btree_read(v);
+	bch_btree_node_read(v);
 	closure_wait_event(&v->io.wait, &cl,
 			   atomic_read(&b->io.cl.remaining) == -1);
 
@@ -143,14 +170,13 @@ void bch_btree_verify(struct btree *b, struct bset *new)
 	    memcmp(new->start,
 		   v->sets[0].data->start,
 		   (void *) end(new) - (void *) new->start)) {
-		struct bset *i;
-		unsigned j;
+		unsigned i, j;
 
 		console_lock();
 
 		printk(KERN_ERR "*** original memory node:\n");
-		for_each_sorted_set(b, i)
-			dump_bset(b, i);
+		for (i = 0; i <= b->nsets; i++)
+			dump_bset(b, b->sets[i].data);
 
 		printk(KERN_ERR "*** sorted memory node:\n");
 		dump_bset(b, new);
@@ -240,30 +266,15 @@ unsigned bch_count_data(struct btree *b)
 	return ret;
 }
 
-static void vdump_bucket_and_panic(struct btree *b, const char *fmt,
-				   va_list args)
-{
-	struct bset *i;
-
-	console_lock();
-
-	for_each_sorted_set(b, i)
-		dump_bset(b, i);
-
-	vprintk(fmt, args);
-
-	console_unlock();
-
-	panic("at %s\n", pbtree(b));
-}
-
 void bch_check_key_order_msg(struct btree *b, struct bset *i,
 			     const char *fmt, ...)
 {
+	struct bkey *k;
+
 	if (!i->keys)
 		return;
 
-	for (struct bkey *k = i->start; bkey_next(k) < end(i); k = bkey_next(k))
+	for (k = i->start; bkey_next(k) < end(i); k = bkey_next(k))
 		if (skipped_backwards(b, k)) {
 			va_list args;
 			va_start(args, fmt);
@@ -279,23 +290,31 @@ void bch_check_keys(struct btree *b, const char *fmt, ...)
 	struct bkey *k, *p = NULL;
 	struct btree_iter iter;
 
-	if (b->level)
-		return;
+	if (!b->level && b->btree_id == BTREE_ID_EXTENTS) {
+		for_each_key(b, k, &iter) {
+			if (p && bkey_cmp(&START_KEY(p), &START_KEY(k)) > 0) {
+				printk(KERN_ERR "Keys out of order:\n");
+				goto bug;
+			}
 
-	for_each_key(b, k, &iter) {
-		if (p && bkey_cmp(&START_KEY(p), &START_KEY(k)) > 0) {
-			printk(KERN_ERR "Keys out of order:\n");
-			goto bug;
+			if (bch_ptr_invalid(b, k))
+				continue;
+
+			if (p && bkey_cmp(p, &START_KEY(k)) > 0) {
+				printk(KERN_ERR "Overlapping keys:\n");
+				goto bug;
+			}
+			p = k;
 		}
+	} else {
+		for_each_key_filter(b, k, &iter, bch_ptr_bad) {
+			if (p && !bkey_cmp(p, k)) {
+				printk(KERN_ERR "Duplicate keys:\n");
+				goto bug;
+			}
 
-		if (bch_ptr_invalid(b, k))
-			continue;
-
-		if (p && bkey_cmp(p, &START_KEY(k)) > 0) {
-			printk(KERN_ERR "Overlapping keys:\n");
-			goto bug;
+			p = k;
 		}
-		p = k;
 	}
 	return;
 bug:
@@ -405,7 +424,9 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 {
 	void dump(struct btree *b)
 	{
-		for (struct bset *i = b->sets[0].data;
+		struct bset *i;
+
+		for (i = b->sets[0].data;
 		     index(i, b) < btree_blocks(b) &&
 		     i->seq == b->sets[0].data->seq;
 		     i = ((void *) i) + set_blocks(i, b->c) * block_bytes(b->c))
@@ -415,9 +436,12 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 	struct cache_sb *sb;
 	struct cache_set *c;
 	struct btree *all[3], *b, *fill, *orig;
-
 	struct btree_op op;
+	struct keylist keys;
+	int j;
+
 	bch_btree_op_init_stack(&op);
+	bch_keylist_init(&keys);
 
 	sb = kzalloc(sizeof(struct cache_sb), GFP_KERNEL);
 	if (!sb)
@@ -430,13 +454,13 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 	if (!c)
 		return -ENOMEM;
 
-	for (int i = 0; i < 3; i++) {
+	for (j = 0; j < 3; j++) {
 		BUG_ON(list_empty(&c->btree_cache));
-		all[i] = list_first_entry(&c->btree_cache, struct btree, list);
-		list_del_init(&all[i]->list);
+		all[j] = list_first_entry(&c->btree_cache, struct btree, list);
+		list_del_init(&all[j]->list);
 
-		all[i]->key = KEY(0, 0, c->sb.bucket_size);
-		bkey_copy_key(&all[i]->key, &MAX_KEY);
+		all[j]->key = KEY(0, 0, c->sb.bucket_size);
+		bkey_copy_key(&all[j]->key, &MAX_KEY);
 	}
 
 	b = all[0];
@@ -444,14 +468,14 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 	orig = all[2];
 
 	while (1) {
-		for (int i = 0; i < 3; i++)
-			all[i]->written = all[i]->nsets = 0;
+		for (j = 0; j < 3; j++)
+			all[j]->written = all[j]->nsets = 0;
 
 		bch_bset_init_next(b);
 
 		while (1) {
 			struct bset *i = write_block(b);
-			struct bkey *k = op.keys.top;
+			struct bkey *k = keys.top;
 			unsigned rand;
 
 			bkey_init(k);
@@ -470,8 +494,8 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 #if 0
 			SET_KEY_PTRS(k, 1);
 #endif
-			bch_keylist_push(&op.keys);
-			bch_btree_insert_keys(b, &op);
+			bch_keylist_push(&keys);
+			bch_btree_insert_keys(b, &op, &keys);
 
 			if (should_split(b) ||
 			    set_blocks(i, b->c) !=
@@ -497,33 +521,33 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 
 		bch_btree_sort(b);
 		fill->written = 0;
-		bch_btree_read_done(&fill->io.cl);
+		bch_btree_node_read_done(fill);
 
 		if (b->sets[0].data->keys != fill->sets[0].data->keys ||
 		    memcmp(b->sets[0].data->start,
 			   fill->sets[0].data->start,
 			   b->sets[0].data->keys * sizeof(uint64_t))) {
 			struct bset *i = b->sets[0].data;
+			struct bkey *k, *l;
 
-			for (struct bkey *k = i->start,
-			     *j = fill->sets[0].data->start;
+			for (k = i->start,
+			     l = fill->sets[0].data->start;
 			     k < end(i);
-			     k = bkey_next(k), j = bkey_next(j))
-				if (bkey_cmp(k, j) ||
-				    KEY_SIZE(k) != KEY_SIZE(j))
-					printk(KERN_ERR "key %zi differs: %s "
+			     k = bkey_next(k), l = bkey_next(l))
+				if (bkey_cmp(k, l) ||
+				    KEY_SIZE(k) != KEY_SIZE(l))
+					pr_err("key %zi differs: %s "
 					       "!= %s\n", (uint64_t *) k - i->d,
-					       pkey(k), pkey(j));
+					       pkey(k), pkey(l));
 
-			for (int i = 0; i < 3; i++) {
-				printk(KERN_ERR "**** Set %i ****\n", i);
-				dump(all[i]);
+			for (j = 0; j < 3; j++) {
+				pr_err("**** Set %i ****\n", j);
+				dump(all[j]);
 			}
 			panic("\n");
 		}
 
-		printk(KERN_DEBUG "bcache: fuzz complete: %i keys\n",
-		       b->sets[0].data->keys);
+		pr_info("fuzz complete: %i keys\n", b->sets[0].data->keys);
 	}
 }
 
