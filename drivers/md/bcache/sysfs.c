@@ -91,8 +91,7 @@ rw_attribute(size);
 
 SHOW(__bch_cached_dev)
 {
-	struct cached_dev *dc = container_of(kobj, struct cached_dev,
-					     disk.kobj);
+	struct cached_dev *dc = container_of(kobj, struct cached_dev, disk.kobj);
 	const char *states[] = { "no cache", "clean", "dirty", "inconsistent" };
 
 #define var(stat)		(dc->stat)
@@ -159,8 +158,7 @@ SHOW_LOCKED(bch_cached_dev)
 
 STORE(__cached_dev)
 {
-	struct cached_dev *dc = container_of(kobj, struct cached_dev,
-					     disk.kobj);
+	struct cached_dev *dc = container_of(kobj, struct cached_dev, disk.kobj);
 	unsigned v = size;
 	struct cache_set *c;
 
@@ -172,8 +170,7 @@ STORE(__cached_dev)
 	d_strtoul(writeback_metadata);
 	d_strtoul(writeback_running);
 	d_strtoul(writeback_delay);
-	sysfs_strtoul_clamp(writeback_rate,
-			    dc->writeback_rate.rate, 1, 1000000);
+	sysfs_strtoul_clamp(writeback_rate, dc->writeback_rate.rate, 1, 1000000);
 	sysfs_strtoul_clamp(writeback_percent, dc->writeback_percent, 0, 40);
 
 	d_strtoul(writeback_rate_update_seconds);
@@ -207,16 +204,13 @@ STORE(__cached_dev)
 	}
 
 	if (attr == &sysfs_label) {
-		mutex_lock(&dc->disk.inode_lock);
-
 		memcpy(dc->sb.label, buf, SB_LABEL_SIZE);
-		memcpy(dc->disk.inode.label, buf, SB_LABEL_SIZE);
-
 		bch_write_bdev_super(dc, NULL);
-		if (dc->disk.c)
-			bch_uuid_inode_write(dc->disk.c, &dc->disk.inode);
-
-		mutex_unlock(&dc->disk.inode_lock);
+		if (dc->disk.c) {
+			memcpy(dc->disk.c->uuids[dc->disk.id].label,
+			       buf, SB_LABEL_SIZE);
+			bch_uuid_write(dc->disk.c);
+		}
 	}
 
 	if (attr == &sysfs_attach) {
@@ -229,7 +223,7 @@ STORE(__cached_dev)
 				return size;
 		}
 
-		pr_err("Can't attach %s: cache set not found\n", buf);
+		err_printk("Can't attach %s: cache set not found\n", buf);
 		size = v;
 	}
 
@@ -298,12 +292,13 @@ SHOW(bch_flash_dev)
 {
 	struct bcache_device *d = container_of(kobj, struct bcache_device,
 					       kobj);
+	struct uuid_entry *u = &d->c->uuids[d->id];
 
 	sysfs_printf(data_csum,	"%i", d->data_csum);
-	sysfs_hprint(size,	d->inode.sectors << 9);
+	sysfs_hprint(size,	u->sectors << 9);
 
 	if (attr == &sysfs_label) {
-		memcpy(buf, d->inode.label, SB_LABEL_SIZE);
+		memcpy(buf, u->label, SB_LABEL_SIZE);
 		buf[SB_LABEL_SIZE + 1] = '\0';
 		strcat(buf, "\n");
 		return strlen(buf);
@@ -316,6 +311,7 @@ STORE(__bch_flash_dev)
 {
 	struct bcache_device *d = container_of(kobj, struct bcache_device,
 					       kobj);
+	struct uuid_entry *u = &d->c->uuids[d->id];
 
 	sysfs_strtoul(data_csum,	d->data_csum);
 
@@ -323,22 +319,14 @@ STORE(__bch_flash_dev)
 		uint64_t v;
 		strtoi_h_or_return(buf, v);
 
-		mutex_lock(&d->inode_lock);
-
-		d->inode.sectors = v >> 9;
-		bch_uuid_inode_write(d->c, &d->inode);
-		set_capacity(d->disk, d->inode.sectors);
-
-		mutex_unlock(&d->inode_lock);
+		u->sectors = v >> 9;
+		bch_uuid_write(d->c);
+		set_capacity(d->disk, u->sectors);
 	}
 
 	if (attr == &sysfs_label) {
-		mutex_lock(&d->inode_lock);
-
-		memcpy(d->inode.label, buf, SB_LABEL_SIZE);
-		bch_uuid_inode_write(d->c, &d->inode);
-
-		mutex_unlock(&d->inode_lock);
+		memcpy(u->label, buf, SB_LABEL_SIZE);
+		bch_uuid_write(d->c);
 	}
 
 	if (attr == &sysfs_unregister) {
@@ -375,9 +363,9 @@ SHOW(__bch_cache_set)
 		do {
 			rw_unlock(false, b);
 lock_root:
-			b = c->btree_roots[BTREE_ID_EXTENTS];
+			b = c->root;
 			rw_lock(false, b, b->level);
-		} while (b != c->btree_roots[BTREE_ID_EXTENTS]);
+		} while (b != c->root);
 
 		for_each_key_filter(b, k, &iter, bch_ptr_bad)
 			bytes += bkey_bytes(k);
@@ -442,7 +430,7 @@ lock_root:
 	sysfs_print(journal_delay_ms,		c->journal_delay_ms);
 	sysfs_hprint(bucket_size,		bucket_bytes(c));
 	sysfs_hprint(block_size,		block_bytes(c));
-	sysfs_print(tree_depth,			c->btree_roots[BTREE_ID_EXTENTS]->level);
+	sysfs_print(tree_depth,			c->root->level);
 	sysfs_print(root_usage_percent,		root_usage(c));
 
 	sysfs_hprint(btree_cache_size,		cache_size(c));

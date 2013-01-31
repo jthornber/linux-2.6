@@ -13,8 +13,6 @@ struct keyprint_hack bch_pbtree(const struct btree *b);
 #define pkey(k)		(&bch_pkey(k).s[0])
 #define pbtree(b)	(&bch_pbtree(b).s[0])
 
-void dump_bucket_and_panic(struct btree *b, const char *fmt, ...);
-
 #ifdef CONFIG_BCACHE_EDEBUG
 
 unsigned bch_count_data(struct btree *);

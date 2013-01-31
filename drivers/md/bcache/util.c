@@ -6,8 +6,6 @@
 #include <linux/seq_file.h>
 #include <linux/types.h>
 
-#include <linux/dynamic_fault.h>
-
 #include "util.h"
 
 #define simple_strtoint(c, end, base)	simple_strtol(c, end, base)
@@ -232,7 +230,6 @@ start:		bv->bv_len	= min_t(size_t, PAGE_SIZE - bv->bv_offset,
 }
 EXPORT_SYMBOL_GPL(bio_map);
 
-#undef bio_alloc_pages
 int bio_alloc_pages(struct bio *bio, gfp_t gfp)
 {
 	int i;

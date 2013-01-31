@@ -119,8 +119,8 @@ static void refill_dirty(struct closure *cl)
 					     writeback.cl);
 	struct keybuf *buf = &dc->writeback_keys;
 	bool searched_from_start = false;
-	unsigned inode = KEY_INODE(&dc->disk.inode.k);
-	struct bkey end = KEY(inode, MAX_KEY_OFFSET, 0);
+	struct bkey end = MAX_KEY;
+	SET_KEY_INODE(&end, dc->disk.id);
 
 	if (!atomic_read(&dc->disk.detaching) &&
 	    !dc->writeback_running)
@@ -137,7 +137,7 @@ static void refill_dirty(struct closure *cl)
 	}
 
 	if (bkey_cmp(&buf->last_scanned, &end) >= 0) {
-		buf->last_scanned = KEY(inode, 0, 0);
+		buf->last_scanned = KEY(dc->disk.id, 0, 0);
 		searched_from_start = true;
 	}
 
@@ -217,22 +217,19 @@ static void write_dirty_finish(struct closure *cl)
 	if (KEY_DIRTY(&w->key)) {
 		unsigned i;
 		struct btree_op op;
-		struct keylist keys;
-
 		bch_btree_op_init_stack(&op);
-		bch_keylist_init(&keys);
 
 		op.type = BTREE_REPLACE;
 		bkey_copy(&op.replace, &w->key);
 
 		SET_KEY_DIRTY(&w->key, false);
-		bch_keylist_add(&keys, &w->key);
+		bch_keylist_add(&op.keys, &w->key);
 
 		for (i = 0; i < KEY_PTRS(&w->key); i++)
 			atomic_inc(&PTR_BUCKET(dc->disk.c, &w->key, i)->pin);
 
 		pr_debug("clearing %s", pkey(&w->key));
-		bch_btree_insert(&op, dc->disk.c, &keys);
+		bch_btree_insert(&op, dc->disk.c);
 		closure_sync(&op.cl);
 
 		atomic_long_inc(op.insert_collision

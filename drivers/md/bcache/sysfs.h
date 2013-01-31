@@ -4,7 +4,7 @@
 #define KTYPE(type)							\
 struct kobj_type type ## _ktype = {					\
 	.release	= type ## _release,				\
-	.sysfs_ops	= &((const struct sysfs_ops) {			\
+	.sysfs_ops	= &((struct sysfs_ops) {			\
 		.show	= type ## _show,				\
 		.store	= type ## _store				\
 	}),								\
@@ -35,7 +35,7 @@ STORE(fn)								\
 	ssize_t ret;							\
 	mutex_lock(&bch_register_lock);					\
 	ret = __ ## fn ## _store(kobj, attr, buf, size);		\
-	mutex_unlock(&bch_register_lock);				\
+	mutex_unlock(&bch_register_lock);					\
 	return ret;							\
 }
 
@@ -48,47 +48,37 @@ STORE(fn)								\
 #define rw_attribute(n)		__sysfs_attribute(n, S_IRUGO|S_IWUSR)
 
 #define sysfs_printf(file, fmt, ...)					\
-do {									\
 	if (attr == &sysfs_ ## file)					\
-		return snprintf(buf, PAGE_SIZE, fmt "\n", __VA_ARGS__);	\
-} while (0)
+		return snprintf(buf, PAGE_SIZE, fmt "\n", __VA_ARGS__)
 
 #define sysfs_print(file, var)						\
-do {									\
 	if (attr == &sysfs_ ## file)					\
-		return snprint(buf, PAGE_SIZE, var);			\
-} while (0)
+		return snprint(buf, PAGE_SIZE, var)
 
 #define sysfs_hprint(file, val)						\
-do {									\
 	if (attr == &sysfs_ ## file) {					\
 		ssize_t ret = hprint(buf, val);				\
 		strcat(buf, "\n");					\
 		return ret + 1;						\
-	}								\
-} while (0)
+	}
 
 #define var_printf(_var, fmt)	sysfs_printf(_var, fmt, var(_var))
 #define var_print(_var)		sysfs_print(_var, var(_var))
 #define var_hprint(_var)	sysfs_hprint(_var, var(_var))
 
 #define sysfs_strtoul(file, var)					\
-do {									\
 	if (attr == &sysfs_ ## file)					\
-		return strtoul_safe(buf, var) ?: (ssize_t) size;	\
-} while (0)
+		return strtoul_safe(buf, var) ?: (ssize_t) size;
 
 #define sysfs_strtoul_clamp(file, var, min, max)			\
-do {									\
 	if (attr == &sysfs_ ## file)					\
 		return strtoul_safe_clamp(buf, var, min, max)		\
-			?: (ssize_t) size;				\
-} while (0)
+			?: (ssize_t) size;
 
 #define strtoul_or_return(cp)						\
 ({									\
 	unsigned long _v;						\
-	int _r = kstrtoul(cp, 10, &_v);					\
+	int _r = strict_strtoul(cp, 10, &_v);				\
 	if (_r)								\
 		return _r;						\
 	_v;								\
@@ -102,9 +92,7 @@ do {									\
 } while (0)
 
 #define sysfs_hatoi(file, var)						\
-do {									\
 	if (attr == &sysfs_ ## file)					\
-		return strtoi_h(buf, &var) ?: (ssize_t) size;		\
-} while (0)
+		return strtoi_h(buf, &var) ?: (ssize_t) size;
 
 #endif  /* _BCACHE_SYSFS_H_ */
