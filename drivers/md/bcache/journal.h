@@ -32,8 +32,10 @@
  * disk in the btree.
  *
  * We track this by maintaining a refcount for every open journal entry, in a
- * fifo; the size of the fifo tells us the number of open journal entries, and
- * when the atomic_t at the end of the fifo goes to 0 we can pop it off.
+ * fifo; each entry in the fifo corresponds to a particular journal
+ * entry/sequence number. When the refcount at the tail of the fifo goes to
+ * zero, we pop it off - thus, the size of the fifo tells us the number of open
+ * journal entries
  *
  * We take a refcount on a journal entry when we add some keys to a journal
  * entry that we're going to insert (held by struct btree_op), and then when we
@@ -45,6 +47,32 @@
  * might contain keys for many journal entries - we handle this by making sure
  * it always has a refcount on the _oldest_ journal entry of all the journal
  * entries it has keys for.
+ *
+ * JOURNAL RECLAIM:
+ *
+ * As mentioned previously, our fifo of refcounts tells us the number of open
+ * journal entries; from that and the current journal sequence number we compute
+ * last_seq - the oldest journal entry we still need. We write last_seq in each
+ * journal entry, and we also have to keep track of where it exists on disk so
+ * we don't overwrite it when we loop around the journal.
+ *
+ * To do that we track, for each journal bucket, the sequence number of the
+ * newest journal entry it contains - if we don't need that journal entry we
+ * don't need anything in that bucket anymore. From that we track the last
+ * journal bucket we still need; all this is tracked in struct journal_device
+ * and updated by journal_reclaim().
+ *
+ * JOURNAL FILLING UP:
+ *
+ * There are two ways the journal could fill up; either we could run out of
+ * space to write to, or we could have too many open journal entries and run out
+ * of room in the fifo of refcounts. Since those refcounts are decremented
+ * without any locking we can't safely resize that fifo, so we handle it the
+ * same way.
+ *
+ * If the journal fills up, we start flushing dirty btree nodes until we can
+ * allocate space for a journal write again - preferentially flushing btree
+ * nodes that are pinning the oldest journal entries first.
  */
 
 #define BCACHE_JSET_VERSION_UUIDv1	1
@@ -107,12 +135,14 @@ struct journal_write {
 	bool			need_write;
 };
 
+/* Embedded in struct cache_set */
 struct journal {
 	spinlock_t		lock;
 	/* used when waiting because the journal was full */
 	struct closure_waitlist	wait;
 	struct closure_with_timer io;
 
+	/* Number of blocks free in the bucket(s) we're currently writing to */
 	unsigned		blocks_free;
 	uint64_t		seq;
 	DECLARE_FIFO(atomic_t, pin);
@@ -122,11 +152,37 @@ struct journal {
 	struct journal_write	w[2], *cur;
 };
 
+/*
+ * Embedded in struct cache. First three fields refer to the array of journal
+ * buckets, in cache_sb.
+ */
 struct journal_device {
-	unsigned		cur;
-	unsigned		last;
+	/*
+	 * For each journal bucket, contains the max sequence number of the
+	 * journal writes it contains - so we know when a bucket can be reused.
+	 */
 	uint64_t		seq[SB_JOURNAL_BUCKETS];
 
+	/* Journal bucket we're currently writing to */
+	unsigned		cur_idx;
+
+	/* Last journal bucket that still contains an open journal entry */
+	unsigned		last_idx;
+
+	/* Next journal bucket to be discarded */
+	unsigned		discard_idx;
+
+#define DISCARD_READY		0
+#define DISCARD_IN_FLIGHT	1
+#define DISCARD_DONE		2
+	/* 1 - discard in flight, -1 - discard completed */
+	atomic_t		discard_in_flight;
+
+	struct work_struct	discard_work;
+	struct bio		discard_bio;
+	struct bio_vec		discard_bv;
+
+	/* Bio for journal reads/writes to this device */
 	struct bio		bio;
 	struct bio_vec		bv[8];
 };

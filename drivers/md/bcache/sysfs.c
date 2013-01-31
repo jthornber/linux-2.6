@@ -91,7 +91,8 @@ rw_attribute(size);
 
 SHOW(__bch_cached_dev)
 {
-	struct cached_dev *dc = container_of(kobj, struct cached_dev, disk.kobj);
+	struct cached_dev *dc = container_of(kobj, struct cached_dev,
+					     disk.kobj);
 	const char *states[] = { "no cache", "clean", "dirty", "inconsistent" };
 
 #define var(stat)		(dc->stat)
@@ -158,7 +159,8 @@ SHOW_LOCKED(bch_cached_dev)
 
 STORE(__cached_dev)
 {
-	struct cached_dev *dc = container_of(kobj, struct cached_dev, disk.kobj);
+	struct cached_dev *dc = container_of(kobj, struct cached_dev,
+					     disk.kobj);
 	unsigned v = size;
 	struct cache_set *c;
 
@@ -170,7 +172,8 @@ STORE(__cached_dev)
 	d_strtoul(writeback_metadata);
 	d_strtoul(writeback_running);
 	d_strtoul(writeback_delay);
-	sysfs_strtoul_clamp(writeback_rate, dc->writeback_rate.rate, 1, 1000000);
+	sysfs_strtoul_clamp(writeback_rate,
+			    dc->writeback_rate.rate, 1, 1000000);
 	sysfs_strtoul_clamp(writeback_percent, dc->writeback_percent, 0, 40);
 
 	d_strtoul(writeback_rate_update_seconds);
@@ -223,7 +226,7 @@ STORE(__cached_dev)
 				return size;
 		}
 
-		err_printk("Can't attach %s: cache set not found\n", buf);
+		pr_err("Can't attach %s: cache set not found\n", buf);
 		size = v;
 	}
 

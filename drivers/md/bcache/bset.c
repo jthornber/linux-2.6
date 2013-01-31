@@ -7,22 +7,12 @@
 
 /* Keylists */
 
-void bch_keylist_copy(struct keylist *dest, struct keylist *src)
-{
-	*dest = *src;
-
-	if (src->list == src->d) {
-		size_t n = (uint64_t *) src->top - src->d;
-		dest->top = (struct bkey *) &dest->d[n];
-		dest->list = dest->d;
-	}
-}
-
 int bch_keylist_realloc(struct keylist *l, int nptrs, struct cache_set *c)
 {
-	unsigned oldsize = (uint64_t *) l->top - l->list;
-	unsigned newsize = oldsize + 2 + nptrs;
-	uint64_t *new;
+	size_t oldsize = bch_keylist_nkeys(l);
+	size_t newsize = oldsize + 2 + nptrs;
+	uint64_t *old_keys = l->keys_p == l->inline_keys ? NULL : l->keys_p;
+	uint64_t *new_keys;
 
 	/* The journalling code doesn't handle the case where the keys to insert
 	 * is bigger than an empty write: If we just return -ENOMEM here,
@@ -38,24 +28,23 @@ int bch_keylist_realloc(struct keylist *l, int nptrs, struct cache_set *c)
 	    roundup_pow_of_two(oldsize) == newsize)
 		return 0;
 
-	new = krealloc(l->list == l->d ? NULL : l->list,
-		       sizeof(uint64_t) * newsize, GFP_NOIO);
+	new_keys = krealloc(old_keys, sizeof(uint64_t) * newsize, GFP_NOIO);
 
-	if (!new)
+	if (!new_keys)
 		return -ENOMEM;
 
-	if (l->list == l->d)
-		memcpy(new, l->list, sizeof(uint64_t) * KEYLIST_INLINE);
+	if (!old_keys)
+		memcpy(new_keys, l->inline_keys, sizeof(uint64_t) * oldsize);
 
-	l->list = new;
-	l->top = (struct bkey *) (&l->list[oldsize]);
+	l->keys_p = new_keys;
+	l->top_p = new_keys + oldsize;
 
 	return 0;
 }
 
 struct bkey *bch_keylist_pop(struct keylist *l)
 {
-	struct bkey *k = l->bottom;
+	struct bkey *k = l->keys;
 
 	if (k == l->top)
 		return NULL;
@@ -66,10 +55,21 @@ struct bkey *bch_keylist_pop(struct keylist *l)
 	return l->top = k;
 }
 
+void bch_keylist_pop_front(struct keylist *l)
+{
+	l->top_p -= bkey_u64s(l->keys);
+
+	memmove(l->keys,
+		bkey_next(l->keys),
+		bch_keylist_bytes(l));
+}
+
 /* Pointer validation */
 
 bool __bch_ptr_invalid(struct cache_set *c, int level, const struct bkey *k)
 {
+	unsigned i;
+
 	if (level && (!KEY_PTRS(k) || !KEY_SIZE(k) || KEY_DIRTY(k)))
 		goto bad;
 
@@ -79,7 +79,7 @@ bool __bch_ptr_invalid(struct cache_set *c, int level, const struct bkey *k)
 	if (!KEY_SIZE(k))
 		return true;
 
-	for (unsigned i = 0; i < KEY_PTRS(k); i++)
+	for (i = 0; i < KEY_PTRS(k); i++)
 		if (ptr_available(c, k, i)) {
 			struct cache *ca = PTR_CACHE(c, k, i);
 			size_t bucket = PTR_BUCKET_NR(c, k, i);
@@ -133,7 +133,7 @@ bool bch_ptr_bad(struct btree *b, const struct bkey *k)
 				if (KEY_DIRTY(k) ||
 				    g->prio != BTREE_PRIO ||
 				    (b->c->gc_mark_valid &&
-				     GC_MARK(g) != GC_MARK_BTREE))
+				     GC_MARK(g) != GC_MARK_METADATA))
 					goto bug;
 
 			} else {
@@ -163,7 +163,8 @@ bug:
 
 /* Key/pointer manipulation */
 
-void bch_bkey_copy_single_ptr(struct bkey *dest, const struct bkey *src, unsigned i)
+void bch_bkey_copy_single_ptr(struct bkey *dest, const struct bkey *src,
+			      unsigned i)
 {
 	BUG_ON(i > KEY_PTRS(src));
 
@@ -177,7 +178,7 @@ void bch_bkey_copy_single_ptr(struct bkey *dest, const struct bkey *src, unsigne
 
 bool __bch_cut_front(const struct bkey *where, struct bkey *k)
 {
-	unsigned len = 0;
+	unsigned i, len = 0;
 
 	if (bkey_cmp(where, &START_KEY(k)) <= 0)
 		return false;
@@ -187,7 +188,7 @@ bool __bch_cut_front(const struct bkey *where, struct bkey *k)
 	else
 		bkey_copy_key(k, where);
 
-	for (unsigned i = 0; i < KEY_PTRS(k); i++)
+	for (i = 0; i < KEY_PTRS(k); i++)
 		SET_PTR_OFFSET(k, i, PTR_OFFSET(k, i) + KEY_SIZE(k) - len);
 
 	BUG_ON(len > KEY_SIZE(k));
@@ -226,6 +227,8 @@ static uint64_t merge_chksums(struct bkey *l, struct bkey *r)
  */
 bool bch_bkey_try_merge(struct btree *b, struct bkey *l, struct bkey *r)
 {
+	unsigned i;
+
 	if (key_merging_disabled(b->c))
 		return false;
 
@@ -234,9 +237,9 @@ bool bch_bkey_try_merge(struct btree *b, struct bkey *l, struct bkey *r)
 	    bkey_cmp(l, &START_KEY(r)))
 		return false;
 
-	for (unsigned j = 0; j < KEY_PTRS(l); j++)
-		if (l->ptr[j] + PTR(0, KEY_SIZE(l), 0) != r->ptr[j] ||
-		    PTR_BUCKET_NR(b->c, l, j) != PTR_BUCKET_NR(b->c, r, j))
+	for (i = 0; i < KEY_PTRS(l); i++)
+		if (l->ptr[i] + PTR(0, KEY_SIZE(l), 0) != r->ptr[i] ||
+		    PTR_BUCKET_NR(b->c, l, i) != PTR_BUCKET_NR(b->c, r, i))
 			return false;
 
 	/* Keys with no pointers aren't restricted to one bucket and could
@@ -837,7 +840,8 @@ static inline bool btree_iter_end(struct btree_iter *iter)
 	return !iter->used;
 }
 
-void bch_btree_iter_push(struct btree_iter *iter, struct bkey *k, struct bkey *end)
+void bch_btree_iter_push(struct btree_iter *iter, struct bkey *k,
+			 struct bkey *end)
 {
 	if (k != end)
 		BUG_ON(!heap_add(iter,
@@ -1032,11 +1036,12 @@ void bch_btree_sort_partial(struct btree *b, unsigned start)
 		oldsize = bch_count_data(b);
 
 	if (start) {
-		struct bset *i;
-		for_each_sorted_set_start(b, i, start)
-			keys += i->keys;
+		unsigned i;
 
-		order = roundup_pow_of_two(__set_bytes(i, keys)) / PAGE_SIZE;
+		for (i = start; i <= b->nsets; i++)
+			keys += b->sets[i].data->keys;
+
+		order = roundup_pow_of_two(__set_bytes(b->sets->data, keys)) / PAGE_SIZE;
 		if (order)
 			order = ilog2(order);
 	}
@@ -1072,14 +1077,14 @@ void bch_btree_sort_into(struct btree *b, struct btree *new)
 void bch_btree_sort_lazy(struct btree *b)
 {
 	if (b->nsets) {
-		struct bset *i;
-		unsigned keys = 0, total;
+		unsigned i, j, keys = 0, total;
 
-		for_each_sorted_set(b, i)
-			keys += i->keys;
+		for (i = 0; i <= b->nsets; i++)
+			keys += b->sets[i].data->keys;
+
 		total = keys;
 
-		for (unsigned j = 0; j < b->nsets; j++) {
+		for (j = 0; j < b->nsets; j++) {
 			if (keys * 2 < total ||
 			    keys < 1000) {
 				bch_btree_sort_partial(b, j);
@@ -1112,12 +1117,14 @@ static int bch_btree_bset_stats(struct btree *b, struct btree_op *op,
 			    struct bset_stats *stats)
 {
 	struct bkey *k;
+	unsigned i;
 
 	stats->nodes++;
 
-	for (int i = 0; i <= b->nsets; i++) {
+	for (i = 0; i <= b->nsets; i++) {
 		struct bset_tree *t = &b->sets[i];
 		size_t bytes = t->data->keys * sizeof(uint64_t);
+		size_t j;
 
 		if (bset_written(b, t)) {
 			stats->sets_written++;
@@ -1125,7 +1132,7 @@ static int bch_btree_bset_stats(struct btree *b, struct btree_op *op,
 
 			stats->floats += t->size - 1;
 
-			for (size_t j = 1; j < t->size; j++)
+			for (j = 1; j < t->size; j++)
 				if (t->tree[j].exponent == 127)
 					stats->failed++;
 		} else {
