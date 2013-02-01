@@ -1536,7 +1536,7 @@ static void bch_btree_gc(struct closure *cl)
 
 	if (ret) {
 		blktrace_msg_all(c, "Stopped gc");
-		pr_warn("gc failed!\n");
+		pr_warn("gc failed!");
 
 		continue_at(cl, bch_btree_gc, bch_gc_wq);
 	}
@@ -2166,7 +2166,7 @@ int bch_btree_insert(struct btree_op *op, struct cache_set *c,
 		} else if (ret) {
 			struct bkey *k;
 
-			pr_err("error %i trying to insert key for %s\n",
+			pr_err("error %i trying to insert key for %s",
 			       ret, op_type(op));
 
 			while ((k = bch_keylist_pop(keys)))

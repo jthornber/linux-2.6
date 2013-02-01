@@ -578,10 +578,10 @@ static void prio_read(struct cache *ca, uint64_t bucket)
 			prio_io(ca, bucket, READ_SYNC);
 
 			if (p->csum != crc64(&p->magic, bucket_bytes(ca) - 8))
-				pr_warn("bad csum reading priorities\n");
+				pr_warn("bad csum reading priorities");
 
 			if (p->magic != pset_magic(ca))
-				pr_warn("bad magic reading priorities\n");
+				pr_warn("bad magic reading priorities");
 
 			bucket = p->next_bucket;
 			d = p->data;
@@ -631,6 +631,35 @@ void bcache_device_stop(struct bcache_device *d)
 		closure_queue(&d->cl);
 }
 
+static void bcache_device_unlink(struct bcache_device *d)
+{
+	unsigned i;
+	struct cache *ca;
+
+	sysfs_remove_link(&d->c->kobj, d->name);
+	sysfs_remove_link(&d->kobj, "cache");
+
+	for_each_cache(ca, d->c, i)
+		bd_unlink_disk_holder(ca->bdev, d->disk);
+}
+
+static void bcache_device_link(struct bcache_device *d, struct cache_set *c,
+			       const char *name)
+{
+	unsigned i;
+	struct cache *ca;
+
+	for_each_cache(ca, d->c, i)
+		bd_link_disk_holder(ca->bdev, d->disk);
+
+	snprintf(d->name, BCACHEDEVNAME_SIZE,
+		 "%s%u", name, d->id);
+
+	WARN(sysfs_create_link(&d->kobj, &c->kobj, "cache") ||
+	     sysfs_create_link(&c->kobj, &d->kobj, d->name),
+	     "Couldn't create device <-> cache set symlinks");
+}
+
 static void bcache_device_detach(struct bcache_device *d)
 {
 	lockdep_assert_held(&bch_register_lock);
@@ -645,6 +674,8 @@ static void bcache_device_detach(struct bcache_device *d)
 
 		atomic_set(&d->detaching, 0);
 	}
+
+	bcache_device_unlink(d);
 
 	d->c->devices[d->id] = NULL;
 	closure_put(&d->c->caching);
@@ -663,22 +694,11 @@ static void bcache_device_attach(struct bcache_device *d, struct cache_set *c,
 	closure_get(&c->caching);
 }
 
-static void bcache_device_link(struct bcache_device *d, struct cache_set *c,
-			       const char *name)
-{
-	snprintf(d->name, BCACHEDEVNAME_SIZE,
-		 "%s%u", name, d->id);
-
-	WARN(sysfs_create_link(&d->kobj, &c->kobj, "cache") ||
-	     sysfs_create_link(&c->kobj, &d->kobj, d->name),
-	     "Couldn't create device <-> cache set symlinks");
-}
-
 static void bcache_device_free(struct bcache_device *d)
 {
 	lockdep_assert_held(&bch_register_lock);
 
-	pr_info("%s stopped\n", d->disk->disk_name);
+	pr_info("%s stopped", d->disk->disk_name);
 
 	if (d->c)
 		bcache_device_detach(d);
@@ -776,6 +796,7 @@ void bch_cached_dev_run(struct cached_dev *dc)
 	}
 
 	add_disk(d->disk);
+	bd_link_disk_holder(dc->bdev, dc->disk.disk);
 #if 0
 	char *env[] = { "SYMLINK=label" , NULL };
 	kobject_uevent_env(&disk_to_dev(d->disk)->kobj, KOBJ_CHANGE, env);
@@ -795,9 +816,6 @@ static void cached_dev_detach_finish(struct work_struct *w)
 	BUG_ON(!atomic_read(&dc->disk.detaching));
 	BUG_ON(atomic_read(&dc->count));
 
-	sysfs_remove_link(&dc->disk.c->kobj, dc->disk.name);
-	sysfs_remove_link(&dc->disk.kobj, "cache");
-
 	mutex_lock(&bch_register_lock);
 
 	memset(&dc->sb.set_uuid, 0, 16);
@@ -811,8 +829,7 @@ static void cached_dev_detach_finish(struct work_struct *w)
 
 	mutex_unlock(&bch_register_lock);
 
-	pr_info("Caching disabled for %s\n",
-		bdevname(dc->bdev, buf));
+	pr_info("Caching disabled for %s", bdevname(dc->bdev, buf));
 
 	/* Drop ref we took in cached_dev_detach() */
 	closure_put(&dc->disk.cl);
@@ -850,19 +867,19 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 		return -ENOENT;
 
 	if (dc->disk.c) {
-		pr_err("Can't attach %s: already attached\n", buf);
+		pr_err("Can't attach %s: already attached", buf);
 		return -EINVAL;
 	}
 
 	if (test_bit(CACHE_SET_STOPPING, &c->flags)) {
-		pr_err("Can't attach %s: shutting down\n", buf);
+		pr_err("Can't attach %s: shutting down", buf);
 		return -EINVAL;
 	}
 
 	if (dc->sb.block_size < c->sb.block_size) {
 		/* Will die */
 		pr_err("Couldn't attach %s: block size "
-		       "less than set's block size\n", buf);
+		       "less than set's block size", buf);
 		return -EINVAL;
 	}
 
@@ -878,13 +895,13 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 
 	if (!u) {
 		if (BDEV_STATE(&dc->sb) == BDEV_STATE_DIRTY) {
-			pr_err("Couldn't find uuid for %s in set\n", buf);
+			pr_err("Couldn't find uuid for %s in set", buf);
 			return -ENOENT;
 		}
 
 		u = uuid_find_empty(c);
 		if (!u) {
-			pr_err("Not caching %s, no room for UUID\n", buf);
+			pr_err("Not caching %s, no room for UUID", buf);
 			return -EINVAL;
 		}
 	}
@@ -913,7 +930,6 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 	}
 
 	bcache_device_attach(&dc->disk, c, u - c->uuids);
-	bcache_device_link(&dc->disk, c, "bdev");
 	list_move(&dc->list, &c->cached_devs);
 	calc_cached_dev_sectors(c);
 
@@ -931,8 +947,9 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 	}
 
 	bch_cached_dev_run(dc);
+	bcache_device_link(&dc->disk, c, "bdev");
 
-	pr_info("Caching %s as %s on set %pU\n",
+	pr_info("Caching %s as %s on set %pU",
 		bdevname(dc->bdev, buf), dc->disk.disk->disk_name,
 		dc->disk.c->sb.set_uuid);
 	return 0;
@@ -954,6 +971,7 @@ static void cached_dev_free(struct closure *cl)
 
 	mutex_lock(&bch_register_lock);
 
+	bd_unlink_disk_holder(dc->bdev, dc->disk.disk);
 	bcache_device_free(&dc->disk);
 	list_del(&dc->list);
 
@@ -1064,8 +1082,7 @@ static const char *register_bdev(struct cache_sb *sb, struct page *sb_page,
 	return NULL;
 err:
 	kobject_put(&dc->disk.kobj);
-	pr_notice("error opening %s: %s\n",
-		  bdevname(bdev, name), err);
+	pr_notice("error opening %s: %s", bdevname(bdev, name), err);
 	/*
 	 * Return NULL instead of an error because kobject_put() cleans
 	 * everything up
@@ -1093,8 +1110,7 @@ static void flash_dev_flush(struct closure *cl)
 {
 	struct bcache_device *d = container_of(cl, struct bcache_device, cl);
 
-	sysfs_remove_link(&d->c->kobj, d->name);
-	sysfs_remove_link(&d->kobj, "cache");
+	bcache_device_unlink(d);
 	kobject_del(&d->kobj);
 	continue_at(cl, flash_dev_free, system_wq);
 }
@@ -1153,7 +1169,7 @@ int bch_flash_dev_create(struct cache_set *c, uint64_t size)
 
 	u = uuid_find_empty(c);
 	if (!u) {
-		pr_err("Can't create volume, no room for UUID\n");
+		pr_err("Can't create volume, no room for UUID");
 		return -EINVAL;
 	}
 
@@ -1235,7 +1251,7 @@ static void cache_set_free(struct closure *cl)
 	list_del(&c->list);
 	mutex_unlock(&bch_register_lock);
 
-	pr_info("Cache set %pU unregistered\n", c->sb.set_uuid);
+	pr_info("Cache set %pU unregistered", c->sb.set_uuid);
 	wake_up(&unregister_wait);
 
 	closure_debug_destroy(&c->cl);
@@ -1412,7 +1428,7 @@ static void run_cache_set(struct cache_set *c)
 		if (bch_journal_read(c, &journal, &op))
 			goto err;
 
-		pr_debug("btree_journal_read() done\n");
+		pr_debug("btree_journal_read() done");
 
 		err = "no journal entries found";
 		if (list_empty(&journal))
@@ -1454,7 +1470,7 @@ static void run_cache_set(struct cache_set *c)
 
 		bch_journal_mark(c, &journal);
 		bch_btree_gc_finish(c);
-		pr_debug("btree_check() done\n");
+		pr_debug("btree_check() done");
 
 		/*
 		 * bcache_journal_next() can't happen sooner, or
@@ -1482,7 +1498,7 @@ static void run_cache_set(struct cache_set *c)
 
 		bch_journal_replay(c, &journal, &op);
 	} else {
-		pr_notice("invalidating existing data\n");
+		pr_notice("invalidating existing data");
 		/* Don't want invalidate_buckets() to queue a gc yet */
 		closure_lock(&c->gc, NULL);
 
@@ -1742,12 +1758,12 @@ static const char *register_cache(struct cache_sb *sb, struct page *sb_page,
 	if (err)
 		goto err;
 
-	pr_info("registered cache device %s\n", bdevname(bdev, name));
+	pr_info("registered cache device %s", bdevname(bdev, name));
 
 	return NULL;
 err:
 	kobject_put(&ca->kobj);
-	pr_info("error opening %s: %s\n", bdevname(bdev, name), err);
+	pr_info("error opening %s: %s", bdevname(bdev, name), err);
 	/* Return NULL instead of an error because kobject_put() cleans
 	 * everything up
 	 */
@@ -1816,7 +1832,7 @@ err_close:
 		blkdev_put(bdev, FMODE_READ|FMODE_WRITE|FMODE_EXCL);
 err:
 		if (attr != &ksysfs_register_quiet)
-			pr_info("error opening %s: %s\n", path, err);
+			pr_info("error opening %s: %s", path, err);
 		ret = -EINVAL;
 	}
 
@@ -1845,7 +1861,7 @@ static int bcache_reboot(struct notifier_block *n, unsigned long code, void *x)
 		    list_empty(&uncached_devices))
 			goto out;
 
-		pr_info("Stopping all devices:\n");
+		pr_info("Stopping all devices:");
 
 		list_for_each_entry_safe(c, tc, &bch_cache_sets, list)
 			bch_cache_set_stop(c);
@@ -1873,9 +1889,10 @@ static int bcache_reboot(struct notifier_block *n, unsigned long code, void *x)
 
 		finish_wait(&unregister_wait, &wait);
 
-		pr_info("%s\n", stopped
-			? "All devices stopped"
-			: "Timeout waiting for devices to be closed");
+		if (stopped)
+			pr_info("All devices stopped");
+		else
+			pr_notice("Timeout waiting for devices to be closed");
 out:
 		mutex_unlock(&bch_register_lock);
 	}

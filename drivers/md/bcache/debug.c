@@ -522,17 +522,17 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 				if (bkey_cmp(k, l) ||
 				    KEY_SIZE(k) != KEY_SIZE(l))
 					pr_err("key %zi differs: %s "
-					       "!= %s\n", (uint64_t *) k - i->d,
+					       "!= %s", (uint64_t *) k - i->d,
 					       pkey(k), pkey(l));
 
 			for (j = 0; j < 3; j++) {
-				pr_err("**** Set %i ****\n", j);
+				pr_err("**** Set %i ****", j);
 				dump(all[j]);
 			}
 			panic("\n");
 		}
 
-		pr_info("fuzz complete: %i keys\n", b->sets[0].data->keys);
+		pr_info("fuzz complete: %i keys", b->sets[0].data->keys);
 	}
 }
 

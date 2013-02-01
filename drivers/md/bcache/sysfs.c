@@ -226,7 +226,7 @@ STORE(__cached_dev)
 				return size;
 		}
 
-		pr_err("Can't attach %s: cache set not found\n", buf);
+		pr_err("Can't attach %s: cache set not found", buf);
 		size = v;
 	}
 

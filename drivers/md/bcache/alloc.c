@@ -134,7 +134,7 @@ static void discard_finish(struct work_struct *w)
 	char buf[BDEVNAME_SIZE];
 
 	if (!test_bit(BIO_UPTODATE, &d->bio.bi_flags)) {
-		pr_notice("discard error on %s, disabling\n",
+		pr_notice("discard error on %s, disabling",
 			 bdevname(ca->bdev, buf));
 		d->ca->discard = 0;
 	}
