@@ -2100,31 +2100,13 @@ static int pool_map(struct dm_target *ti, struct bio *bio)
 	return r;
 }
 
-/*
- * Retrieves the number of blocks of the data device from
- * the superblock and compares it to the actual device size,
- * thus resizing the data device in case it has grown.
- *
- * This both copes with opening preallocated data devices in the ctr
- * being followed by a resume
- * -and-
- * calling the resume method individually after userspace has
- * grown the data device in reaction to a table event.
- */
-static int pool_preresume(struct dm_target *ti)
+static int maybe_resize_data_dev(struct dm_target *ti, int *need_commit)
 {
 	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 	sector_t data_size = ti->len;
 	dm_block_t sb_data_size;
-
-	/*
-	 * Take control of the pool object.
-	 */
-	r = bind_control_target(pool, ti);
-	if (r)
-		return r;
 
 	(void) sector_div(data_size, pool->sectors_per_block);
 
@@ -2149,6 +2131,45 @@ static int pool_preresume(struct dm_target *ti)
 		}
 
 		(void) commit_or_fallback(pool);
+		*need_commit = 1; /* FIXME: ??? */
+	}
+
+	return 0;
+}
+
+/*
+ * Retrieves the number of blocks of the data device from
+ * the superblock and compares it to the actual device size,
+ * thus resizing the data device in case it has grown.
+ *
+ * This both copes with opening preallocated data devices in the ctr
+ * being followed by a resume
+ * -and-
+ * calling the resume method individually after userspace has
+ * grown the data device in reaction to a table event.
+ */
+static int pool_preresume(struct dm_target *ti)
+{
+	int r, need_commit;
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+
+	/*
+	 * Take control of the pool object.
+	 */
+	r = bind_control_target(pool, ti);
+	if (r)
+		return r;
+
+	r = maybe_resize_data_dev(ti, &need_commit);
+	if (r)
+		return r;
+
+	if (need_commit) {
+		r = commit(pool);
+		if (r)
+			/* FIXME: fail mode ? */
+			return r;
 	}
 
 	return 0;

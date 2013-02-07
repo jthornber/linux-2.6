@@ -189,6 +189,171 @@ static int recursing(struct sm_metadata *smm)
 	return smm->recursion_count;
 }
 
+/*----------------------------------------------------------------*/
+
+/*
+ * When a new space map is created that manages its own space.  We use
+ * this tiny bootstrap allocator.
+ */
+static void sm_bootstrap_destroy(struct dm_space_map *sm)
+{
+}
+
+static int sm_bootstrap_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
+{
+	DMERR("bootstrap doesn't support extend");
+
+	return -EINVAL;
+}
+
+static int sm_bootstrap_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
+{
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+
+	return smm->ll.nr_blocks;
+}
+
+static int sm_bootstrap_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
+{
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+
+	*count = smm->ll.nr_blocks - smm->begin;
+
+	return 0;
+}
+
+static int sm_bootstrap_get_count(struct dm_space_map *sm, dm_block_t b,
+				  uint32_t *result)
+{
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+
+	return b < smm->begin ? 1 : 0;
+}
+
+static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm,
+					       dm_block_t b, int *result)
+{
+	*result = 0;
+
+	return 0;
+}
+
+static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b,
+				  uint32_t count)
+{
+	DMERR("bootstrap doesn't support set_count");
+
+	return -EINVAL;
+}
+
+static int sm_bootstrap_new_block(struct dm_space_map *sm, dm_block_t *b)
+{
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+
+	/*
+	 * We know the entire device is unused.
+	 */
+	if (smm->begin == smm->ll.nr_blocks)
+		return -ENOSPC;
+
+	*b = smm->begin++;
+
+	return 0;
+}
+
+static int sm_bootstrap_inc_block(struct dm_space_map *sm, dm_block_t b)
+{
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+
+	return add_bop(smm, BOP_INC, b);
+}
+
+static int sm_bootstrap_dec_block(struct dm_space_map *sm, dm_block_t b)
+{
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+
+	return add_bop(smm, BOP_DEC, b);
+}
+
+static int sm_bootstrap_commit(struct dm_space_map *sm)
+{
+	return 0;
+}
+
+static int sm_bootstrap_root_size(struct dm_space_map *sm, size_t *result)
+{
+	DMERR("bootstrap doesn't support root_size");
+
+	return -EINVAL;
+}
+
+static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where,
+				  size_t max)
+{
+	DMERR("bootstrap doesn't support copy_root");
+
+	return -EINVAL;
+}
+
+static struct dm_space_map bootstrap_ops = {
+	.destroy = sm_bootstrap_destroy,
+	.extend = sm_bootstrap_extend,
+	.get_nr_blocks = sm_bootstrap_get_nr_blocks,
+	.get_nr_free = sm_bootstrap_get_nr_free,
+	.get_count = sm_bootstrap_get_count,
+	.count_is_more_than_one = sm_bootstrap_count_is_more_than_one,
+	.set_count = sm_bootstrap_set_count,
+	.inc_block = sm_bootstrap_inc_block,
+	.dec_block = sm_bootstrap_dec_block,
+	.new_block = sm_bootstrap_new_block,
+	.commit = sm_bootstrap_commit,
+	.root_size = sm_bootstrap_root_size,
+	.copy_root = sm_bootstrap_copy_root,
+	.register_threshold_callback = NULL
+};
+
+/*----------------------------------------------------------------*/
+
+static void sm_metadata_destroy(struct dm_space_map *sm);
+static int sm_metadata_extend(struct dm_space_map *sm, dm_block_t extra_blocks);
+static int sm_metadata_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count);
+static int sm_metadata_get_nr_free(struct dm_space_map *sm, dm_block_t *count);
+static int sm_metadata_get_count(struct dm_space_map *sm, dm_block_t b,
+				 uint32_t *result);
+static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm,
+					      dm_block_t b, int *result);
+static int sm_metadata_set_count(struct dm_space_map *sm, dm_block_t b,
+				 uint32_t count);
+static int sm_metadata_inc_block(struct dm_space_map *sm, dm_block_t b);
+static int sm_metadata_dec_block(struct dm_space_map *sm, dm_block_t b);
+static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b);
+static int sm_metadata_commit(struct dm_space_map *sm);
+static int sm_metadata_register_threshold_callback(struct dm_space_map *sm,
+						   dm_block_t threshold,
+						   dm_sm_threshold_fn fn,
+						   void *context);
+static int sm_metadata_root_size(struct dm_space_map *sm, size_t *result);
+static int sm_metadata_copy_root(struct dm_space_map *sm, void *where_le, size_t max);
+
+static struct dm_space_map ops = {
+	.destroy = sm_metadata_destroy,
+	.extend = sm_metadata_extend,
+	.get_nr_blocks = sm_metadata_get_nr_blocks,
+	.get_nr_free = sm_metadata_get_nr_free,
+	.get_count = sm_metadata_get_count,
+	.count_is_more_than_one = sm_metadata_count_is_more_than_one,
+	.set_count = sm_metadata_set_count,
+	.inc_block = sm_metadata_inc_block,
+	.dec_block = sm_metadata_dec_block,
+	.new_block = sm_metadata_new_block,
+	.commit = sm_metadata_commit,
+	.root_size = sm_metadata_root_size,
+	.copy_root = sm_metadata_copy_root,
+	.register_threshold_callback = sm_metadata_register_threshold_callback
+};
+
+/*----------------------------------------------------------------*/
+
 static void sm_metadata_destroy(struct dm_space_map *sm)
 {
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
@@ -198,8 +363,27 @@ static void sm_metadata_destroy(struct dm_space_map *sm)
 
 static int sm_metadata_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
-	DMERR("doesn't support extend");
-	return -EINVAL;
+	int r, i;
+	enum allocation_event ev;
+	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+	dm_block_t old_len = smm->ll.nr_blocks;
+
+	/*
+	 * We flick into a mode where all blocks get allocated in the new
+	 * area, ...
+	 */
+	smm->begin = old_len;
+	memcpy(&smm->sm, &bootstrap_ops, sizeof(smm->sm));
+
+	/* ... extend, ... */
+	r = sm_ll_extend(&smm->ll, extra_blocks);
+
+	/* ... then switch back to normal behaviour. */
+	memcpy(&smm->sm, &ops, sizeof(smm->sm));
+	for (i = old_len; !r && i < smm->begin; i++)
+		r = sm_ll_inc(&smm->ll, i, &ev);
+
+	return r;
 }
 
 static int sm_metadata_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
@@ -454,146 +638,6 @@ static int sm_metadata_copy_root(struct dm_space_map *sm, void *where_le, size_t
 
 	return 0;
 }
-
-static struct dm_space_map ops = {
-	.destroy = sm_metadata_destroy,
-	.extend = sm_metadata_extend,
-	.get_nr_blocks = sm_metadata_get_nr_blocks,
-	.get_nr_free = sm_metadata_get_nr_free,
-	.get_count = sm_metadata_get_count,
-	.count_is_more_than_one = sm_metadata_count_is_more_than_one,
-	.set_count = sm_metadata_set_count,
-	.inc_block = sm_metadata_inc_block,
-	.dec_block = sm_metadata_dec_block,
-	.new_block = sm_metadata_new_block,
-	.commit = sm_metadata_commit,
-	.root_size = sm_metadata_root_size,
-	.copy_root = sm_metadata_copy_root,
-	.register_threshold_callback = sm_metadata_register_threshold_callback
-};
-
-/*----------------------------------------------------------------*/
-
-/*
- * When a new space map is created that manages its own space.  We use
- * this tiny bootstrap allocator.
- */
-static void sm_bootstrap_destroy(struct dm_space_map *sm)
-{
-}
-
-static int sm_bootstrap_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
-{
-	DMERR("boostrap doesn't support extend");
-
-	return -EINVAL;
-}
-
-static int sm_bootstrap_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
-{
-	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-
-	return smm->ll.nr_blocks;
-}
-
-static int sm_bootstrap_get_nr_free(struct dm_space_map *sm, dm_block_t *count)
-{
-	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-
-	*count = smm->ll.nr_blocks - smm->begin;
-
-	return 0;
-}
-
-static int sm_bootstrap_get_count(struct dm_space_map *sm, dm_block_t b,
-				  uint32_t *result)
-{
-	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-
-	return b < smm->begin ? 1 : 0;
-}
-
-static int sm_bootstrap_count_is_more_than_one(struct dm_space_map *sm,
-					       dm_block_t b, int *result)
-{
-	*result = 0;
-
-	return 0;
-}
-
-static int sm_bootstrap_set_count(struct dm_space_map *sm, dm_block_t b,
-				  uint32_t count)
-{
-	DMERR("boostrap doesn't support set_count");
-
-	return -EINVAL;
-}
-
-static int sm_bootstrap_new_block(struct dm_space_map *sm, dm_block_t *b)
-{
-	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-
-	/*
-	 * We know the entire device is unused.
-	 */
-	if (smm->begin == smm->ll.nr_blocks)
-		return -ENOSPC;
-
-	*b = smm->begin++;
-
-	return 0;
-}
-
-static int sm_bootstrap_inc_block(struct dm_space_map *sm, dm_block_t b)
-{
-	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-
-	return add_bop(smm, BOP_INC, b);
-}
-
-static int sm_bootstrap_dec_block(struct dm_space_map *sm, dm_block_t b)
-{
-	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-
-	return add_bop(smm, BOP_DEC, b);
-}
-
-static int sm_bootstrap_commit(struct dm_space_map *sm)
-{
-	return 0;
-}
-
-static int sm_bootstrap_root_size(struct dm_space_map *sm, size_t *result)
-{
-	DMERR("boostrap doesn't support root_size");
-
-	return -EINVAL;
-}
-
-static int sm_bootstrap_copy_root(struct dm_space_map *sm, void *where,
-				  size_t max)
-{
-	DMERR("boostrap doesn't support copy_root");
-
-	return -EINVAL;
-}
-
-static struct dm_space_map bootstrap_ops = {
-	.destroy = sm_bootstrap_destroy,
-	.extend = sm_bootstrap_extend,
-	.get_nr_blocks = sm_bootstrap_get_nr_blocks,
-	.get_nr_free = sm_bootstrap_get_nr_free,
-	.get_count = sm_bootstrap_get_count,
-	.count_is_more_than_one = sm_bootstrap_count_is_more_than_one,
-	.set_count = sm_bootstrap_set_count,
-	.inc_block = sm_bootstrap_inc_block,
-	.dec_block = sm_bootstrap_dec_block,
-	.new_block = sm_bootstrap_new_block,
-	.commit = sm_bootstrap_commit,
-	.root_size = sm_bootstrap_root_size,
-	.copy_root = sm_bootstrap_copy_root,
-	.register_threshold_callback = NULL
-};
 
 /*----------------------------------------------------------------*/
 
