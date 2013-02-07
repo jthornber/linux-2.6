@@ -9,6 +9,8 @@
 
 #include "dm-block-manager.h"
 
+typedef void (*dm_sm_threshold_fn)(void *context);
+
 /*
  * struct dm_space_map keeps a record of how many times each block in a device
  * is referenced.  It needs to be fixed on disk as part of the transaction.
@@ -51,6 +53,15 @@ struct dm_space_map {
 	 * new_block will increment the returned block.
 	 */
 	int (*new_block)(struct dm_space_map *sm, dm_block_t *b);
+
+	/*
+	 * You can register 1 threshold callback.  This is edge triggered
+	 * when the free space in the space map drops below the threshold.
+	 */
+	int (*register_threshold_callback)(struct dm_space_map *sm,
+					   dm_block_t threshold,
+					   dm_sm_threshold_fn fn,
+					   void *context);
 
 	/*
 	 * The root contains all the information needed to fix the space map.
@@ -119,6 +130,17 @@ static inline int dm_sm_dec_block(struct dm_space_map *sm, dm_block_t b)
 static inline int dm_sm_new_block(struct dm_space_map *sm, dm_block_t *b)
 {
 	return sm->new_block(sm, b);
+}
+
+static inline int dm_sm_register_threshold_callback(struct dm_space_map *sm,
+						    dm_block_t threshold,
+						    dm_sm_threshold_fn fn,
+						    void *context)
+{
+	if (sm->register_threshold_callback)
+		return sm->register_threshold_callback(sm, threshold, fn, context);
+
+	return -EINVAL;
 }
 
 static inline int dm_sm_root_size(struct dm_space_map *sm, size_t *result)

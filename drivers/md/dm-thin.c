@@ -39,6 +39,14 @@
 #define MAX_DEV_ID ((1 << 24) - 1)
 
 /*
+ * Metadata low water mark.
+ *
+ * If the free blocks in the metadata device pass this threshold an event
+ * will be generated.
+ */
+#define METADATA_LOW_WATER_MARK 64
+
+/*
  * How do we handle breaking sharing of data blocks?
  * =================================================
  *
