@@ -1923,6 +1923,20 @@ static void metadata_low_callback(void *context)
 	dm_table_event(pool->ti->table);
 }
 
+static dm_block_t get_metadata_dev_size(struct block_device *bdev)
+{
+	sector_t md_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
+	char buffer[BDEVNAME_SIZE];
+
+	if (md_size > THIN_METADATA_MAX_SECTORS_WARNING) {
+		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
+		       bdevname(bdev, buffer), THIN_METADATA_MAX_SECTORS);
+		md_size = THIN_METADATA_MAX_SECTORS_WARNING;
+	}
+
+	return md_size / (THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
+}
+
 /*
  * thin-pool <metadata dev> <data dev>
  *	     <data block size (sectors)>
@@ -1946,7 +1960,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	dm_block_t low_water_blocks;
 	struct dm_dev *metadata_dev;
 	sector_t metadata_dev_size;
-	char b[BDEVNAME_SIZE];
 
 	/*
 	 * FIXME Remove validation from scope of lock.
@@ -1966,11 +1979,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata block device";
 		goto out_unlock;
 	}
-
-	metadata_dev_size = i_size_read(metadata_dev->bdev->bd_inode) >> SECTOR_SHIFT;
-	if (metadata_dev_size > THIN_METADATA_MAX_SECTORS_WARNING)
-		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
-		       bdevname(metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
+	metadata_dev_size = get_metadata_dev_size(metadata_dev->bdev);
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -2137,6 +2146,40 @@ static int maybe_resize_data_dev(struct dm_target *ti, int *need_commit)
 	return 0;
 }
 
+static int maybe_resize_metadata_dev(struct dm_target *ti, int *need_commit)
+{
+	int r;
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+	dm_block_t md_size, sb_md_size;
+
+	*need_commit = 0;
+	md_size = get_metadata_dev_size(pool->md_dev);
+
+	r = dm_pool_get_metadata_dev_size(pool->pmd, &sb_md_size);
+	if (r) {
+		DMERR("failed to retrieve data device size");
+		return r;
+	}
+
+	if (md_size < sb_md_size) {
+		DMERR("metadata device too small, is %llu sectors (expected %llu)",
+		      md_size, sb_md_size);
+		return -EINVAL;
+
+	} else if (md_size > sb_md_size) {
+		r = dm_pool_resize_metadata_dev(pool->pmd, md_size);
+		if (r) {
+			DMERR("failed to resize metadata device");
+			return r;
+		}
+
+		*need_commit = 1;
+	}
+
+	return 0;
+}
+
 /*
  * Retrieves the number of blocks of the data device from
  * the superblock and compares it to the actual device size,
@@ -2150,7 +2193,7 @@ static int maybe_resize_data_dev(struct dm_target *ti, int *need_commit)
  */
 static int pool_preresume(struct dm_target *ti)
 {
-	int r, need_commit;
+	int r, need_commit1, need_commit2;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
@@ -2161,11 +2204,15 @@ static int pool_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	r = maybe_resize_data_dev(ti, &need_commit);
+	r = maybe_resize_data_dev(ti, &need_commit1);
 	if (r)
 		return r;
 
-	if (need_commit) {
+	r = maybe_resize_metadata_dev(ti, &need_commit2);
+	if (r)
+		return r;
+
+	if (need_commit1 || need_commit2) {
 		r = commit(pool);
 		if (r)
 			/* FIXME: fail mode ? */
