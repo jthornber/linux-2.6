@@ -929,7 +929,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		return r;
 
 	if (free_blocks <= pool->low_water_blocks && !pool->low_water_triggered) {
-		DMWARN("%s: reached low water mark, sending event.",
+		DMWARN("%s: reached low water mark for data device, sending event.",
 		       dm_device_name(pool->pool_md));
 		spin_lock_irqsave(&pool->lock, flags);
 		pool->low_water_triggered = 1;
@@ -1915,6 +1915,14 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	return r;
 }
 
+static void metadata_low_callback(void *context)
+{
+	struct pool *pool = context;
+	DMWARN("%s: reached low water mark for metadata device, sending event.",
+	       dm_device_name(pool->pool_md));
+	dm_table_event(pool->ti->table);
+}
+
 /*
  * thin-pool <metadata dev> <data dev>
  *	     <data block size (sectors)>
@@ -2045,6 +2053,13 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->discard_zeroes_data_unsupported = true;
 	}
 	ti->private = pt;
+
+	r = dm_pool_register_metadata_threshold(pt->pool->pmd,
+						METADATA_LOW_WATER_MARK,
+						metadata_low_callback,
+						pool);
+	if (r)
+		goto out_free_pt;
 
 	pt->callbacks.congested_fn = pool_is_congested;
 	dm_table_add_target_callbacks(ti->table, &pt->callbacks);
