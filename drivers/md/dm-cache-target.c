@@ -21,7 +21,6 @@
 #include <linux/slab.h>
 
 #define DM_MSG_PREFIX "cache"
-#define DAEMON "cached"
 
 /*----------------------------------------------------------------*/
 
@@ -228,6 +227,17 @@ static void wake_worker(struct cache *cache)
 
 /*----------------------------------------------------------------*/
 
+static struct dm_bio_prison_cell *alloc_prison_cell(struct cache *cache)
+{
+	/* FIXME: change to use a local slab. */
+	return dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+}
+
+static void free_prison_cell(struct cache *cache, struct dm_bio_prison_cell *cell)
+{
+	dm_bio_prison_free_cell(cache->prison, cell);
+}
+
 static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 {
 	if (!p->mg) {
@@ -237,13 +247,13 @@ static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 	}
 
 	if (!p->cell1) {
-		p->cell1 = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+		p->cell1 = alloc_prison_cell(cache);
 		if (!p->cell1)
 			return -ENOMEM;
 	}
 
 	if (!p->cell2) {
-		p->cell2 = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+		p->cell2 = alloc_prison_cell(cache);
 		if (!p->cell2)
 			return -ENOMEM;
 	}
@@ -254,10 +264,10 @@ static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
 static void prealloc_free_structs(struct cache *cache, struct prealloc *p)
 {
 	if (p->cell2)
-		dm_bio_prison_free_cell(cache->prison, p->cell2);
+		free_prison_cell(cache, p->cell2);
 
 	if (p->cell1)
-		dm_bio_prison_free_cell(cache->prison, p->cell1);
+		free_prison_cell(cache, p->cell1);
 
 	if (p->mg)
 		mempool_free(p->mg, cache->migration_pool);
@@ -319,17 +329,17 @@ static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
 typedef void (*cell_free_fn)(void *context, struct dm_bio_prison_cell *cell);
 
 static int bio_detain(struct cache *cache, dm_oblock_t oblock,
-		      struct bio *bio, struct dm_bio_prison_cell *cell,
+		      struct bio *bio, struct dm_bio_prison_cell *cell_prealloc,
 		      cell_free_fn free_fn, void *free_context,
-		      struct dm_bio_prison_cell **result)
+		      struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	struct dm_cell_key key;
 
 	build_key(oblock, &key);
-	r = dm_bio_detain(cache->prison, &key, bio, cell, result);
+	r = dm_bio_detain(cache->prison, &key, bio, cell_prealloc, cell_result);
 	if (r)
-		free_fn(free_context, cell);
+		free_fn(free_context, cell_prealloc);
 
 	return r;
 }
@@ -337,18 +347,18 @@ static int bio_detain(struct cache *cache, dm_oblock_t oblock,
 static int get_cell(struct cache *cache,
 		    dm_oblock_t oblock,
 		    struct prealloc *structs,
-		    struct dm_bio_prison_cell **result)
+		    struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	struct dm_cell_key key;
-	struct dm_bio_prison_cell *cell;
+	struct dm_bio_prison_cell *cell_prealloc;
 
-	cell = prealloc_get_cell(structs);
+	cell_prealloc = prealloc_get_cell(structs);
 
 	build_key(oblock, &key);
-	r = dm_get_cell(cache->prison, &key, cell, result);
+	r = dm_get_cell(cache->prison, &key, cell_prealloc, cell_result);
 	if (r)
-		prealloc_put_cell(structs, cell);
+		prealloc_put_cell(structs, cell_prealloc);
 
 	return r;
 }
@@ -461,7 +471,7 @@ static void save_stats(struct cache *cache)
 }
 
 /*----------------------------------------------------------------
- * Per request data
+ * Per bio data
  *--------------------------------------------------------------*/
 static struct per_bio_data *get_per_bio_data(struct bio *bio)
 {
@@ -475,7 +485,7 @@ static struct per_bio_data *init_per_bio_data(struct bio *bio)
 	struct per_bio_data *pb = get_per_bio_data(bio);
 
 	pb->tick = false;
-	pb->req_nr = dm_bio_get_target_request_nr(bio);
+	pb->req_nr = dm_bio_get_target_bio_nr(bio);
 	pb->all_io_entry = NULL;
 
 	return pb;
@@ -608,7 +618,7 @@ static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
 {
 	(holder ? dm_cell_release : dm_cell_release_no_holder)
 		(cache->prison, cell, &cache->deferred_bios);
-	dm_bio_prison_free_cell(cache->prison, cell);
+	free_prison_cell(cache, cell);
 }
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
@@ -1011,7 +1021,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	int r;
 	bool release_cell = true;
 	dm_oblock_t block = get_bio_block(cache, bio);
-	struct dm_bio_prison_cell *cell, *old_ocell, *new_ocell;
+	struct dm_bio_prison_cell *cell_prealloc, *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
 	struct per_bio_data *pb = get_per_bio_data(bio);
 	bool discarded_block = is_discarded_oblock(cache, block);
@@ -1020,8 +1030,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	cell = prealloc_get_cell(structs);
-	r = bio_detain(cache, block, bio, cell,
+	cell_prealloc = prealloc_get_cell(structs);
+	r = bio_detain(cache, block, bio, cell_prealloc,
 		       (cell_free_fn) prealloc_put_cell,
 		       structs, &new_ocell);
 	if (r > 0)
@@ -1075,8 +1085,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		break;
 
 	case POLICY_REPLACE:
-		cell = prealloc_get_cell(structs);
-		r = bio_detain(cache, lookup_result.old_oblock, bio, cell,
+		cell_prealloc = prealloc_get_cell(structs);
+		r = bio_detain(cache, lookup_result.old_oblock, bio, cell_prealloc,
 			       (cell_free_fn) prealloc_put_cell,
 			       structs, &old_ocell);
 		if (r > 0) {
@@ -1489,10 +1499,12 @@ static int ensure_args__(struct dm_arg_set *as,
 	return 0;
 }
 
-#define ensure_args(n) \
-	r = ensure_args__(as, n, error); \
-	if (r) \
-		return r;
+#define ensure_args(n)					\
+	do {						\
+		r = ensure_args__(as, n, error);	\
+		if (r)					\
+			return r;			\
+	} while (0)
 
 static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 			      char **error)
@@ -1653,10 +1665,12 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	as.argc = argc;
 	as.argv = argv;
 
-#define parse(name) \
-	r = parse_ ## name(ca, &as, error); \
-	if (r) \
-		return r;
+#define parse(name)					\
+	do {						\
+		r = parse_ ## name(ca, &as, error);	\
+		if (r)					\
+			return r;			\
+	} while (0)
 
 	parse(metadata_dev);
 	parse(cache_dev);
@@ -1719,6 +1733,8 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 
 #define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
 
+static unsigned cache_num_write_bios(struct dm_target *ti, struct bio *bio);
+
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
 	int r = 0;
@@ -1736,24 +1752,28 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->ti = ca->ti;
 	ti->private = cache;
 	ti->per_bio_data_size = sizeof(struct per_bio_data);
-	ti->num_flush_requests = 2;
+	ti->num_flush_bios = 2;
 	ti->flush_supported = true;
 
-	ti->num_discard_requests = 1;
+	ti->num_discard_bios = 1;
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
+
+	if (cache->features.write_through)
+		ti->num_write_bios = cache_num_write_bios;
 
 	cache->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
 
-#define consume(n) n; n = NULL;
+	cache->metadata_dev = ca->metadata_dev;
+	cache->origin_dev = ca->origin_dev;
+	cache->cache_dev = ca->cache_dev;
 
-	cache->metadata_dev = consume(ca->metadata_dev);
-	cache->origin_dev = consume(ca->origin_dev);
-	cache->cache_dev = consume(ca->cache_dev);
+	ca->metadata_dev = ca->origin_dev = ca->cache_dev = NULL;
+
 	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 
-	// FIXME: factor out this whole section
+	/* FIXME: factor out this whole section */
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
 	do_div(origin_blocks, ca->block_size);
 	cache->origin_blocks = to_oblock(origin_blocks);
@@ -1820,7 +1840,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	cache->wq = alloc_ordered_workqueue(DAEMON, WQ_MEM_RECLAIM);
+	cache->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
 	if (!cache->wq) {
 		*error = "could not create workqueue for metadata object";
 		goto bad;
@@ -1844,7 +1864,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
-		*error = "Error creating cache's endio_hook mempool";
+		*error = "Error creating cache's migration mempool";
 		goto bad;
 	}
 
@@ -1905,27 +1925,18 @@ out:
 	return r;
 }
 
-static unsigned cache_get_num_duplicates(struct dm_target *ti,
-					 struct bio *bio)
+static unsigned cache_num_write_bios(struct dm_target *ti, struct bio *bio)
 {
 	int r;
 	struct cache *cache = ti->private;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	dm_cblock_t cblock;
 
-	if (bio_data_dir(bio) != WRITE || !cache->features.write_through)
-		return 1;
-
-#if 0
 	r = policy_lookup(cache->policy, block, &cblock);
 	if (r < 0)
 		return 2;	/* assume the worst */
 
 	return (!r && !is_dirty(cache, cblock)) ? 2 : 1;
-#else
-	// testing the failure case
-	return 2;
-#endif
 }
 
 static int cache_map(struct dm_target *ti, struct bio *bio)
@@ -1960,10 +1971,15 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	cell = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
+	cell = alloc_prison_cell(cache);
+	if (!cell) {
+		defer_bio(cache, bio);
+		return DM_MAPIO_SUBMITTED;
+	}
+
 	r = bio_detain(cache, block, bio, cell,
-		       (cell_free_fn) dm_bio_prison_free_cell,
-		       cache->prison, &cell);
+		       (cell_free_fn) free_prison_cell,
+		       cache, &cell);
 	if (r) {
 		if (r < 0)
 			defer_bio(cache, bio);
@@ -1980,7 +1996,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 
 	} else if (r) {
-		DMERR("Bug in policy\n");
+		DMERR_LIMIT("Unexpected return from cache replacement policy: %d", r);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -2179,7 +2195,7 @@ static int load_discard(void *context, sector_t discard_block_size,
 {
 	struct cache *cache = context;
 
-	// FIXME: handle mis-matched block size
+	/* FIXME: handle mis-matched block size */
 
 	if (discard)
 		set_discard(cache, dblock);
@@ -2397,7 +2413,6 @@ static struct target_type cache_target = {
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
-	.get_num_duplicates = cache_get_num_duplicates,
 	.map = cache_map,
 	.end_io = cache_end_io,
 	.postsuspend = cache_postsuspend,

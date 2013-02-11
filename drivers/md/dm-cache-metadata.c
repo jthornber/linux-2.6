@@ -16,9 +16,6 @@
 
 /*----------------------------------------------------------------*/
 
-//#define debug(x...) pr_alert(x)
-#define debug(x...) ;
-
 #define DM_MSG_PREFIX   "cache metadata"
 
 #define CACHE_SUPERBLOCK_MAGIC 06142003
@@ -95,7 +92,7 @@ struct dm_cache_metadata {
 
 	struct dm_array_info info;
 	struct dm_array_info hint_info;
-	struct dm_bitset_info discard_info;
+	struct dm_disk_bitset discard_info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
@@ -140,15 +137,15 @@ static int sb_check(struct dm_block_validator *v,
 	__le32 csum_le;
 
 	if (dm_block_location(b) != le64_to_cpu(disk_super->blocknr)) {
-		DMERR("sb_check failed: blocknr %llu: "
-		      "wanted %llu", le64_to_cpu(disk_super->blocknr),
+		DMERR("sb_check failed: blocknr %llu: wanted %llu",
+		      le64_to_cpu(disk_super->blocknr),
 		      (unsigned long long)dm_block_location(b));
 		return -ENOTBLK;
 	}
 
 	if (le64_to_cpu(disk_super->magic) != CACHE_SUPERBLOCK_MAGIC) {
-		DMERR("sb_check failed: magic %llu: "
-		      "wanted %llu", le64_to_cpu(disk_super->magic),
+		DMERR("sb_check failed: magic %llu: wanted %llu",
+		      le64_to_cpu(disk_super->magic),
 		      (unsigned long long)CACHE_SUPERBLOCK_MAGIC);
 		return -EILSEQ;
 	}
@@ -232,10 +229,10 @@ static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 	vt.inc = NULL;
 	vt.dec = NULL;
 	vt.equal = NULL;
-	dm_setup_array_info(&cmd->info, cmd->tm, &vt);
+	dm_array_info_init(&cmd->info, cmd->tm, &vt);
 
 	vt.size = sizeof(__le32);
-	dm_setup_array_info(&cmd->hint_info, cmd->tm, &vt);
+	dm_array_info_init(&cmd->hint_info, cmd->tm, &vt);
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -300,7 +297,6 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 {
 	int r;
 
-	debug("formatting metadata dev");
 	r = dm_tm_create_with_sm(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
 				 &cmd->tm, &cmd->metadata_sm);
 	if (r < 0) {
@@ -314,7 +310,7 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r < 0)
 		goto bad;
 
-	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+	dm_disk_bitset_init(cmd->tm, &cmd->discard_info);
 
 	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_root);
 	if (r < 0)
@@ -394,7 +390,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	}
 
 	__setup_mapping_info(cmd);
-	dm_bitset_info_init(cmd->tm, &cmd->discard_info);
+	dm_disk_bitset_init(cmd->tm, &cmd->discard_info);
 	sb_flags = le32_to_cpu(disk_super->flags);
 	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
 	return dm_bm_unlock(sblock);
@@ -563,7 +559,6 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	if (mutator)
 		update_flags(disk_super, mutator);
 
-	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->hint_root = cpu_to_le64(cmd->hint_root);
 	disk_super->discard_root = cpu_to_le64(cmd->discard_root);
@@ -793,10 +788,9 @@ static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
 	int r;
 	__le64 value = pack_value(0, 0);
 
-	debug("__remove %lu\n", (unsigned long) oblock);
 	__dm_bless_for_disk(&value);
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
-			 &value, &cmd->root);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
+			       &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -822,8 +816,8 @@ static int __insert(struct dm_cache_metadata *cmd,
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
-			 &value, &cmd->root);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
+			       &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -877,8 +871,8 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 
 	if (flags & M_VALID) {
 		if (thunk->hints_valid) {
-			r = dm_array_get(&cmd->hint_info, cmd->hint_root,
-					 cblock, &hint_value);
+			r = dm_array_get_value(&cmd->hint_info, cmd->hint_root,
+					       cblock, &hint_value);
 			if (r && r != -ENODATA)
 				return r;
 		}
@@ -911,11 +905,9 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd, const char *policy_nam
 {
 	int r;
 
-	debug("> dm_cache_load_mappings\n");
 	down_read(&cmd->root_lock);
 	r = __load_mappings(cmd, policy_name, fn, context);
 	up_read(&cmd->root_lock);
-	debug("< dm_cache_load_mappings\n");
 
 	return r;
 }
@@ -968,7 +960,7 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 	dm_oblock_t oblock;
 	__le64 value;
 
-	r = dm_array_get(&cmd->info, cmd->root, from_cblock(cblock), &value);
+	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(cblock), &value);
 	if (r)
 		return r;
 
@@ -981,8 +973,8 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 	value = pack_value(oblock, flags | (dirty ? M_DIRTY : 0));
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->info, cmd->root, from_cblock(cblock),
-			 &value, &cmd->root);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
+			       &value, &cmd->root);
 	if (r)
 		return r;
 
@@ -1115,8 +1107,8 @@ static int save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock,
 	__le32 value = cpu_to_le32(hint);
 	__dm_bless_for_disk(&value);
 
-	r = dm_array_set(&cmd->hint_info, cmd->hint_root,
-			 from_cblock(cblock), &value, &cmd->hint_root);
+	r = dm_array_set_value(&cmd->hint_info, cmd->hint_root,
+			       from_cblock(cblock), &value, &cmd->hint_root);
 	cmd->changed = true;
 
 	return r;

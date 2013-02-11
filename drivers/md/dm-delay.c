@@ -198,8 +198,8 @@ out:
 	mutex_init(&dc->timer_lock);
 	atomic_set(&dc->may_delay, 1);
 
-	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
+	ti->num_flush_bios = 1;
+	ti->num_discard_bios = 1;
 	ti->private = dc;
 	return 0;
 
@@ -337,7 +337,7 @@ out:
 
 static struct target_type delay_target = {
 	.name	     = "delay",
-	.version     = {1, 1, 0},
+	.version     = {1, 2, 0},
 	.module      = THIS_MODULE,
 	.ctr	     = delay_ctr,
 	.dtr	     = delay_dtr,

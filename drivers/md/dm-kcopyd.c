@@ -585,6 +585,7 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 		   unsigned int flags, dm_kcopyd_notify_fn fn, void *context)
 {
 	struct kcopyd_job *job;
+	int i;
 
 	/*
 	 * Allocate an array of jobs consisting of one master job
@@ -608,22 +609,19 @@ int dm_kcopyd_copy(struct dm_kcopyd_client *kc, struct dm_io_region *from,
 		job->pages = NULL;
 		job->rw = READ;
 	} else {
-		int i;
-
 		memset(&job->source, 0, sizeof job->source);
 		job->source.count = job->dests[0].count;
 		job->pages = &zero_page_list;
-		job->rw = WRITE;
+
 		/*
-		 * Optimize zeroing via WRITE SAME if all dests support it.
+		 * Use WRITE SAME to optimize zeroing if all dests support it.
 		 */
-		job->rw |= REQ_WRITE_SAME;
-		for (i = 0; i < job->num_dests; i++) {
+		job->rw = WRITE | REQ_WRITE_SAME;
+		for (i = 0; i < job->num_dests; i++)
 			if (!bdev_write_same(job->dests[i].bdev)) {
-				job->rw &= ~REQ_WRITE_SAME;
+				job->rw = WRITE;
 				break;
 			}
-		}
 	}
 
 	job->fn = fn;

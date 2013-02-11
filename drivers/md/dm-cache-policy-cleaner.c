@@ -385,7 +385,8 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 }
 
 #if 0
-static int wb_status(struct dm_cache_policy *pe, status_type_t type, unsigned status_flags, char *result, unsigned maxlen)
+static int wb_status(struct dm_cache_policy *pe, status_type_t type,
+		     unsigned status_flags, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	struct policy *p = to_policy(pe);
@@ -459,7 +460,7 @@ static struct dm_cache_policy_type wb_policy_type = {
 	.name = "cleaner",
 	.hint_size = 0,
 	.owner = THIS_MODULE,
-        .create = wb_create
+	.create = wb_create
 };
 
 static int __init wb_init(void)
@@ -475,8 +476,6 @@ static void __exit wb_exit(void)
 module_init(wb_init);
 module_exit(wb_exit);
 
-MODULE_AUTHOR("Heinz Mauelshagen");
+MODULE_AUTHOR("Heinz Mauelshagen <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("cleaner cache policy");
-
-/*----------------------------------------------------------------------------*/

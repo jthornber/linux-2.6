@@ -295,9 +295,11 @@ static int validate_region_size(struct raid_set *rs, unsigned long region_size)
 		 * Choose a reasonable default.  All figures in sectors.
 		 */
 		if (min_region_size > (1 << 13)) {
+			/* If not a power of 2, make it the next power of 2 */
+			if (min_region_size & (min_region_size - 1))
+				region_size = 1 << fls(region_size);
 			DMINFO("Choosing default region size of %lu sectors",
 			       region_size);
-			region_size = min_region_size;
 		} else {
 			DMINFO("Choosing default region size of 4MiB");
 			region_size = 1 << 13; /* sectors */
@@ -1176,7 +1178,7 @@ static int raid_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	INIT_WORK(&rs->md.event_work, do_table_event);
 	ti->private = rs;
-	ti->num_flush_requests = 1;
+	ti->num_flush_bios = 1;
 
 	mutex_lock(&rs->md.reconfig_mutex);
 	ret = md_run(&rs->md);
@@ -1430,7 +1432,7 @@ static void raid_resume(struct dm_target *ti)
 
 static struct target_type raid_target = {
 	.name = "raid",
-	.version = {1, 3, 1},
+	.version = {1, 4, 0},
 	.module = THIS_MODULE,
 	.ctr = raid_ctr,
 	.dtr = raid_dtr,

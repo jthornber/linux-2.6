@@ -1072,8 +1072,8 @@ static int mirror_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (r)
 		goto err_free_context;
 
-	ti->num_flush_requests = 1;
-	ti->num_discard_requests = 1;
+	ti->num_flush_bios = 1;
+	ti->num_discard_bios = 1;
 	ti->per_bio_data_size = sizeof(struct dm_raid1_bio_record);
 	ti->discard_zeroes_data_unsupported = true;
 
@@ -1403,7 +1403,7 @@ static int mirror_iterate_devices(struct dm_target *ti,
 
 static struct target_type mirror_target = {
 	.name	 = "mirror",
-	.version = {1, 12, 1},
+	.version = {1, 13, 1},
 	.module	 = THIS_MODULE,
 	.ctr	 = mirror_ctr,
 	.dtr	 = mirror_dtr,

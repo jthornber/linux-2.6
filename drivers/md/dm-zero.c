@@ -25,7 +25,7 @@ static int zero_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	/*
 	 * Silently drop discards, avoiding -EOPNOTSUPP.
 	 */
-	ti->num_discard_requests = 1;
+	ti->num_discard_bios = 1;
 
 	return 0;
 }
@@ -55,7 +55,7 @@ static int zero_map(struct dm_target *ti, struct bio *bio)
 
 static struct target_type zero_target = {
 	.name   = "zero",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.module = THIS_MODULE,
 	.ctr    = zero_ctr,
 	.map    = zero_map,
