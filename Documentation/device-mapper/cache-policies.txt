@@ -1,0 +1,152 @@
+
+* Overview of given cache replacement policies
+
+  o dm-cache-policy-mq.c with the 'mq' aka 'default' policy:
+    multiqueue policy with two times 16 queues, one set for entries waiting
+    for the cache and another one for those in the cache, aging cache entries
+    in those queues based on logical time. Entry into cache is based on
+    variable thresholds and queue selection is based on hit count on entry;
+    aims to take different cache miss costs into account and
+    to adjust to varying load patterns automatically;
+    prefered, thus default replacement policy unless specific loads need
+    better addressing by other policies described below
+
+  o dm-cache-policy-basic.c with the following shared infrastructure policies:
+    provides two tracking queues for entries waiting for cache blocks and
+    entries evicted frm the cache; the former queue allows for prioritizing
+    entries based on variable thresholds to get promoted to the cache either
+    on hit count or working set size (see respective policy description below)
+    (ie. how many read/write hits an entry takes or how many sectors
+    are read/written from/to an entry), the latter queue allows to retrieve
+    hit count/working set size on cache reentry, thus prioritizing formerly
+    evicted entries over completely new ones by adding their former counts
+    back in; aims to take different cache miss costs into account
+
+    x fifo:
+      first in first out (same as 'last in last out');
+      suits loads where the oldest entry is likely _not_
+      to be referenced shortly
+
+    x filo:
+      first in last out (same as 'last in first out')
+      suits loads where the oldest entry is likely to
+      be referenced shortly
+
+    x lru:
+      least recently used;
+      cache entries are being ordered by access;
+      the entry with the oldest hit gets evicted;
+      suits loads where the least recently used entry is unlikely to
+      be referenced shortly
+
+    x mru:
+      most recently used;
+      cache entries are being ordered by access;
+      the entry with the newest hit gets evicted;
+      suits loads where the most recently used entry is unlikely to
+      get referenced shortly
+
+    x lfu:
+      least frequently used;
+      cache entries are being ordered by hit count;
+      the entry with the lowest hit count gets evicted;
+      enhances on lru and suits loads where the least frequently used
+      entry is unlikely to get reused shortly
+
+    x mfu:
+      most frequently used;
+      cache entries are being ordered by hit count;
+      the entry with the highest hit count gets evicted;
+      enhances on mru and suits loads where the most frequently used
+      entry is unlikely to get reused shortly
+
+    x lfu_ws:
+      least frequently used work set;
+      cache entries are being ordered by work set (ie. sum of sectors read/written);
+      the entry with the lowest sector count gets evicted;
+      enhances on lfu and suits loads where the least frequently used
+      entry is unlikely to get reused shortly;
+      suits varying io sizes better than lfu
+
+    x mfu_ws:
+      most frequently used work set;
+      cache entries are being ordered by work set (ie. sum of sectors read/written);
+      the entry with the highest sector count gets evicted;
+      enhances on lfu and suits loads where the least
+      frequently used entry is unlikely to get reused shortly;
+      suits varying io sizes better than mfu
+
+    x multiqueue:
+      allocates a variable number of queues depending on the amout of
+      total cache entries;
+      queue selection on entry is based on hit count;
+      expiring of cache entries based on configurable real time thresholds
+      rather than logical time ones as with 'mq';
+
+    x multiqueue_ws:
+      multi queue work set;
+      like multiqueue but queue insertions and priorities based on work set size(
+      (ie. sum of sectors read/written) rether than hit count;
+      expiring of cache entries based on configurable real time thresholds
+      rather than logical time ones as with 'mq';
+      suits varying io sizes better than multiqueue;
+
+    x random:
+      randomly picks an entry to evict;
+      admits stochastic replacement, thus suitable to varying loads
+
+    Experimental ones:
+    x q2:
+      single lru queue; similar to lru
+
+    x twoqueue:
+      two queues where a maximum of 25% entries is allowed on the first queue
+
+    x noop:
+      does what it says for testing/performance comparison;
+      no caching or tracking at all;
+      always reports cache miss thus causing direct io to/from the origin device;
+      compare with any cache replacement policy; your policy should be faster
+
+    x dumb:
+      no operation, just one fifo list and no in/out queue tracking of entries,
+      thus no prioritization on cache entry/eviction;
+      like a high water mark to compare to with any other policy;
+      any decent cache replacement policy is faster than this one
+
+
+
+* Constructor arguments and messages accepted
+
+  o all aforementioned policies but 'dumb' and 'noop' support io_tracker sequential
+    and random thresholds defaulting to 512 and 4.
+  
+    Large, sequential ios are probably better left on the origin device since
+    spindles tend to have good bandwidth. The io_tracker tries to spot when
+    the io is in one of these sequential modes.
+  
+    Message/constructor argument pairs are 'sequential_threshold <#nr_sequential>'
+    and 'random_threshold <#nr_random>'
+  
+    Message syntax using the dmsetup command is, eg.:
+    dmsetup message <mapped device> 0 set_config sequential_threshold 1024
+    - or -
+    dmsetup message <mapped device> 0 set_config random_threshold 8
+  
+    Constructor syntax is:
+    cache <metadata dev> <cache dev> <origin dev> <block size>
+          <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
+  
+    Eg. "cache /dev/sdb /dev/sdc /dev/sdd 512 0 mq 4 sequential_threshold 1024 random_threshold 8", ie. with dmsetup command
+    dmsetup create blah --table "0 268435456 cache /dev/sdb /dev/sdc /dev/sdd 512 0 mq 4 sequential_threshold 1024 random_threshold 8"
+    would create a 128GB large mapped device named 'blah' with those two
+    policy argument pairs applied.
+
+  o multiqueue and multiqueue_ws:
+    support the 'multiqueue_timout #milliseconds' message and constructor
+    argument pair allowing to set the lifetime in any of the multiple queues.
+
+  o all module policies but 'mq' (aka 'default'), 'noop' and 'dump':
+    support the 'hits [01]' message and constructor argument pair to
+    disable/enable hits or work set size (ie. sum of sectors read/written
+    whilst on the pre cache queue) based cache promotion threshold processing.
