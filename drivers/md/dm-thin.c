@@ -1959,7 +1959,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	unsigned long block_size;
 	dm_block_t low_water_blocks;
 	struct dm_dev *metadata_dev;
-	sector_t metadata_dev_size;
 
 	/*
 	 * FIXME Remove validation from scope of lock.
@@ -1979,7 +1978,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata block device";
 		goto out_unlock;
 	}
-	metadata_dev_size = get_metadata_dev_size(metadata_dev->bdev);
+	(void) get_metadata_dev_size(metadata_dev->bdev);
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -2139,8 +2138,7 @@ static int maybe_resize_data_dev(struct dm_target *ti, int *need_commit)
 			return r;
 		}
 
-		(void) commit_or_fallback(pool);
-		*need_commit = 1; /* FIXME: ??? */
+		*need_commit = 1;
 	}
 
 	return 0;
@@ -2153,7 +2151,6 @@ static int maybe_resize_metadata_dev(struct dm_target *ti, int *need_commit)
 	struct pool *pool = pt->pool;
 	dm_block_t md_size, sb_md_size;
 
-	*need_commit = 0;
 	md_size = get_metadata_dev_size(pool->md_dev);
 
 	r = dm_pool_get_metadata_dev_size(pool->pmd, &sb_md_size);
@@ -2163,7 +2160,7 @@ static int maybe_resize_metadata_dev(struct dm_target *ti, int *need_commit)
 	}
 
 	if (md_size < sb_md_size) {
-		DMERR("metadata device too small, is %llu sectors (expected %llu)",
+		DMERR("metadata device too small, is %llu blocks (expected %llu)",
 		      md_size, sb_md_size);
 		return -EINVAL;
 
@@ -2171,6 +2168,8 @@ static int maybe_resize_metadata_dev(struct dm_target *ti, int *need_commit)
 		r = dm_pool_resize_metadata_dev(pool->pmd, md_size);
 		if (r) {
 			DMERR("failed to resize metadata device");
+			/* FIXME Stricter than necessary: Rollback transaction instead here */
+			set_pool_mode(pool, PM_READ_ONLY);
 			return r;
 		}
 
@@ -2193,7 +2192,7 @@ static int maybe_resize_metadata_dev(struct dm_target *ti, int *need_commit)
  */
 static int pool_preresume(struct dm_target *ti)
 {
-	int r, need_commit1, need_commit2;
+	int r, need_commit1 = 0, need_commit2 = 0;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
@@ -2212,12 +2211,8 @@ static int pool_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	if (need_commit1 || need_commit2) {
-		r = commit(pool);
-		if (r)
-			/* FIXME: fail mode ? */
-			return r;
-	}
+	if (need_commit1 || need_commit2)
+		(void) commit_or_fallback(pool);
 
 	return 0;
 }
