@@ -283,6 +283,10 @@ static struct dm_cache_migration *prealloc_get_migration(struct prealloc *p)
 	return mg;
 }
 
+/*
+ * You must have a cell within the prealloc struct to return.  If not this
+ * function will BUG() rather than returning NULL.
+ */
 static struct dm_bio_prison_cell *prealloc_get_cell(struct prealloc *p)
 {
 	struct dm_bio_prison_cell *r = NULL;
@@ -300,6 +304,10 @@ static struct dm_bio_prison_cell *prealloc_get_cell(struct prealloc *p)
 	return r;
 }
 
+/*
+ * You can't have more than two cells in a prealloc struct.  BUG() will be
+ * called if you try and overfill.
+ */
 static void prealloc_put_cell(struct prealloc *p, struct dm_bio_prison_cell *cell)
 {
 	if (!p->cell2)
