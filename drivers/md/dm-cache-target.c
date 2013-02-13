@@ -403,7 +403,7 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 	sector_t tmp = cache->discard_block_size;
 	dm_block_t b = from_oblock(oblock);
 
-	do_div(tmp, cache->sectors_per_block);
+	sector_div(tmp, cache->sectors_per_block);
 	do_div(b, tmp);
 	return to_dblock(b);
 }
@@ -989,7 +989,7 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
-	do_div(end_block, cache->discard_block_size);
+	sector_div(end_block, cache->discard_block_size);
 
 	for (b = start_block; b < end_block; b++)
 		set_discard(cache, to_dblock(b));
@@ -1721,7 +1721,7 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 static bool too_many_discard_blocks(sector_t block_size,
 				    sector_t origin_size)
 {
-	do_div(origin_size, block_size);
+	sector_div(origin_size, block_size);
 	return origin_size > MAX_DISCARD_BLOCKS;
 }
 
@@ -1783,7 +1783,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	/* FIXME: factor out this whole section */
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
-	do_div(origin_blocks, ca->block_size);
+	sector_div(origin_blocks, ca->block_size);
 	cache->origin_blocks = to_oblock(origin_blocks);
 
 	cache->sectors_per_block = ca->block_size;
