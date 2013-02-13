@@ -9,13 +9,9 @@
 #include "dm-cache-metadata.h"
 #include "dm-cache-policy-internal.h"
 
-#include <asm/div64.h>
-
-#include <linux/blkdev.h>
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
 #include <linux/init.h>
-#include <linux/list.h>
 #include <linux/mempool.h>
 #include <linux/module.h>
 #include <linux/slab.h>
