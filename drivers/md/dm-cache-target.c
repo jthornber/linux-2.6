@@ -979,8 +979,7 @@ static void process_flush_bio(struct cache *cache, struct bio *bio)
  * mark off blocks on the discard bitset.  No passdown occurs!
  *
  * To implement passdown we need to change the bio_prison such that a cell
- * can have a key that spans many blocks.  This change is planned for
- * thin-provisioning.
+ * can have a key that spans many blocks.
  */
 static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
