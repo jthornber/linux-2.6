@@ -1660,20 +1660,29 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	as.argc = argc;
 	as.argv = argv;
 
-#define parse(name)					\
-	do {						\
-		r = parse_ ## name(ca, &as, error);	\
-		if (r)					\
-			return r;			\
-	} while (0)
+	r = parse_metadata_dev(ca, &as, error);
+	if (r)
+		return r;
 
-	parse(metadata_dev);
-	parse(cache_dev);
-	parse(origin_dev);
-	parse(block_size);
-	parse(features);
-	parse(policy);
-#undef parse
+	r = parse_cache_dev(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_origin_dev(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_block_size(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_features(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_policy(ca, &as, error);
+	if (r)
+		return r;
 
 	return 0;
 }
