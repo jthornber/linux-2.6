@@ -714,7 +714,7 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 	struct cache *cache = mg->cache;
 
 	if (mg->writeback) {
-		DMWARN("shouldn't get here");
+		DMWARN("writeback unexpectedly triggered commit");
 		return;
 
 	} else if (mg->demote) {
