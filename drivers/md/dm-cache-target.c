@@ -1689,7 +1689,7 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 /*----------------------------------------------------------------*/
 
-static struct kmem_cache *_migration_cache;
+static struct kmem_cache *migration_cache;
 
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
@@ -1866,7 +1866,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
-							 _migration_cache);
+							 migration_cache);
 	if (!cache->migration_pool) {
 		*error = "Error creating cache's migration mempool";
 		goto bad;
@@ -2439,8 +2439,8 @@ static int __init dm_cache_init(void)
 
 	r = -ENOMEM;
 
-	_migration_cache = KMEM_CACHE(dm_cache_migration, 0);
-	if (!_migration_cache) {
+	migration_cache = KMEM_CACHE(dm_cache_migration, 0);
+	if (!migration_cache) {
 		dm_unregister_target(&cache_target);
 		return r;
 	}
@@ -2451,7 +2451,7 @@ static int __init dm_cache_init(void)
 static void dm_cache_exit(void)
 {
 	dm_unregister_target(&cache_target);
-	kmem_cache_destroy(_migration_cache);
+	kmem_cache_destroy(migration_cache);
 }
 
 module_init(dm_cache_init);
