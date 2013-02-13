@@ -1482,23 +1482,15 @@ static void destroy_cache_args(struct cache_args *ca)
 	kfree(ca);
 }
 
-static int ensure_args__(struct dm_arg_set *as,
-		       unsigned count, char **error)
+static bool at_least_one_arg(struct dm_arg_set *as, char **error)
 {
-	if (as->argc < count) {
+	if (!as->argc) {
 		*error = "Insufficient args";
-		return -EINVAL;
+		return true;
 	}
 
-	return 0;
+	return false;
 }
-
-#define ensure_args(n)					\
-	do {						\
-		r = ensure_args__(as, n, error);	\
-		if (r)					\
-			return r;			\
-	} while (0)
 
 static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 			      char **error)
@@ -1507,7 +1499,8 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
 
-	ensure_args(1);
+	if (!at_least_one_arg(as, error))
+		return -EINVAL;
 
 	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE,
 			  &ca->metadata_dev);
@@ -1529,7 +1522,9 @@ static int parse_cache_dev(struct cache_args *ca, struct dm_arg_set *as,
 {
 	int r;
 
-	ensure_args(1);
+	if (!at_least_one_arg(as, error))
+		return -EINVAL;
+
 	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE,
 			  &ca->cache_dev);
 	if (r) {
@@ -1546,7 +1541,9 @@ static int parse_origin_dev(struct cache_args *ca, struct dm_arg_set *as,
 {
 	int r;
 
-	ensure_args(1);
+	if (!at_least_one_arg(as, error))
+		return -EINVAL;
+
 	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE,
 			  &ca->origin_dev);
 	if (r) {
@@ -1566,10 +1563,11 @@ static int parse_origin_dev(struct cache_args *ca, struct dm_arg_set *as,
 static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 			    char **error)
 {
-	int r;
 	unsigned long tmp;
 
-	ensure_args(1);
+	if (!at_least_one_arg(as, error))
+		return -EINVAL;
+
 	if (kstrtoul(dm_shift_arg(as), 10, &tmp) || !tmp ||
 	    tmp < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
 	    tmp & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
@@ -1637,7 +1635,10 @@ static int parse_policy(struct cache_args *ca, struct dm_arg_set *as,
 	};
 
 	int r;
-	ensure_args(1);
+
+	if (!at_least_one_arg(as, error))
+		return -EINVAL;
+
 	ca->policy_name = dm_shift_arg(as);
 
 	r = dm_read_arg_group(_args, as, &ca->policy_argc, error);
