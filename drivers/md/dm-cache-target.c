@@ -1763,6 +1763,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
+	memcpy(&cache->features, &ca->features, sizeof(cache->features));
+
 	if (cache->features.write_through)
 		ti->num_write_bios = cache_num_write_bios;
 
@@ -1774,8 +1776,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->cache_dev = ca->cache_dev;
 
 	ca->metadata_dev = ca->origin_dev = ca->cache_dev = NULL;
-
-	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 
 	/* FIXME: factor out this whole section */
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
