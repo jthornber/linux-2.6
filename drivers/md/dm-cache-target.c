@@ -459,7 +459,7 @@ static void load_stats(struct cache *cache)
 {
 	struct dm_cache_statistics stats;
 
-	dm_cache_get_stats(cache->cmd, &stats);
+	dm_cache_metadata_get_stats(cache->cmd, &stats);
 	atomic_set(&cache->stats.read_hit, stats.read_hits);
 	atomic_set(&cache->stats.read_miss, stats.read_misses);
 	atomic_set(&cache->stats.write_hit, stats.write_hits);
@@ -475,7 +475,7 @@ static void save_stats(struct cache *cache)
 	stats.write_hits = atomic_read(&cache->stats.write_hit);
 	stats.write_misses = atomic_read(&cache->stats.write_miss);
 
-	dm_cache_set_stats(cache->cmd, &stats);
+	dm_cache_metadata_set_stats(cache->cmd, &stats);
 }
 
 /*----------------------------------------------------------------
