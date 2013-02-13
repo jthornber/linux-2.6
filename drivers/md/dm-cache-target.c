@@ -80,6 +80,19 @@ struct cache_features {
 	bool write_through:1;
 };
 
+struct cache_stats {
+	atomic_t read_hit;
+	atomic_t read_miss;
+	atomic_t write_hit;
+	atomic_t write_miss;
+	atomic_t demotion;
+	atomic_t promotion;
+	atomic_t copies_avoided;
+	atomic_t cache_cell_clash;
+	atomic_t commit_count;
+	atomic_t discard_count;
+};
+
 struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -169,16 +182,7 @@ struct cache {
 	bool loaded_mappings:1;
 	bool loaded_discards:1;
 
-	atomic_t read_hit;
-	atomic_t read_miss;
-	atomic_t write_hit;
-	atomic_t write_miss;
-	atomic_t demotion;
-	atomic_t promotion;
-	atomic_t copies_avoided;
-	atomic_t cache_cell_clash;
-	atomic_t commit_count;
-	atomic_t discard_count;
+	struct cache_stats stats;
 };
 
 struct per_bio_data {
@@ -400,7 +404,7 @@ static void set_discard(struct cache *cache, dm_dblock_t b)
 {
 	unsigned long flags;
 
-	atomic_inc(&cache->discard_count);
+	atomic_inc(&cache->stats.discard_count);
 
 	spin_lock_irqsave(&cache->lock, flags);
 	set_bit(from_dblock(b), cache->discard_bitset);
@@ -448,20 +452,20 @@ static void load_stats(struct cache *cache)
 	struct dm_cache_statistics stats;
 
 	dm_cache_get_stats(cache->cmd, &stats);
-	atomic_set(&cache->read_hit, stats.read_hits);
-	atomic_set(&cache->read_miss, stats.read_misses);
-	atomic_set(&cache->write_hit, stats.write_hits);
-	atomic_set(&cache->write_miss, stats.write_misses);
+	atomic_set(&cache->stats.read_hit, stats.read_hits);
+	atomic_set(&cache->stats.read_miss, stats.read_misses);
+	atomic_set(&cache->stats.write_hit, stats.write_hits);
+	atomic_set(&cache->stats.write_miss, stats.write_misses);
 }
 
 static void save_stats(struct cache *cache)
 {
 	struct dm_cache_statistics stats;
 
-	stats.read_hits = atomic_read(&cache->read_hit);
-	stats.read_misses = atomic_read(&cache->read_miss);
-	stats.write_hits = atomic_read(&cache->write_hit);
-	stats.write_misses = atomic_read(&cache->write_miss);
+	stats.read_hits = atomic_read(&cache->stats.read_hit);
+	stats.read_misses = atomic_read(&cache->stats.read_miss);
+	stats.write_hits = atomic_read(&cache->stats.write_hit);
+	stats.write_misses = atomic_read(&cache->stats.write_miss);
 
 	dm_cache_set_stats(cache->cmd, &stats);
 }
@@ -770,7 +774,7 @@ static void issue_copy_real(struct dm_cache_migration *mg)
 
 static void avoid_copy(struct dm_cache_migration *mg)
 {
-	atomic_inc(&mg->cache->copies_avoided);
+	atomic_inc(&mg->cache->stats.copies_avoided);
 	migration_success_pre_commit(mg);
 }
 
@@ -1002,13 +1006,13 @@ static bool is_writethrough_io(struct cache *cache, struct bio *bio,
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
 {
 	atomic_inc(bio_data_dir(bio) == READ ?
-		   &cache->read_hit : &cache->write_hit);
+		   &cache->stats.read_hit : &cache->stats.write_hit);
 }
 
 static void inc_miss_counter(struct cache *cache, struct bio *bio)
 {
 	atomic_inc(bio_data_dir(bio) == READ ?
-		   &cache->read_miss : &cache->write_miss);
+		   &cache->stats.read_miss : &cache->stats.write_miss);
 }
 
 static void process_bio(struct cache *cache, struct prealloc *structs,
@@ -1075,7 +1079,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		break;
 
 	case POLICY_NEW:
-		atomic_inc(&cache->promotion);
+		atomic_inc(&cache->stats.promotion);
 		promote(cache, structs, block, lookup_result.cblock, new_ocell);
 		release_cell = false;
 		break;
@@ -1093,11 +1097,11 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 			 */
 			policy_force_mapping(cache->policy, block,
 					     lookup_result.old_oblock);
-			atomic_inc(&cache->cache_cell_clash);
+			atomic_inc(&cache->stats.cache_cell_clash);
 			break;
 		}
-		atomic_inc(&cache->demotion);
-		atomic_inc(&cache->promotion);
+		atomic_inc(&cache->stats.demotion);
+		atomic_inc(&cache->stats.promotion);
 
 		demote_then_promote(cache, structs, lookup_result.old_oblock,
 				    block, lookup_result.cblock,
@@ -1125,7 +1129,7 @@ static int commit_if_needed(struct cache *cache)
 {
 	if (dm_cache_changed_this_transaction(cache->cmd) &&
 	    (cache->commit_requested || need_commit_due_to_time(cache))) {
-		atomic_inc(&cache->commit_count);
+		atomic_inc(&cache->stats.commit_count);
 		cache->last_commit_jiffies = jiffies;
 		cache->commit_requested = false;
 		return dm_cache_commit(cache->cmd, false);
@@ -1405,16 +1409,16 @@ static void cache_dtr(struct dm_target *ti)
 	struct cache *cache = ti->private;
 
 	pr_alert("dm-cache statistics:\n");
-	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->read_hit));
-	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->read_miss));
-	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->write_hit));
-	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->write_miss));
-	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&cache->demotion));
-	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&cache->promotion));
-	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&cache->copies_avoided));
-	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->cache_cell_clash));
-	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->commit_count));
-	pr_alert("discards:\t\t%u\n", (unsigned) atomic_read(&cache->discard_count));
+	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->stats.read_hit));
+	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->stats.read_miss));
+	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->stats.write_hit));
+	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->stats.write_miss));
+	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&cache->stats.demotion));
+	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&cache->stats.promotion));
+	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&cache->stats.copies_avoided));
+	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->stats.cache_cell_clash));
+	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->stats.commit_count));
+	pr_alert("discards:\t\t%u\n", (unsigned) atomic_read(&cache->stats.discard_count));
 
 	destroy(cache);
 }
@@ -1881,12 +1885,12 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	load_stats(cache);
 
-	atomic_set(&cache->demotion, 0);
-	atomic_set(&cache->promotion, 0);
-	atomic_set(&cache->copies_avoided, 0);
-	atomic_set(&cache->cache_cell_clash, 0);
-	atomic_set(&cache->commit_count, 0);
-	atomic_set(&cache->discard_count, 0);
+	atomic_set(&cache->stats.demotion, 0);
+	atomic_set(&cache->stats.promotion, 0);
+	atomic_set(&cache->stats.copies_avoided, 0);
+	atomic_set(&cache->stats.cache_cell_clash, 0);
+	atomic_set(&cache->stats.commit_count, 0);
+	atomic_set(&cache->stats.discard_count, 0);
 
 	*result = cache;
 	return 0;
@@ -2290,12 +2294,12 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u %llu",
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
-		       (unsigned) atomic_read(&cache->read_hit),
-		       (unsigned) atomic_read(&cache->read_miss),
-		       (unsigned) atomic_read(&cache->write_hit),
-		       (unsigned) atomic_read(&cache->write_miss),
-		       (unsigned) atomic_read(&cache->demotion),
-		       (unsigned) atomic_read(&cache->promotion),
+		       (unsigned) atomic_read(&cache->stats.read_hit),
+		       (unsigned) atomic_read(&cache->stats.read_miss),
+		       (unsigned) atomic_read(&cache->stats.write_hit),
+		       (unsigned) atomic_read(&cache->stats.write_miss),
+		       (unsigned) atomic_read(&cache->stats.demotion),
+		       (unsigned) atomic_read(&cache->stats.promotion),
 		       (unsigned long long) from_cblock(residency),
 		       cache->nr_dirty,
 		       (unsigned long long) cache->migration_threshold);
