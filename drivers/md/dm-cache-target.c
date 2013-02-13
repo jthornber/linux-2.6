@@ -1414,19 +1414,6 @@ static void destroy(struct cache *cache)
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
-
-	pr_alert("dm-cache statistics:\n");
-	pr_alert("read hits:\t%u\n", (unsigned) atomic_read(&cache->stats.read_hit));
-	pr_alert("read misses:\t%u\n", (unsigned) atomic_read(&cache->stats.read_miss));
-	pr_alert("write hits:\t%u\n", (unsigned) atomic_read(&cache->stats.write_hit));
-	pr_alert("write misses:\t%u\n", (unsigned) atomic_read(&cache->stats.write_miss));
-	pr_alert("demotions:\t%u\n", (unsigned) atomic_read(&cache->stats.demotion));
-	pr_alert("promotions:\t%u\n", (unsigned) atomic_read(&cache->stats.promotion));
-	pr_alert("copies avoided:\t%u\n", (unsigned) atomic_read(&cache->stats.copies_avoided));
-	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->stats.cache_cell_clash));
-	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->stats.commit_count));
-	pr_alert("discards:\t\t%u\n", (unsigned) atomic_read(&cache->stats.discard_count));
-
 	destroy(cache);
 }
 
