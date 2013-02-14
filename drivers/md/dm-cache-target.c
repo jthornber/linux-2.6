@@ -2332,6 +2332,8 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	return r;
 }
 
+#define NOT_CORE_OPTION 1
+
 static int process_config_option(struct cache *cache, char **argv)
 {
 	if (!strcasecmp(argv[1], "migration_threshold")) {
@@ -2343,25 +2345,26 @@ static int process_config_option(struct cache *cache, char **argv)
 		cache->migration_threshold = tmp;
 
 	} else
-		return 1; /* Inform caller it's not our option. */
+		return NOT_CORE_OPTION;
 
 	return 0;
 }
 
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r = 0;
+	int r;
 	struct cache *cache = ti->private;
 
 	if (argc != 3)
 		return -EINVAL;
 
-	r = !strcasecmp(argv[0], "set_config") ? process_config_option(cache, argv) : 1;
+	if (!strcasecmp(argv[0], "set_config")) {
+		r = process_config_option(cache, argv);
+		if (r != NOT_CORE_OPTION)
+			return r;
+	}
 
-	if (r == 1) /* Message is for the target -> hand over to policy plugin. */
-		r = policy_message(cache->policy, argc, argv);
-
-	return r;
+	return policy_message(cache->policy, argc, argv);
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
