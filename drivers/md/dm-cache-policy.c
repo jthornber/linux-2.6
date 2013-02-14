@@ -132,8 +132,8 @@ void dm_cache_policy_destroy(struct dm_cache_policy *p)
 {
 	struct dm_cache_policy_type *t = p->private;
 
-	put_policy(t);
 	p->destroy(p);
+	put_policy(t);
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_destroy);
 
