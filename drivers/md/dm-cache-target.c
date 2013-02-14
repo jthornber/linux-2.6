@@ -1486,10 +1486,10 @@ static bool at_least_one_arg(struct dm_arg_set *as, char **error)
 {
 	if (!as->argc) {
 		*error = "Insufficient args";
-		return true;
+		return false;
 	}
 
-	return false;
+	return true;
 }
 
 static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
