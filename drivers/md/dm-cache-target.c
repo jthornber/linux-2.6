@@ -2454,7 +2454,7 @@ static int __init dm_cache_init(void)
 	return 0;
 }
 
-static void dm_cache_exit(void)
+static void __exit dm_cache_exit(void)
 {
 	dm_unregister_target(&cache_target);
 	kmem_cache_destroy(migration_cache);
