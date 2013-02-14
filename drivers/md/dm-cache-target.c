@@ -2350,6 +2350,9 @@ static int process_config_option(struct cache *cache, char **argv)
 	return 0;
 }
 
+/*
+ * Supports set_config <key> <value>, or whatever your policy has implemented.
+ */
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
