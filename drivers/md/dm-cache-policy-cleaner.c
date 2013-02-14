@@ -380,26 +380,6 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 	return to_policy(pe)->nr_cblocks_allocated;
 }
 
-#if 0
-static int wb_status(struct dm_cache_policy *pe, status_type_t type,
-		     unsigned status_flags, char *result, unsigned maxlen)
-{
-	ssize_t sz = 0;
-	struct policy *p = to_policy(pe);
-
-	switch (type) {
-	case STATUSTYPE_INFO:
-		DMEMIT("%u", from_cblock(p->nr_dirty));
-		break;
-
-	case STATUSTYPE_TABLE:
-		break;
-	}
-
-	return 0;
-}
-#endif
-
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
@@ -415,10 +395,6 @@ static void init_policy_functions(struct policy *p)
 	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
-#if 0
-	p->policy.status = wb_status;
-	p->policy.message = NULL;
-#endif
 }
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
