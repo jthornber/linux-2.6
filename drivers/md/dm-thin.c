@@ -39,6 +39,14 @@
 #define MAX_DEV_ID ((1 << 24) - 1)
 
 /*
+ * Metadata low water mark.
+ *
+ * If the free blocks in the metadata device pass this threshold an event
+ * will be generated.
+ */
+#define METADATA_LOW_WATER_MARK 64
+
+/*
  * How do we handle breaking sharing of data blocks?
  * =================================================
  *
@@ -921,7 +929,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		return r;
 
 	if (free_blocks <= pool->low_water_blocks && !pool->low_water_triggered) {
-		DMWARN("%s: reached low water mark, sending event.",
+		DMWARN("%s: reached low water mark for data device, sending event.",
 		       dm_device_name(pool->pool_md));
 		spin_lock_irqsave(&pool->lock, flags);
 		pool->low_water_triggered = 1;
@@ -1907,6 +1915,28 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	return r;
 }
 
+static void metadata_low_callback(void *context)
+{
+	struct pool *pool = context;
+	DMWARN("%s: reached low water mark for metadata device, sending event.",
+	       dm_device_name(pool->pool_md));
+	dm_table_event(pool->ti->table);
+}
+
+static dm_block_t get_metadata_dev_size(struct block_device *bdev)
+{
+	sector_t md_size = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
+	char buffer[BDEVNAME_SIZE];
+
+	if (md_size > THIN_METADATA_MAX_SECTORS_WARNING) {
+		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
+		       bdevname(bdev, buffer), THIN_METADATA_MAX_SECTORS);
+		md_size = THIN_METADATA_MAX_SECTORS_WARNING;
+	}
+
+	return md_size / (THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
+}
+
 /*
  * thin-pool <metadata dev> <data dev>
  *	     <data block size (sectors)>
@@ -1929,8 +1959,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	unsigned long block_size;
 	dm_block_t low_water_blocks;
 	struct dm_dev *metadata_dev;
-	sector_t metadata_dev_size;
-	char b[BDEVNAME_SIZE];
 
 	/*
 	 * FIXME Remove validation from scope of lock.
@@ -1950,11 +1978,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata block device";
 		goto out_unlock;
 	}
-
-	metadata_dev_size = i_size_read(metadata_dev->bdev->bd_inode) >> SECTOR_SHIFT;
-	if (metadata_dev_size > THIN_METADATA_MAX_SECTORS_WARNING)
-		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
-		       bdevname(metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
+	(void) get_metadata_dev_size(metadata_dev->bdev);
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
 	if (r) {
@@ -2038,6 +2062,13 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	ti->private = pt;
 
+	r = dm_pool_register_metadata_threshold(pt->pool->pmd,
+						METADATA_LOW_WATER_MARK,
+						metadata_low_callback,
+						pool);
+	if (r)
+		goto out_free_pt;
+
 	pt->callbacks.congested_fn = pool_is_congested;
 	dm_table_add_target_callbacks(ti->table, &pt->callbacks);
 
@@ -2077,31 +2108,13 @@ static int pool_map(struct dm_target *ti, struct bio *bio)
 	return r;
 }
 
-/*
- * Retrieves the number of blocks of the data device from
- * the superblock and compares it to the actual device size,
- * thus resizing the data device in case it has grown.
- *
- * This both copes with opening preallocated data devices in the ctr
- * being followed by a resume
- * -and-
- * calling the resume method individually after userspace has
- * grown the data device in reaction to a table event.
- */
-static int pool_preresume(struct dm_target *ti)
+static int maybe_resize_data_dev(struct dm_target *ti, int *need_commit)
 {
 	int r;
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 	sector_t data_size = ti->len;
 	dm_block_t sb_data_size;
-
-	/*
-	 * Take control of the pool object.
-	 */
-	r = bind_control_target(pool, ti);
-	if (r)
-		return r;
 
 	(void) sector_div(data_size, pool->sectors_per_block);
 
@@ -2125,8 +2138,81 @@ static int pool_preresume(struct dm_target *ti)
 			return r;
 		}
 
-		(void) commit_or_fallback(pool);
+		*need_commit = 1;
 	}
+
+	return 0;
+}
+
+static int maybe_resize_metadata_dev(struct dm_target *ti, int *need_commit)
+{
+	int r;
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+	dm_block_t md_size, sb_md_size;
+
+	md_size = get_metadata_dev_size(pool->md_dev);
+
+	r = dm_pool_get_metadata_dev_size(pool->pmd, &sb_md_size);
+	if (r) {
+		DMERR("failed to retrieve data device size");
+		return r;
+	}
+
+	if (md_size < sb_md_size) {
+		DMERR("metadata device too small, is %llu blocks (expected %llu)",
+		      md_size, sb_md_size);
+		return -EINVAL;
+
+	} else if (md_size > sb_md_size) {
+		r = dm_pool_resize_metadata_dev(pool->pmd, md_size);
+		if (r) {
+			DMERR("failed to resize metadata device");
+			/* FIXME Stricter than necessary: Rollback transaction instead here */
+			set_pool_mode(pool, PM_READ_ONLY);
+			return r;
+		}
+
+		*need_commit = 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Retrieves the number of blocks of the data device from
+ * the superblock and compares it to the actual device size,
+ * thus resizing the data device in case it has grown.
+ *
+ * This both copes with opening preallocated data devices in the ctr
+ * being followed by a resume
+ * -and-
+ * calling the resume method individually after userspace has
+ * grown the data device in reaction to a table event.
+ */
+static int pool_preresume(struct dm_target *ti)
+{
+	int r, need_commit1 = 0, need_commit2 = 0;
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+
+	/*
+	 * Take control of the pool object.
+	 */
+	r = bind_control_target(pool, ti);
+	if (r)
+		return r;
+
+	r = maybe_resize_data_dev(ti, &need_commit1);
+	if (r)
+		return r;
+
+	r = maybe_resize_metadata_dev(ti, &need_commit2);
+	if (r)
+		return r;
+
+	if (need_commit1 || need_commit2)
+		(void) commit_or_fallback(pool);
 
 	return 0;
 }

@@ -509,6 +509,10 @@ static int grow_needs_more_blocks(struct resize *resize)
 	int r;
 
 	if (resize->old_nr_entries_in_last_block > 0) {
+		/*
+		 * FIXME: how does it know to extend the old tail block
+		 * rather than the new?  Write test case.
+		 */
 		r = grow_extend_tail_block(resize, resize->max_entries);
 		if (r)
 			return r;

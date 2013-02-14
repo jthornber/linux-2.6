@@ -10,7 +10,6 @@
 #include "dm.h"
 
 #include <linux/hash.h>
-#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 
@@ -92,7 +91,7 @@ static void free_hash(struct hash *hash)
 
 static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size)
 {
-	int r;
+	int r = -ENOMEM;
 
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
 	if (p->cblocks) {
@@ -107,9 +106,7 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size
 		r = alloc_hash(&p->chash, from_cblock(cache_size));
 		if (r)
 			vfree(p->cblocks);
-
-	} else
-		r = -ENOMEM;
+	}
 
 	return r;
 }
@@ -218,7 +215,6 @@ static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t
 
 	return r;
 }
-
 
 static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
 {
@@ -384,26 +380,6 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 	return to_policy(pe)->nr_cblocks_allocated;
 }
 
-#if 0
-static int wb_status(struct dm_cache_policy *pe, status_type_t type,
-		     unsigned status_flags, char *result, unsigned maxlen)
-{
-	ssize_t sz = 0;
-	struct policy *p = to_policy(pe);
-
-	switch (type) {
-	case STATUSTYPE_INFO:
-		DMEMIT("%u", from_cblock(p->nr_dirty));
-		break;
-
-	case STATUSTYPE_TABLE:
-		break;
-	}
-
-	return 0;
-}
-#endif
-
 /* Init the policy plugin interface function pointers. */
 static void init_policy_functions(struct policy *p)
 {
@@ -419,10 +395,6 @@ static void init_policy_functions(struct policy *p)
 	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
-#if 0
-	p->policy.status = wb_status;
-	p->policy.message = NULL;
-#endif
 }
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
