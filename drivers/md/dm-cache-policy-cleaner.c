@@ -10,7 +10,6 @@
 #include "dm.h"
 
 #include <linux/hash.h>
-#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 
@@ -92,7 +91,7 @@ static void free_hash(struct hash *hash)
 
 static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size)
 {
-	int r;
+	int r = -ENOMEM;
 
 	p->cblocks = vzalloc(sizeof(*p->cblocks) * from_cblock(cache_size));
 	if (p->cblocks) {
@@ -107,9 +106,7 @@ static int alloc_cache_blocks_with_hash(struct policy *p, dm_cblock_t cache_size
 		r = alloc_hash(&p->chash, from_cblock(cache_size));
 		if (r)
 			vfree(p->cblocks);
-
-	} else
-		r = -ENOMEM;
+	}
 
 	return r;
 }
