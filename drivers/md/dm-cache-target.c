@@ -2383,6 +2383,12 @@ static int cache_iterate_devices(struct dm_target *ti,
 	return r;
 }
 
+/*
+ * We could look up the exact location of the data, but this is expensive
+ * and could always be out of date by the time the bio is submitted.
+ * Instead we just assume it's going to the origin (which is the volume
+ * more likely to have restrictions eg, by being striped).
+ */
 static int cache_bvec_merge(struct dm_target *ti,
 			  struct bvec_merge_data *bvm,
 			  struct bio_vec *biovec, int max_size)
