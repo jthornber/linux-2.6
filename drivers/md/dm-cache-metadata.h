@@ -130,10 +130,10 @@ struct dm_cache_statistics {
 	uint32_t write_misses;
 };
 
-void dm_cache_get_stats(struct dm_cache_metadata *cmd,
-			struct dm_cache_statistics *stats);
-void dm_cache_set_stats(struct dm_cache_metadata *cmd,
-			struct dm_cache_statistics *stats);
+void dm_cache_metadata_get_stats(struct dm_cache_metadata *cmd,
+				 struct dm_cache_statistics *stats);
+void dm_cache_metadata_set_stats(struct dm_cache_metadata *cmd,
+				 struct dm_cache_statistics *stats);
 
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
 
