@@ -1201,14 +1201,14 @@ bad_cache_alloc:
 
 static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
-	.hint_size = 0,
+	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
 };
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
-	.hint_size = 0,
+	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
 };
