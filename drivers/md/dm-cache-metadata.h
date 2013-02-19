@@ -7,53 +7,11 @@
 #ifndef DM_CACHE_METADATA_H
 #define DM_CACHE_METADATA_H
 
-#include "persistent-data/dm-block-manager.h"
+#include "dm-cache-block-types.h"
+#include "dm-cache-policy-internal.h"
 
 /*----------------------------------------------------------------*/
 
-/*
- * It's helpful to get sparse to differentiate between indexes into the
- * origin device, indexes into the cache device, and indexes into the
- * discard bitset.
- */
-
-typedef dm_block_t __bitwise__ dm_oblock_t;
-typedef uint32_t __bitwise__ dm_cblock_t;
-typedef dm_block_t __bitwise__ dm_dblock_t;
-
-static inline dm_oblock_t to_oblock(dm_block_t b)
-{
-	return (__force dm_oblock_t) b;
-}
-
-static inline dm_block_t from_oblock(dm_oblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-
-static inline dm_cblock_t to_cblock(uint32_t b)
-{
-	return (__force dm_cblock_t) b;
-}
-
-static inline uint32_t from_cblock(dm_cblock_t b)
-{
-	return (__force uint32_t) b;
-}
-
-static inline dm_dblock_t to_dblock(dm_block_t b)
-{
-	return (__force dm_dblock_t) b;
-}
-
-static inline dm_block_t from_dblock(dm_dblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-
-/*----------------------------------------------------------------*/
-
-#define CACHE_POLICY_NAME_SIZE 16
 #define CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */

@@ -7,7 +7,6 @@
 #include "dm.h"
 #include "dm-bio-prison.h"
 #include "dm-cache-metadata.h"
-#include "dm-cache-policy-internal.h"
 
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
