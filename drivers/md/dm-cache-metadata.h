@@ -44,7 +44,8 @@
  */
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
-						 bool may_format_device);
+						 bool may_format_device,
+						 size_t policy_hint_size);
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
@@ -115,7 +116,7 @@ void dm_cache_dump(struct dm_cache_metadata *cmd);
  * structures and fill in the hints in whatever order it wishes.
  */
 
-int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name);
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *p);
 
 /*
  * requests hints for every cblock and stores in the metadata device.

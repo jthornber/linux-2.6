@@ -1798,8 +1798,14 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		cache->cache_size = to_cblock(ca->cache_sectors >> cache->sectors_per_block_shift);
 	}
 
+	r = create_cache_policy(cache, ca, error);
+	if (r)
+		goto bad;
+	cache->policy_nr_args = ca->policy_argc;
+
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev,
-				     ca->block_size, may_format);
+				     ca->block_size, may_format,
+				     dm_cache_policy_get_hint_size(cache->policy));
 	if (IS_ERR(cmd)) {
 		*error = "Error creating metadata object";
 		r = PTR_ERR(cmd);
@@ -1872,12 +1878,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 
 	cache->next_migration = NULL;
-
-	r = create_cache_policy(cache, ca, error);
-	if (r)
-		goto bad;
-
-	cache->policy_nr_args = ca->policy_argc;
 
 	cache->need_tick_bio = true;
 	cache->sized = false;
@@ -2115,8 +2115,7 @@ static int write_hints(struct cache *cache)
 {
 	int r;
 
-	r = dm_cache_begin_hints(cache->cmd,
-				 dm_cache_policy_get_name(cache->policy));
+	r = dm_cache_begin_hints(cache->cmd, cache->policy);
 	if (r) {
 		DMERR("dm_cache_begin_hints failed");
 		return r;
