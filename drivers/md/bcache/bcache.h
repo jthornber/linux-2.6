@@ -208,7 +208,7 @@ struct bucket {
 BITMASK(GC_MARK,	 struct bucket, gc_mark, 0, 2);
 #define GC_MARK_RECLAIMABLE	0
 #define GC_MARK_DIRTY		1
-#define GC_MARK_BTREE		2
+#define GC_MARK_METADATA	2
 BITMASK(GC_SECTORS_USED, struct bucket, gc_mark, 2, 14);
 
 struct bkey {
@@ -232,7 +232,7 @@ struct bkey {
 #define SB_SECTOR		8
 #define SB_SIZE			4096
 #define SB_LABEL_SIZE		32
-#define SB_JOURNAL_BUCKETS	256
+#define SB_JOURNAL_BUCKETS	256U
 /* SB_JOURNAL_BUCKETS must be divisible by BITS_PER_LONG */
 #define MAX_CACHES_PER_SET	8
 
@@ -427,7 +427,8 @@ struct bcache_device {
 
 	unsigned		data_csum:1;
 
-	int (*cache_miss)(struct btree *, struct search *, struct bio *, unsigned);
+	int (*cache_miss)(struct btree *, struct search *,
+			  struct bio *, unsigned);
 	int (*ioctl) (struct bcache_device *, fmode_t, unsigned, unsigned long);
 
 	struct bio_split_pool	bio_split_hook;
@@ -524,6 +525,14 @@ struct cached_dev {
 	unsigned		writeback_rate_d_smooth;
 };
 
+enum alloc_watermarks {
+	WATERMARK_PRIO,
+	WATERMARK_METADATA,
+	WATERMARK_MOVINGGC,
+	WATERMARK_NONE,
+	WATERMARK_MAX
+};
+
 struct cache {
 	struct cache_set	*set;
 	struct cache_sb		sb;
@@ -532,6 +541,11 @@ struct cache {
 
 	struct kobject		kobj;
 	struct block_device	*bdev;
+
+	unsigned		watermark[WATERMARK_MAX];
+
+	struct closure		alloc;
+	struct workqueue_struct	*alloc_workqueue;
 
 	struct closure		prio;
 	struct prio_set		*disk_buckets;
@@ -544,15 +558,7 @@ struct cache {
 	 * allocated for the next prio write.
 	 */
 	uint64_t		*prio_buckets;
-	uint64_t		*prio_next;
-	unsigned		prio_write;
-	unsigned		prio_alloc;
-
-	/* > 0: buckets in free_inc have been marked as free
-	 * = 0: buckets in free_inc can't be used until priorities are written
-	 * < 0: priority write in progress
-	 */
-	atomic_t		prio_written;
+	uint64_t		*prio_last_buckets;
 
 	/*
 	 * free: Buckets that are ready to be used
@@ -600,8 +606,8 @@ struct cache {
 	 * whenever there's work to do and is called by free_some_buckets() and
 	 * when a discard finishes.
 	 */
+	atomic_t		discards_in_flight;
 	struct list_head	discards;
-	struct page		*discard_page;
 
 	struct journal_device	journal;
 
@@ -627,6 +633,24 @@ struct gc_stat {
 	unsigned		in_use; /* percent */
 };
 
+/*
+ * Flag bits, for how the cache set is shutting down, and what phase it's at:
+ *
+ * CACHE_SET_UNREGISTERING means we're not just shutting down, we're detaching
+ * all the backing devices first (their cached data gets invalidated, and they
+ * won't automatically reattach).
+ *
+ * CACHE_SET_STOPPING always gets set first when we're closing down a cache set;
+ * we'll continue to run normally for awhile with CACHE_SET_STOPPING set (i.e.
+ * flushing dirty data).
+ *
+ * CACHE_SET_STOPPING_2 gets set at the last phase, when it's time to shut down the
+ * allocation thread.
+ */
+#define CACHE_SET_UNREGISTERING		0
+#define	CACHE_SET_STOPPING		1
+#define	CACHE_SET_STOPPING_2		2
+
 struct cache_set {
 	struct closure		cl;
 
@@ -636,12 +660,7 @@ struct cache_set {
 	struct dentry		*debug;
 	struct cache_accounting accounting;
 
-	/*
-	 * If nonzero, we're trying to detach from all the devices we're
-	 * caching; otherwise we're merely closing
-	 */
-	atomic_t		unregistering;
-	atomic_t		closing;
+	unsigned long		flags;
 
 	struct cache_sb		sb;
 
@@ -662,6 +681,9 @@ struct cache_set {
 
 	/* For the btree cache */
 	struct shrinker		shrink;
+
+	/* For the allocator itself */
+	wait_queue_head_t	alloc_wait;
 
 	/* For the btree cache and anything allocation related */
 	struct mutex		bucket_lock;
@@ -857,7 +879,7 @@ static inline unsigned local_clock_us(void)
 	return local_clock() >> 10;
 }
 
-#define MAX_BSETS		4
+#define MAX_BSETS		4U
 
 #define BTREE_PRIO		USHRT_MAX
 #define INITIAL_PRIO		32768
@@ -1048,20 +1070,12 @@ do {									\
 
 /* Looping macros */
 
-#define for_each_cache(ca, cs)						\
-	for (int _i = 0; ca = cs->cache[_i], _i < (cs)->sb.nr_in_set; _i++)
+#define for_each_cache(ca, cs, iter)					\
+	for (iter = 0; ca = cs->cache[iter], iter < (cs)->sb.nr_in_set; iter++)
 
 #define for_each_bucket(b, ca)						\
 	for (b = (ca)->buckets + (ca)->sb.first_bucket;			\
 	     b < (ca)->buckets + (ca)->sb.nbuckets; b++)
-
-static inline void __bkey_put(struct cache_set *c, struct bkey *k)
-{
-	unsigned i;
-
-	for (i = 0; i < KEY_PTRS(k); i++)
-		atomic_dec_bug(&PTR_BUCKET(c, k, i)->pin);
-}
 
 /* Blktrace macros */
 
@@ -1075,11 +1089,10 @@ do {									\
 #define blktrace_msg_all(s, fmt, ...)					\
 do {									\
 	struct cache *_c;						\
-	for_each_cache(_c, (s))						\
+	unsigned i;							\
+	for_each_cache(_c, (s), i)					\
 		blktrace_msg(_c, fmt, ##__VA_ARGS__);			\
 } while (0)
-
-#define err_printk(...)	printk(KERN_ERR "bcache: " __VA_ARGS__)
 
 static inline void cached_dev_put(struct cached_dev *dc)
 {
@@ -1131,7 +1144,8 @@ void bch_writeback_queue(struct cached_dev *);
 void bch_writeback_add(struct cached_dev *, unsigned);
 
 void bch_count_io_errors(struct cache *, int, const char *);
-void bch_bbio_count_io_errors(struct cache_set *, struct bio *, int, const char *);
+void bch_bbio_count_io_errors(struct cache_set *, struct bio *,
+			      int, const char *);
 void bch_bbio_endio(struct cache_set *, struct bio *, int, const char *);
 void bch_bbio_free(struct bio *, struct cache_set *);
 struct bio *bch_bbio_alloc(struct cache_set *);
@@ -1144,12 +1158,14 @@ void bch_submit_bbio(struct bio *, struct cache_set *, struct bkey *, unsigned);
 uint8_t bch_inc_gen(struct cache *, struct bucket *);
 void bch_rescale_priorities(struct cache_set *, int);
 bool bch_bucket_add_unused(struct cache *, struct bucket *);
-bool bch_can_save_prios(struct cache *);
-void bch_free_some_buckets(struct cache *);
+void bch_allocator_thread(struct closure *);
+
+long bch_bucket_alloc(struct cache *, unsigned, struct closure *);
 void bch_bucket_free(struct cache_set *, struct bkey *);
-int __bch_bucket_alloc_set(struct cache_set *, int, uint16_t,
+
+int __bch_bucket_alloc_set(struct cache_set *, unsigned,
 			   struct bkey *, int, struct closure *);
-int bch_bucket_alloc_set(struct cache_set *, int, uint16_t,
+int bch_bucket_alloc_set(struct cache_set *, unsigned,
 			 struct bkey *, int, struct closure *);
 
 __printf(2, 3)
@@ -1188,12 +1204,13 @@ void bch_cache_set_unregister(struct cache_set *);
 void bch_cache_set_stop(struct cache_set *);
 
 struct cache_set *bch_cache_set_alloc(struct cache_sb *);
-void bch_free_discards(struct cache *);
-int bch_alloc_discards(struct cache *);
 void bch_btree_cache_free(struct cache_set *);
 int bch_btree_cache_alloc(struct cache_set *);
 void bch_writeback_init_cached_dev(struct cached_dev *);
 void bch_moving_init_cache_set(struct cache_set *);
+
+void bch_cache_allocator_exit(struct cache *ca);
+int bch_cache_allocator_init(struct cache *ca);
 
 void bch_debug_exit(void);
 int bch_debug_init(struct kobject *);
