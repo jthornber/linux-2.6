@@ -7,7 +7,6 @@
 #include "dm-cache-policy-internal.h"
 #include "dm.h"
 
-#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 
@@ -28,34 +27,44 @@ static struct dm_cache_policy_type *__find_policy(const char *name)
 	return NULL;
 }
 
-static struct dm_cache_policy_type *__get_policy(const char *name)
+static int __get_policy_once(const char *name, struct dm_cache_policy_type **result)
 {
-	struct dm_cache_policy_type *t = __find_policy(name);
+	int r = 0;
 
-	if (!t) {
-		spin_unlock(&register_lock);
-		request_module("dm-cache-%s", name);
-		spin_lock(&register_lock);
-		t = __find_policy(name);
+	*result = __find_policy(name);
+	if (*result) {
+		if (!try_module_get((*result)->owner)) {
+			DMWARN("couldn't get module");
+			return -EINVAL;
+		}
 	}
 
-	if (t && !try_module_get(t->owner)) {
-		DMWARN("couldn't get module");
-		t = NULL;
-	}
+	return r;
+}
 
-	return t;
+static int get_policy_once(const char *name, struct dm_cache_policy_type **result)
+{
+	int r;
+
+	spin_lock(&register_lock);
+	r = __get_policy_once(name, result);
+	spin_unlock(&register_lock);
+
+	return r;
 }
 
 static struct dm_cache_policy_type *get_policy(const char *name)
 {
+	int r;
 	struct dm_cache_policy_type *t;
 
-	spin_lock(&register_lock);
-	t = __get_policy(name);
-	spin_unlock(&register_lock);
+	r = get_policy_once(name, &t);
+	if (!r && !t) {
+		request_module("dm-cache-%s", name);
+		r = get_policy_once(name, &t);
+	}
 
-	return t;
+	return r ? NULL : t;
 }
 
 static void put_policy(struct dm_cache_policy_type *t)
@@ -123,8 +132,8 @@ void dm_cache_policy_destroy(struct dm_cache_policy *p)
 {
 	struct dm_cache_policy_type *t = p->private;
 
-	put_policy(t);
 	p->destroy(p);
+	put_policy(t);
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_destroy);
 

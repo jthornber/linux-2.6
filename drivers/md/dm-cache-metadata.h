@@ -7,53 +7,11 @@
 #ifndef DM_CACHE_METADATA_H
 #define DM_CACHE_METADATA_H
 
-#include "persistent-data/dm-block-manager.h"
+#include "dm-cache-block-types.h"
+#include "dm-cache-policy-internal.h"
 
 /*----------------------------------------------------------------*/
 
-/*
- * It's helpful to get sparse to differentiate between indexes into the
- * origin device, indexes into the cache device, and indexes into the
- * discard bitset.
- */
-
-typedef dm_block_t __bitwise__ dm_oblock_t;
-typedef uint32_t __bitwise__ dm_cblock_t;
-typedef dm_block_t __bitwise__ dm_dblock_t;
-
-static inline dm_oblock_t to_oblock(dm_block_t b)
-{
-	return (__force dm_oblock_t) b;
-}
-
-static inline dm_block_t from_oblock(dm_oblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-
-static inline dm_cblock_t to_cblock(uint32_t b)
-{
-	return (__force dm_cblock_t) b;
-}
-
-static inline uint32_t from_cblock(dm_cblock_t b)
-{
-	return (__force uint32_t) b;
-}
-
-static inline dm_dblock_t to_dblock(dm_block_t b)
-{
-	return (__force dm_dblock_t) b;
-}
-
-static inline dm_block_t from_dblock(dm_dblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-
-/*----------------------------------------------------------------*/
-
-#define CACHE_POLICY_NAME_SIZE 16
 #define CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */
@@ -86,7 +44,8 @@ static inline dm_block_t from_dblock(dm_dblock_t b)
  */
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
-						 bool may_format_device);
+						 bool may_format_device,
+						 size_t policy_hint_size);
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
@@ -130,10 +89,10 @@ struct dm_cache_statistics {
 	uint32_t write_misses;
 };
 
-void dm_cache_get_stats(struct dm_cache_metadata *cmd,
-			struct dm_cache_statistics *stats);
-void dm_cache_set_stats(struct dm_cache_metadata *cmd,
-			struct dm_cache_statistics *stats);
+void dm_cache_metadata_get_stats(struct dm_cache_metadata *cmd,
+				 struct dm_cache_statistics *stats);
+void dm_cache_metadata_set_stats(struct dm_cache_metadata *cmd,
+				 struct dm_cache_statistics *stats);
 
 int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
 
@@ -157,7 +116,7 @@ void dm_cache_dump(struct dm_cache_metadata *cmd);
  * structures and fill in the hints in whatever order it wishes.
  */
 
-int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name);
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *p);
 
 /*
  * requests hints for every cblock and stores in the metadata device.

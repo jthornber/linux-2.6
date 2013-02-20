@@ -7,8 +7,7 @@
 #ifndef DM_CACHE_POLICY_H
 #define DM_CACHE_POLICY_H
 
-#include "dm-cache-metadata.h"
-#include "persistent-data/dm-block-manager.h"
+#include "dm-cache-block-types.h"
 
 #include <linux/device-mapper.h>
 
@@ -195,7 +194,7 @@ struct dm_cache_policy {
 /*
  * We maintain a little register of the different policy types.
  */
-#define CACHE_POLICY_NAME_MAX 16
+#define CACHE_POLICY_NAME_SIZE 16
 
 struct dm_cache_policy_type {
 	/* For use by the register code only. */
@@ -205,7 +204,7 @@ struct dm_cache_policy_type {
 	 * Policy writers should fill in these fields.  The name field is
 	 * what gets passed on the target line to select your policy.
 	 */
-	char name[CACHE_POLICY_NAME_MAX];
+	char name[CACHE_POLICY_NAME_SIZE];
 	size_t hint_size;	/* in bytes, must be 0 or 4 */
 	struct module *owner;
 	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,

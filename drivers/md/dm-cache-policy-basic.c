@@ -1866,7 +1866,7 @@ static struct dm_cache_policy *policy ## _create(dm_cblock_t cache_size, sector_
 #define	__POLICY_TYPE(policy) \
 static struct dm_cache_policy_type policy ## _policy_type = { \
 	.name = #policy, \
-	.hint_size = 0, \
+	.hint_size = 4, \
 	.owner = THIS_MODULE, \
 	.create = policy ## _create \
 };
