@@ -2318,7 +2318,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("1 %s ", cache->features.write_through ?
 		       "writethrough" : "writeback");
 
-		DMEMIT("%s %u ", dm_cache_policy_get_name(cache->policy),
+		DMEMIT("%s %u", dm_cache_policy_get_name(cache->policy),
 		       cache->policy_nr_args);
 	}
 
