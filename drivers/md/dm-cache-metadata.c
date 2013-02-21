@@ -633,6 +633,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
+	cmd->policy_hint_size = policy_hint_size;
 	cmd->changed = true;
 
 	r = __create_persistent_data_objects(cmd, may_format_device);

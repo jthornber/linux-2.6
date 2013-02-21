@@ -13,6 +13,7 @@
 /*----------------------------------------------------------------*/
 
 #define DM_MSG_PREFIX "cache-policy"
+
 static DEFINE_SPINLOCK(register_lock);
 static LIST_HEAD(register_list);
 
@@ -27,44 +28,48 @@ static struct dm_cache_policy_type *__find_policy(const char *name)
 	return NULL;
 }
 
-static int __get_policy_once(const char *name, struct dm_cache_policy_type **result)
+static struct dm_cache_policy_type *__get_policy_once(const char *name)
 {
-	int r = 0;
+	struct dm_cache_policy_type *t = __find_policy(name); 
 
-	*result = __find_policy(name);
-	if (*result) {
-		if (!try_module_get((*result)->owner)) {
-			DMWARN("couldn't get module");
-			return -EINVAL;
-		}
+	if (t && !try_module_get(t->owner)) {
+		t = NULL;
+		DMWARN("couldn't get module %s", name);
+		t = ERR_PTR(-EINVAL);
 	}
 
-	return r;
+	return t;
 }
 
-static int get_policy_once(const char *name, struct dm_cache_policy_type **result)
+static struct dm_cache_policy_type *get_policy_once(const char *name)
 {
-	int r;
+	struct dm_cache_policy_type *t;
 
 	spin_lock(&register_lock);
-	r = __get_policy_once(name, result);
+	t = __get_policy_once(name);
 	spin_unlock(&register_lock);
 
-	return r;
+	return t;
 }
 
 static struct dm_cache_policy_type *get_policy(const char *name)
 {
-	int r;
 	struct dm_cache_policy_type *t;
 
-	r = get_policy_once(name, &t);
-	if (!r && !t) {
-		request_module("dm-cache-%s", name);
-		r = get_policy_once(name, &t);
-	}
+	t = get_policy_once(name);
+	if (IS_ERR(t))
+		return NULL;
 
-	return r ? NULL : t;
+	if (t)
+		return t;
+
+	request_module("dm-cache-%s", name);
+
+	t = get_policy_once(name);
+	if (IS_ERR(t))
+		return NULL;
+
+	return t;
 }
 
 static void put_policy(struct dm_cache_policy_type *t)
@@ -77,12 +82,14 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type)
 	int r;
 
 	/* One size fits all for now */
-	if (type->hint_size != 0 && type->hint_size != 4)
+	if (type->hint_size != 0 && type->hint_size != 4) {
+		DMWARN("hint size must be 0 or 4 but %llu supplied.", (unsigned long long) type->hint_size);
 		return -EINVAL;
+	}
 
 	spin_lock(&register_lock);
 	if (__find_policy(type->name)) {
-		DMWARN("attempt to register policy under duplicate name");
+		DMWARN("attempt to register policy under duplicate name %s", type->name);
 		r = -EINVAL;
 	} else {
 		list_add(&type->list, &register_list);
