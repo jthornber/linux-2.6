@@ -12,7 +12,7 @@
 
 /*----------------------------------------------------------------*/
 
-#define CACHE_METADATA_BLOCK_SIZE 4096
+#define DM_CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */
 /*
@@ -21,12 +21,12 @@
  * We have one block of index, which can hold 255 index entries.  Each
  * index entry contains allocation info about 16k metadata blocks.
  */
-#define CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
+#define DM_CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (DM_CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
 /*
  * A metadata device larger than 16GB triggers a warning.
  */
-#define CACHE_METADATA_MAX_SECTORS_WARNING (16 * (1024 * 1024 * 1024 >> SECTOR_SHIFT))
+#define DM_CACHE_METADATA_MAX_SECTORS_WARNING (16 * (1024 * 1024 * 1024 >> SECTOR_SHIFT))
 
 /*----------------------------------------------------------------*/
 
@@ -34,9 +34,9 @@
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the thin metadata.
  */
-#define CACHE_FEATURE_COMPAT_SUPP	  0UL
-#define CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
-#define CACHE_FEATURE_INCOMPAT_SUPP	  0UL
+#define DM_CACHE_FEATURE_COMPAT_SUPP	  0UL
+#define DM_CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
+#define DM_CACHE_FEATURE_INCOMPAT_SUPP	  0UL
 
 /*
  * Reopens or creates a new, empty metadata volume.
@@ -50,7 +50,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
 /*
- * The metadata needs to know how many cache blocks there are.  We're dont
+ * The metadata needs to know how many cache blocks there are.  We dont
  * care about the origin, assuming the core target is giving us valid
  * origin blocks to map to.
  */
@@ -126,4 +126,4 @@ int dm_cache_save_hint(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif	/* DM_CACHE_METADATA_H */

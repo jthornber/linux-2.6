@@ -205,7 +205,13 @@ struct dm_cache_policy_type {
 	 * what gets passed on the target line to select your policy.
 	 */
 	char name[CACHE_POLICY_NAME_SIZE];
-	size_t hint_size;	/* in bytes, must be 0 or 4 */
+
+	/*
+	 * Policies may store a hint for each each cache block.  Currently
+	 * the size of this hint must be 0 or 4 bytes (to change
+	 * shortly).
+	 */
+	size_t hint_size;
 	struct module *owner;
 	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
 					  sector_t origin_size,
@@ -218,4 +224,4 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif /* DM_CACHE_POLICY_H */

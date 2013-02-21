@@ -1036,8 +1036,10 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 
 	if (!strcasecmp(argv[0], "sequential_threshold"))
 		pattern = PATTERN_SEQUENTIAL;
+
 	else if (!strcasecmp(argv[0], "random_threshold"))
 		pattern = PATTERN_RANDOM;
+
 	else
 		return -EINVAL;
 
@@ -1059,16 +1061,12 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 
 static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
 {
-	int r = -EINVAL;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	if (argc != 3)
+	if (argc != 2)
 		return -EINVAL;
 
-	if (!strcasecmp(argv[0], "set_config"))
-		r = process_config_option(mq, argv + 1, false);
-
-	return r;
+	return process_config_option(mq, argv, false);
 }
 
 static int mq_status(struct dm_cache_policy *p, status_type_t type,

@@ -1433,13 +1433,12 @@ static sector_t get_dev_size(struct dm_dev *dev)
  * cache dev	   : fast device holding cached data blocks
  * origin dev	   : slow device holding original data blocks
  * block size	   : cache unit size in sectors
- * #feature args [<arg>]* : number of feature arguments followed by
- *                          optional arguments * cache dev
- * policy          : the replacement policy to use
-
- * #policy_args  [<arg>]* : number of policy arguments followed by optional
- *                          arguments; see policy plugin for instances
- *			    (key value pairs count as 2; delimiter is space)
+ * #feature args   : number of feature arguments passed
+ * feature args    : 'writeback' or 'writethrough' (one or the other).
+ * #policy args    : an even number of arguments corresponding to
+ *                   key/value pairs passed to the policy.
+ * policy args     : key/value pairs (eg, 'sequential_threshold 1024');
+ *                   see cache-policies.txt for details
  *
  * Optional feature arguments are:
  *	writeback: write back cache allowing cache block contents to
@@ -1509,7 +1508,7 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 	}
 
 	metadata_dev_size = get_dev_size(ca->metadata_dev);
-	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
+	if (metadata_dev_size > DM_CACHE_METADATA_MAX_SECTORS_WARNING)
 		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
 		       bdevname(ca->metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
 
@@ -2042,7 +2041,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		break;
 
 	default:
-		DMERR_LIMIT("%s: erroring bio, unknown policy op: %u", __func__,
+		DMERR_LIMIT("%s: erroring bio: unknown policy op: %u", __func__,
 			    (unsigned) lookup_result.op);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
@@ -2350,6 +2349,8 @@ static int process_config_option(struct cache *cache, char **argv)
 
 /*
  * Supports set_config <key> <value>, or whatever your policy has implemented.
+ *
+ * The key migration_threshold is supported by the cache target core.
  */
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2365,7 +2366,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 			return r;
 	}
 
-	return policy_message(cache->policy, argc, argv);
+	return policy_message(cache->policy, argc - 1, argv + 1);
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
@@ -2388,8 +2389,8 @@ static int cache_iterate_devices(struct dm_target *ti,
  * more likely to have restrictions eg, by being striped).
  */
 static int cache_bvec_merge(struct dm_target *ti,
-			  struct bvec_merge_data *bvm,
-			  struct bio_vec *biovec, int max_size)
+			    struct bvec_merge_data *bvm,
+			    struct bio_vec *biovec, int max_size)
 {
 	struct cache *cache = ti->private;
 	struct request_queue *q = bdev_get_queue(cache->origin_dev->bdev);
@@ -2444,15 +2445,15 @@ static int __init dm_cache_init(void)
 	int r;
 
 	r = dm_register_target(&cache_target);
-	if (r)
+	if (r) {
+		DMERR("cache target registration failed: %d", r);
 		return r;
-
-	r = -ENOMEM;
+	}
 
 	migration_cache = KMEM_CACHE(dm_cache_migration, 0);
 	if (!migration_cache) {
 		dm_unregister_target(&cache_target);
-		return r;
+		return -ENOMEM;
 	}
 
 	return 0;
