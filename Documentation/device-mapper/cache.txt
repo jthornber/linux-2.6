@@ -1,4 +1,5 @@
-* Introduction
+Introduction
+============
 
 dm-cache is a device mapper target written by Joe Thornber, Heinz
 Mauelshagen, and Mike Snitzer.
@@ -7,49 +8,54 @@ It aims to improve performance of a block device (eg, a spindle) by
 dynamically migrating some of its data to a faster, smaller device
 (eg, an SSD).
 
-There are various caching solutions out there, for example bcache, we
-feel there is a need for a purely device-mapper solution that allows
-us to insert this caching at different levels of the dm stack.  For
-instance above the data device for a thin-provisioning pool.  Caching
-solutions that are integrated more closely with the virtual memory
-system should give better performance.
+There are various caching solutions out there, for example bcache [1].
+We feel there is a need for a purely device-mapper solution that
+allows us to insert this caching at different levels of the dm stack,
+for instance above the data device for a thin-provisioning pool.
+Caching solutions that are integrated more closely with the virtual
+memory system should give better performance.
 
 The target reuses the metadata library used in the thin-provisioning
 library.
 
-The decision of what and when to migrate data is left to a plug-in
+The decision as to what and when to migrate data is left to a plug-in
 policy module.  Several of these have been written as we experiment,
 and we hope other people will contribute others for specific io
 scenarios (eg. a vm image server).
 
-* Glossary
+Glossary
+========
 
-- Migration -  Movement of a logical block from one device to the other.
-- Promotion -  Migration from slow device to fast device.
-- Demotion  -  Migration from fast device to slow device.
+  Migration -  Movement of the primary copy of a logical block from one
+               device to the other.
+  Promotion -  Migration from slow device to fast device.
+  Demotion  -  Migration from fast device to slow device.
 
-* Design
+The origin device always contains a copy of the logical block, which
+may be out of date or kept in sync with the copy on the cache
+(depending on policy).
 
-** Sub devices
+Design
+======
+
+Sub-devices
+-----------
 
 The target is constructed by passing three devices to it (along with
 other params detailed later):
 
-- An origin device (the big, slow one).
+1. An origin device - the big, slow one.
 
-- A cache device (the small, fast one).
+2. A cache device - the small, fast one.
 
-- A small metadata device.
+3. A small metadata device - records which blocks are in the cache,
+   which are dirty, and extra hints for use by the policy object.
+   This information could be put on the cache device, but having it
+   separate allows the volume manager to configure it differently,
+   e.g. as a mirror for extra robustness.
 
-  Device that records which blocks are in the cache.  Which are dirty,
-  and extra hints for use by the policy object.
-
-  This information could be put on the cache device, but having it
-  separate allows the volume manager to configure it differently.  eg,
-  as a mirror for extra robustness.
-
-
-** Fixed block size
+Fixed block size
+----------------
 
 The origin is divided up into blocks of a fixed size.  This block size
 is configurable when you first create the cache.  Typically we've been
@@ -58,78 +64,71 @@ using block sizes of 256k - 1024k.
 Having a fixed block size simplifies the target a lot.  But it is
 something of a compromise.  For instance a small part of a block may
 be getting hit a lot (eg, /etc/passwd), yet the whole block will be
-promoted to the cache.  So large block sizes are bad, because they
+promoted to the cache.  So large block sizes are bad because they
 waste cache space.  And small block sizes are bad because they
 increase the amount of metadata (both in core and on disk).
 
-** Writeback/writethrough
+Writeback/writethrough
+----------------------
 
-The cache has these two modes.
+The cache has these two modes, writeback and witethrough.
 
-If writeback is selected then writes to blocks that are cached will
+If writeback is selected then a write to a block that is cached will
 only go to the cache, and the block will be marked dirty in the
 metadata.
 
-If writethrough mode is selected then a write to a cached block will
-not complete until has hit both the origin and cache device.  Clean
+If writethrough is selected then a write to a cached block will not
+complete until it has hit both the origin and cache devices.  Clean
 blocks should remain clean.
 
-A simple cleaner policy is provided, which will clean all dirty blocks
-in a cache.  Useful for decommissioning a cache.
+A simple cleaner policy is provided, which will clean (write back) all
+dirty blocks in a cache.  Useful for decommissioning a cache.
 
-** Migration throttling
+Migration throttling
+--------------------
 
 Migrating data between the origin and cache device uses bandwidth.
 The user can set a throttle to prevent more than a certain amount of
-migrations occuring at any one time.  Currently we're not taking any
-account of normal io traffic going to the devs.  More work needs to be
-done here to avoid migrating during those peak io moments.
+migration occuring at any one time.  Currently we're not taking any
+account of normal io traffic going to the devices.  More work needs
+doing here to avoid migrating during those peak io moments.
 
 For the time being, a message "set_config migration_threshold <#sectors>"
 can be used to set the maximum number of sectors being migrated;
 default being 204800 sectors (or 100MB).
 
-** Updating on disk metadata
+Updating on disk metadata
+-------------------------
 
-On disk metadata is committed everytime a REQ_SYNC or REQ_FUA bio is
+On disk metadata is committed every time a REQ_SYNC or REQ_FUA bio is
 written.  If no such requests are made then commits will occur every
 second.  This means the cache behaves like a physical disk that has a
 write cache (the same is true of the thin-provisioning target).  If
 power is lost you may lose some recent writes.  The metadata should
-always be consistent in spite of a crash.
+always be consistent in spite of any crash.
 
 The 'dirty' state for a cache block changes far too frequently for us
 to keep updating it on the fly.  So we treat it as a hint.  In normal
 operation it will be written when the dm device is suspended.  If the
 system crashes all cache blocks will be assumed dirty when restarted.
 
-** per block policy hints
+Per block policy hints
+----------------------
 
 Policy plug-ins can store a chunk of data per cache block.  It's up to
-the policy how big this chunk is (please keep it small).  Like the
-dirty flags this data is lost if there's a crash so a safe fallback
-value should always be possible.
+the policy how big this chunk is, but it should be kept small.  Like
+the dirty flags this data is lost if there's a crash so a safe
+fallback value should always be possible.
 
-For instance the 'mq' policy, which is currently the default policy,
+For instance, the 'mq' policy, which is currently the default policy,
 uses this facility to store the hit count of the cache blocks.  If
 there's a crash this information will be lost, which means the cache
 may be less efficient until those hit counts are regenerated.
 
-Policy hints effect performance, not correctness.
+Policy hints affect performance, not correctness.
 
-** Policy messaging
-
-Policies have different tunables, specific to each one, so we need a
-generic way of getting and setting these.  One way would be through
-a sysfs interface; much as we do with a block device's queue
-parameters.  Another is to use the device-mapper message facility.
-We're using that latter method currently, though don't feel strongly
-one way or the other.
-
-See cache-policies.txt for details on the attributes and config
-options of the various cache replacement policies.
-
-** discard bitset resolution
+Discard bitset resolution
+-------------------------
 
 We can avoid copying data during migration if we know the block has
 been discarded.  A prime example of this is when mkfs discards the
@@ -139,16 +138,15 @@ from the cache blocks.  This is because we need to track the discard
 state for all of the origin device (compare with the dirty bitset
 which is just for the smaller cache device).
 
-** Target interface
+Target interface
+================
 
- cache <metadata dev>
-       <cache dev>
-       <origin dev>
-       <block size>
+Constructor
+-----------
+
+ cache <metadata dev> <cache dev> <origin dev> <block size>
        <#feature args> [<feature arg>]*
-       <policy>
-       <#policy args>
-       [policy args]*
+       <policy> <#policy args> [policy args]*
 
  metadata dev    : fast device holding the persistent metadata
  cache dev	 : fast device holding cached data blocks
@@ -161,59 +159,62 @@ which is just for the smaller cache device).
 
  #policy args    : an even number of arguments corresponding to
                    key/value pairs passed to the policy.
- policy args     : key/value pairs (eg, 'sequential_threshold 1024');
-                   see cache-policies.txt for details
+ policy args     : key/value pairs (eg, 'sequential_threshold 1024')
 
 A policy called 'default' is always registered.  This is an alias for
 the policy we currently think is giving best all round performance.
+As the default policy could vary between kernels, if you are relying
+on the characteristics of a specific policy, always request it by
+name.
 
-See cache-policies.txt for details on the attributes and config
-options of this and the other various cache replacement policies.
+Status
+------
 
-* Example usage
+The status gives a lot of information:
+
+  <#used metadata blocks> <#total metadata blocks> <#read hits> <#read misses>
+  <#write hits> <#write misses> <#demotions> <#promotions> <#blocks in cache> <#dirty>
+  <#feature args> <feature args>* <#policy args> <policy args>*
+
+  #used metadata blocks    : Number of metadata blocks used
+  #total metadata blocks   : Total number of metadata blocks
+  #read hits               : Number of times a READ bio has been mapped to the cache
+  #read misses             : Number of times a READ bio has been mapped to the origin
+  #write hits              : Number of times a WRITE bio has been mapped to the cache
+  #write misses            : Number of times a WRITE bio has been mapped to the origin
+  #demotions               : Number of times a block has been removed from the cache
+  #promotions              : Number of times a block has been moved to the cache
+  #blocks in cache         : Number of blocks resident in the cache
+  #dirty                   : Number of blocks in the cache that differ from the origin
+  #feature args            : Number of feature args to follow
+  feature args             : One of 'writeback' or 'writethrough'
+  #policy args             : Number of policy arguments to follow (must be even)
+  policy args              : Key/value pairs (eg, 'sequential_threshold 1024)
+
+Messages
+--------
+
+Policies will have different tunables, specific to each one, so we
+need a generic way of getting and setting these.  Device-mapper
+messages are used.  (A sysfs interface would also be possible.)
+
+THe message format is:
+
+   set_config <key> <value>
+
+eg,
+
+   dmsetup message my_cache 0 set_config sequential_threshold 1024
+
+Examples
+========
 
 The test suite can be found here:
 
 https://github.com/jthornber/thinp-test-suite
 
-0 41943040 cache /dev/mapper/metadata /dev/mapper/ssd /dev/mapper/origin 512 1 writeback default 0
-
-* Policy interface
-
-- Try to keep transactionality out of it.  The core is careful to
-  avoid asking about anything that is migrating.  This is a pain, but
-  makes it easier to write the policies.
-
-- Mappings are loaded into the policy at construction time.
-
-- Every bio that is mapped by the target is referred to the policy, it
-  can give a simple HIT or MISS or issue a migration.
-
-- Currently there's no way for the policy to issue background work,
-  eg, start writing back dirty blocks that are soon going to be evicted.
-
-- Because we map bios, rather than requests it's easy for the policy
-  to get fooled by many small bios.  For this reason the core target
-  issues periodic ticks to the policy.  It's suggested that the policy
-  doesn't update states (eg, hit counts) for a block more than once
-  for each tick.  [The core ticks by watching bios complete, and so
-  trying to see when the io scheduler has let the ios run]
+dmsetup create my_cache --table '0 41943040 cache /dev/mapper/metadata /dev/mapper/ssd /dev/mapper/origin 512 1 writeback default 0'
+dmsetup create my_cache --table '0 41943040 cache /dev/mapper/metadata /dev/mapper/ssd /dev/mapper/origin 1024 1 writeback mq 4 sequential_threshold 1024 random_threshold 8'
 
 
-	void (*destroy)(struct dm_cache_policy *p);
-	void (*map)(struct dm_cache_policy *p, dm_block_t origin_block, int data_dir,
-		    bool can_migrate, bool cheap_copy, struct bio *bio,
-		    struct policy_result *result);
-
-	int (*load_mapping)(struct dm_cache_policy *p, dm_block_t oblock, dm_block_t cblock);
-
-	/* must succeed */
-	void (*remove_mapping)(struct dm_cache_policy *p, dm_block_t oblock);
-	void (*force_mapping)(struct dm_cache_policy *p, dm_block_t current_oblock,
-			      dm_block_t new_oblock);
-
-	dm_block_t (*residency)(struct dm_cache_policy *p);
-	void (*set_seq_io_threshold)(struct dm_cache_policy *p,
-				     unsigned seq_io_thresh);
-
-	void (*tick)(struct dm_cache_policy *p);
+[1] bcache - http://bcache.evilpiepirate.org/
