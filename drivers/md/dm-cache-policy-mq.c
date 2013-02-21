@@ -1034,11 +1034,11 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 	enum io_pattern pattern;
 	unsigned long tmp;
 
-	if (!strcasecmp(argv[0], "sequential_threshold"))
-		pattern = PATTERN_SEQUENTIAL;
-
-	else if (!strcasecmp(argv[0], "random_threshold"))
+	if (!strcasecmp(argv[0], "random_threshold"))
 		pattern = PATTERN_RANDOM;
+
+	else if (!strcasecmp(argv[0], "sequential_threshold"))
+		pattern = PATTERN_SEQUENTIAL;
 
 	else
 		return -EINVAL;
@@ -1083,11 +1083,11 @@ static int mq_status(struct dm_cache_policy *p, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		if (mq->threshold_args[PATTERN_SEQUENTIAL] > -1)
-			DMEMIT(" sequential_threshold %u", mq->threshold_args[PATTERN_SEQUENTIAL]);
-
 		if (mq->threshold_args[PATTERN_RANDOM] > -1)
 			DMEMIT(" random_threshold %u", mq->threshold_args[PATTERN_RANDOM]);
+
+		if (mq->threshold_args[PATTERN_SEQUENTIAL] > -1)
+			DMEMIT(" sequential_threshold %u", mq->threshold_args[PATTERN_SEQUENTIAL]);
 	}
 
 	return 0;
