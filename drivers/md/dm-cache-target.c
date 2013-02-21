@@ -2041,7 +2041,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		break;
 
 	default:
-		DMERR_LIMIT("%s: erroring bio, unknown policy op: %u", __func__,
+		DMERR_LIMIT("%s: erroring bio: unknown policy op: %u", __func__,
 			    (unsigned) lookup_result.op);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
