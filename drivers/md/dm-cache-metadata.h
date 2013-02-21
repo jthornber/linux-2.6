@@ -31,8 +31,21 @@
 /*----------------------------------------------------------------*/
 
 /*
- * Compat feature flags.  Any incompat flags beyond the ones
- * specified below will prevent use of the thin metadata.
+ * Ext[234]-style compat feature flags.
+ *
+ * A new feature which old metadata will still be compatible with should
+ * define a DM_CACHE_FEATURE_COMPAT_* flag (rarely useful).
+ *
+ * A new feature that is not compatible with old code should define a
+ * DM_CACHE_FEATURE_INCOMPAT_* flag and guard the relevant code with
+ * that flag.
+ *
+ * A new feature that is not compatible with old code accessing the
+ * metadata RDWR should define a DM_CACHE_FEATURE_RO_COMPAT_* flag and
+ * guard the relevant code with that flag.
+ *
+ * As these various flags are defined they should be added to the
+ * following masks.
  */
 #define DM_CACHE_FEATURE_COMPAT_SUPP	  0UL
 #define DM_CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
