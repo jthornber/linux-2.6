@@ -13,6 +13,7 @@
 /*----------------------------------------------------------------*/
 
 #define DM_MSG_PREFIX "cache-policy"
+
 static DEFINE_SPINLOCK(register_lock);
 static LIST_HEAD(register_list);
 
@@ -77,12 +78,14 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type)
 	int r;
 
 	/* One size fits all for now */
-	if (type->hint_size != 0 && type->hint_size != 4)
+	if (type->hint_size != 0 && type->hint_size != 4) {
+		DMWARN("hint size must be 0 or 4 but %llu supplied.", (unsigned long long) type->hint_size);
 		return -EINVAL;
+	}
 
 	spin_lock(&register_lock);
 	if (__find_policy(type->name)) {
-		DMWARN("attempt to register policy under duplicate name");
+		DMWARN("attempt to register policy under duplicate name %s", type->name);
 		r = -EINVAL;
 	} else {
 		list_add(&type->list, &register_list);
