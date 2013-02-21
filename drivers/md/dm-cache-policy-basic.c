@@ -1629,13 +1629,10 @@ static int basic_message(struct dm_cache_policy *pe, unsigned argc, char **argv)
 {
 	struct policy *p = to_policy(pe);
 
-	if (argc != 3)
+	if (argc != 2)
 		return -EINVAL;
 
-	if (!strcasecmp(argv[0], "set_config"))
-		return process_config_option(p, argv + 1, false);
-
-	return -EINVAL;
+	return process_config_option(p, argv, false);
 }
 
 static int basic_status(struct dm_cache_policy *pe, status_type_t type,
