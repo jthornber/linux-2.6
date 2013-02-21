@@ -2389,8 +2389,8 @@ static int cache_iterate_devices(struct dm_target *ti,
  * more likely to have restrictions eg, by being striped).
  */
 static int cache_bvec_merge(struct dm_target *ti,
-			  struct bvec_merge_data *bvm,
-			  struct bio_vec *biovec, int max_size)
+			    struct bvec_merge_data *bvm,
+			    struct bio_vec *biovec, int max_size)
 {
 	struct cache *cache = ti->private;
 	struct request_queue *q = bdev_get_queue(cache->origin_dev->bdev);
@@ -2445,15 +2445,15 @@ static int __init dm_cache_init(void)
 	int r;
 
 	r = dm_register_target(&cache_target);
-	if (r)
+	if (r) {
+		DMERR("cache target registration failed: %d", r);
 		return r;
-
-	r = -ENOMEM;
+	}
 
 	migration_cache = KMEM_CACHE(dm_cache_migration, 0);
 	if (!migration_cache) {
 		dm_unregister_target(&cache_target);
-		return r;
+		return -ENOMEM;
 	}
 
 	return 0;
