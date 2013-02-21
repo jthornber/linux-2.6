@@ -218,4 +218,4 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif /* DM_CACHE_POLICY_H */

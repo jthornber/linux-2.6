@@ -2349,6 +2349,8 @@ static int process_config_option(struct cache *cache, char **argv)
 
 /*
  * Supports set_config <key> <value>, or whatever your policy has implemented.
+ *
+ * The key migration_threshold is supported by the cache target core.
  */
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2364,7 +2366,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 			return r;
 	}
 
-	return policy_message(cache->policy, argc, argv);
+	return policy_message(cache->policy, argc - 1, argv + 1);
 }
 
 static int cache_iterate_devices(struct dm_target *ti,

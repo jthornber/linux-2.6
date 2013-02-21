@@ -30,7 +30,7 @@ static struct dm_cache_policy_type *__find_policy(const char *name)
 
 static struct dm_cache_policy_type *__get_policy_once(const char *name)
 {
-	struct dm_cache_policy_type *t = __find_policy(name); 
+	struct dm_cache_policy_type *t = __find_policy(name);
 
 	if (t && !try_module_get(t->owner)) {
 		t = NULL;
