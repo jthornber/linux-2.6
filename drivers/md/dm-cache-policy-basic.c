@@ -1610,17 +1610,17 @@ static int process_hits_option(struct policy *p, char **argv, bool set_ctr_arg)
 
 static int process_config_option(struct policy *p, char **argv, bool set_ctr_arg)
 {
-	if (!strcasecmp(argv[0], "sequential_threshold"))
-		return process_threshold_option(p, argv, PATTERN_SEQUENTIAL, set_ctr_arg);
-
-	else if (!strcasecmp(argv[0], "random_threshold"))
-		return process_threshold_option(p, argv, PATTERN_RANDOM, set_ctr_arg);
+	if (!strcasecmp(argv[0], "hits"))
+		return process_hits_option(p, argv, set_ctr_arg);
 
 	else if (!strcasecmp(argv[0], "multiqueue_timeout"))
 		return process_multiqueue_timeout_option(p, argv, set_ctr_arg);
 
-	else if (!strcasecmp(argv[0], "hits"))
-		return process_hits_option(p, argv, set_ctr_arg);
+	else if (!strcasecmp(argv[0], "random_threshold"))
+		return process_threshold_option(p, argv, PATTERN_RANDOM, set_ctr_arg);
+
+	else if (!strcasecmp(argv[0], "sequential_threshold"))
+		return process_threshold_option(p, argv, PATTERN_SEQUENTIAL, set_ctr_arg);
 
 	return -EINVAL;
 }
@@ -1654,17 +1654,17 @@ static int basic_status(struct dm_cache_policy *pe, status_type_t type,
 		break;
 
 	case STATUSTYPE_TABLE:
-		if (p->threshold_args[PATTERN_SEQUENTIAL] > -1)
-			DMEMIT(" sequential_threshold %u", p->threshold_args[PATTERN_SEQUENTIAL]);
-
-		if (p->threshold_args[PATTERN_RANDOM] > -1)
-			DMEMIT(" random_threshold %u", p->threshold_args[PATTERN_RANDOM]);
+		if (p->ctype_arg > -1)
+			DMEMIT(" hits %d", p->ctype_arg);
 
 		if (p->mq_tmo_arg > -1)
 			DMEMIT(" multiqueue_timeout %d", p->mq_tmo_arg);
 
-		if (p->ctype_arg > -1)
-			DMEMIT(" hits %d", p->ctype_arg);
+		if (p->threshold_args[PATTERN_RANDOM] > -1)
+			DMEMIT(" random_threshold %u", p->threshold_args[PATTERN_RANDOM]);
+
+		if (p->threshold_args[PATTERN_SEQUENTIAL] > -1)
+			DMEMIT(" sequential_threshold %u", p->threshold_args[PATTERN_SEQUENTIAL]);
 	}
 
 	return 0;
