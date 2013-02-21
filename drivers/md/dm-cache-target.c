@@ -1433,13 +1433,12 @@ static sector_t get_dev_size(struct dm_dev *dev)
  * cache dev	   : fast device holding cached data blocks
  * origin dev	   : slow device holding original data blocks
  * block size	   : cache unit size in sectors
- * #feature args [<arg>]* : number of feature arguments followed by
- *                          optional arguments * cache dev
- * policy          : the replacement policy to use
-
- * #policy_args  [<arg>]* : number of policy arguments followed by optional
- *                          arguments; see policy plugin for instances
- *			    (key value pairs count as 2; delimiter is space)
+ * #feature args   : number of feature arguments passed
+ * feature args    : 'writeback' or 'writethrough' (one or the other).
+ * #policy args    : an even number of arguments corresponding to
+ *                   key/value pairs passed to the policy.
+ * policy args     : key/value pairs (eg, 'sequential_threshold 1024');
+ *                   see cache-policies.txt for details
  *
  * Optional feature arguments are:
  *	writeback: write back cache allowing cache block contents to
