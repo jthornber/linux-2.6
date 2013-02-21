@@ -248,8 +248,8 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	sector_t bdev_size = i_size_read(cmd->bdev->bd_inode) >> SECTOR_SHIFT;
 
 	/* FIXME: see if we can lose the max sectors limit */
-	if (bdev_size > CACHE_METADATA_MAX_SECTORS)
-		bdev_size = CACHE_METADATA_MAX_SECTORS;
+	if (bdev_size > DM_CACHE_METADATA_MAX_SECTORS)
+		bdev_size = DM_CACHE_METADATA_MAX_SECTORS;
 
 	r = dm_sm_root_size(cmd->metadata_sm, &metadata_len);
 	if (r < 0)
@@ -281,7 +281,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->discard_root = cpu_to_le64(cmd->discard_root);
 	disk_super->discard_block_size = cpu_to_le64(cmd->discard_block_size);
 	disk_super->discard_nr_blocks = cpu_to_le64(from_dblock(cmd->discard_nr_blocks));
-	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
+	disk_super->metadata_block_size = cpu_to_le32(DM_CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
 	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
@@ -343,7 +343,7 @@ static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 {
 	uint32_t features;
 
-	features = le32_to_cpu(disk_super->incompat_flags) & ~CACHE_FEATURE_INCOMPAT_SUPP;
+	features = le32_to_cpu(disk_super->incompat_flags) & ~DM_CACHE_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to unsupported optional features (%lx).",
 		      (unsigned long)features);
@@ -356,7 +356,7 @@ static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 	if (get_disk_ro(cmd->bdev->bd_disk))
 		return 0;
 
-	features = le32_to_cpu(disk_super->compat_ro_flags) & ~CACHE_FEATURE_COMPAT_RO_SUPP;
+	features = le32_to_cpu(disk_super->compat_ro_flags) & ~DM_CACHE_FEATURE_COMPAT_RO_SUPP;
 	if (features) {
 		DMERR("could not access metadata RDWR due to unsupported optional features (%lx).",
 		      (unsigned long)features);
@@ -424,7 +424,7 @@ static int __create_persistent_data_objects(struct dm_cache_metadata *cmd,
 					    bool may_format_device)
 {
 	int r;
-	cmd->bm = dm_block_manager_create(cmd->bdev, CACHE_METADATA_BLOCK_SIZE,
+	cmd->bm = dm_block_manager_create(cmd->bdev, DM_CACHE_METADATA_BLOCK_SIZE,
 					  CACHE_METADATA_CACHE_SIZE,
 					  CACHE_MAX_CONCURRENT_LOCKS);
 	if (IS_ERR(cmd->bm)) {

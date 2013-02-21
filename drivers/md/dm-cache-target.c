@@ -1508,7 +1508,7 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 	}
 
 	metadata_dev_size = get_dev_size(ca->metadata_dev);
-	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
+	if (metadata_dev_size > DM_CACHE_METADATA_MAX_SECTORS_WARNING)
 		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
 		       bdevname(ca->metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
 
