@@ -553,7 +553,7 @@ static int __check_incompat_features(struct thin_disk_superblock *disk_super,
 {
 	uint32_t features;
 
-	features = le32_to_cpu(disk_super->incompat_flags) & ~THIN_FEATURE_INCOMPAT_SUPP;
+	features = le32_to_cpu(disk_super->incompat_flags) & ~DM_THIN_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to unsupported optional features (%lx).",
 		      (unsigned long)features);
@@ -566,7 +566,7 @@ static int __check_incompat_features(struct thin_disk_superblock *disk_super,
 	if (get_disk_ro(pmd->bdev->bd_disk))
 		return 0;
 
-	features = le32_to_cpu(disk_super->compat_ro_flags) & ~THIN_FEATURE_COMPAT_RO_SUPP;
+	features = le32_to_cpu(disk_super->compat_ro_flags) & ~DM_THIN_FEATURE_COMPAT_RO_SUPP;
 	if (features) {
 		DMERR("could not access metadata RDWR due to unsupported optional features (%lx).",
 		      (unsigned long)features);

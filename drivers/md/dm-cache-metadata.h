@@ -7,54 +7,12 @@
 #ifndef DM_CACHE_METADATA_H
 #define DM_CACHE_METADATA_H
 
-#include "persistent-data/dm-block-manager.h"
+#include "dm-cache-block-types.h"
+#include "dm-cache-policy-internal.h"
 
 /*----------------------------------------------------------------*/
 
-/*
- * It's helpful to get sparse to differentiate between indexes into the
- * origin device, indexes into the cache device, and indexes into the
- * discard bitset.
- */
-
-typedef dm_block_t __bitwise__ dm_oblock_t;
-typedef uint32_t __bitwise__ dm_cblock_t;
-typedef dm_block_t __bitwise__ dm_dblock_t;
-
-static inline dm_oblock_t to_oblock(dm_block_t b)
-{
-	return (__force dm_oblock_t) b;
-}
-
-static inline dm_block_t from_oblock(dm_oblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-
-static inline dm_cblock_t to_cblock(uint32_t b)
-{
-	return (__force dm_cblock_t) b;
-}
-
-static inline uint32_t from_cblock(dm_cblock_t b)
-{
-	return (__force uint32_t) b;
-}
-
-static inline dm_dblock_t to_dblock(dm_block_t b)
-{
-	return (__force dm_dblock_t) b;
-}
-
-static inline dm_block_t from_dblock(dm_dblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-
-/*----------------------------------------------------------------*/
-
-#define CACHE_POLICY_NAME_SIZE 16
-#define CACHE_METADATA_BLOCK_SIZE 4096
+#define DM_CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */
 /*
@@ -63,22 +21,35 @@ static inline dm_block_t from_dblock(dm_dblock_t b)
  * We have one block of index, which can hold 255 index entries.  Each
  * index entry contains allocation info about 16k metadata blocks.
  */
-#define CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
+#define DM_CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (DM_CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
 /*
  * A metadata device larger than 16GB triggers a warning.
  */
-#define CACHE_METADATA_MAX_SECTORS_WARNING (16 * (1024 * 1024 * 1024 >> SECTOR_SHIFT))
+#define DM_CACHE_METADATA_MAX_SECTORS_WARNING (16 * (1024 * 1024 * 1024 >> SECTOR_SHIFT))
 
 /*----------------------------------------------------------------*/
 
 /*
- * Compat feature flags.  Any incompat flags beyond the ones
- * specified below will prevent use of the thin metadata.
+ * Ext[234]-style compat feature flags.
+ *
+ * A new feature which old metadata will still be compatible with should
+ * define a DM_CACHE_FEATURE_COMPAT_* flag (rarely useful).
+ *
+ * A new feature that is not compatible with old code should define a
+ * DM_CACHE_FEATURE_INCOMPAT_* flag and guard the relevant code with
+ * that flag.
+ *
+ * A new feature that is not compatible with old code accessing the
+ * metadata RDWR should define a DM_CACHE_FEATURE_RO_COMPAT_* flag and
+ * guard the relevant code with that flag.
+ *
+ * As these various flags are defined they should be added to the
+ * following masks.
  */
-#define CACHE_FEATURE_COMPAT_SUPP	  0UL
-#define CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
-#define CACHE_FEATURE_INCOMPAT_SUPP	  0UL
+#define DM_CACHE_FEATURE_COMPAT_SUPP	  0UL
+#define DM_CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
+#define DM_CACHE_FEATURE_INCOMPAT_SUPP	  0UL
 
 /*
  * Reopens or creates a new, empty metadata volume.
@@ -86,12 +57,13 @@ static inline dm_block_t from_dblock(dm_dblock_t b)
  */
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
-						 bool may_format_device);
+						 bool may_format_device,
+						 size_t policy_hint_size);
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
 /*
- * The metadata needs to know how many cache blocks there are.  We're dont
+ * The metadata needs to know how many cache blocks there are.  We dont
  * care about the origin, assuming the core target is giving us valid
  * origin blocks to map to.
  */
@@ -157,7 +129,7 @@ void dm_cache_dump(struct dm_cache_metadata *cmd);
  * structures and fill in the hints in whatever order it wishes.
  */
 
-int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name);
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *p);
 
 /*
  * requests hints for every cblock and stores in the metadata device.
@@ -167,4 +139,4 @@ int dm_cache_save_hint(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-#endif
+#endif	/* DM_CACHE_METADATA_H */

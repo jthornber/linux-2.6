@@ -61,6 +61,7 @@ struct cache_disk_superblock {
 	__le32 version;
 
 	__u8 policy_name[CACHE_POLICY_NAME_SIZE];
+	__le32 policy_hint_size;
 
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
@@ -108,6 +109,7 @@ struct dm_cache_metadata {
 	bool clean_when_opened:1;
 
 	char policy_name[CACHE_POLICY_NAME_SIZE];
+	size_t policy_hint_size;
 	struct dm_cache_statistics stats;
 };
 
@@ -231,8 +233,10 @@ static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 	vt.equal = NULL;
 	dm_array_info_init(&cmd->info, cmd->tm, &vt);
 
-	vt.size = sizeof(__le32);
-	dm_array_info_init(&cmd->hint_info, cmd->tm, &vt);
+	if (cmd->policy_hint_size) {
+		vt.size = sizeof(__le32);
+		dm_array_info_init(&cmd->hint_info, cmd->tm, &vt);
+	}
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -244,8 +248,8 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	sector_t bdev_size = i_size_read(cmd->bdev->bd_inode) >> SECTOR_SHIFT;
 
 	/* FIXME: see if we can lose the max sectors limit */
-	if (bdev_size > CACHE_METADATA_MAX_SECTORS)
-		bdev_size = CACHE_METADATA_MAX_SECTORS;
+	if (bdev_size > DM_CACHE_METADATA_MAX_SECTORS)
+		bdev_size = DM_CACHE_METADATA_MAX_SECTORS;
 
 	r = dm_sm_root_size(cmd->metadata_sm, &metadata_len);
 	if (r < 0)
@@ -265,6 +269,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->magic = cpu_to_le64(CACHE_SUPERBLOCK_MAGIC);
 	disk_super->version = cpu_to_le32(CACHE_VERSION);
 	memset(disk_super->policy_name, 0, CACHE_POLICY_NAME_SIZE);
+	disk_super->policy_hint_size = 0;
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -276,7 +281,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->discard_root = cpu_to_le64(cmd->discard_root);
 	disk_super->discard_block_size = cpu_to_le64(cmd->discard_block_size);
 	disk_super->discard_nr_blocks = cpu_to_le64(from_dblock(cmd->discard_nr_blocks));
-	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
+	disk_super->metadata_block_size = cpu_to_le32(DM_CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
 	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
@@ -338,7 +343,7 @@ static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 {
 	uint32_t features;
 
-	features = le32_to_cpu(disk_super->incompat_flags) & ~CACHE_FEATURE_INCOMPAT_SUPP;
+	features = le32_to_cpu(disk_super->incompat_flags) & ~DM_CACHE_FEATURE_INCOMPAT_SUPP;
 	if (features) {
 		DMERR("could not access metadata due to unsupported optional features (%lx).",
 		      (unsigned long)features);
@@ -351,7 +356,7 @@ static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 	if (get_disk_ro(cmd->bdev->bd_disk))
 		return 0;
 
-	features = le32_to_cpu(disk_super->compat_ro_flags) & ~CACHE_FEATURE_COMPAT_RO_SUPP;
+	features = le32_to_cpu(disk_super->compat_ro_flags) & ~DM_CACHE_FEATURE_COMPAT_RO_SUPP;
 	if (features) {
 		DMERR("could not access metadata RDWR due to unsupported optional features (%lx).",
 		      (unsigned long)features);
@@ -419,7 +424,7 @@ static int __create_persistent_data_objects(struct dm_cache_metadata *cmd,
 					    bool may_format_device)
 {
 	int r;
-	cmd->bm = dm_block_manager_create(cmd->bdev, CACHE_METADATA_BLOCK_SIZE,
+	cmd->bm = dm_block_manager_create(cmd->bdev, DM_CACHE_METADATA_BLOCK_SIZE,
 					  CACHE_METADATA_CACHE_SIZE,
 					  CACHE_MAX_CONCURRENT_LOCKS);
 	if (IS_ERR(cmd->bm)) {
@@ -473,6 +478,7 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
 	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
 	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
+	cmd->policy_hint_size = le32_to_cpu(disk_super->policy_hint_size);
 
 	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
 	cmd->stats.read_misses = le32_to_cpu(disk_super->read_misses);
@@ -611,7 +617,8 @@ static void unpack_value(__le64 value_le, dm_oblock_t *block, unsigned *flags)
 
 struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
-						 bool may_format_device)
+						 bool may_format_device,
+						 size_t policy_hint_size)
 {
 	int r;
 	struct dm_cache_metadata *cmd;
@@ -626,6 +633,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->bdev = bdev;
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
+	cmd->policy_hint_size = policy_hint_size;
 	cmd->changed = true;
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
@@ -846,13 +854,19 @@ struct thunk {
 	bool hints_valid;
 };
 
+static bool hints_array_initialized(struct dm_cache_metadata *cmd)
+{
+	return cmd->hint_root && cmd->policy_hint_size;
+}
+
 static bool hints_array_available(struct dm_cache_metadata *cmd,
 				  const char *policy_name)
 {
 	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
 					   sizeof(cmd->policy_name));
 
-	return cmd->clean_when_opened && policy_names_match && cmd->hint_root;
+	return cmd->clean_when_opened && policy_names_match &&
+		hints_array_initialized(cmd);
 }
 
 static int __load_mapping(void *context, uint64_t cblock, void *leaf)
@@ -1055,10 +1069,12 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-static int begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
+static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *policy)
 {
 	int r;
 	__le32 value;
+	size_t hint_size;
+	const char *policy_name = dm_cache_policy_get_name(policy);
 
 	if (!policy_name[0] ||
 	    (strlen(policy_name) > sizeof(cmd->policy_name) - 1))
@@ -1066,6 +1082,11 @@ static int begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
 
 	if (strcmp(cmd->policy_name, policy_name)) {
 		strncpy(cmd->policy_name, policy_name, sizeof(cmd->policy_name));
+
+		hint_size = dm_cache_policy_get_hint_size(policy);
+		if (!hint_size)
+			return 0; /* short-circuit hints initialization */
+		cmd->policy_hint_size = hint_size;
 
 		if (cmd->hint_root) {
 			r = dm_array_del(&cmd->hint_info, cmd->hint_root);
@@ -1089,12 +1110,12 @@ static int begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
 	return 0;
 }
 
-int dm_cache_begin_hints(struct dm_cache_metadata *cmd, const char *policy_name)
+int dm_cache_begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *policy)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = begin_hints(cmd, policy_name);
+	r = begin_hints(cmd, policy);
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -1118,6 +1139,9 @@ int dm_cache_save_hint(struct dm_cache_metadata *cmd, dm_cblock_t cblock,
 		       uint32_t hint)
 {
 	int r;
+
+	if (!hints_array_initialized(cmd))
+		return 0;
 
 	down_write(&cmd->root_lock);
 	r = save_hint(cmd, cblock, hint);

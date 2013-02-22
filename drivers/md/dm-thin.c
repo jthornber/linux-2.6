@@ -230,13 +230,6 @@ struct thin_c {
 
 	struct pool *pool;
 	struct dm_thin_device *td;
-
-	/*
-	 * The cell structures are too big to put on the stack, so we have
-	 * a couple here for use by the main mapping function.
-	 */
-	spinlock_t lock;
-	struct dm_bio_prison_cell cell1, cell2;
 };
 
 /*----------------------------------------------------------------*/
@@ -1462,6 +1455,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	struct dm_thin_device *td = tc->td;
 	struct dm_thin_lookup_result result;
 	struct dm_cell_key key;
+	struct dm_bio_prison_cell cell1, cell2;
 	struct dm_bio_prison_cell *cell_result;
 
 	thin_hook_bio(tc, bio);
@@ -1502,24 +1496,19 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			return DM_MAPIO_SUBMITTED;
 		}
 
-		spin_lock(&tc->lock);
 		build_virtual_key(tc->td, block, &key);
-		if (dm_bio_detain(tc->pool->prison, &key, bio, &tc->cell1, &cell_result)) {
-			spin_unlock(&tc->lock);
+		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
 			return DM_MAPIO_SUBMITTED;
-		}
 
 		build_data_key(tc->td, result.block, &key);
-		if (dm_bio_detain(tc->pool->prison, &key, bio, &tc->cell2, &cell_result)) {
-			cell_defer_no_holder_no_free(tc, &tc->cell1);
-			spin_unlock(&tc->lock);
+		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
+			cell_defer_no_holder_no_free(tc, &cell1);
 			return DM_MAPIO_SUBMITTED;
 		}
 
 		inc_all_io_entry(tc->pool, bio);
-		cell_defer_no_holder_no_free(tc, &tc->cell2);
-		cell_defer_no_holder_no_free(tc, &tc->cell1);
-		spin_unlock(&tc->lock);
+		cell_defer_no_holder_no_free(tc, &cell2);
+		cell_defer_no_holder_no_free(tc, &cell1);
 
 		remap(tc, bio, result.block);
 		return DM_MAPIO_REMAPPED;
@@ -2741,8 +2730,6 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_set_target_max_io_len(ti, tc->pool->sectors_per_block);
 	if (r)
 		goto bad_thin_open;
-
-	spin_lock_init(&tc->lock);
 
 	ti->num_flush_bios = 1;
 	ti->flush_supported = true;

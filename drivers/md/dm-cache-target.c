@@ -7,7 +7,6 @@
 #include "dm.h"
 #include "dm-bio-prison.h"
 #include "dm-cache-metadata.h"
-#include "dm-cache-policy-internal.h"
 
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
@@ -1434,13 +1433,12 @@ static sector_t get_dev_size(struct dm_dev *dev)
  * cache dev	   : fast device holding cached data blocks
  * origin dev	   : slow device holding original data blocks
  * block size	   : cache unit size in sectors
- * #feature args [<arg>]* : number of feature arguments followed by
- *                          optional arguments * cache dev
- * policy          : the replacement policy to use
-
- * #policy_args  [<arg>]* : number of policy arguments followed by optional
- *                          arguments; see policy plugin for instances
- *			    (key value pairs count as 2; delimiter is space)
+ * #feature args   : number of feature arguments passed
+ * feature args    : 'writeback' or 'writethrough' (one or the other).
+ * #policy args    : an even number of arguments corresponding to
+ *                   key/value pairs passed to the policy.
+ * policy args     : key/value pairs (eg, 'sequential_threshold 1024');
+ *                   see cache-policies.txt for details
  *
  * Optional feature arguments are:
  *	writeback: write back cache allowing cache block contents to
@@ -1510,7 +1508,7 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 	}
 
 	metadata_dev_size = get_dev_size(ca->metadata_dev);
-	if (metadata_dev_size > CACHE_METADATA_MAX_SECTORS_WARNING)
+	if (metadata_dev_size > DM_CACHE_METADATA_MAX_SECTORS_WARNING)
 		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
 		       bdevname(ca->metadata_dev->bdev, b), THIN_METADATA_MAX_SECTORS);
 
@@ -1799,8 +1797,14 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		cache->cache_size = to_cblock(ca->cache_sectors >> cache->sectors_per_block_shift);
 	}
 
+	r = create_cache_policy(cache, ca, error);
+	if (r)
+		goto bad;
+	cache->policy_nr_args = ca->policy_argc;
+
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev,
-				     ca->block_size, may_format);
+				     ca->block_size, may_format,
+				     dm_cache_policy_get_hint_size(cache->policy));
 	if (IS_ERR(cmd)) {
 		*error = "Error creating metadata object";
 		r = PTR_ERR(cmd);
@@ -1873,12 +1877,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 
 	cache->next_migration = NULL;
-
-	r = create_cache_policy(cache, ca, error);
-	if (r)
-		goto bad;
-
-	cache->policy_nr_args = ca->policy_argc;
 
 	cache->need_tick_bio = true;
 	cache->sized = false;
@@ -2043,7 +2041,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		break;
 
 	default:
-		DMERR_LIMIT("%s: erroring bio, unknown policy op: %u", __func__,
+		DMERR_LIMIT("%s: erroring bio: unknown policy op: %u", __func__,
 			    (unsigned) lookup_result.op);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
@@ -2116,8 +2114,7 @@ static int write_hints(struct cache *cache)
 {
 	int r;
 
-	r = dm_cache_begin_hints(cache->cmd,
-				 dm_cache_policy_get_name(cache->policy));
+	r = dm_cache_begin_hints(cache->cmd, cache->policy);
 	if (r) {
 		DMERR("dm_cache_begin_hints failed");
 		return r;
@@ -2295,7 +2292,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u %llu",
+		DMEMIT("%llu %llu %u %u %u %u %u %u %llu %u ",
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->stats.read_hit),
@@ -2305,8 +2302,11 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->stats.demotion),
 		       (unsigned) atomic_read(&cache->stats.promotion),
 		       (unsigned long long) from_cblock(residency),
-		       cache->nr_dirty,
-		       (unsigned long long) cache->migration_threshold);
+		       cache->nr_dirty);
+
+		DMEMIT("1 %s ", cache->features.write_through ?
+		       "writethrough" : "writeback");
+
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2321,9 +2321,11 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("1 %s ", cache->features.write_through ?
 		       "writethrough" : "writeback");
 
-		DMEMIT("%s %u ", dm_cache_policy_get_name(cache->policy),
+		DMEMIT("%s %u", dm_cache_policy_get_name(cache->policy),
 		       cache->policy_nr_args);
 	}
+
+	DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 
 	if (sz < maxlen)
 		r = policy_status(cache->policy, type, status_flags,
@@ -2336,38 +2338,38 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 static int process_config_option(struct cache *cache, char **argv)
 {
-	if (!strcasecmp(argv[1], "migration_threshold")) {
+	if (!strcasecmp(argv[0], "migration_threshold")) {
 		unsigned long tmp;
 
-		if (kstrtoul(argv[2], 10, &tmp))
+		if (kstrtoul(argv[1], 10, &tmp))
 			return -EINVAL;
 
 		cache->migration_threshold = tmp;
 
-	} else
-		return NOT_CORE_OPTION;
+		return 0;
+	}
 
-	return 0;
+	return NOT_CORE_OPTION;
 }
 
 /*
- * Supports set_config <key> <value>, or whatever your policy has implemented.
+ * Supports <key> <value>, or whatever your policy has implemented.
+ *
+ * The key migration_threshold is supported by the cache target core.
  */
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r;
 	struct cache *cache = ti->private;
 
-	if (argc != 3)
+	if (argc != 2)
 		return -EINVAL;
 
-	if (!strcasecmp(argv[0], "set_config")) {
-		r = process_config_option(cache, argv);
-		if (r != NOT_CORE_OPTION)
-			return r;
-	}
+	r = process_config_option(cache, argv);
+	if (r == NOT_CORE_OPTION)
+		return policy_message(cache->policy, argc, argv);
 
-	return policy_message(cache->policy, argc, argv);
+	return r;
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
@@ -2383,9 +2385,15 @@ static int cache_iterate_devices(struct dm_target *ti,
 	return r;
 }
 
+/*
+ * We could look up the exact location of the data, but this is expensive
+ * and could always be out of date by the time the bio is submitted.
+ * Instead we just assume it's going to the origin (which is the volume
+ * more likely to have restrictions eg, by being striped).
+ */
 static int cache_bvec_merge(struct dm_target *ti,
-			  struct bvec_merge_data *bvm,
-			  struct bio_vec *biovec, int max_size)
+			    struct bvec_merge_data *bvm,
+			    struct bio_vec *biovec, int max_size)
 {
 	struct cache *cache = ti->private;
 	struct request_queue *q = bdev_get_queue(cache->origin_dev->bdev);
@@ -2440,15 +2448,15 @@ static int __init dm_cache_init(void)
 	int r;
 
 	r = dm_register_target(&cache_target);
-	if (r)
+	if (r) {
+		DMERR("cache target registration failed: %d", r);
 		return r;
-
-	r = -ENOMEM;
+	}
 
 	migration_cache = KMEM_CACHE(dm_cache_migration, 0);
 	if (!migration_cache) {
 		dm_unregister_target(&cache_target);
-		return r;
+		return -ENOMEM;
 	}
 
 	return 0;

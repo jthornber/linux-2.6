@@ -62,7 +62,7 @@ struct io_tracker {
 
 	unsigned nr_seq_samples;
 	unsigned nr_rand_samples;
-	int thresholds[2];
+	unsigned thresholds[2];
 
 	dm_oblock_t last_end_oblock;
 };
@@ -1034,10 +1034,12 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 	enum io_pattern pattern;
 	unsigned long tmp;
 
-	if (!strcasecmp(argv[0], "sequential_threshold"))
-		pattern = PATTERN_SEQUENTIAL;
-	else if (!strcasecmp(argv[0], "random_threshold"))
+	if (!strcasecmp(argv[0], "random_threshold"))
 		pattern = PATTERN_RANDOM;
+
+	else if (!strcasecmp(argv[0], "sequential_threshold"))
+		pattern = PATTERN_SEQUENTIAL;
+
 	else
 		return -EINVAL;
 
@@ -1059,16 +1061,20 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 
 static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
 {
-	int r = -EINVAL;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	if (argc != 3)
+	if (argc != 2)
 		return -EINVAL;
 
-	if (!strcasecmp(argv[0], "set_config"))
-		r = process_config_option(mq, argv + 1, false);
+	return process_config_option(mq, argv, false);
+}
 
-	return r;
+static void emit_tunables(ssize_t sz, char *result, unsigned maxlen,
+			  unsigned random_threshold,
+			  unsigned sequential_threshold)
+{
+	DMEMIT("4 random_threshold %u sequential_threshold %u",
+	       random_threshold, sequential_threshold);
 }
 
 static int mq_status(struct dm_cache_policy *p, status_type_t type,
@@ -1079,17 +1085,15 @@ static int mq_status(struct dm_cache_policy *p, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT(" %u %u",
-		       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
-		       mq->tracker.thresholds[PATTERN_RANDOM]);
+		emit_tunables(sz, result, maxlen,
+			      mq->tracker.thresholds[PATTERN_SEQUENTIAL],
+			      mq->tracker.thresholds[PATTERN_RANDOM]);
 		break;
 
 	case STATUSTYPE_TABLE:
-		if (mq->threshold_args[PATTERN_SEQUENTIAL] > -1)
-			DMEMIT(" sequential_threshold %u", mq->threshold_args[PATTERN_SEQUENTIAL]);
-
-		if (mq->threshold_args[PATTERN_RANDOM] > -1)
-			DMEMIT(" random_threshold %u", mq->threshold_args[PATTERN_RANDOM]);
+		emit_tunables(sz, result, maxlen,
+			      mq->threshold_args[PATTERN_RANDOM],
+			      mq->threshold_args[PATTERN_SEQUENTIAL]);
 	}
 
 	return 0;
@@ -1201,14 +1205,14 @@ bad_cache_alloc:
 
 static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
-	.hint_size = 0,
+	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
 };
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
-	.hint_size = 0,
+	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
 };
