@@ -93,7 +93,7 @@ migration occuring at any one time.  Currently we're not taking any
 account of normal io traffic going to the devices.  More work needs
 doing here to avoid migrating during those peak io moments.
 
-For the time being, a message "set_config migration_threshold <#sectors>"
+For the time being, a message "migration_threshold <#sectors>"
 can be used to set the maximum number of sectors being migrated;
 default being 204800 sectors (or 100MB).
 
@@ -200,11 +200,11 @@ messages are used.  (A sysfs interface would also be possible.)
 
 THe message format is:
 
-   set_config <key> <value>
+   <key> <value>
 
 eg,
 
-   dmsetup message my_cache 0 set_config sequential_threshold 1024
+   dmsetup message my_cache 0 sequential_threshold 1024
 
 Examples
 ========

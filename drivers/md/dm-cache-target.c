@@ -2333,22 +2333,22 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 static int process_config_option(struct cache *cache, char **argv)
 {
-	if (!strcasecmp(argv[1], "migration_threshold")) {
+	if (!strcasecmp(argv[0], "migration_threshold")) {
 		unsigned long tmp;
 
-		if (kstrtoul(argv[2], 10, &tmp))
+		if (kstrtoul(argv[1], 10, &tmp))
 			return -EINVAL;
 
 		cache->migration_threshold = tmp;
 
-	} else
-		return NOT_CORE_OPTION;
+		return 0;
+	}
 
-	return 0;
+	return NOT_CORE_OPTION;
 }
 
 /*
- * Supports set_config <key> <value>, or whatever your policy has implemented.
+ * Supports <key> <value>, or whatever your policy has implemented.
  *
  * The key migration_threshold is supported by the cache target core.
  */
@@ -2357,16 +2357,14 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	struct cache *cache = ti->private;
 
-	if (argc != 3)
+	if (argc != 2)
 		return -EINVAL;
 
-	if (!strcasecmp(argv[0], "set_config")) {
-		r = process_config_option(cache, argv);
-		if (r != NOT_CORE_OPTION)
-			return r;
-	}
+	r = process_config_option(cache, argv);
+	if (r == NOT_CORE_OPTION)
+		return policy_message(cache->policy, argc, argv);
 
-	return policy_message(cache->policy, argc - 1, argv + 1);
+	return r;
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
