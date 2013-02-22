@@ -594,8 +594,6 @@ static void check_generation(struct mq_policy *mq)
 		mq->promote_threshold = nr ? total / nr : 1;
 		if (mq->promote_threshold * nr < total)
 			mq->promote_threshold++;
-
-		pr_alert("promote threshold = %u, nr = %u\n", mq->promote_threshold, nr);
 	}
 }
 
