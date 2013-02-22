@@ -2292,7 +2292,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u %llu",
+		DMEMIT("%llu %llu %u %u %u %u %u %u %llu %u ",
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->stats.read_hit),
@@ -2302,8 +2302,11 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->stats.demotion),
 		       (unsigned) atomic_read(&cache->stats.promotion),
 		       (unsigned long long) from_cblock(residency),
-		       cache->nr_dirty,
-		       (unsigned long long) cache->migration_threshold);
+		       cache->nr_dirty);
+
+		DMEMIT("1 %s ", cache->features.write_through ?
+		       "writethrough" : "writeback");
+
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2321,6 +2324,8 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%s %u", dm_cache_policy_get_name(cache->policy),
 		       cache->policy_nr_args);
 	}
+
+	DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 
 	if (sz < maxlen)
 		r = policy_status(cache->policy, type, status_flags,

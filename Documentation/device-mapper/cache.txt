@@ -174,7 +174,7 @@ The status gives a lot of information:
 
   <#used metadata blocks> <#total metadata blocks> <#read hits> <#read misses>
   <#write hits> <#write misses> <#demotions> <#promotions> <#blocks in cache> <#dirty>
-  <#feature args> <feature args>* <#policy args> <policy args>*
+  <#features> <features>* <#core args> <core args> <#policy args> <policy args>*
 
   #used metadata blocks    : Number of metadata blocks used
   #total metadata blocks   : Total number of metadata blocks
@@ -188,6 +188,8 @@ The status gives a lot of information:
   #dirty                   : Number of blocks in the cache that differ from the origin
   #feature args            : Number of feature args to follow
   feature args             : One of 'writeback' or 'writethrough'
+  #core args               : Number of core arguments (must be even)
+  core args                : Key/value pairs for tuning the core (eg, migration_threshold)
   #policy args             : Number of policy arguments to follow (must be even)
   policy args              : Key/value pairs (eg, 'sequential_threshold 1024)
 
