@@ -198,7 +198,7 @@ Policies will have different tunables, specific to each one, so we
 need a generic way of getting and setting these.  Device-mapper
 messages are used.  (A sysfs interface would also be possible.)
 
-THe message format is:
+The message format is:
 
    <key> <value>
 
