@@ -51,6 +51,7 @@ static void free_bitset(unsigned long *bits)
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512
+#define UNINIT_TUNABLE -1
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -74,9 +75,9 @@ static void iot_init(struct io_tracker *t,
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
 	t->thresholds[PATTERN_SEQUENTIAL] =
-		sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
+		sequential_threshold > UNINIT_TUNABLE ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
 	t->thresholds[PATTERN_RANDOM] =
-		random_threshold > -1 ?	random_threshold : RANDOM_THRESHOLD_DEFAULT;
+		random_threshold > UNINIT_TUNABLE ? random_threshold : RANDOM_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
@@ -311,6 +312,7 @@ struct mq_policy {
 	dm_block_t hash_bits;
 	struct hlist_head *table;
 
+	unsigned threshold_arg_count;
 	int threshold_args[2];
 };
 
@@ -1044,11 +1046,11 @@ static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr
 	if (kstrtoul(argv[1], 10, &tmp))
 		return -EINVAL;
 
-
 	if (set_ctr_arg) {
-		if (mq->threshold_args[pattern] > -1)
+		if (mq->threshold_args[pattern] > UNINIT_TUNABLE)
 			return -EINVAL;
 
+		mq->threshold_arg_count += 2;
 		mq->threshold_args[pattern] = tmp;
 	}
 
@@ -1067,14 +1069,6 @@ static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
 	return process_config_option(mq, argv, false);
 }
 
-static void emit_tunables(ssize_t sz, char *result, unsigned maxlen,
-			  unsigned random_threshold,
-			  unsigned sequential_threshold)
-{
-	DMEMIT("4 random_threshold %u sequential_threshold %u",
-	       random_threshold, sequential_threshold);
-}
-
 static int mq_status(struct dm_cache_policy *p, status_type_t type,
 		     unsigned status_flags, char *result, unsigned maxlen)
 {
@@ -1083,15 +1077,18 @@ static int mq_status(struct dm_cache_policy *p, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		emit_tunables(sz, result, maxlen,
-			      mq->tracker.thresholds[PATTERN_SEQUENTIAL],
-			      mq->tracker.thresholds[PATTERN_RANDOM]);
+		DMEMIT("%u %u ",
+		       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
+		       mq->tracker.thresholds[PATTERN_RANDOM]);
 		break;
 
 	case STATUSTYPE_TABLE:
-		emit_tunables(sz, result, maxlen,
-			      mq->threshold_args[PATTERN_RANDOM],
-			      mq->threshold_args[PATTERN_SEQUENTIAL]);
+		DMEMIT("%u ", mq->threshold_arg_count);
+		if (mq->threshold_args[PATTERN_RANDOM] > UNINIT_TUNABLE)
+			DMEMIT("random_threshold %u ", mq->threshold_args[PATTERN_RANDOM]);
+
+		if (mq->threshold_args[PATTERN_SEQUENTIAL] > UNINIT_TUNABLE)
+			DMEMIT("sequential_threshold %u ", mq->threshold_args[PATTERN_SEQUENTIAL]);
 	}
 
 	return 0;
@@ -1102,7 +1099,8 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 	int r;
 	unsigned u;
 
-	mq->threshold_args[0] = mq->threshold_args[1] = -1;
+	mq->threshold_arg_count = 0;
+	mq->threshold_args[0] = mq->threshold_args[1] = UNINIT_TUNABLE;
 
 	if (!argc)
 		return 0;
