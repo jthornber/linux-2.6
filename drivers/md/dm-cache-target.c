@@ -182,6 +182,13 @@ struct cache {
 	bool loaded_discards:1;
 
 	struct cache_stats stats;
+
+	/*
+	 * Rather than reconstructing the table line for the status we just
+	 * save it and regurgitate.
+	 */
+	unsigned nr_ctr_args;
+	const char **ctr_args;
 };
 
 struct per_bio_data {
@@ -1461,7 +1468,7 @@ struct cache_args {
 
 	const char *policy_name;
 	int policy_argc;
-	char **policy_argv;
+	const char **policy_argv;
 
 	struct cache_features features;
 };
@@ -1643,7 +1650,7 @@ static int parse_policy(struct cache_args *ca, struct dm_arg_set *as,
 	if (r)
 		return -EINVAL;
 
-	ca->policy_argv = as->argv;
+	ca->policy_argv = (const char **) as->argv;
 	dm_consume_args(as, ca->policy_argc);
 
 	return 0;
@@ -1689,20 +1696,49 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 static struct kmem_cache *migration_cache;
 
+static int set_config_values(struct dm_cache_policy *p, int argc, const char **argv)
+{
+	int r = 0;
+
+	if (argc & 1) {
+		DMWARN("An odd number of policy arguments given (they should be <key> <value> pairs).");
+		return -EINVAL;
+	}
+
+	while (argc) {
+		r = policy_set_config_value(p, argv[0], argv[1]);
+		if (r) {
+			DMWARN("policy_set_config_value failed: key = '%s', value = '%s'",
+			       argv[0], argv[1]);
+			return r;
+		}
+
+		argc -= 2;
+		argv += 2;
+	}
+
+	return r;
+}
+
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
 {
+	int r;
+
 	cache->policy =	dm_cache_policy_create(ca->policy_name,
 					       cache->cache_size,
 					       cache->origin_sectors,
-					       cache->sectors_per_block,
-					       ca->policy_argc, ca->policy_argv);
+					       cache->sectors_per_block);
 	if (!cache->policy) {
 		*error = "Error creating cache's policy";
 		return -ENOMEM;
 	}
 
-	return 0;
+	r = set_config_values(cache->policy, ca->policy_argc, ca->policy_argv);
+	if (r)
+		dm_cache_policy_destroy(cache->policy);
+
+	return r;
 }
 
 /*
@@ -1902,6 +1938,27 @@ bad:
 	return r;
 }
 
+static int copy_ctr_args(struct cache *cache, int argc, const char **argv)
+{
+	unsigned i;
+	const char **copy = kzalloc(sizeof(*copy) * argc, GFP_KERNEL);
+
+	for (i = 0; i < argc; i++) {
+		copy[i] = kstrdup(argv[i], GFP_KERNEL);
+		if (!copy[i]) {
+			while (i--)
+				kfree(copy[i]);
+			kfree(copy);
+			return -ENOMEM;
+		}
+	}
+
+	cache->nr_ctr_args = argc;
+	cache->ctr_args = copy;
+
+	return 0;
+}
+
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	int r = -EINVAL;
@@ -1920,6 +1977,13 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 
 	r = cache_create(ca, &cache);
+
+	r = copy_ctr_args(cache, argc - 3, (const char **) argv + 3);
+	if (r) {
+		destroy(cache);
+		goto out;
+	}
+
 	ti->private = cache;
 
 out:
@@ -2265,6 +2329,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r = 0;
+	unsigned i;
 	ssize_t sz = 0;
 	dm_block_t nr_free_blocks_metadata = 0;
 	dm_block_t nr_blocks_metadata = 0;
@@ -2304,9 +2369,14 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long) from_cblock(residency),
 		       cache->nr_dirty);
 
-		DMEMIT("1 %s ", cache->features.write_through ?
-		       "writethrough" : "writeback");
+		if (cache->features.write_through)
+			DMEMIT("1 writethrough ");
+		else
+			DMEMIT("0 ");
 
+		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
+		if (sz < maxlen)
+			r = policy_emit_config_values(cache->policy, result + sz, maxlen - sz);
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2316,20 +2386,13 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
-		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
 
-		DMEMIT("1 %s ", cache->features.write_through ?
-		       "writethrough" : "writeback");
+		for (i = 0; i < cache->nr_ctr_args - 1; i++)
+			DMEMIT("%s ", cache->ctr_args[i]);
 
-		DMEMIT("%s %u", dm_cache_policy_get_name(cache->policy),
-		       cache->policy_nr_args);
+		if (cache->nr_ctr_args)
+			DMEMIT("%s", cache->ctr_args[cache->nr_ctr_args - 1]);
 	}
-
-	DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
-
-	if (sz < maxlen)
-		r = policy_status(cache->policy, type, status_flags,
-				  result + sz, maxlen - sz);
 
 	return r;
 }
@@ -2353,7 +2416,7 @@ static int process_config_option(struct cache *cache, char **argv)
 }
 
 /*
- * Supports <key> <value>, or whatever your policy has implemented.
+ * Supports <key> <value>
  *
  * The key migration_threshold is supported by the cache target core.
  */
@@ -2367,7 +2430,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 
 	r = process_config_option(cache, argv);
 	if (r == NOT_CORE_OPTION)
-		return policy_message(cache->policy, argc, argv);
+		return policy_set_config_value(cache->policy, argv[0], argv[1]);
 
 	return r;
 }

@@ -81,15 +81,20 @@ static inline void policy_tick(struct dm_cache_policy *p)
 		return p->tick(p);
 }
 
-static inline int policy_status(struct dm_cache_policy *p, status_type_t type,
-				unsigned status_flags, char *result, unsigned maxlen)
+static inline int policy_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
 {
-	return p->status ? p->status(p, type, status_flags, result, maxlen) : 0;
+	ssize_t sz = 0;
+	if (p->emit_config_values)
+		return p->emit_config_values(p, result, maxlen);
+
+	DMEMIT("0");
+	return 0;
 }
 
-static inline int policy_message(struct dm_cache_policy *p, unsigned argc, char **argv)
+static inline int policy_set_config_value(struct dm_cache_policy *p,
+					  const char *key, const char *value)
 {
-	return p->message ? p->message(p, argc, argv) : 0;
+	return p->set_config_value ? p->set_config_value(p, key, value) : -EINVAL;
 }
 
 /*----------------------------------------------------------------*/
@@ -98,8 +103,7 @@ static inline int policy_message(struct dm_cache_policy *p, unsigned argc, char 
  * Creates a new cache policy given a policy name, a cache size, an origin size and the block size.
  */
 struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
-					       sector_t origin_size, sector_t block_size,
-					       int argc, char **argv);
+					       sector_t origin_size, sector_t block_size);
 
 /*
  * Destroys the policy.  This drops references to the policy module as well

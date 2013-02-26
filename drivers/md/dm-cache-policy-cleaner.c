@@ -399,8 +399,7 @@ static void init_policy_functions(struct policy *p)
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
-					 sector_t block_size,
-					 int argc, char **argv)
+					 sector_t block_size)
 {
 	int r;
 	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);
