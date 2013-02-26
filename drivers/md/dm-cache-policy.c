@@ -112,8 +112,7 @@ EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 struct dm_cache_policy *dm_cache_policy_create(const char *name,
 					       dm_cblock_t cache_size,
 					       sector_t origin_size,
-					       sector_t block_size,
-					       int argc, char **argv)
+					       sector_t block_size)
 {
 	struct dm_cache_policy *p = NULL;
 	struct dm_cache_policy_type *type;
@@ -124,7 +123,7 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 		return NULL;
 	}
 
-	p = type->create(cache_size, origin_size, block_size, argc, argv);
+	p = type->create(cache_size, origin_size, block_size);
 	if (!p) {
 		put_policy(type);
 		return NULL;

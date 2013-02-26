@@ -73,10 +73,6 @@ static void iot_init(struct io_tracker *t,
 	t->pattern = PATTERN_RANDOM;
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
-	t->thresholds[PATTERN_SEQUENTIAL] =
-		sequential_threshold > -1 ? sequential_threshold : SEQUENTIAL_THRESHOLD_DEFAULT;
-	t->thresholds[PATTERN_RANDOM] =
-		random_threshold > -1 ?	random_threshold : RANDOM_THRESHOLD_DEFAULT;
 	t->last_end_oblock = 0;
 }
 
@@ -1027,93 +1023,37 @@ static void mq_tick(struct dm_cache_policy *p)
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
-static int process_config_option(struct mq_policy *mq, char **argv, bool set_ctr_arg)
+static int mq_set_config_value(struct dm_cache_policy *p,
+			       const char *key, const char *value)
 {
+	struct mq_policy *mq = to_mq_policy(p);
 	enum io_pattern pattern;
 	unsigned long tmp;
 
-	if (!strcasecmp(argv[0], "random_threshold"))
+	if (!strcasecmp(key, "random_threshold"))
 		pattern = PATTERN_RANDOM;
 
-	else if (!strcasecmp(argv[0], "sequential_threshold"))
+	else if (!strcasecmp(key, "sequential_threshold"))
 		pattern = PATTERN_SEQUENTIAL;
 
 	else
 		return -EINVAL;
 
-	if (kstrtoul(argv[1], 10, &tmp))
+	if (kstrtoul(value, 10, &tmp))
 		return -EINVAL;
 
-
-	if (set_ctr_arg) {
-		if (mq->threshold_args[pattern] > -1)
-			return -EINVAL;
-
-		mq->threshold_args[pattern] = tmp;
-	}
-
 	mq->tracker.thresholds[pattern] = tmp;
-
 	return 0;
 }
 
-static int mq_message(struct dm_cache_policy *p, unsigned argc, char **argv)
-{
-	struct mq_policy *mq = to_mq_policy(p);
-
-	if (argc != 2)
-		return -EINVAL;
-
-	return process_config_option(mq, argv, false);
-}
-
-static void emit_tunables(ssize_t sz, char *result, unsigned maxlen,
-			  unsigned random_threshold,
-			  unsigned sequential_threshold)
-{
-	DMEMIT("4 random_threshold %u sequential_threshold %u",
-	       random_threshold, sequential_threshold);
-}
-
-static int mq_status(struct dm_cache_policy *p, status_type_t type,
-		     unsigned status_flags, char *result, unsigned maxlen)
+static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	struct mq_policy *mq = to_mq_policy(p);
-
-	switch (type) {
-	case STATUSTYPE_INFO:
-		emit_tunables(sz, result, maxlen,
-			      mq->tracker.thresholds[PATTERN_SEQUENTIAL],
-			      mq->tracker.thresholds[PATTERN_RANDOM]);
-		break;
-
-	case STATUSTYPE_TABLE:
-		emit_tunables(sz, result, maxlen,
-			      mq->threshold_args[PATTERN_RANDOM],
-			      mq->threshold_args[PATTERN_SEQUENTIAL]);
-	}
-
+	DMEMIT("4 random_threshold %u sequential_threshold %u",
+	       mq->tracker.thresholds[PATTERN_RANDOM],
+	       mq->tracker.thresholds[PATTERN_SEQUENTIAL]);
 	return 0;
-}
-
-static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
-{
-	int r;
-	unsigned u;
-
-	mq->threshold_args[0] = mq->threshold_args[1] = -1;
-
-	if (!argc)
-		return 0;
-
-	if (argc != 2 && argc != 4)
-		return -EINVAL;
-
-	for (r = u = 0; u < argc && !r; u += 2)
-		r = process_config_option(mq, argv + u, true);
-
-	return r;
 }
 
 /* Init the policy plugin interface function pointers. */
@@ -1129,14 +1069,13 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
-	mq->policy.status = mq_status;
-	mq->policy.message = mq_message;
+	mq->policy.emit_config_values = mq_emit_config_values;
+	mq->policy.set_config_value = mq_set_config_value;
 }
 
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
-					 sector_t block_size,
-					 int argc, char **argv)
+					 sector_t block_size)
 {
 	int r;
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
@@ -1145,13 +1084,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 		return NULL;
 
 	init_policy_functions(mq);
-
-	/* Need to do that before iot_init(). */
-	r = process_policy_args(mq, argc, argv);
-	if (r)
-		goto bad_free_policy;
-
-	iot_init(&mq->tracker, mq->threshold_args[PATTERN_SEQUENTIAL], mq->threshold_args[PATTERN_RANDOM]);
+	iot_init(&mq->tracker, SEQUENTIAL_THRESHOLD_DEFAULT, RANDOM_THRESHOLD_DEFAULT);
 
 	mq->cache_size = cache_size;
 	mq->tick_protected = 0;
@@ -1192,7 +1125,6 @@ bad_alloc_bitset:
 	kfree(mq->table);
 bad_alloc_table:
 	free_entries(mq);
-bad_free_policy:
 bad_cache_alloc:
 	kfree(mq);
 

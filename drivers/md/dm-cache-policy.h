@@ -177,11 +177,12 @@ struct dm_cache_policy {
 	void (*tick)(struct dm_cache_policy *p);
 
 	/*
-	 * Status and message.
+	 * Configuration.
 	 */
-	int (*status) (struct dm_cache_policy *p, status_type_t type,
-		       unsigned status_flags, char *result, unsigned maxlen);
-	int (*message) (struct dm_cache_policy *p, unsigned argc, char **argv);
+	int (*emit_config_values)(struct dm_cache_policy *p,
+				  char *result, unsigned maxlen);
+	int (*set_config_value)(struct dm_cache_policy *p,
+				const char *key, const char *value);
 
 	/*
 	 * Book keeping ptr for the policy register, not for general use.
@@ -215,8 +216,7 @@ struct dm_cache_policy_type {
 	struct module *owner;
 	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
 					  sector_t origin_size,
-					  sector_t block_size,
-					  int argc, char **argv);
+					  sector_t block_size);
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);
