@@ -51,6 +51,7 @@ static void free_bitset(unsigned long *bits)
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512
+#define UNINIT_TUNABLE -1
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -307,6 +308,7 @@ struct mq_policy {
 	dm_block_t hash_bits;
 	struct hlist_head *table;
 
+	unsigned threshold_arg_count;
 	int threshold_args[2];
 };
 
