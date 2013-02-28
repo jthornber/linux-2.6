@@ -410,7 +410,7 @@ static bool block_size_is_power_of_two(struct cache *cache)
 
 static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 {
- 	sector_t discard_blocks = cache->discard_block_size;
+	sector_t discard_blocks = cache->discard_block_size;
 	dm_block_t b = from_oblock(oblock);
 
 	if (!block_size_is_power_of_two(cache))
