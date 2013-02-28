@@ -130,7 +130,7 @@ struct cache {
 	/*
 	 * Fields for converting from sectors to blocks.
 	 */
-	sector_t sectors_per_block;
+	uint32_t sectors_per_block;
 	int sectors_per_block_shift;
 
 	struct dm_cache_metadata *cmd;
@@ -1464,7 +1464,7 @@ struct cache_args {
 	struct dm_dev *origin_dev;
 	sector_t origin_sectors;
 
-	sector_t block_size;
+	uint32_t block_size;
 
 	const char *policy_name;
 	int policy_argc;
