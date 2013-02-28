@@ -403,13 +403,20 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 }
 
 /*----------------------------------------------------------------*/
+static bool block_size_is_power_of_two(struct cache *cache)
+{
+	return cache->sectors_per_block_shift >= 0;
+}
 
 static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 {
  	sector_t discard_blocks = cache->discard_block_size;
 	dm_block_t b = from_oblock(oblock);
 
-	sector_div(discard_blocks, cache->sectors_per_block);
+	if (!block_size_is_power_of_two(cache))
+		(void) sector_div(discard_blocks, cache->sectors_per_block);
+	else
+		discard_blocks >>= cache->sectors_per_block_shift;
 	sector_div(b, discard_blocks);
 	return to_dblock(b);
 }
@@ -508,11 +515,6 @@ static struct per_bio_data *init_per_bio_data(struct bio *bio)
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
-static bool block_size_is_power_of_two(struct cache *cache)
-{
-	return cache->sectors_per_block_shift >= 0;
-}
-
 static void remap_to_origin(struct cache *cache, struct bio *bio)
 {
 	bio->bi_bdev = cache->origin_dev->bdev;
