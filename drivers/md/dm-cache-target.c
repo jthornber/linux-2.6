@@ -410,7 +410,7 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 	dm_block_t b = from_oblock(oblock);
 
 	sector_div(tmp, cache->sectors_per_block);
-	do_div(b, tmp);
+	sector_div(b, tmp);
 	return to_dblock(b);
 }
 
