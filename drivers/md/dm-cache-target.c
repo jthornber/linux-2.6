@@ -406,11 +406,11 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 
 static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 {
-	sector_t tmp = cache->discard_block_size;
+ 	sector_t discard_blocks = cache->discard_block_size;
 	dm_block_t b = from_oblock(oblock);
 
-	sector_div(tmp, cache->sectors_per_block);
-	sector_div(b, tmp);
+	sector_div(discard_blocks, cache->sectors_per_block);
+	sector_div(b, discard_blocks);
 	return to_dblock(b);
 }
 
