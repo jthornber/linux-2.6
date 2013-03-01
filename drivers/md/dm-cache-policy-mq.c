@@ -307,9 +307,6 @@ struct mq_policy {
 	unsigned nr_buckets;
 	dm_block_t hash_bits;
 	struct hlist_head *table;
-
-	unsigned threshold_arg_count;
-	int threshold_args[2];
 };
 
 /*----------------------------------------------------------------*/
