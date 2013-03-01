@@ -121,19 +121,19 @@ struct dm_cache_metadata {
 
 static void sb_prepare_for_write(struct dm_block_validator *v,
 				 struct dm_block *b,
-				 size_t block_size)
+				 size_t sb_block_size)
 {
 	struct cache_disk_superblock *disk_super = dm_block_data(b);
 
 	disk_super->blocknr = cpu_to_le64(dm_block_location(b));
 	disk_super->csum = cpu_to_le32(dm_bm_checksum(&disk_super->flags,
-						      block_size - sizeof(__le32),
+						      sb_block_size - sizeof(__le32),
 						      SUPERBLOCK_CSUM_XOR));
 }
 
 static int sb_check(struct dm_block_validator *v,
 		    struct dm_block *b,
-		    size_t block_size)
+		    size_t sb_block_size)
 {
 	struct cache_disk_superblock *disk_super = dm_block_data(b);
 	__le32 csum_le;
@@ -153,7 +153,7 @@ static int sb_check(struct dm_block_validator *v,
 	}
 
 	csum_le = cpu_to_le32(dm_bm_checksum(&disk_super->flags,
-					     block_size - sizeof(__le32),
+					     sb_block_size - sizeof(__le32),
 					     SUPERBLOCK_CSUM_XOR));
 	if (csum_le != disk_super->csum) {
 		DMERR("sb_check failed: csum %u: wanted %u",
@@ -201,7 +201,7 @@ static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 	unsigned i;
 	struct dm_block *b;
 	__le64 *data_le, zero = cpu_to_le64(0);
-	unsigned block_size = dm_bm_block_size(bm) / sizeof(__le64);
+	unsigned sb_block_size = dm_bm_block_size(bm) / sizeof(__le64);
 
 	/*
 	 * We can't use a validator here - it may be all zeroes.
@@ -212,7 +212,7 @@ static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 
 	data_le = dm_block_data(b);
 	*result = 1;
-	for (i = 0; i < block_size; i++) {
+	for (i = 0; i < sb_block_size; i++) {
 		if (data_le[i] != zero) {
 			*result = 0;
 			break;
@@ -935,11 +935,6 @@ static int __dump_mapping(void *context, uint64_t cblock, void *leaf)
 
 	memcpy(&value, leaf, sizeof(value));
 	unpack_value(value, &oblock, &flags);
-
-	if (flags & M_VALID)
-		pr_alert("%p o(%u) -> c(%u)\n", leaf,
-			 (unsigned) from_oblock(oblock),
-			 (unsigned) cblock);
 
 	return r;
 }

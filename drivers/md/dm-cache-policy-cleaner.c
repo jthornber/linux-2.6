@@ -12,8 +12,12 @@
 #include <linux/hash.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 /*----------------------------------------------------------------*/
+
+#define DM_MSG_PREFIX "cache cleaner"
+#define CLEANER_VERSION "1.0.0"
 
 /* Cache entry struct. */
 struct wb_cache_entry {
@@ -68,7 +72,9 @@ static struct policy *to_policy(struct dm_cache_policy *p)
 static struct list_head *list_pop(struct list_head *q)
 {
 	struct list_head *r = q->next;
+
 	list_del(r);
+
 	return r;
 }
 
@@ -399,7 +405,7 @@ static void init_policy_functions(struct policy *p)
 
 static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
-					 sector_t block_size)
+					 sector_t cache_block_size)
 {
 	int r;
 	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);
@@ -436,7 +442,14 @@ static struct dm_cache_policy_type wb_policy_type = {
 
 static int __init wb_init(void)
 {
-	return dm_cache_policy_register(&wb_policy_type);
+	int r = dm_cache_policy_register(&wb_policy_type);
+
+	if (r < 0)
+		DMERR("register failed %d", r);
+	else
+		DMINFO("version " CLEANER_VERSION " loaded");
+
+	return r;
 }
 
 static void __exit wb_exit(void)

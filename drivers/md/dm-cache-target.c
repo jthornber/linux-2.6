@@ -417,7 +417,9 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 		(void) sector_div(discard_blocks, cache->sectors_per_block);
 	else
 		discard_blocks >>= cache->sectors_per_block_shift;
-	sector_div(b, discard_blocks);
+
+	(void) sector_div(b, discard_blocks);
+
 	return to_dblock(b);
 }
 
@@ -996,7 +998,7 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
 	dm_block_t b;
 
-	sector_div(end_block, cache->discard_block_size);
+	(void) sector_div(end_block, cache->discard_block_size);
 
 	for (b = start_block; b < end_block; b++)
 		set_discard(cache, to_dblock(b));
@@ -1422,6 +1424,7 @@ static void destroy(struct cache *cache)
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
+
 	destroy(cache);
 }
 
@@ -1436,24 +1439,30 @@ static sector_t get_dev_size(struct dm_dev *dev)
  * Construct a cache device mapping.
  *
  * cache <metadata dev> <cache dev> <origin dev> <block size>
- *       <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
+ *       <#feature args> [<feature arg>]*
+ *       <policy> <#policy args> [<policy arg>]*
  *
  * metadata dev    : fast device holding the persistent metadata
  * cache dev	   : fast device holding cached data blocks
  * origin dev	   : slow device holding original data blocks
  * block size	   : cache unit size in sectors
+ *
  * #feature args   : number of feature arguments passed
- * feature args    : 'writeback' or 'writethrough' (one or the other).
- * #policy args    : an even number of arguments corresponding to
- *                   key/value pairs passed to the policy.
- * policy args     : key/value pairs (eg, 'sequential_threshold 1024');
- *                   see cache-policies.txt for details
+ * feature args    : writethrough.  (The default is writeback.)
+ *
+ * policy	   : the replacement policy to use
+ * #policy args    : an even number of policy arguments corresponding
+ *		     to key/value pairs passed to the policy
+ * policy args	   : key/value pairs passed to the policy
+ *		     E.g. 'sequential_threshold 1024'
+ *		     See cache-policies.txt for details.
  *
  * Optional feature arguments are:
- *	writeback: write back cache allowing cache block contents to
- *                 differ from origin blocks for performance reasons
- *	writethrough: write through caching prohibiting cache block
- *                    content from being distinct from origin block content
+ *   writethrough  : write through caching that prohibits cache block
+ *		     content from being different from origin block content.
+ *		     Without this argument, the default behaviour is to write
+ *		     back cache block contents later for performance reasons,
+ *		     so they may differ from the corresponding origin blocks.
  */
 struct cache_args {
 	struct dm_target *ti;
@@ -1652,7 +1661,7 @@ static int parse_policy(struct cache_args *ca, struct dm_arg_set *as,
 	if (r)
 		return -EINVAL;
 
-	ca->policy_argv = (const char **) as->argv;
+	ca->policy_argv = (const char **)as->argv;
 	dm_consume_args(as, ca->policy_argc);
 
 	return 0;
@@ -1703,7 +1712,7 @@ static int set_config_values(struct dm_cache_policy *p, int argc, const char **a
 	int r = 0;
 
 	if (argc & 1) {
-		DMWARN("An odd number of policy arguments given (they should be <key> <value> pairs).");
+		DMWARN("Odd number of policy arguments given but they should be <key> <value> pairs.");
 		return -EINVAL;
 	}
 
@@ -1750,25 +1759,26 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
  */
 #define MAX_DISCARD_BLOCKS (1 << 14)
 
-static bool too_many_discard_blocks(sector_t block_size,
+static bool too_many_discard_blocks(sector_t discard_block_size,
 				    sector_t origin_size)
 {
-	sector_div(origin_size, block_size);
+	(void) sector_div(origin_size, discard_block_size);
+
 	return origin_size > MAX_DISCARD_BLOCKS;
 }
 
 static sector_t calculate_discard_block_size(sector_t cache_block_size,
 					     sector_t origin_size)
 {
-	sector_t r;
+	sector_t discard_block_size;
 
-	r = roundup_pow_of_two(cache_block_size);
+	discard_block_size = roundup_pow_of_two(cache_block_size);
 
 	if (origin_size)
-		while (too_many_discard_blocks(r, origin_size))
-			r *= 2;
+		while (too_many_discard_blocks(discard_block_size, origin_size))
+			discard_block_size *= 2;
 
-	return r;
+	return discard_block_size;
 }
 
 #define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
@@ -1815,7 +1825,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	/* FIXME: factor out this whole section */
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
-	sector_div(origin_blocks, ca->block_size);
+	(void) sector_div(origin_blocks, ca->block_size);
 	cache->origin_blocks = to_oblock(origin_blocks);
 
 	cache->sectors_per_block = ca->block_size;
@@ -1980,7 +1990,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	r = cache_create(ca, &cache);
 
-	r = copy_ctr_args(cache, argc - 3, (const char **) argv + 3);
+	r = copy_ctr_args(cache, argc - 3, (const char **)argv + 3);
 	if (r) {
 		destroy(cache);
 		goto out;
@@ -2131,6 +2141,7 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 	}
 
 	check_for_quiesced_migrations(cache, pb);
+
 	return 0;
 }
 
@@ -2359,7 +2370,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%llu %llu %u %u %u %u %u %u %llu %u ",
+		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u ",
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->stats.read_hit),
@@ -2377,8 +2388,11 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 			DMEMIT("0 ");
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
-		if (sz < maxlen)
+		if (sz < maxlen) {
 			r = policy_emit_config_values(cache->policy, result + sz, maxlen - sz);
+			if (r)
+				DMERR("policy_emit_config_values returned %d", r);
+		}
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2387,30 +2401,28 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
-		DMEMIT("%s ", buf);
+		DMEMIT("%s", buf);
 
 		for (i = 0; i < cache->nr_ctr_args - 1; i++)
-			DMEMIT("%s ", cache->ctr_args[i]);
-
+			DMEMIT(" %s", cache->ctr_args[i]);
 		if (cache->nr_ctr_args)
-			DMEMIT("%s", cache->ctr_args[cache->nr_ctr_args - 1]);
+			DMEMIT(" %s", cache->ctr_args[cache->nr_ctr_args - 1]);
 	}
 
-	return r;
+	return 0;
 }
 
 #define NOT_CORE_OPTION 1
 
 static int process_config_option(struct cache *cache, char **argv)
 {
-	if (!strcasecmp(argv[0], "migration_threshold")) {
-		unsigned long tmp;
+	unsigned long tmp;
 
+	if (!strcasecmp(argv[0], "migration_threshold")) {
 		if (kstrtoul(argv[1], 10, &tmp))
 			return -EINVAL;
 
 		cache->migration_threshold = tmp;
-
 		return 0;
 	}
 
@@ -2418,7 +2430,7 @@ static int process_config_option(struct cache *cache, char **argv)
 }
 
 /*
- * Supports <key> <value>
+ * Supports <key> <value>.
  *
  * The key migration_threshold is supported by the cache target core.
  */
@@ -2451,10 +2463,10 @@ static int cache_iterate_devices(struct dm_target *ti,
 }
 
 /*
- * We could look up the exact location of the data, but this is expensive
- * and could always be out of date by the time the bio is submitted.
- * Instead we just assume it's going to the origin (which is the volume
- * more likely to have restrictions eg, by being striped).
+ * We assume I/O is going to the origin (which is the volume
+ * more likely to have restrictions e.g. by being striped).
+ * (Looking up the exact location of the data would be expensive
+ * and could always be out of date by the time the bio is submitted.)
  */
 static int cache_bvec_merge(struct dm_target *ti,
 			    struct bvec_merge_data *bvm,

@@ -97,7 +97,9 @@ static void *element_at(struct dm_array_info *info, struct array_block *ab,
 			unsigned index)
 {
 	unsigned char *entry = (unsigned char *) (ab + 1);
+
 	entry += index * info->value_type.size;
+
 	return entry;
 }
 
@@ -509,10 +511,6 @@ static int grow_needs_more_blocks(struct resize *resize)
 	int r;
 
 	if (resize->old_nr_entries_in_last_block > 0) {
-		/*
-		 * FIXME: how does it know to extend the old tail block
-		 * rather than the new?  Write test case.
-		 */
 		r = grow_extend_tail_block(resize, resize->max_entries);
 		if (r)
 			return r;
