@@ -75,6 +75,8 @@ static void iot_init(struct io_tracker *t,
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
 	t->last_end_oblock = 0;
+	t->thresholds[PATTERN_RANDOM] = random_threshold;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold;
 }
 
 static enum io_pattern iot_pattern(struct io_tracker *t)
