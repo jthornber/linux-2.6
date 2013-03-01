@@ -1379,6 +1379,8 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
  */
 static void destroy(struct cache *cache)
 {
+	unsigned i;
+
 	if (cache->next_migration)
 		mempool_free(cache->next_migration, cache->migration_pool);
 
@@ -1417,6 +1419,10 @@ static void destroy(struct cache *cache)
 
 	if (cache->policy)
 		dm_cache_policy_destroy(cache->policy);
+
+	for (i = 0; i < cache->nr_ctr_args ; i++)
+		kfree(cache->ctr_args[i]);
+	kfree(cache->ctr_args);
 
 	kfree(cache);
 }
