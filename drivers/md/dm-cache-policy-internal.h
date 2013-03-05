@@ -87,7 +87,7 @@ static inline int policy_emit_config_values(struct dm_cache_policy *p, char *res
 	if (p->emit_config_values)
 		return p->emit_config_values(p, result, maxlen);
 
-	DMEMIT(" 0");
+	DMEMIT("0");
 	return 0;
 }
 

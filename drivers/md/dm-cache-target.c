@@ -14,8 +14,12 @@
 #include <linux/mempool.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache"
+
+DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
+	"A percentage of time allocated for copying to and/or from cache");
 
 /*----------------------------------------------------------------*/
 
@@ -1895,7 +1899,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	clear_bitset(cache->discard_bitset, from_dblock(cache->discard_nr_blocks));
 
-	cache->copier = dm_kcopyd_client_create();
+	cache->copier = dm_kcopyd_client_create(&dm_kcopyd_throttle);
 	if (IS_ERR(cache->copier)) {
 		*error = "could not create kcopyd client";
 		r = PTR_ERR(cache->copier);
@@ -1959,8 +1963,11 @@ bad:
 static int copy_ctr_args(struct cache *cache, int argc, const char **argv)
 {
 	unsigned i;
-	const char **copy = kzalloc(sizeof(*copy) * argc, GFP_KERNEL);
+	const char **copy;
 
+	copy = kcalloc(argc, sizeof(*copy), GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
 	for (i = 0; i < argc; i++) {
 		copy[i] = kstrdup(argv[i], GFP_KERNEL);
 		if (!copy[i]) {
@@ -2344,8 +2351,18 @@ static void cache_resume(struct dm_target *ti)
 	do_waker(&cache->waker.work);
 }
 
-static int cache_status(struct dm_target *ti, status_type_t type,
-			unsigned status_flags, char *result, unsigned maxlen)
+/*
+ * Status format:
+ *
+ * <#used metadata blocks>/<#total metadata blocks>
+ * <#read hits> <#read misses> <#write hits> <#write misses>
+ * <#demotions> <#promotions> <#blocks in cache> <#dirty>
+ * <#features> <features>*
+ * <#core args> <core args>
+ * <#policy args> <policy args>*
+ */
+static void cache_status(struct dm_target *ti, status_type_t type,
+			 unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r = 0;
 	unsigned i;
@@ -2367,12 +2384,16 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		r = dm_cache_get_free_metadata_block_count(cache->cmd,
 							   &nr_free_blocks_metadata);
-		if (r)
+		if (r) {
 			DMERR("could not get metadata free block count");
+			goto err;
+		}
 
 		r = dm_cache_get_metadata_dev_size(cache->cmd, &nr_blocks_metadata);
-		if (r)
+		if (r) {
 			DMERR("could not get metadata device size");
+			goto err;
+		}
 
 		residency = policy_residency(cache->policy);
 
@@ -2399,6 +2420,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 			if (r)
 				DMERR("policy_emit_config_values returned %d", r);
 		}
+
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2415,7 +2437,10 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 			DMEMIT(" %s", cache->ctr_args[cache->nr_ctr_args - 1]);
 	}
 
-	return 0;
+	return;
+
+err:
+	DMEMIT("Error");
 }
 
 #define NOT_CORE_OPTION 1

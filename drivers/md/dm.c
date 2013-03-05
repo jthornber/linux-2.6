@@ -163,7 +163,6 @@ struct mapped_device {
 	 * io objects are allocated from here.
 	 */
 	mempool_t *io_pool;
-	mempool_t *tio_pool;
 
 	struct bio_set *bs;
 
@@ -197,19 +196,12 @@ struct mapped_device {
  */
 struct dm_md_mempools {
 	mempool_t *io_pool;
-	mempool_t *tio_pool;
 	struct bio_set *bs;
 };
 
 #define MIN_IOS 256
 static struct kmem_cache *_io_cache;
 static struct kmem_cache *_rq_tio_cache;
-
-/*
- * Unused now, and needs to be deleted. But since io_pool is overloaded and it's
- * still used for _io_cache, I'm leaving this for a later cleanup
- */
-static struct kmem_cache *_rq_bio_info_cache;
 
 static int __init local_init(void)
 {
@@ -224,13 +216,9 @@ static int __init local_init(void)
 	if (!_rq_tio_cache)
 		goto out_free_io_cache;
 
-	_rq_bio_info_cache = KMEM_CACHE(dm_rq_clone_bio_info, 0);
-	if (!_rq_bio_info_cache)
-		goto out_free_rq_tio_cache;
-
 	r = dm_uevent_init();
 	if (r)
-		goto out_free_rq_bio_info_cache;
+		goto out_free_rq_tio_cache;
 
 	_major = major;
 	r = register_blkdev(_major, _name);
@@ -244,8 +232,6 @@ static int __init local_init(void)
 
 out_uevent_exit:
 	dm_uevent_exit();
-out_free_rq_bio_info_cache:
-	kmem_cache_destroy(_rq_bio_info_cache);
 out_free_rq_tio_cache:
 	kmem_cache_destroy(_rq_tio_cache);
 out_free_io_cache:
@@ -256,7 +242,6 @@ out_free_io_cache:
 
 static void local_exit(void)
 {
-	kmem_cache_destroy(_rq_bio_info_cache);
 	kmem_cache_destroy(_rq_tio_cache);
 	kmem_cache_destroy(_io_cache);
 	unregister_blkdev(_major, _name);
@@ -449,12 +434,12 @@ static void free_tio(struct mapped_device *md, struct dm_target_io *tio)
 static struct dm_rq_target_io *alloc_rq_tio(struct mapped_device *md,
 					    gfp_t gfp_mask)
 {
-	return mempool_alloc(md->tio_pool, gfp_mask);
+	return mempool_alloc(md->io_pool, gfp_mask);
 }
 
 static void free_rq_tio(struct dm_rq_target_io *tio)
 {
-	mempool_free(tio, tio->md->tio_pool);
+	mempool_free(tio, tio->md->io_pool);
 }
 
 static int md_in_flight(struct mapped_device *md)
@@ -627,7 +612,6 @@ static void dec_pending(struct dm_io *io, int error)
 			queue_io(md, bio);
 		} else {
 			/* done with normal IO or empty flush */
-			trace_block_bio_complete(md->queue, bio, io_error);
 			bio_endio(bio, io_error);
 		}
 	}
@@ -1996,8 +1980,6 @@ static void free_dev(struct mapped_device *md)
 	unlock_fs(md);
 	bdput(md->bdev);
 	destroy_workqueue(md->wq);
-	if (md->tio_pool)
-		mempool_destroy(md->tio_pool);
 	if (md->io_pool)
 		mempool_destroy(md->io_pool);
 	if (md->bs)
@@ -2020,24 +2002,33 @@ static void __bind_mempools(struct mapped_device *md, struct dm_table *t)
 {
 	struct dm_md_mempools *p = dm_table_get_md_mempools(t);
 
-	if (md->io_pool && (md->tio_pool || dm_table_get_type(t) == DM_TYPE_BIO_BASED) && md->bs) {
-		/*
-		 * The md already has necessary mempools. Reload just the
-		 * bioset because front_pad may have changed because
-		 * a different table was loaded.
-		 */
-		bioset_free(md->bs);
-		md->bs = p->bs;
-		p->bs = NULL;
+	if (md->io_pool && md->bs) {
+		/* The md already has necessary mempools. */
+		if (dm_table_get_type(t) == DM_TYPE_BIO_BASED) {
+			/*
+			 * Reload bioset because front_pad may have changed
+			 * because a different table was loaded.
+			 */
+			bioset_free(md->bs);
+			md->bs = p->bs;
+			p->bs = NULL;
+		} else if (dm_table_get_type(t) == DM_TYPE_REQUEST_BASED) {
+			/*
+			 * There's no need to reload with request-based dm
+			 * because the size of front_pad doesn't change.
+			 * Note for future: If you are to reload bioset,
+			 * prep-ed requests in the queue may refer
+			 * to bio from the old bioset, so you must walk
+			 * through the queue to unprep.
+			 */
+		}
 		goto out;
 	}
 
-	BUG_ON(!p || md->io_pool || md->tio_pool || md->bs);
+	BUG_ON(!p || md->io_pool || md->bs);
 
 	md->io_pool = p->io_pool;
 	p->io_pool = NULL;
-	md->tio_pool = p->tio_pool;
-	p->tio_pool = NULL;
 	md->bs = p->bs;
 	p->bs = NULL;
 
@@ -2468,7 +2459,7 @@ static void dm_queue_flush(struct mapped_device *md)
  */
 struct dm_table *dm_swap_table(struct mapped_device *md, struct dm_table *table)
 {
-	struct dm_table *live_map, *map = ERR_PTR(-EINVAL);
+	struct dm_table *live_map = NULL, *map = ERR_PTR(-EINVAL);
 	struct queue_limits limits;
 	int r;
 
@@ -2491,10 +2482,12 @@ struct dm_table *dm_swap_table(struct mapped_device *md, struct dm_table *table)
 		dm_table_put(live_map);
 	}
 
-	r = dm_calculate_queue_limits(table, &limits);
-	if (r) {
-		map = ERR_PTR(r);
-		goto out;
+	if (!live_map) {
+		r = dm_calculate_queue_limits(table, &limits);
+		if (r) {
+			map = ERR_PTR(r);
+			goto out;
+		}
 	}
 
 	map = __bind(md, table, &limits);
@@ -2792,52 +2785,42 @@ EXPORT_SYMBOL_GPL(dm_noflush_suspending);
 
 struct dm_md_mempools *dm_alloc_md_mempools(unsigned type, unsigned integrity, unsigned per_bio_data_size)
 {
-	struct dm_md_mempools *pools = kmalloc(sizeof(*pools), GFP_KERNEL);
-	unsigned int pool_size = (type == DM_TYPE_BIO_BASED) ? 16 : MIN_IOS;
+	struct dm_md_mempools *pools = kzalloc(sizeof(*pools), GFP_KERNEL);
+	struct kmem_cache *cachep;
+	unsigned int pool_size;
+	unsigned int front_pad;
 
 	if (!pools)
 		return NULL;
 
-	per_bio_data_size = roundup(per_bio_data_size, __alignof__(struct dm_target_io));
+	if (type == DM_TYPE_BIO_BASED) {
+		cachep = _io_cache;
+		pool_size = 16;
+		front_pad = roundup(per_bio_data_size, __alignof__(struct dm_target_io)) + offsetof(struct dm_target_io, clone);
+	} else if (type == DM_TYPE_REQUEST_BASED) {
+		cachep = _rq_tio_cache;
+		pool_size = MIN_IOS;
+		front_pad = offsetof(struct dm_rq_clone_bio_info, clone);
+		/* per_bio_data_size is not used. See __bind_mempools(). */
+		WARN_ON(per_bio_data_size != 0);
+	} else
+		goto out;
 
-	pools->io_pool = (type == DM_TYPE_BIO_BASED) ?
-			 mempool_create_slab_pool(MIN_IOS, _io_cache) :
-			 mempool_create_slab_pool(MIN_IOS, _rq_bio_info_cache);
+	pools->io_pool = mempool_create_slab_pool(MIN_IOS, cachep);
 	if (!pools->io_pool)
-		goto free_pools_and_out;
+		goto out;
 
-	pools->tio_pool = NULL;
-	if (type == DM_TYPE_REQUEST_BASED) {
-		pools->tio_pool = mempool_create_slab_pool(MIN_IOS, _rq_tio_cache);
-		if (!pools->tio_pool)
-			goto free_io_pool_and_out;
-	}
-
-	pools->bs = (type == DM_TYPE_BIO_BASED) ?
-		bioset_create(pool_size,
-			      per_bio_data_size + offsetof(struct dm_target_io, clone)) :
-		bioset_create(pool_size,
-			      offsetof(struct dm_rq_clone_bio_info, clone));
+	pools->bs = bioset_create(pool_size, front_pad);
 	if (!pools->bs)
-		goto free_tio_pool_and_out;
+		goto out;
 
 	if (integrity && bioset_integrity_create(pools->bs, pool_size))
-		goto free_bioset_and_out;
+		goto out;
 
 	return pools;
 
-free_bioset_and_out:
-	bioset_free(pools->bs);
-
-free_tio_pool_and_out:
-	if (pools->tio_pool)
-		mempool_destroy(pools->tio_pool);
-
-free_io_pool_and_out:
-	mempool_destroy(pools->io_pool);
-
-free_pools_and_out:
-	kfree(pools);
+out:
+	dm_free_md_mempools(pools);
 
 	return NULL;
 }
@@ -2849,9 +2832,6 @@ void dm_free_md_mempools(struct dm_md_mempools *pools)
 
 	if (pools->io_pool)
 		mempool_destroy(pools->io_pool);
-
-	if (pools->tio_pool)
-		mempool_destroy(pools->tio_pool);
 
 	if (pools->bs)
 		bioset_free(pools->bs);

@@ -26,6 +26,9 @@
 #define PRISON_CELLS 1024
 #define COMMIT_PERIOD HZ
 
+DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
+		"A percentage of time allocated for copy on write");
+
 /*
  * The block size of the device holding pool data must be
  * between 64KB and 1GB.
@@ -1710,7 +1713,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		goto bad_prison;
 	}
 
-	pool->copier = dm_kcopyd_client_create();
+	pool->copier = dm_kcopyd_client_create(&dm_kcopyd_throttle);
 	if (IS_ERR(pool->copier)) {
 		r = PTR_ERR(pool->copier);
 		*error = "Error creating pool's kcopyd client";
@@ -2373,8 +2376,8 @@ static void emit_flags(struct pool_features *pf, char *result,
  *    <transaction id> <used metadata sectors>/<total metadata sectors>
  *    <used data sectors>/<total data sectors> <held metadata root>
  */
-static int pool_status(struct dm_target *ti, status_type_t type,
-		       unsigned status_flags, char *result, unsigned maxlen)
+static void pool_status(struct dm_target *ti, status_type_t type,
+			unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r;
 	unsigned sz = 0;
@@ -2400,32 +2403,41 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti))
 			(void) commit_or_fallback(pool);
 
-		r = dm_pool_get_metadata_transaction_id(pool->pmd,
-							&transaction_id);
-		if (r)
-			return r;
+		r = dm_pool_get_metadata_transaction_id(pool->pmd, &transaction_id);
+		if (r) {
+			DMERR("dm_pool_get_metadata_transaction_id returned %d", r);
+			goto err;
+		}
 
-		r = dm_pool_get_free_metadata_block_count(pool->pmd,
-							  &nr_free_blocks_metadata);
-		if (r)
-			return r;
+		r = dm_pool_get_free_metadata_block_count(pool->pmd, &nr_free_blocks_metadata);
+		if (r) {
+			DMERR("dm_pool_get_free_metadata_block_count returned %d", r);
+			goto err;
+		}
 
 		r = dm_pool_get_metadata_dev_size(pool->pmd, &nr_blocks_metadata);
-		if (r)
-			return r;
+		if (r) {
+			DMERR("dm_pool_get_metadata_dev_size returned %d", r);
+			goto err;
+		}
 
-		r = dm_pool_get_free_block_count(pool->pmd,
-						 &nr_free_blocks_data);
-		if (r)
-			return r;
+		r = dm_pool_get_free_block_count(pool->pmd, &nr_free_blocks_data);
+		if (r) {
+			DMERR("dm_pool_get_free_block_count returned %d", r);
+			goto err;
+		}
 
 		r = dm_pool_get_data_dev_size(pool->pmd, &nr_blocks_data);
-		if (r)
-			return r;
+		if (r) {
+			DMERR("dm_pool_get_data_dev_size returned %d", r);
+			goto err;
+		}
 
 		r = dm_pool_get_metadata_snap(pool->pmd, &held_root);
-		if (r)
-			return r;
+		if (r) {
+			DMERR("dm_pool_get_metadata_snap returned %d", r);
+			goto err;
+		}
 
 		DMEMIT("%llu %llu/%llu %llu/%llu ",
 		       (unsigned long long)transaction_id,
@@ -2462,8 +2474,10 @@ static int pool_status(struct dm_target *ti, status_type_t type,
 		emit_flags(&pt->requested_pf, result, sz, maxlen);
 		break;
 	}
+	return;
 
-	return 0;
+err:
+	DMEMIT("Error");
 }
 
 static int pool_iterate_devices(struct dm_target *ti,
@@ -2738,8 +2752,8 @@ static void thin_postsuspend(struct dm_target *ti)
 /*
  * <nr mapped sectors> <highest mapped sector>
  */
-static int thin_status(struct dm_target *ti, status_type_t type,
-		       unsigned status_flags, char *result, unsigned maxlen)
+static void thin_status(struct dm_target *ti, status_type_t type,
+			unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r;
 	ssize_t sz = 0;
@@ -2749,7 +2763,7 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
 		DMEMIT("Fail");
-		return 0;
+		return;
 	}
 
 	if (!tc->td)
@@ -2758,12 +2772,16 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 		switch (type) {
 		case STATUSTYPE_INFO:
 			r = dm_thin_get_mapped_count(tc->td, &mapped);
-			if (r)
-				return r;
+			if (r) {
+				DMERR("dm_thin_get_mapped_count returned %d", r);
+				goto err;
+			}
 
 			r = dm_thin_get_highest_mapped_block(tc->td, &highest);
-			if (r < 0)
-				return r;
+			if (r < 0) {
+				DMERR("dm_thin_get_highest_mapped_block returned %d", r);
+				goto err;
+			}
 
 			DMEMIT("%llu ", mapped * tc->pool->sectors_per_block);
 			if (r)
@@ -2783,7 +2801,10 @@ static int thin_status(struct dm_target *ti, status_type_t type,
 		}
 	}
 
-	return 0;
+	return;
+
+err:
+	DMEMIT("Error");
 }
 
 static int thin_iterate_devices(struct dm_target *ti,
