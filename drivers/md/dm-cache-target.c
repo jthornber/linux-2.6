@@ -383,7 +383,7 @@ static int get_cell(struct cache *cache,
 	return r;
 }
 
- /*----------------------------------------------------------------*/
+/*----------------------------------------------------------------*/
 
 static bool is_dirty(struct cache *cache, dm_cblock_t b)
 {
@@ -409,6 +409,7 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 }
 
 /*----------------------------------------------------------------*/
+
 static bool block_size_is_power_of_two(struct cache *cache)
 {
 	return cache->sectors_per_block_shift >= 0;
