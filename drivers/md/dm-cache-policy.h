@@ -130,7 +130,7 @@ struct dm_cache_policy {
 	 *
 	 * Must not block.
 	 *
-	 * Returns 1 iff in cache, 0 iff not, < 0 on error (-EWOULDBLOCK
+	 * Returns 0 if in cache, -ENOENT if not, < 0 for other errors (-EWOULDBLOCK
 	 * would be typical).
 	 */
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
