@@ -51,6 +51,7 @@ static void free_bitset(unsigned long *bits)
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512
+#define UNINIT_TUNABLE -1
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -74,6 +75,8 @@ static void iot_init(struct io_tracker *t,
 	t->nr_seq_samples = 0;
 	t->nr_rand_samples = 0;
 	t->last_end_oblock = 0;
+	t->thresholds[PATTERN_RANDOM] = random_threshold;
+	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold;
 }
 
 static enum io_pattern iot_pattern(struct io_tracker *t)
@@ -306,8 +309,6 @@ struct mq_policy {
 	unsigned nr_buckets;
 	dm_block_t hash_bits;
 	struct hlist_head *table;
-
-	int threshold_args[2];
 };
 
 /*----------------------------------------------------------------*/
