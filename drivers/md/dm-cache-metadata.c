@@ -862,18 +862,33 @@ struct thunk {
 	bool hints_valid;
 };
 
+static bool policy_unchanged(struct dm_cache_metadata *cmd,
+			     struct dm_cache_policy *policy)
+{
+	const char *policy_name = dm_cache_policy_get_name(policy);
+	const unsigned *policy_version = dm_cache_policy_get_version(policy);
+	size_t policy_hint_size = dm_cache_policy_get_hint_size(policy);
+
+	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
+					   sizeof(cmd->policy_name));
+	bool policy_major_versions_match =
+		(cmd->policy_version[0] == policy_version[0]);
+	bool policy_hint_sizes_match =
+		(cmd->policy_hint_size == policy_hint_size);
+
+	return (policy_names_match && policy_major_versions_match &&
+		policy_hint_sizes_match);
+}
+
 static bool hints_array_initialized(struct dm_cache_metadata *cmd)
 {
 	return cmd->hint_root && cmd->policy_hint_size;
 }
 
 static bool hints_array_available(struct dm_cache_metadata *cmd,
-				  const char *policy_name)
+				  struct dm_cache_policy *policy)
 {
-	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
-					   sizeof(cmd->policy_name));
-
-	return cmd->clean_when_opened && policy_names_match &&
+	return cmd->clean_when_opened && policy_unchanged(cmd, policy) &&
 		hints_array_initialized(cmd);
 }
 
@@ -907,7 +922,8 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 	return r;
 }
 
-static int __load_mappings(struct dm_cache_metadata *cmd, const char *policy_name,
+static int __load_mappings(struct dm_cache_metadata *cmd,
+			   struct dm_cache_policy *policy,
 			   load_mapping_fn fn, void *context)
 {
 	struct thunk thunk;
@@ -917,18 +933,19 @@ static int __load_mappings(struct dm_cache_metadata *cmd, const char *policy_nam
 
 	thunk.cmd = cmd;
 	thunk.respect_dirty_flags = cmd->clean_when_opened;
-	thunk.hints_valid = hints_array_available(cmd, policy_name);
+	thunk.hints_valid = hints_array_available(cmd, policy);
 
 	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
 
-int dm_cache_load_mappings(struct dm_cache_metadata *cmd, const char *policy_name,
+int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
+			   struct dm_cache_policy *policy,
 			   load_mapping_fn fn, void *context)
 {
 	int r;
 
 	down_read(&cmd->root_lock);
-	r = __load_mappings(cmd, policy_name, fn, context);
+	r = __load_mappings(cmd, policy, fn, context);
 	up_read(&cmd->root_lock);
 
 	return r;
@@ -1084,7 +1101,7 @@ static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 	    (strlen(policy_name) > sizeof(cmd->policy_name) - 1))
 		return -EINVAL;
 
-	if (strcmp(cmd->policy_name, policy_name)) {
+	if (!policy_unchanged(cmd, policy)) {
 		strncpy(cmd->policy_name, policy_name, sizeof(cmd->policy_name));
 		memcpy(cmd->policy_version, policy_version, sizeof(cmd->policy_version));
 
