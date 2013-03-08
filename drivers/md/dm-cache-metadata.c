@@ -869,15 +869,19 @@ static bool policy_unchanged(struct dm_cache_metadata *cmd,
 	const unsigned *policy_version = dm_cache_policy_get_version(policy);
 	size_t policy_hint_size = dm_cache_policy_get_hint_size(policy);
 
-	bool policy_names_match = !strncmp(cmd->policy_name, policy_name,
-					   sizeof(cmd->policy_name));
-	bool policy_major_versions_match =
-		(cmd->policy_version[0] == policy_version[0]);
-	bool policy_hint_sizes_match =
-		(cmd->policy_hint_size == policy_hint_size);
+	/* check if policy names match */
+	if (strncmp(cmd->policy_name, policy_name, sizeof(cmd->policy_name)))
+		return false;
 
-	return (policy_names_match && policy_major_versions_match &&
-		policy_hint_sizes_match);
+	/* check if policy major versions match */
+	if (cmd->policy_version[0] != policy_version[0])
+		return false;
+
+	/* check if policy hint sizes match */
+	if (cmd->policy_hint_size != policy_hint_size)
+		return false;
+
+	return true;
 }
 
 static bool hints_array_initialized(struct dm_cache_metadata *cmd)
