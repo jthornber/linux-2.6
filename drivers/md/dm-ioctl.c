@@ -1067,6 +1067,7 @@ static void retrieve_status(struct dm_table *table,
 	num_targets = dm_table_get_num_targets(table);
 	for (i = 0; i < num_targets; i++) {
 		struct dm_target *ti = dm_table_get_target(table, i);
+		size_t l;
 
 		remaining = len - (outptr - outbuf);
 		if (remaining <= sizeof(struct dm_target_spec)) {
@@ -1093,14 +1094,17 @@ static void retrieve_status(struct dm_table *table,
 		if (ti->type->status) {
 			if (param->flags & DM_NOFLUSH_FLAG)
 				status_flags |= DM_STATUS_NOFLUSH_FLAG;
-			if (ti->type->status(ti, type, status_flags, outptr, remaining)) {
-				param->flags |= DM_BUFFER_FULL_FLAG;
-				break;
-			}
+			ti->type->status(ti, type, status_flags, outptr, remaining);
 		} else
 			outptr[0] = '\0';
 
-		outptr += strlen(outptr) + 1;
+		l = strlen(outptr) + 1;
+		if (l == remaining) {
+			param->flags |= DM_BUFFER_FULL_FLAG;
+			break;
+		}
+
+		outptr += l;
 		used = param->data_start + (outptr - outbuf);
 
 		outptr = align_ptr(outptr);
@@ -1410,6 +1414,22 @@ static int table_status(struct dm_ioctl *param, size_t param_size)
 	return 0;
 }
 
+static bool buffer_test_overflow(char *result, unsigned maxlen)
+{
+	return !maxlen || strlen(result) + 1 >= maxlen;
+}
+
+/*
+ * Process device-mapper dependent messages.
+ * Returns a number <= 1 if message was processed by device mapper.
+ * Returns 2 if message should be delivered to the target.
+ */
+static int message_for_md(struct mapped_device *md, unsigned argc, char **argv,
+			  char *result, unsigned maxlen)
+{
+	return 2;
+}
+
 /*
  * Pass a message to the target that's at the supplied device offset.
  */
@@ -1421,6 +1441,8 @@ static int target_message(struct dm_ioctl *param, size_t param_size)
 	struct dm_table *table;
 	struct dm_target *ti;
 	struct dm_target_msg *tmsg = (void *) param + param->data_start;
+	size_t maxlen;
+	char *result = get_result_buffer(param, param_size, &maxlen);
 
 	md = find_device(param);
 	if (!md)
@@ -1443,6 +1465,10 @@ static int target_message(struct dm_ioctl *param, size_t param_size)
 		DMWARN("Empty message received.");
 		goto out_argv;
 	}
+
+	r = message_for_md(md, argc, argv, result, maxlen);
+	if (r <= 1)
+		goto out_argv;
 
 	table = dm_get_live_table(md);
 	if (!table)
@@ -1469,7 +1495,18 @@ static int target_message(struct dm_ioctl *param, size_t param_size)
  out_argv:
 	kfree(argv);
  out:
-	param->data_size = 0;
+	if (r >= 0)
+		__dev_status(md, param);
+
+	if (r == 1) {
+		param->flags |= DM_DATA_OUT_FLAG;
+		if (buffer_test_overflow(result, maxlen))
+			param->flags |= DM_BUFFER_FULL_FLAG;
+		else
+			param->data_size = param->data_start + strlen(result) + 1;
+		r = 0;
+	}
+
 	dm_put(md);
 	return r;
 }
@@ -1649,6 +1686,7 @@ static int validate_params(uint cmd, struct dm_ioctl *param)
 	param->flags &= ~DM_BUFFER_FULL_FLAG;
 	param->flags &= ~DM_UEVENT_GENERATED_FLAG;
 	param->flags &= ~DM_SECURE_DATA_FLAG;
+	param->flags &= ~DM_DATA_OUT_FLAG;
 
 	/* Ignores parameters */
 	if (cmd == DM_REMOVE_ALL_CMD ||

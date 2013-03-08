@@ -63,7 +63,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
 /*
- * The metadata needs to know how many cache blocks there are.  We dont
+ * The metadata needs to know how many cache blocks there are.  We don't
  * care about the origin, assuming the core target is giving us valid
  * origin blocks to map to.
  */
@@ -139,4 +139,4 @@ int dm_cache_save_hint(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-#endif	/* DM_CACHE_METADATA_H */
+#endif /* DM_CACHE_METADATA_H */

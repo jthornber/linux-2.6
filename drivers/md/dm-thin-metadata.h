@@ -8,7 +8,6 @@
 #define DM_THIN_METADATA_H
 
 #include "persistent-data/dm-block-manager.h"
-#include "persistent-data/dm-space-map.h"
 
 #define THIN_METADATA_BLOCK_SIZE 4096
 
@@ -45,25 +44,12 @@ struct dm_pool_metadata *dm_pool_metadata_open(struct block_device *bdev,
 int dm_pool_metadata_close(struct dm_pool_metadata *pmd);
 
 /*
- * Ext[234]-style compat feature flags.
- *
- * A new feature which old metadata will still be compatible with should
- * define a DM_THIN_FEATURE_COMPAT_* flag (rarely useful).
- *
- * A new feature that is not compatible with old code should define a
- * DM_THIN_FEATURE_INCOMPAT_* flag and guard the relevant code with
- * that flag.
- *
- * A new feature that is not compatible with old code accessing the
- * metadata RDWR should define a DM_THIN_FEATURE_RO_COMPAT_* flag and
- * guard the relevant code with that flag.
- *
- * As these various flags are defined they should be added to the
- * following masks.
+ * Compat feature flags.  Any incompat flags beyond the ones
+ * specified below will prevent use of the thin metadata.
  */
-#define DM_THIN_FEATURE_COMPAT_SUPP	  0UL
-#define DM_THIN_FEATURE_COMPAT_RO_SUPP	  0UL
-#define DM_THIN_FEATURE_INCOMPAT_SUPP	  0UL
+#define THIN_FEATURE_COMPAT_SUPP	  0UL
+#define THIN_FEATURE_COMPAT_RO_SUPP	  0UL
+#define THIN_FEATURE_INCOMPAT_SUPP	  0UL
 
 /*
  * Device creation/deletion.
@@ -199,18 +185,12 @@ int dm_pool_get_data_dev_size(struct dm_pool_metadata *pmd, dm_block_t *result);
  * blocks would be lost.
  */
 int dm_pool_resize_data_dev(struct dm_pool_metadata *pmd, dm_block_t new_size);
-int dm_pool_resize_metadata_dev(struct dm_pool_metadata *pmd, dm_block_t new_size);
 
 /*
  * Flicks the underlying block manager into read only mode, so you know
  * that nothing is changing.
  */
 void dm_pool_metadata_read_only(struct dm_pool_metadata *pmd);
-
-int dm_pool_register_metadata_threshold(struct dm_pool_metadata *pmd,
-					dm_block_t threshold,
-					dm_sm_threshold_fn fn,
-					void *context);
 
 /*----------------------------------------------------------------*/
 
