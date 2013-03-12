@@ -63,7 +63,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
 /*
- * The metadata needs to know how many cache blocks there are.  We dont
+ * The metadata needs to know how many cache blocks there are.  We don't
  * care about the origin, assuming the core target is giving us valid
  * origin blocks to map to.
  */
@@ -89,7 +89,7 @@ typedef int (*load_mapping_fn)(void *context, dm_oblock_t oblock,
 			       dm_cblock_t cblock, bool dirty,
 			       uint32_t hint, bool hint_valid);
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
-			   const char *policy_name,
+			   struct dm_cache_policy *policy,
 			   load_mapping_fn fn,
 			   void *context);
 
@@ -139,4 +139,4 @@ int dm_cache_save_hint(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-#endif	/* DM_CACHE_METADATA_H */
+#endif /* DM_CACHE_METADATA_H */

@@ -14,8 +14,12 @@
 #include <linux/mempool.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache"
+
+DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
+	"A percentage of time allocated for copying to and/or from cache");
 
 /*----------------------------------------------------------------*/
 
@@ -630,22 +634,22 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 
 static void writethrough_endio(struct bio *bio, int err)
 {
-	struct per_bio_data *data = get_per_bio_data(bio);
-	bio->bi_end_io = data->saved_bi_end_io;
+	struct per_bio_data *pb = get_per_bio_data(bio);
+	bio->bi_end_io = pb->saved_bi_end_io;
 
 	if (err) {
 		bio_endio(bio, err);
 		return;
 	}
 
-	remap_to_cache(data->cache, bio, data->cblock);
+	remap_to_cache(pb->cache, bio, pb->cblock);
 
 	/*
 	 * We can't issue this bio directly, since we're in interrupt
 	 * context.  So it get's put on a bio list for processing by the
 	 * worker thread.
 	 */
-	defer_writethrough_bio(data->cache, bio);
+	defer_writethrough_bio(pb->cache, bio);
 }
 
 /*
@@ -656,14 +660,14 @@ static void writethrough_endio(struct bio *bio, int err)
 static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
 				       dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	struct per_bio_data *data = get_per_bio_data(bio);
+	struct per_bio_data *pb = get_per_bio_data(bio);
 
-	data->cache = cache;
-	data->cblock = cblock;
-	data->saved_bi_end_io = bio->bi_end_io;
+	pb->cache = cache;
+	pb->cblock = cblock;
+	pb->saved_bi_end_io = bio->bi_end_io;
 	bio->bi_end_io = writethrough_endio;
 
-	remap_to_origin_clear_discard(data->cache, bio, oblock);
+	remap_to_origin_clear_discard(pb->cache, bio, oblock);
 }
 
 /*----------------------------------------------------------------
@@ -1446,6 +1450,8 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
  */
 static void destroy(struct cache *cache)
 {
+	unsigned i;
+
 	if (cache->next_migration)
 		mempool_free(cache->next_migration, cache->migration_pool);
 
@@ -1485,12 +1491,17 @@ static void destroy(struct cache *cache)
 	if (cache->policy)
 		dm_cache_policy_destroy(cache->policy);
 
+	for (i = 0; i < cache->nr_ctr_args ; i++)
+		kfree(cache->ctr_args[i]);
+	kfree(cache->ctr_args);
+
 	kfree(cache);
 }
 
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
+
 	destroy(cache);
 }
 
@@ -1505,24 +1516,30 @@ static sector_t get_dev_size(struct dm_dev *dev)
  * Construct a cache device mapping.
  *
  * cache <metadata dev> <cache dev> <origin dev> <block size>
- *       <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
+ *       <#feature args> [<feature arg>]*
+ *       <policy> <#policy args> [<policy arg>]*
  *
  * metadata dev    : fast device holding the persistent metadata
  * cache dev	   : fast device holding cached data blocks
  * origin dev	   : slow device holding original data blocks
  * block size	   : cache unit size in sectors
+ *
  * #feature args   : number of feature arguments passed
- * feature args    : 'writeback' or 'writethrough' (one or the other).
- * #policy args    : an even number of arguments corresponding to
- *                   key/value pairs passed to the policy.
- * policy args     : key/value pairs (eg, 'sequential_threshold 1024');
- *                   see cache-policies.txt for details
+ * feature args    : writethrough.  (The default is writeback.)
+ *
+ * policy	   : the replacement policy to use
+ * #policy args    : an even number of policy arguments corresponding
+ *		     to key/value pairs passed to the policy
+ * policy args	   : key/value pairs passed to the policy
+ *		     E.g. 'sequential_threshold 1024'
+ *		     See cache-policies.txt for details.
  *
  * Optional feature arguments are:
- *	writeback: write back cache allowing cache block contents to
- *                 differ from origin blocks for performance reasons
- *	writethrough: write through caching prohibiting cache block
- *                    content from being distinct from origin block content
+ *   writethrough  : write through caching that prohibits cache block
+ *		     content from being different from origin block content.
+ *		     Without this argument, the default behaviour is to write
+ *		     back cache block contents later for performance reasons,
+ *		     so they may differ from the corresponding origin blocks.
  */
 struct cache_args {
 	struct dm_target *ti;
@@ -1721,7 +1738,7 @@ static int parse_policy(struct cache_args *ca, struct dm_arg_set *as,
 	if (r)
 		return -EINVAL;
 
-	ca->policy_argv = (const char **) as->argv;
+	ca->policy_argv = (const char **)as->argv;
 	dm_consume_args(as, ca->policy_argc);
 
 	return 0;
@@ -1772,7 +1789,7 @@ static int set_config_values(struct dm_cache_policy *p, int argc, const char **a
 	int r = 0;
 
 	if (argc & 1) {
-		DMWARN("An odd number of policy arguments given (they should be <key> <value> pairs).");
+		DMWARN("Odd number of policy arguments given but they should be <key> <value> pairs.");
 		return -EINVAL;
 	}
 
@@ -1806,8 +1823,11 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 	}
 
 	r = set_config_values(cache->policy, ca->policy_argc, ca->policy_argv);
-	if (r)
+	if (r) {
+		*error = "Error setting cache policy's config values";
 		dm_cache_policy_destroy(cache->policy);
+		cache->policy = NULL;
+	}
 
 	return r;
 }
@@ -1819,25 +1839,26 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
  */
 #define MAX_DISCARD_BLOCKS (1 << 14)
 
-static bool too_many_discard_blocks(sector_t block_size,
+static bool too_many_discard_blocks(sector_t discard_block_size,
 				    sector_t origin_size)
 {
-	sector_div(origin_size, block_size);
+	(void) sector_div(origin_size, discard_block_size);
+
 	return origin_size > MAX_DISCARD_BLOCKS;
 }
 
 static sector_t calculate_discard_block_size(sector_t cache_block_size,
 					     sector_t origin_size)
 {
-	sector_t r;
+	sector_t discard_block_size;
 
-	r = roundup_pow_of_two(cache_block_size);
+	discard_block_size = roundup_pow_of_two(cache_block_size);
 
 	if (origin_size)
-		while (too_many_discard_blocks(r, origin_size))
-			r *= 2;
+		while (too_many_discard_blocks(discard_block_size, origin_size))
+			discard_block_size *= 2;
 
-	return r;
+	return discard_block_size;
 }
 
 #define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
@@ -1944,7 +1965,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	clear_bitset(cache->discard_bitset, from_dblock(cache->discard_nr_blocks));
 
-	cache->copier = dm_kcopyd_client_create();
+	cache->copier = dm_kcopyd_client_create(&dm_kcopyd_throttle);
 	if (IS_ERR(cache->copier)) {
 		*error = "could not create kcopyd client";
 		r = PTR_ERR(cache->copier);
@@ -2008,8 +2029,11 @@ bad:
 static int copy_ctr_args(struct cache *cache, int argc, const char **argv)
 {
 	unsigned i;
-	const char **copy = kzalloc(sizeof(*copy) * argc, GFP_KERNEL);
+	const char **copy;
 
+	copy = kcalloc(argc, sizeof(*copy), GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
 	for (i = 0; i < argc; i++) {
 		copy[i] = kstrdup(argv[i], GFP_KERNEL);
 		if (!copy[i]) {
@@ -2044,8 +2068,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out;
 
 	r = cache_create(ca, &cache);
+	if (r)
+		goto out;
 
-	r = copy_ctr_args(cache, argc - 3, (const char **) argv + 3);
+	r = copy_ctr_args(cache, argc - 3, (const char **)argv + 3);
 	if (r) {
 		destroy(cache);
 		goto out;
@@ -2176,6 +2202,7 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 	}
 
 	check_for_quiesced_migrations(cache, pb);
+
 	return 0;
 }
 
@@ -2340,8 +2367,7 @@ static int cache_preresume(struct dm_target *ti)
 	}
 
 	if (!cache->loaded_mappings) {
-		r = dm_cache_load_mappings(cache->cmd,
-					   dm_cache_policy_get_name(cache->policy),
+		r = dm_cache_load_mappings(cache->cmd, cache->policy,
 					   load_mapping, cache);
 		if (r) {
 			DMERR("could not load cache mappings");
@@ -2372,8 +2398,18 @@ static void cache_resume(struct dm_target *ti)
 	do_waker(&cache->waker.work);
 }
 
-static int cache_status(struct dm_target *ti, status_type_t type,
-			unsigned status_flags, char *result, unsigned maxlen)
+/*
+ * Status format:
+ *
+ * <#used metadata blocks>/<#total metadata blocks>
+ * <#read hits> <#read misses> <#write hits> <#write misses>
+ * <#demotions> <#promotions> <#blocks in cache> <#dirty>
+ * <#features> <features>*
+ * <#core args> <core args>
+ * <#policy args> <policy args>*
+ */
+static void cache_status(struct dm_target *ti, status_type_t type,
+			 unsigned status_flags, char *result, unsigned maxlen)
 {
 	int r = 0;
 	unsigned i;
@@ -2395,16 +2431,20 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		r = dm_cache_get_free_metadata_block_count(cache->cmd,
 							   &nr_free_blocks_metadata);
-		if (r)
+		if (r) {
 			DMERR("could not get metadata free block count");
+			goto err;
+		}
 
 		r = dm_cache_get_metadata_dev_size(cache->cmd, &nr_blocks_metadata);
-		if (r)
+		if (r) {
 			DMERR("could not get metadata device size");
+			goto err;
+		}
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%llu %llu %u %u %u %u %u %u %llu %u ",
+		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u ",
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->stats.read_hit),
@@ -2422,8 +2462,12 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 			DMEMIT("0 ");
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
-		if (sz < maxlen)
+		if (sz < maxlen) {
 			r = policy_emit_config_values(cache->policy, result + sz, maxlen - sz);
+			if (r)
+				DMERR("policy_emit_config_values returned %d", r);
+		}
+
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -2432,30 +2476,31 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
-		DMEMIT("%s ", buf);
+		DMEMIT("%s", buf);
 
 		for (i = 0; i < cache->nr_ctr_args - 1; i++)
-			DMEMIT("%s ", cache->ctr_args[i]);
-
+			DMEMIT(" %s", cache->ctr_args[i]);
 		if (cache->nr_ctr_args)
-			DMEMIT("%s", cache->ctr_args[cache->nr_ctr_args - 1]);
+			DMEMIT(" %s", cache->ctr_args[cache->nr_ctr_args - 1]);
 	}
 
-	return r;
+	return;
+
+err:
+	DMEMIT("Error");
 }
 
 #define NOT_CORE_OPTION 1
 
 static int process_config_option(struct cache *cache, char **argv)
 {
-	if (!strcasecmp(argv[0], "migration_threshold")) {
-		unsigned long tmp;
+	unsigned long tmp;
 
+	if (!strcasecmp(argv[0], "migration_threshold")) {
 		if (kstrtoul(argv[1], 10, &tmp))
 			return -EINVAL;
 
 		cache->migration_threshold = tmp;
-
 		return 0;
 	}
 
@@ -2463,7 +2508,7 @@ static int process_config_option(struct cache *cache, char **argv)
 }
 
 /*
- * Supports <key> <value>
+ * Supports <key> <value>.
  *
  * The key migration_threshold is supported by the cache target core.
  */
@@ -2496,10 +2541,10 @@ static int cache_iterate_devices(struct dm_target *ti,
 }
 
 /*
- * We could look up the exact location of the data, but this is expensive
- * and could always be out of date by the time the bio is submitted.
- * Instead we just assume it's going to the origin (which is the volume
- * more likely to have restrictions eg, by being striped).
+ * We assume I/O is going to the origin (which is the volume
+ * more likely to have restrictions e.g. by being striped).
+ * (Looking up the exact location of the data would be expensive
+ * and could always be out of date by the time the bio is submitted.)
  */
 static int cache_bvec_merge(struct dm_target *ti,
 			    struct bvec_merge_data *bvm,

@@ -8,10 +8,10 @@
 #include "dm.h"
 
 #include <linux/hash.h>
-#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache-policy-mq"
 
@@ -51,7 +51,6 @@ static void free_bitset(unsigned long *bits)
  */
 #define RANDOM_THRESHOLD_DEFAULT 4
 #define SEQUENTIAL_THRESHOLD_DEFAULT 512
-#define UNINIT_TUNABLE -1
 
 enum io_pattern {
 	PATTERN_SEQUENTIAL,
@@ -86,10 +85,9 @@ static enum io_pattern iot_pattern(struct io_tracker *t)
 
 static void iot_update_stats(struct io_tracker *t, struct bio *bio)
 {
-	if (bio->bi_sector == from_oblock(t->last_end_oblock) + 1) {
+	if (bio->bi_sector == from_oblock(t->last_end_oblock) + 1)
 		t->nr_seq_samples++;
-
-	} else {
+	else {
 		/*
 		 * Just one non-sequential IO is enough to reset the
 		 * counters.
@@ -363,6 +361,7 @@ static int alloc_entries(struct mq_policy *mq, unsigned elts)
 static void hash_insert(struct mq_policy *mq, struct entry *e)
 {
 	unsigned h = hash_64(from_oblock(e->oblock), mq->hash_bits);
+
 	hlist_add_head(&e->hlist, mq->table + h);
 }
 
@@ -370,10 +369,9 @@ static struct entry *hash_lookup(struct mq_policy *mq, dm_oblock_t oblock)
 {
 	unsigned h = hash_64(from_oblock(oblock), mq->hash_bits);
 	struct hlist_head *bucket = mq->table + h;
-	struct hlist_node *tmp;
 	struct entry *e;
 
-	hlist_for_each_entry(e, tmp, bucket, hlist)
+	hlist_for_each_entry(e, bucket, hlist)
 		if (e->oblock == oblock) {
 			hlist_del(&e->hlist);
 			hlist_add_head(&e->hlist, bucket);
@@ -421,6 +419,7 @@ static void alloc_cblock(struct mq_policy *mq, dm_cblock_t cblock)
 {
 	BUG_ON(from_cblock(cblock) > from_cblock(mq->cache_size));
 	BUG_ON(test_bit(from_cblock(cblock), mq->allocation_bitset));
+
 	set_bit(from_cblock(cblock), mq->allocation_bitset);
 	mq->nr_cblocks_allocated++;
 }
@@ -429,6 +428,7 @@ static void free_cblock(struct mq_policy *mq, dm_cblock_t cblock)
 {
 	BUG_ON(from_cblock(cblock) > from_cblock(mq->cache_size));
 	BUG_ON(!test_bit(from_cblock(cblock), mq->allocation_bitset));
+
 	clear_bit(from_cblock(cblock), mq->allocation_bitset);
 	mq->nr_cblocks_allocated--;
 }
@@ -691,7 +691,6 @@ static int cache_entry_found(struct mq_policy *mq,
 	if (e->in_cache) {
 		result->op = POLICY_HIT;
 		result->cblock = e->cblock;
-		return 0;
 	}
 
 	return 0;
@@ -733,10 +732,8 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 	if ((!discarded_oblock && updated) ||
 	    !should_promote(mq, e, discarded_oblock, data_dir))
 		result->op = POLICY_MISS;
-
 	else if (!can_migrate)
 		r = -EWOULDBLOCK;
-
 	else
 		r = pre_cache_to_cache(mq, e, result);
 
@@ -801,17 +798,16 @@ static int no_entry_found(struct mq_policy *mq, dm_oblock_t oblock,
 			  int data_dir, struct policy_result *result)
 {
 	if (adjusted_promote_threshold(mq, discarded_oblock, data_dir) == 1) {
-		if (can_migrate) {
+		if (can_migrate)
 			insert_in_cache(mq, oblock, result);
-			return 0;
-		} else
+		else
 			return -EWOULDBLOCK;
-
 	} else {
 		insert_in_pre_cache(mq, oblock);
 		result->op = POLICY_MISS;
-		return 0;
 	}
+
+	return 0;
 }
 
 /*
@@ -827,10 +823,8 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 
 	if (e && e->in_cache)
 		r = cache_entry_found(mq, e, result);
-
 	else if (iot_pattern(&mq->tracker) == PATTERN_SEQUENTIAL)
 		result->op = POLICY_MISS;
-
 	else if (e)
 		r = pre_cache_entry_found(mq, e, can_migrate, discarded_oblock,
 					  data_dir, result);
@@ -840,6 +834,7 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 
 	if (r == -EWOULDBLOCK)
 		result->op = POLICY_MISS;
+
 	return r;
 }
 
@@ -885,9 +880,8 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 
 	if (can_block)
 		mutex_lock(&mq->lock);
-	else
-		if (!mutex_trylock(&mq->lock))
-			return -EWOULDBLOCK;
+	else if (!mutex_trylock(&mq->lock))
+		return -EWOULDBLOCK;
 
 	copy_tick(mq);
 
@@ -913,7 +907,6 @@ static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t 
 	if (e && e->in_cache) {
 		*cblock = e->cblock;
 		r = 0;
-
 	} else
 		r = -ENOENT;
 
@@ -952,6 +945,7 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	unsigned level;
 
 	mutex_lock(&mq->lock);
+
 	for (level = 0; level < NR_QUEUE_LEVELS; level++)
 		list_for_each_entry(e, &mq->cache.qs[level], list) {
 			r = fn(context, e->cblock, e->oblock, e->hit_count);
@@ -961,6 +955,7 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 
 out:
 	mutex_unlock(&mq->lock);
+
 	return r;
 }
 
@@ -1033,10 +1028,8 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 
 	if (!strcasecmp(key, "random_threshold"))
 		pattern = PATTERN_RANDOM;
-
 	else if (!strcasecmp(key, "sequential_threshold"))
 		pattern = PATTERN_SEQUENTIAL;
-
 	else
 		return -EINVAL;
 
@@ -1044,6 +1037,7 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 		return -EINVAL;
 
 	mq->tracker.thresholds[pattern] = tmp;
+
 	return 0;
 }
 
@@ -1051,9 +1045,11 @@ static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsign
 {
 	ssize_t sz = 0;
 	struct mq_policy *mq = to_mq_policy(p);
+
 	DMEMIT("4 random_threshold %u sequential_threshold %u",
 	       mq->tracker.thresholds[PATTERN_RANDOM],
 	       mq->tracker.thresholds[PATTERN_SEQUENTIAL]);
+
 	return 0;
 }
 
@@ -1076,7 +1072,7 @@ static void init_policy_functions(struct mq_policy *mq)
 
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
-					 sector_t block_size)
+					 sector_t cache_block_size)
 {
 	int r;
 	struct mq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
@@ -1136,6 +1132,7 @@ bad_cache_alloc:
 
 static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
+	.version = {1, 0, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
@@ -1143,6 +1140,7 @@ static struct dm_cache_policy_type mq_policy_type = {
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
+	.version = {1, 0, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
@@ -1160,12 +1158,21 @@ static int __init mq_init(void)
 		goto bad;
 
 	r = dm_cache_policy_register(&mq_policy_type);
-	if (r)
+	if (r) {
+		DMERR("register failed %d", r);
 		goto bad_register_mq;
+	}
 
 	r = dm_cache_policy_register(&default_policy_type);
-	if (!r)
+	if (!r) {
+		DMINFO("version %u.%u.%u loaded",
+		       mq_policy_type.version[0],
+		       mq_policy_type.version[1],
+		       mq_policy_type.version[2]);
 		return 0;
+	}
+
+	DMERR("register failed (as default) %d", r);
 
 	dm_cache_policy_unregister(&mq_policy_type);
 bad_register_mq:
@@ -1178,6 +1185,7 @@ static void __exit mq_exit(void)
 {
 	dm_cache_policy_unregister(&mq_policy_type);
 	dm_cache_policy_unregister(&default_policy_type);
+
 	kmem_cache_destroy(mq_entry_cache);
 }
 

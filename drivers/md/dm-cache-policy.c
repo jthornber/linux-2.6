@@ -33,7 +33,6 @@ static struct dm_cache_policy_type *__get_policy_once(const char *name)
 	struct dm_cache_policy_type *t = __find_policy(name);
 
 	if (t && !try_module_get(t->owner)) {
-		t = NULL;
 		DMWARN("couldn't get module %s", name);
 		t = ERR_PTR(-EINVAL);
 	}
@@ -112,7 +111,7 @@ EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 struct dm_cache_policy *dm_cache_policy_create(const char *name,
 					       dm_cblock_t cache_size,
 					       sector_t origin_size,
-					       sector_t block_size)
+					       sector_t cache_block_size)
 {
 	struct dm_cache_policy *p = NULL;
 	struct dm_cache_policy_type *type;
@@ -123,7 +122,7 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 		return NULL;
 	}
 
-	p = type->create(cache_size, origin_size, block_size);
+	p = type->create(cache_size, origin_size, cache_block_size);
 	if (!p) {
 		put_policy(type);
 		return NULL;
@@ -150,6 +149,14 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p)
 	return t->name;
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_get_name);
+
+const unsigned *dm_cache_policy_get_version(struct dm_cache_policy *p)
+{
+	struct dm_cache_policy_type *t = p->private;
+
+	return t->version;
+}
+EXPORT_SYMBOL_GPL(dm_cache_policy_get_version);
 
 size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p)
 {

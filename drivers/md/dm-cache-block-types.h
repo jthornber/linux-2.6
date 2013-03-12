@@ -51,4 +51,4 @@ static inline dm_block_t from_dblock(dm_dblock_t b)
 	return (__force dm_block_t) b;
 }
 
-#endif
+#endif /* DM_CACHE_BLOCK_TYPES_H */

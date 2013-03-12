@@ -68,8 +68,8 @@ typedef void (*dm_postsuspend_fn) (struct dm_target *ti);
 typedef int (*dm_preresume_fn) (struct dm_target *ti);
 typedef void (*dm_resume_fn) (struct dm_target *ti);
 
-typedef int (*dm_status_fn) (struct dm_target *ti, status_type_t status_type,
-			     unsigned status_flags, char *result, unsigned maxlen);
+typedef void (*dm_status_fn) (struct dm_target *ti, status_type_t status_type,
+			      unsigned status_flags, char *result, unsigned maxlen);
 
 typedef int (*dm_message_fn) (struct dm_target *ti, unsigned argc, char **argv);
 
@@ -247,6 +247,13 @@ struct dm_target {
 	 */
 	bool discards_supported:1;
 
+ 	/*
+	 * Set if this target should _not_ receive discards, regardless of
+	 * whether or not its underlygin devices have support.
+	 * Incompatible with discards_supported.
+	 */
+	bool discards_unsupported:1;
+
 	/*
 	 * Set if the target required discard bios to be split
 	 * on max_io_len boundary.
@@ -257,6 +264,7 @@ struct dm_target {
 	 * Set if this target does not return zeroes on discarded blocks.
 	 */
 	bool discard_zeroes_data_unsupported:1;
+	bool pretend_discard_zeroes_data:1;
 };
 
 /* Each target can link one of these into the table */

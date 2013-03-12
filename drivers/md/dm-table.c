@@ -1382,6 +1382,9 @@ static bool dm_table_discard_zeroes_data(struct dm_table *t)
 	while (i < dm_table_get_num_targets(t)) {
 		ti = dm_table_get_target(t, i++);
 
+		if (ti->pretend_discard_zeroes_data)
+			return 1;
+
 		if (ti->discard_zeroes_data_unsupported)
 			return 0;
 	}
@@ -1459,10 +1462,10 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	 */
 	q->limits = *limits;
 
-	if (!dm_table_supports_discards(t))
-		queue_flag_clear_unlocked(QUEUE_FLAG_DISCARD, q);
-	else
+	if (dm_table_supports_discards(t))
 		queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
+	else
+		queue_flag_clear_unlocked(QUEUE_FLAG_DISCARD, q);
 
 	if (dm_table_supports_flush(t, REQ_FLUSH)) {
 		flush |= REQ_FLUSH;
@@ -1659,13 +1662,16 @@ bool dm_table_supports_discards(struct dm_table *t)
 		if (!ti->num_discard_bios)
 			continue;
 
+		if (ti->discards_unsupported)
+			return false;
+
 		if (ti->discards_supported)
-			return 1;
+			return true;
 
 		if (ti->type->iterate_devices &&
 		    ti->type->iterate_devices(ti, device_discard_capable, NULL))
-			return 1;
+			return true;
 	}
 
-	return 0;
+	return false;
 }
