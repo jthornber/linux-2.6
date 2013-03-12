@@ -1663,15 +1663,15 @@ bool dm_table_supports_discards(struct dm_table *t)
 			continue;
 
 		if (ti->discards_unsupported)
-			return 0;
+			return false;
 
 		if (ti->discards_supported)
-			return 1;
+			return true;
 
 		if (ti->type->iterate_devices &&
 		    ti->type->iterate_devices(ti, device_discard_capable, NULL))
-			return 1;
+			return true;
 	}
 
-	return 0;
+	return false;
 }
