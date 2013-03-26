@@ -61,6 +61,35 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * There are a couple of places where we let a bio run, but want to do some
+ * work before calling it's endio function.  We do this by temporarily
+ * changing the endio fn.
+ */
+struct hook_info {
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
+};
+
+static void hook_bio(struct hook_info *h, struct bio *bio,
+		     bio_end_io_t *bi_end_io,
+		     void *bi_private)
+{
+	h->bi_end_io = bio->bi_end_io;
+	h->bi_private = bio->bi_private;
+
+	bio->bi_end_io = bi_end_io;
+	bio->bi_private = bi_private;
+}
+
+static void unhook_bio(struct hook_info *h, struct bio *bio)
+{
+	bio->bi_end_io = h->bi_end_io;
+	bio->bi_private = h->bi_private;
+}
+
+/*----------------------------------------------------------------*/
+
 #define PRISON_CELLS 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
@@ -205,7 +234,7 @@ struct per_bio_data {
 	/* writethrough fields */
 	struct cache *cache;
 	dm_cblock_t cblock;
-	bio_end_io_t *saved_bi_end_io;
+	struct hook_info hook_info;
 	struct dm_bio_details bio_details;
 };
 
@@ -637,7 +666,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 static void writethrough_endio(struct bio *bio, int err)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio);
-	bio->bi_end_io = pb->saved_bi_end_io;
+	unhook_bio(&pb->hook_info, bio);
 
 	if (err) {
 		bio_endio(bio, err);
@@ -667,9 +696,8 @@ static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
 
 	pb->cache = cache;
 	pb->cblock = cblock;
-	pb->saved_bi_end_io = bio->bi_end_io;
+	hook_bio(&pb->hook_info, bio, writethrough_endio, NULL);
 	dm_bio_record(&pb->bio_details, bio);
-	bio->bi_end_io = writethrough_endio;
 
 	remap_to_origin_clear_discard(pb->cache, bio, oblock);
 }
