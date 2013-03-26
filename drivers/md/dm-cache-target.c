@@ -251,6 +251,7 @@ struct dm_cache_migration {
 	bool writeback:1;
 	bool demote:1;
 	bool promote:1;
+	bool requeue_holder:1;
 
 	struct dm_bio_prison_cell *old_ocell;
 	struct dm_bio_prison_cell *new_ocell;
@@ -840,7 +841,12 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			cleanup_migration(mg);
 
 	} else {
-		cell_defer(cache, mg->new_ocell, true);
+		if (mg->requeue_holder)
+			cell_defer(cache, mg->new_ocell, true);
+		else {
+			bio_endio(mg->new_ocell->holder, 0);
+			cell_defer(cache, mg->new_ocell, false);
+		}
 		clear_dirty(cache, mg->new_oblock, mg->cblock);
 		cleanup_migration(mg);
 	}
@@ -889,6 +895,41 @@ static void issue_copy_real(struct dm_cache_migration *mg)
 		migration_failure(mg);
 }
 
+static void overwrite_endio(struct bio *bio, int err)
+{
+	struct per_bio_data *pb = get_per_bio_data(bio);
+	struct dm_cache_migration *mg = bio->bi_private;
+	struct cache *cache = mg->cache;
+	unsigned long flags;
+
+	if (err)
+		mg->err = true;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	list_add_tail(&mg->list, &cache->completed_migrations);
+	unhook_bio(&pb->hook_info, bio);
+	mg->requeue_holder = false;
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
+static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
+{
+	struct per_bio_data *pb = get_per_bio_data(bio);
+
+	pr_alert("issue_overwrite\n");
+	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
+	remap_to_cache(mg->cache, bio, mg->cblock);
+	generic_make_request(bio);
+}
+
+static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
+{
+	return (bio_data_dir(bio) == WRITE) &&
+		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
+}
+
 static void avoid_copy(struct dm_cache_migration *mg)
 {
 	atomic_inc(&mg->cache->stats.copies_avoided);
@@ -898,13 +939,21 @@ static void avoid_copy(struct dm_cache_migration *mg)
 static void issue_copy(struct dm_cache_migration *mg)
 {
 	bool avoid;
+	struct bio *bio = mg->new_ocell->holder;
 	struct cache *cache = mg->cache;
 
 	if (mg->writeback || mg->demote)
 		avoid = !is_dirty(cache, mg->cblock) ||
 			is_discarded_oblock(cache, mg->old_oblock);
-	else
+	else {
 		avoid = is_discarded_oblock(cache, mg->new_oblock);
+
+		if (!avoid && bio_writes_complete_block(cache, bio)) {
+			issue_overwrite(mg, bio);
+			return;
+		}
+
+	}
 
 	avoid ? avoid_copy(mg) : issue_copy_real(mg);
 }
@@ -995,6 +1044,7 @@ static void promote(struct cache *cache, struct prealloc *structs,
 	mg->writeback = false;
 	mg->demote = false;
 	mg->promote = true;
+	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->new_oblock = oblock;
 	mg->cblock = cblock;
@@ -1016,6 +1066,7 @@ static void writeback(struct cache *cache, struct prealloc *structs,
 	mg->writeback = true;
 	mg->demote = false;
 	mg->promote = false;
+	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->old_oblock = oblock;
 	mg->cblock = cblock;
@@ -1039,6 +1090,7 @@ static void demote_then_promote(struct cache *cache, struct prealloc *structs,
 	mg->writeback = false;
 	mg->demote = true;
 	mg->promote = true;
+	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->old_oblock = old_oblock;
 	mg->new_oblock = new_oblock;
