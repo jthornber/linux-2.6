@@ -678,7 +678,7 @@ static void writethrough_endio(struct bio *bio, int err)
 
 	/*
 	 * We can't issue this bio directly, since we're in interrupt
-	 * context.  So it get's put on a bio list for processing by the
+	 * context.  So it gets put on a bio list for processing by the
 	 * worker thread.
 	 */
 	defer_writethrough_bio(pb->cache, bio);
