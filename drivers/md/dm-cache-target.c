@@ -784,6 +784,8 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 	unsigned long flags;
 	struct cache *cache = mg->cache;
 
+	/* FIXME: what if mg->err? */
+
 	if (mg->writeback) {
 		cell_defer(cache, mg->old_ocell, false);
 		clear_dirty(cache, mg->old_oblock, mg->cblock);
