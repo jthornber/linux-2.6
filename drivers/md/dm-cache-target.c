@@ -1948,7 +1948,7 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 	return discard_block_size;
 }
 
-#define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
+#define DEFAULT_MIGRATION_THRESHOLD 2048
 
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
