@@ -532,14 +532,16 @@ static void del(struct mq_policy *mq, struct entry *e)
  */
 static struct entry *pop(struct mq_policy *mq, struct queue *q)
 {
-	struct entry *e = container_of(queue_pop(q), struct entry, list);
+	struct entry *e;
+	struct list_head *h = queue_pop(q);
 
-	if (e) {
-		hash_remove(e);
+	if (!h)
+		return NULL;
 
-		if (e->in_cache)
-			free_cblock(mq, e->cblock);
-	}
+	e = container_of(h, struct entry, list);
+	hash_remove(e);
+	if (e->in_cache)
+		free_cblock(mq, e->cblock);
 
 	return e;
 }
