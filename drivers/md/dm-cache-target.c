@@ -918,7 +918,6 @@ static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio);
 
-	pr_alert("issue_overwrite\n");
 	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
 	remap_to_cache_dirty(mg->cache, bio, mg->new_oblock, mg->cblock);
 	generic_make_request(bio);
