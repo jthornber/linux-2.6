@@ -938,17 +938,16 @@ static void avoid_copy(struct dm_cache_migration *mg)
 static void issue_copy(struct dm_cache_migration *mg)
 {
 	bool avoid;
-	struct bio *bio = mg->new_ocell->holder;
 	struct cache *cache = mg->cache;
 
 	if (mg->writeback || mg->demote)
 		avoid = !is_dirty(cache, mg->cblock) ||
 			is_discarded_oblock(cache, mg->old_oblock);
 	else {
-		avoid = is_discarded_oblock(cache, mg->new_oblock);
+		struct bio *bio = mg->new_ocell->holder;
 
+		avoid = is_discarded_oblock(cache, mg->new_oblock);
 #if 0
-		// There's a bug in this
 		if (!avoid && bio_writes_complete_block(cache, bio)) {
 			issue_overwrite(mg, bio);
 			return;
