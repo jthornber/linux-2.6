@@ -311,7 +311,7 @@ struct mq_policy {
 
 /*----------------------------------------------------------------*/
 /* Free/alloc mq cache entry structures. */
-static void takeout_queue(struct list_head *lh, struct queue *q)
+static void concat_queue(struct list_head *lh, struct queue *q)
 {
 	unsigned level;
 
@@ -323,8 +323,9 @@ static void free_entries(struct mq_policy *mq)
 {
 	struct entry *e, *tmp;
 
-	takeout_queue(&mq->free, &mq->pre_cache);
-	takeout_queue(&mq->free, &mq->cache);
+	concat_queue(&mq->free, &mq->pre_cache);
+	concat_queue(&mq->free, &mq->cache_clean);
+	concat_queue(&mq->free, &mq->cache_dirty);
 
 	list_for_each_entry_safe(e, tmp, &mq->free, list)
 		kmem_cache_free(mq_entry_cache, e);
