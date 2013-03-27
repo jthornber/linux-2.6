@@ -948,11 +948,13 @@ static void issue_copy(struct dm_cache_migration *mg)
 	else {
 		avoid = is_discarded_oblock(cache, mg->new_oblock);
 
+#if 0
+		// There's a bug in this
 		if (!avoid && bio_writes_complete_block(cache, bio)) {
 			issue_overwrite(mg, bio);
 			return;
 		}
-
+#endif
 	}
 
 	avoid ? avoid_copy(mg) : issue_copy_real(mg);
