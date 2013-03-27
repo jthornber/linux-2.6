@@ -700,7 +700,7 @@ static int cache_entry_found(struct mq_policy *mq,
 }
 
 /*
- * Moves and entry from the pre_cache to the cache.  The main work is
+ * Moves an entry from the pre_cache to the cache.  The main work is
  * finding which cache block to use.
  */
 static int pre_cache_to_cache(struct mq_policy *mq, struct entry *e,
