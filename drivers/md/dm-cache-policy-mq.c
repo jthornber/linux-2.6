@@ -646,23 +646,28 @@ static void requeue_and_update_tick(struct mq_policy *mq, struct entry *e)
  * - set the hit count to a hard coded value other than 1, eg, is it better
  *   if it goes in at level 2?
  */
-static dm_cblock_t demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
+static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock, dm_cblock_t *cblock)
 {
-	dm_cblock_t result;
 	struct entry *demoted = pop(mq, &mq->cache_clean);
 
 	if (!demoted)
-		demoted = pop(mq, &mq->cache_dirty);
+		/*
+		 * We could get a block from mq->cache_dirty, but that
+		 * would add extra latency to the triggering bio as it
+		 * waits for the writeback.  Better to not promote this
+		 * time and hope there's a clean block next time this block
+		 * is hit.
+		 */
+		return -ENOSPC;
 
-	BUG_ON(!demoted);
-	result = demoted->cblock;
+	*cblock = demoted->cblock;
 	*oblock = demoted->oblock;
 	demoted->in_cache = false;
 	demoted->dirty = false;
 	demoted->hit_count = 1;
 	push(mq, demoted);
 
-	return result;
+	return 0;
 }
 
 /*
@@ -722,11 +727,16 @@ static int cache_entry_found(struct mq_policy *mq,
 static int pre_cache_to_cache(struct mq_policy *mq, struct entry *e,
 			      struct policy_result *result)
 {
+	int r;
 	dm_cblock_t cblock;
 
 	if (find_free_cblock(mq, &cblock) == -ENOSPC) {
 		result->op = POLICY_REPLACE;
-		cblock = demote_cblock(mq, &result->old_oblock);
+		r = demote_cblock(mq, &result->old_oblock, &cblock);
+		if (r) {
+			result->op = POLICY_MISS;
+			return 0;
+		}
 	} else
 		result->op = POLICY_NEW;
 
