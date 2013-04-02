@@ -1991,7 +1991,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
-	memcpy(&cache->features, &ca->features, sizeof(cache->features));
+	cache->features = ca->features;
 
 	cache->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
