@@ -397,7 +397,7 @@ config DM_VERITY
 
 config DM_TEST_TARGETS
        bool "DM test targets"
-       depends on BLK_DEV_DM && EXPERIMENTAL
+       depends on BLK_DEV_DM
        ---help---
          Targets that are only useful for testing.
 
