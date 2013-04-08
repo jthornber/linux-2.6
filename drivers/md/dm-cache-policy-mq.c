@@ -1066,6 +1066,7 @@ static int mq_writeback_work_(struct mq_policy *mq, dm_oblock_t *oblock,
 	struct entry *e = pop(mq, &mq->cache_dirty);
 
 	if (e) {
+#if 0
 		/*
 		 * mq->tick - 1 because we don't want a flurry of
 		 * writebacks every time the tick rolls over.
@@ -1074,12 +1075,15 @@ static int mq_writeback_work_(struct mq_policy *mq, dm_oblock_t *oblock,
 			push(mq, e);
 
 		else {
+#endif
 			*oblock = e->oblock;
 			*cblock = e->cblock;
 			e->dirty = false;
 			push(mq, e);
 			return 0;
+#if 0
 		}
+#endif
 	}
 
 	return -ENODATA;
