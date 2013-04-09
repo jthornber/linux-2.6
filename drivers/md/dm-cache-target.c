@@ -1527,6 +1527,7 @@ static void do_worker(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(to_delayed_work(ws), struct cache, waker);
+	policy_tick(cache->policy);
 	wake_worker(cache);
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
 }
@@ -2270,6 +2271,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	r = policy_map(cache->policy, block, false, can_migrate, discarded_block,
 		       bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
+		// FIXME: we should check to see if there's any spare migration bandwidth here
 		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
 
