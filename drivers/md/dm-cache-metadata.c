@@ -61,7 +61,6 @@ struct cache_disk_superblock {
 	__le32 version;
 
 	__u8 policy_name[CACHE_POLICY_NAME_SIZE];
-	__le32 policy_version[CACHE_POLICY_VERSION_SIZE];
 	__le32 policy_hint_size;
 
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
@@ -84,6 +83,8 @@ struct cache_disk_superblock {
 	__le32 read_misses;
 	__le32 write_hits;
 	__le32 write_misses;
+
+	__le32 policy_version[CACHE_POLICY_VERSION_SIZE];
 } __packed;
 
 struct dm_cache_metadata {
@@ -869,15 +870,21 @@ static bool policy_unchanged(struct dm_cache_metadata *cmd,
 	const unsigned *policy_version = dm_cache_policy_get_version(policy);
 	size_t policy_hint_size = dm_cache_policy_get_hint_size(policy);
 
-	/* check if policy names match */
+	/*
+	 * Ensure policy names match.
+	 */
 	if (strncmp(cmd->policy_name, policy_name, sizeof(cmd->policy_name)))
 		return false;
 
-	/* check if policy major versions match */
+	/*
+	 * Ensure policy major versions match.
+	 */
 	if (cmd->policy_version[0] != policy_version[0])
 		return false;
 
-	/* check if policy hint sizes match */
+	/*
+	 * Ensure policy hint sizes match.
+	 */
 	if (cmd->policy_hint_size != policy_hint_size)
 		return false;
 

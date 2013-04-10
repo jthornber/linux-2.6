@@ -704,8 +704,9 @@ static void writethrough_endio(struct bio *bio, int err)
 
 /*
  * When running in writethrough mode we need to send writes to clean blocks
- * to both the cache and origin devices.  We could clone the bio and send
- * them in parallel, but for now we're doing them in series.
+ * to both the cache and origin devices.  In future we'd like to clone the
+ * bio and send them in parallel, but for now we're doing them in
+ * series as this is easier.
  */
 static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
 				       dm_oblock_t oblock, dm_cblock_t cblock)
@@ -2696,7 +2697,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type cache_target = {
 	.name = "cache",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
