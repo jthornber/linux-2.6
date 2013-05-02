@@ -42,14 +42,6 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
 #define MAX_DEV_ID ((1 << 24) - 1)
 
 /*
- * Metadata low water mark.
- *
- * If the free blocks in the metadata device pass this threshold an event
- * will be generated.
- */
-#define METADATA_LOW_WATER_MARK 64
-
-/*
  * How do we handle breaking sharing of data blocks?
  * =================================================
  *
@@ -1289,6 +1281,10 @@ static void process_bio_fail(struct thin_c *tc, struct bio *bio)
 	bio_io_error(bio);
 }
 
+/*
+ * FIXME: should we also commit due to size of transaction, measured in
+ * metadata blocks?
+ */
 static int need_commit_due_to_time(struct pool *pool)
 {
 	return jiffies < pool->last_commit_jiffies ||
@@ -1947,6 +1943,23 @@ static dm_block_t get_metadata_dev_size_in_blocks(struct block_device *bdev)
 }
 
 /*
+ * When a metadata threshold is crossed a dm event is triggered, and
+ * userland should respond by growing the metadata device.  We could let
+ * userland set the threshold, like we do with the data threshold, but I'm
+ * not sure they know enough to do this well.
+ */
+static dm_block_t calc_metadata_threshold(struct pool_c *pt)
+{
+	/*
+	 * 4M is ample for all ops with the possible exception of thin
+	 * device deletion which is harmless if it fails (just retry the
+	 * delete after you've grown the device).
+	 */
+	dm_block_t quarter = get_metadata_dev_size_in_blocks(pt->metadata_dev->bdev) / 4;
+	return min((dm_block_t)1024ULL /* 4M */, quarter);
+}
+
+/*
  * thin-pool <metadata dev> <data dev>
  *	     <data block size (sectors)>
  *	     <low water mark (blocks)>
@@ -2080,7 +2093,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->private = pt;
 
 	r = dm_pool_register_metadata_threshold(pt->pool->pmd,
-						METADATA_LOW_WATER_MARK,
+						calc_metadata_threshold(pt),
 						metadata_low_callback,
 						pool);
 	if (r)
