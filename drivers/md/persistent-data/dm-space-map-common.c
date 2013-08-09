@@ -372,11 +372,13 @@ int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 	return -ENOSPC;
 }
 
-int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
-		 uint32_t ref_count, enum allocation_event *ev)
+static int sm_ll_mutate(struct ll_disk *ll, dm_block_t b,
+			uint32_t (*mutator)(void *context, uint32_t old), void *context,
+			enum allocation_event *ev)
 {
 	int r;
-	uint32_t bit, old;
+	uint32_t bit, old, ref_count;
+	__le32 le_old;
 	struct dm_block *nb;
 	dm_block_t index = b;
 	struct disk_index_entry ie_disk;
@@ -398,6 +400,16 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
 
 	bm_le = dm_bitmap_data(nb);
 	old = sm_lookup_bitmap(bm_le, bit);
+
+	if (old > 2) {
+		r = dm_btree_lookup(&ll->ref_count_info, ll->ref_count_root, &b, &le_old);
+		if (r < 0)
+			return r;
+
+		old = le32_to_cpu(le_old);
+	}
+
+	ref_count = mutator(context, old);
 
 	if (ref_count <= 2) {
 		sm_set_bitmap(bm_le, bit, ref_count);
@@ -448,31 +460,35 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
 	return ll->save_ie(ll, index, &ie_disk);
 }
 
+static uint32_t set_rc(void *context, uint32_t old)
+{
+	return *((uint32_t *) context);
+}
+
+int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
+		 uint32_t ref_count, enum allocation_event *ev)
+{
+	return sm_ll_mutate(ll, b, set_rc, &ref_count, ev);
+}
+
+static uint32_t inc_rc(void *context, uint32_t old)
+{
+	return old + 1;
+}
+
 int sm_ll_inc(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
 {
-	int r;
-	uint32_t rc;
+	return sm_ll_mutate(ll, b, inc_rc, NULL, ev);
+}
 
-	r = sm_ll_lookup(ll, b, &rc);
-	if (r)
-		return r;
-
-	return sm_ll_insert(ll, b, rc + 1, ev);
+static uint32_t dec_rc(void *context, uint32_t old)
+{
+	return old - 1;
 }
 
 int sm_ll_dec(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
 {
-	int r;
-	uint32_t rc;
-
-	r = sm_ll_lookup(ll, b, &rc);
-	if (r)
-		return r;
-
-	if (!rc)
-		return -EINVAL;
-
-	return sm_ll_insert(ll, b, rc - 1, ev);
+	return sm_ll_mutate(ll, b, dec_rc, NULL, ev);
 }
 
 int sm_ll_commit(struct ll_disk *ll)
