@@ -41,7 +41,7 @@ static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t obl
 
 static inline int policy_load_mapping(struct dm_cache_policy *p,
 				      dm_oblock_t oblock, dm_cblock_t cblock,
-				      uint32_t hint, bool hint_valid)
+				      void *hint, bool hint_valid)
 {
 	return p->load_mapping(p, oblock, cblock, hint, hint_valid);
 }

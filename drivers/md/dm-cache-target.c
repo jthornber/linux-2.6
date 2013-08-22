@@ -2379,7 +2379,7 @@ static int write_discard_bitset(struct cache *cache)
 }
 
 static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock,
-		     uint32_t hint)
+		     void *hint)
 {
 	struct cache *cache = context;
 	return dm_cache_save_hint(cache->cmd, cblock, hint);
@@ -2449,7 +2449,7 @@ static void cache_postsuspend(struct dm_target *ti)
 }
 
 static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
-			bool dirty, uint32_t hint, bool hint_valid)
+			bool dirty, void *hint, bool hint_valid)
 {
 	int r;
 	struct cache *cache = context;
