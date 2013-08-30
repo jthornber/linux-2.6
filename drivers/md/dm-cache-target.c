@@ -103,14 +103,19 @@ static void unhook_bio(struct hook_info *h, struct bio *bio)
 /*
  * FIXME: the cache is read/write for the time being.
  */
-enum cache_mode {
+enum cache_metadata_mode {
 	CM_WRITE,		/* metadata may be changed */
 	CM_READ_ONLY,		/* metadata may not be changed */
 };
 
+enum cache_io_mode {
+	CM_IO_WRITEBACK,
+	CM_IO_WRITETHROUGH
+};
+
 struct cache_features {
-	enum cache_mode mode;
-	bool write_through:1;
+	enum cache_metadata_mode mode;
+	enum cache_io_mode io_mode;
 };
 
 struct cache_stats {
@@ -555,9 +560,14 @@ static void save_stats(struct cache *cache)
 #define PB_DATA_SIZE_WB (offsetof(struct per_bio_data, cache))
 #define PB_DATA_SIZE_WT (sizeof(struct per_bio_data))
 
+static bool is_writethrough(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_WRITETHROUGH;
+}
+
 static size_t get_per_bio_data_size(struct cache *cache)
 {
-	return cache->features.write_through ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
+	return is_writethrough(&cache->features) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
 }
 
 static struct per_bio_data *get_per_bio_data(struct bio *bio, size_t data_size)
@@ -1189,7 +1199,7 @@ static bool is_writethrough_io(struct cache *cache, struct bio *bio,
 			       dm_cblock_t cblock)
 {
 	return bio_data_dir(bio) == WRITE &&
-		cache->features.write_through && !is_dirty(cache, cblock);
+		is_writethrough(&cache->features) && !is_dirty(cache, cblock);
 }
 
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
@@ -1790,7 +1800,7 @@ static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 static void init_features(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
-	cf->write_through = false;
+	cf->io_mode = CM_IO_WRITEBACK;
 }
 
 static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
@@ -1815,10 +1825,10 @@ static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 		arg = dm_shift_arg(as);
 
 		if (!strcasecmp(arg, "writeback"))
-			cf->write_through = false;
+			cf->io_mode = CM_IO_WRITEBACK;
 
 		else if (!strcasecmp(arg, "writethrough"))
-			cf->write_through = true;
+			cf->io_mode = CM_IO_WRITETHROUGH;
 
 		else {
 			*error = "Unrecognised cache feature requested";
@@ -2593,7 +2603,7 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long) from_cblock(residency),
 		       cache->nr_dirty);
 
-		if (cache->features.write_through)
+		if (is_writethrough(&cache->features))
 			DMEMIT("1 writethrough ");
 		else
 			DMEMIT("0 ");
