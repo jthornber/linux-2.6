@@ -110,7 +110,8 @@ enum cache_metadata_mode {
 
 enum cache_io_mode {
 	CM_IO_WRITEBACK,
-	CM_IO_WRITETHROUGH
+	CM_IO_WRITETHROUGH,
+	CM_IO_PASSTHROUGH
 };
 
 struct cache_features {
@@ -560,14 +561,24 @@ static void save_stats(struct cache *cache)
 #define PB_DATA_SIZE_WB (offsetof(struct per_bio_data, cache))
 #define PB_DATA_SIZE_WT (sizeof(struct per_bio_data))
 
-static bool is_writethrough(struct cache_features *f)
+static bool writethrough_mode(struct cache_features *f)
 {
 	return f->io_mode == CM_IO_WRITETHROUGH;
 }
 
+static bool writeback_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_WRITEBACK;
+}
+
+static bool passthrough_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_PASSTHROUGH;
+}
+
 static size_t get_per_bio_data_size(struct cache *cache)
 {
-	return is_writethrough(&cache->features) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
+	return writethrough_mode(&cache->features) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
 }
 
 static struct per_bio_data *get_per_bio_data(struct bio *bio, size_t data_size)
@@ -1199,7 +1210,7 @@ static bool is_writethrough_io(struct cache *cache, struct bio *bio,
 			       dm_cblock_t cblock)
 {
 	return bio_data_dir(bio) == WRITE &&
-		is_writethrough(&cache->features) && !is_dirty(cache, cblock);
+		writethrough_mode(&cache->features) && !is_dirty(cache, cblock);
 }
 
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
@@ -1829,6 +1840,9 @@ static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 
 		else if (!strcasecmp(arg, "writethrough"))
 			cf->io_mode = CM_IO_WRITETHROUGH;
+
+		else if (!strcasecmp(arg, "passthrough"))
+			cf->io_mode = CM_IO_PASSTHROUGH;
 
 		else {
 			*error = "Unrecognised cache feature requested";
@@ -2603,10 +2617,18 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long) from_cblock(residency),
 		       cache->nr_dirty);
 
-		if (is_writethrough(&cache->features))
+		if (writethrough_mode(&cache->features))
 			DMEMIT("1 writethrough ");
+
+		else if (passthrough_mode(&cache->features))
+			DMEMIT("1 passthrough ");
+
+		else if (writeback_mode(&cache->features))
+			DMEMIT("1 writeback ");
+
 		else
-			DMEMIT("0 ");
+			DMERR("internal error: unknown io mode: %d",
+			      (int) cache->features.io_mode);
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 		if (sz < maxlen) {
