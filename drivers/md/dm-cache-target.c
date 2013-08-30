@@ -1144,6 +1144,32 @@ static void demote_then_promote(struct cache *cache, struct prealloc *structs,
 	quiesce_migration(mg);
 }
 
+/*
+ * Invalidate a cache entry.  No writeback occurs; any changes in the cache
+ * block are thrown away.
+ */
+static void invalidate(struct cache *cache, struct prealloc *structs,
+		       dm_oblock_t oblock, dm_cblock_t cblock,
+		       struct dm_bio_prison_cell *cell)
+{
+	struct dm_cache_migration *mg = prealloc_get_migration(structs);
+
+	mg->err = false;
+	mg->writeback = false;
+	mg->demote = true;
+	mg->promote = false;
+	mg->requeue_holder = true;
+	mg->cache = cache;
+	mg->old_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = cell;
+	mg->new_ocell = NULL;
+	mg->start_jiffies = jiffies;
+
+	inc_nr_migrations(cache);
+	quiesce_migration(mg);
+}
+
 /*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
