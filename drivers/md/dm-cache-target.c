@@ -1269,7 +1269,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 	bool discarded_block = is_discarded_oblock(cache, block);
-	bool can_migrate = discarded_block || spare_migration_bandwidth(cache);
+	bool passthrough = passthrough_mode(&cache->features);
+	bool can_migrate = !passthrough && (discarded_block || spare_migration_bandwidth(cache));
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -1290,24 +1291,38 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		inc_hit_counter(cache, bio);
+		if (passthrough) {
+			inc_miss_counter(cache, bio);
 
-		if (is_write_io(bio)) {
-			if (writethrough_mode(&cache->features) && !is_dirty(cache, lookup_result.cblock)) {
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
-				issue(cache, bio);
+			/*
+			 * Passthrough always maps to the origin,
+			 * invalidating any cache blocks that are written
+			 * to.
+			 */
 
-			} else if (passthrough_mode(&cache->features)) {
+			if (is_write_io(bio)) {
 				atomic_inc(&cache->stats.demotion);
 				invalidate(cache, structs, block, lookup_result.cblock, new_ocell);
 				release_cell = false;
 
+			} else {
+				// FIXME: factor out issue_origin()
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+				remap_to_origin_clear_discard(cache, bio, block);
+				issue(cache, bio);
+			}
+		} else {
+			inc_hit_counter(cache, bio);
+
+			if (is_write_io(bio) &&
+			    writethrough_mode(&cache->features) &&
+			    !is_dirty(cache, lookup_result.cblock)) {
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
+				issue(cache, bio);
 			} else
 				issue_cache_bio(cache, bio, pb, block, lookup_result.cblock);
-
-		} else
-			issue_cache_bio(cache, bio, pb, block, lookup_result.cblock);
+		}
 
 		break;
 
@@ -2352,26 +2367,34 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	r = DM_MAPIO_REMAPPED;
 	switch (lookup_result.op) {
 	case POLICY_HIT:
-		inc_hit_counter(cache, bio);
-		pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-
-		if (is_write_io(bio)) {
-			if (writethrough_mode(&cache->features) && !is_dirty(cache, lookup_result.cblock)) {
-				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
-				cell_defer(cache, cell, false);
-
-			} else if (passthrough_mode(&cache->features)) {
+		if (passthrough_mode(&cache->features)) {
+			if (is_write_io(bio)) {
+				/*
+				 * We need to invalidate this block, so
+				 * defer for the worker thread.
+				 */
 				cell_defer(cache, cell, true);
 				r = DM_MAPIO_SUBMITTED;
 
-			} else if (writeback_mode(&cache->features)) {
-				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
-				cell_defer(cache, cell, false);
+			} else {
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+				inc_miss_counter(cache, bio);
+				remap_to_origin_clear_discard(cache, bio, block);
 			}
 
 		} else {
-			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+			inc_hit_counter(cache, bio);
+
+			if (is_write_io(bio) &&
+			    writethrough_mode(&cache->features) &&
+			    !is_dirty(cache, lookup_result.cblock))
+				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
+
+			else
+				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+
 			cell_defer(cache, cell, false);
+
 		}
 		break;
 
