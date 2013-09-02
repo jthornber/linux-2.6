@@ -103,14 +103,20 @@ static void unhook_bio(struct hook_info *h, struct bio *bio)
 /*
  * FIXME: the cache is read/write for the time being.
  */
-enum cache_mode {
+enum cache_metadata_mode {
 	CM_WRITE,		/* metadata may be changed */
 	CM_READ_ONLY,		/* metadata may not be changed */
 };
 
+enum cache_io_mode {
+	CM_IO_WRITEBACK,
+	CM_IO_WRITETHROUGH,
+	CM_IO_PASSTHROUGH
+};
+
 struct cache_features {
-	enum cache_mode mode;
-	bool write_through:1;
+	enum cache_metadata_mode mode;
+	enum cache_io_mode io_mode;
 };
 
 struct cache_stats {
@@ -555,9 +561,24 @@ static void save_stats(struct cache *cache)
 #define PB_DATA_SIZE_WB (offsetof(struct per_bio_data, cache))
 #define PB_DATA_SIZE_WT (sizeof(struct per_bio_data))
 
+static bool writethrough_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_WRITETHROUGH;
+}
+
+static bool writeback_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_WRITEBACK;
+}
+
+static bool passthrough_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_PASSTHROUGH;
+}
+
 static size_t get_per_bio_data_size(struct cache *cache)
 {
-	return cache->features.write_through ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
+	return writethrough_mode(&cache->features) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
 }
 
 static struct per_bio_data *get_per_bio_data(struct bio *bio, size_t data_size)
@@ -1123,6 +1144,32 @@ static void demote_then_promote(struct cache *cache, struct prealloc *structs,
 	quiesce_migration(mg);
 }
 
+/*
+ * Invalidate a cache entry.  No writeback occurs; any changes in the cache
+ * block are thrown away.
+ */
+static void invalidate(struct cache *cache, struct prealloc *structs,
+		       dm_oblock_t oblock, dm_cblock_t cblock,
+		       struct dm_bio_prison_cell *cell)
+{
+	struct dm_cache_migration *mg = prealloc_get_migration(structs);
+
+	mg->err = false;
+	mg->writeback = false;
+	mg->demote = true;
+	mg->promote = false;
+	mg->requeue_holder = true;
+	mg->cache = cache;
+	mg->old_oblock = oblock;
+	mg->cblock = cblock;
+	mg->old_ocell = cell;
+	mg->new_ocell = NULL;
+	mg->start_jiffies = jiffies;
+
+	inc_nr_migrations(cache);
+	quiesce_migration(mg);
+}
+
 /*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
@@ -1185,11 +1232,9 @@ static bool spare_migration_bandwidth(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
-static bool is_writethrough_io(struct cache *cache, struct bio *bio,
-			       dm_cblock_t cblock)
+static bool is_write_io(struct bio *bio)
 {
-	return bio_data_dir(bio) == WRITE &&
-		cache->features.write_through && !is_dirty(cache, cblock);
+	return bio_data_dir(bio) == WRITE;
 }
 
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
@@ -1202,6 +1247,15 @@ static void inc_miss_counter(struct cache *cache, struct bio *bio)
 {
 	atomic_inc(bio_data_dir(bio) == READ ?
 		   &cache->stats.read_miss : &cache->stats.write_miss);
+}
+
+static void issue_cache_bio(struct cache *cache, struct bio *bio,
+			    struct per_bio_data *pb,
+			    dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+	remap_to_cache_dirty(cache, bio, oblock, cblock);
+	issue(cache, bio);
 }
 
 static void process_bio(struct cache *cache, struct prealloc *structs,
@@ -1237,14 +1291,24 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		inc_hit_counter(cache, bio);
-		pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (is_writethrough_io(cache, bio, lookup_result.cblock))
-			remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
-		else
-			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+		if (is_write_io(bio)) {
+			if (writethrough_mode(&cache->features) && !is_dirty(cache, lookup_result.cblock)) {
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
+				issue(cache, bio);
 
-		issue(cache, bio);
+			} else if (passthrough_mode(&cache->features)) {
+				atomic_inc(&cache->stats.demotion);
+				invalidate(cache, structs, block, lookup_result.cblock, new_ocell);
+				release_cell = false;
+
+			} else
+				issue_cache_bio(cache, bio, pb, block, lookup_result.cblock);
+
+		} else
+			issue_cache_bio(cache, bio, pb, block, lookup_result.cblock);
+
 		break;
 
 	case POLICY_MISS:
@@ -1790,7 +1854,7 @@ static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 static void init_features(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
-	cf->write_through = false;
+	cf->io_mode = CM_IO_WRITEBACK;
 }
 
 static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
@@ -1815,10 +1879,13 @@ static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 		arg = dm_shift_arg(as);
 
 		if (!strcasecmp(arg, "writeback"))
-			cf->write_through = false;
+			cf->io_mode = CM_IO_WRITEBACK;
 
 		else if (!strcasecmp(arg, "writethrough"))
-			cf->write_through = true;
+			cf->io_mode = CM_IO_WRITETHROUGH;
+
+		else if (!strcasecmp(arg, "passthrough"))
+			cf->io_mode = CM_IO_PASSTHROUGH;
 
 		else {
 			*error = "Unrecognised cache feature requested";
@@ -2282,17 +2349,30 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 	}
 
+	r = DM_MAPIO_REMAPPED;
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		inc_hit_counter(cache, bio);
 		pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
-		if (is_writethrough_io(cache, bio, lookup_result.cblock))
-			remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
-		else
-			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+		if (is_write_io(bio)) {
+			if (writethrough_mode(&cache->features) && !is_dirty(cache, lookup_result.cblock)) {
+				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
+				cell_defer(cache, cell, false);
 
-		cell_defer(cache, cell, false);
+			} else if (passthrough_mode(&cache->features)) {
+				cell_defer(cache, cell, true);
+				r = DM_MAPIO_SUBMITTED;
+
+			} else if (writeback_mode(&cache->features)) {
+				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+				cell_defer(cache, cell, false);
+			}
+
+		} else {
+			remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+			cell_defer(cache, cell, false);
+		}
 		break;
 
 	case POLICY_MISS:
@@ -2317,10 +2397,10 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		DMERR_LIMIT("%s: erroring bio: unknown policy op: %u", __func__,
 			    (unsigned) lookup_result.op);
 		bio_io_error(bio);
-		return DM_MAPIO_SUBMITTED;
+		r = DM_MAPIO_SUBMITTED;
 	}
 
-	return DM_MAPIO_REMAPPED;
+	return r;
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
@@ -2646,10 +2726,18 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long) from_cblock(residency),
 		       cache->nr_dirty);
 
-		if (cache->features.write_through)
+		if (writethrough_mode(&cache->features))
 			DMEMIT("1 writethrough ");
+
+		else if (passthrough_mode(&cache->features))
+			DMEMIT("1 passthrough ");
+
+		else if (writeback_mode(&cache->features))
+			DMEMIT("1 writeback ");
+
 		else
-			DMEMIT("0 ");
+			DMERR("internal error: unknown io mode: %d",
+			      (int) cache->features.io_mode);
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 		if (sz < maxlen) {
