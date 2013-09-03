@@ -2169,6 +2169,22 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 	cache->cmd = cmd;
 
+	if (passthrough_mode(&cache->features)) {
+		bool all_clean;
+
+		r = dm_cache_metadata_all_clean(cache->cmd, &all_clean);
+		if (r) {
+			*error = "dm_cache_metadata_all_clean() failed";
+			goto bad;
+		}
+
+		if (!all_clean) {
+			*error = "Cannot enter passthrough mode unless all blocks are clean";
+			r = -EINVAL;
+			goto bad;
+		}
+	}
+
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
