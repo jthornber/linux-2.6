@@ -109,8 +109,25 @@ enum cache_metadata_mode {
 };
 
 enum cache_io_mode {
+	/*
+	 * Data is written to cached blocks only.  These blocks are marked
+	 * dirty.  If you lose the cache device you will lose data.
+	 * Potential performance increase for both reads and writes.
+	 */
 	CM_IO_WRITEBACK,
+
+	/*
+	 * Data is written to both cache and origin.  Blocks are never
+	 * dirty.  Potential performance benfit for reads only.
+	 */
 	CM_IO_WRITETHROUGH,
+
+	/*
+	 * A degraded mode useful for various cache coherency situations
+	 * (eg, rolling back snapshots).  Reads and writes always go to the
+	 * origin.  If a write goes to a cached oblock, then the cache
+	 * block is invalidated.
+	 */
 	CM_IO_PASSTHROUGH
 };
 
