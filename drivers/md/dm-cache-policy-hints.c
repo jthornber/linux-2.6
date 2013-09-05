@@ -395,11 +395,12 @@ static void hints_destroy(struct dm_cache_policy *pe)
 /*----------------------------------------------------------------------------*/
 
 /* Hints endianess conversions */
+#define __le8 uint8_t
 struct hints_ptrs {
 	__le64 *le64_hints;
 	__le32 *le32_hints;
 	__le16 *le16_hints;
-	uint8_t  *le8_hints;
+	__le8  *le8_hints;
 
 	uint64_t *u64_hints;
 	uint32_t *u32_hints;
@@ -408,79 +409,44 @@ struct hints_ptrs {
 };
 
 typedef int (*hints_xfer_fn_t) (struct hints_ptrs*, unsigned, unsigned, bool);
-static int hints_64_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
-{
-	if (to_disk)
-		p->le64_hints[idx] = cpu_to_le64(val);
 
-	else {
-		p->u64_hints[idx] = le64_to_cpu(p->le64_hints[idx]);
-		if (p->u64_hints[idx] != val) {
-			DMERR_LIMIT("%s -- hint value %llu != %u", __func__, p->u64_hints[idx], val);
-			return -EINVAL;
-		}
-	}
+#define cpu_to_le8(x) (x)
+#define le8_to_cpu(x) (x)
 
-	return 0;
+#define HINTS_XFER(width) \
+static int hints_ ## width ## _xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk) \
+{ \
+	if (to_disk) \
+		p->le ## width ## _hints[idx] = cpu_to_le ## width(val); \
+\
+	else { \
+		p->u ## width ## _hints[idx] = le ## width ## _to_cpu(p->le ## width ## _hints[idx]); \
+		if (p->u ## width ## _hints[idx] != val) { \
+			DMERR_LIMIT("%s -- hint value %llu != %u", __func__, \
+				    (long long unsigned) p->u ## width ## _hints[idx], val); \
+			return -EINVAL; \
+		} \
+	} \
+\
+	return 0; \
 }
 
-static int hints_32_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
-{
-	if (to_disk)
-		p->le32_hints[idx] = cpu_to_le32(val);
-
-	else {
-		p->u32_hints[idx] = le32_to_cpu(p->le32_hints[idx]);
-		if (p->u32_hints[idx] != val) {
-			DMERR_LIMIT("%s -- hint value %u != %u", __func__, p->u32_hints[idx], val);
-			return -EINVAL;
-		}
-	}
-
-	return 0;
-}
-
-static int hints_16_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
-{
-	if (to_disk)
-		p->le16_hints[idx] = cpu_to_le16(val);
-
-	else {
-		p->u16_hints[idx] = le16_to_cpu(p->le16_hints[idx]);
-		if (p->u16_hints[idx] != val) {
-			DMERR_LIMIT("%s -- hint value %u != %u", __func__, p->u16_hints[idx], val);
-			return -EINVAL;
-		}
-	}
-
-	return 0;
-}
-
-static int hints_8_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
-{
-	if (to_disk)
-		p->le8_hints[idx] = val;
-
-	else if (p->u8_hints[idx] != val) {
-		DMERR_LIMIT("%s -- hint value %u != %u", __func__, p->u8_hints[idx], val);
-		return -EINVAL;
-	}
-
-	return 0;
-}
+HINTS_XFER(64)
+HINTS_XFER(32)
+HINTS_XFER(16)
+HINTS_XFER(8)
 
 static void calc_hint_value_counters(struct policy *p)
 {
 	unsigned div, rest = dm_cache_policy_get_hint_size(&p->policy), u;
-	
-	for (u = 3, div = 8; rest; u--, div >>= 1) {
+
+	for (u = 3, div = sizeof(uint64_t); rest; u--, div >>= 1) {
 		p->hint_counter[u] = rest / div;
 		rest -= p->hint_counter[u] * div;
-DMINFO("%s -- u=%u c=%u", __func__, u, p->hint_counter[u]);
 	}
 }
 
-#define __le8 unsigned char
+/* Macro to set hint ptr for width on LHS based on RHS width<<1 */
 #define PTR_INC(lhs, rhs, c) \
 	inc = 2 * p->hint_counter[c]; \
 	ptrs->le ## lhs ## _hints = (__le ## lhs  *) ptrs->le ## rhs ## _hints + inc; \
@@ -509,7 +475,6 @@ static void __hints_xfer_disk(struct policy *p, bool to_disk)
 	};
 
 	struct hints_ptrs hints_ptrs;
-static unsigned c = 0;
  
 	if (!p->hint_size_set) {
 		calc_hint_value_counters(p);
@@ -519,16 +484,16 @@ static unsigned c = 0;
 	/* Must happen after calc_hint_value_counters()! */
 	set_hints_ptrs(p, &hints_ptrs);
 
-	val = 1;
-	u = 4;
-	while (u--) {
+	for (val = 1, u = ARRAY_SIZE(hints_xfer_fns); u--; val++) {
 		for (idx = 0; idx < p->hint_counter[u]; idx++) {
+			/*
+			 * val only suitable because of 256 hint value limitation.
+			 *
+			 * An uint8_t maxes at 255, so we could theoretically
+			 * test hint sizes up to 2040 bytes with this limitation.
+			 */
 			if (hints_xfer_fns[u](&hints_ptrs, idx, val, to_disk))
 				return;
-else if (++c < 16)
-DMINFO("%s -- hint %u ok", __func__, val);
-
-			val++;
 		}
 	}
 
@@ -551,7 +516,6 @@ static int hints_load_mapping(struct dm_cache_policy *pe,
 {
 	struct policy *p = to_policy(pe);
 	struct entry *e;
-static unsigned c = 0;
 
 	e = alloc_cache_entry(p);
 	if (!e)
@@ -559,10 +523,6 @@ static unsigned c = 0;
 
 	e->cblock = cblock;
 	e->oblock = oblock;
-
-#define	LLU long long unsigned
-if (++c < 16)
-DMINFO("%s -- hint_valid=%u hint_size=%llu cblock=%llu oblock=%llu", __func__, hint_valid, (LLU) dm_cache_policy_get_hint_size(pe), (LLU) from_cblock(cblock), (LLU) from_oblock(oblock));
 
 	if (hint_valid) {
 		unsigned hint_size = dm_cache_policy_get_hint_size(pe);
@@ -582,16 +542,12 @@ static int hints_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, vo
 	int r = 0;
 	struct policy *p = to_policy(pe);
 	struct entry *e;
-static unsigned c = 0;
 
-DMINFO_LIMIT("%s", __func__);
 	hints_preset_and_to_disk(p);
 
 	mutex_lock(&p->lock);
 
 	list_for_each_entry(e, &p->queues.used, list) {
-if (++c < 16)
-DMINFO("%s -- cblock=%llu oblock=%llu", __func__, (LLU) from_cblock(e->cblock), (LLU) from_oblock(e->oblock));
 		r = fn(context, e->cblock, e->oblock, (void*) p->hints_buffer);
 		if (r)
 			break;
@@ -678,7 +634,6 @@ static int hints_set_config_value(struct dm_cache_policy *pe,
 					p->hint_size_set = true;
 				}
 
-DMINFO("%s -- hint_size=%llu", __func__, (LLU) dm_cache_policy_get_hint_size(pe));
 				return r;
 			}
 		}
