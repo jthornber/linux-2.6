@@ -612,6 +612,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	disk_super->policy_version[0] = cpu_to_le32(cmd->policy_version[0]);
 	disk_super->policy_version[1] = cpu_to_le32(cmd->policy_version[1]);
 	disk_super->policy_version[2] = cpu_to_le32(cmd->policy_version[2]);
+	disk_super->policy_hint_size =  cpu_to_le32(cmd->policy_hint_size);
 
 	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);
 	disk_super->read_misses = cpu_to_le32(cmd->stats.read_misses);
@@ -907,28 +908,19 @@ static bool policy_unchanged(struct dm_cache_metadata *cmd,
 	 * Ensure policy names match.
 	 */
 	if (strncmp(cmd->policy_name, policy_name, sizeof(cmd->policy_name)))
-{
-DMINFO("%s -- name false: \"%s\" != \"%s\"", __func__, cmd->policy_name, policy_name);
 		return false;
-}
 
 	/*
 	 * Ensure policy major versions match.
 	 */
 	if (cmd->policy_version[0] != policy_version[0])
-{
-DMINFO("%s -- version false", __func__);
 		return false;
-}
 
 	/*
 	 * Ensure policy hint sizes match.
 	 */
 	if (cmd->policy_hint_size != policy_hint_size)
-{
-DMINFO("%s --policy_hint_size false: %llu != %llu", __func__, (long long unsigned) cmd->policy_hint_size, (long long unsigned) policy_hint_size);
 		return false;
-}
 
 	return true;
 }
@@ -941,7 +933,6 @@ static bool hints_array_initialized(struct dm_cache_metadata *cmd)
 static bool hints_array_available(struct dm_cache_metadata *cmd,
 				  struct dm_cache_policy *policy)
 {
-DMINFO("%s -- cwo=%u pu=%u hai=%u", __func__, cmd->clean_when_opened, policy_unchanged(cmd, policy), hints_array_initialized(cmd));
 	return cmd->clean_when_opened && policy_unchanged(cmd, policy) &&
 		hints_array_initialized(cmd);
 }
@@ -987,7 +978,6 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	thunk.cmd = cmd;
 	thunk.respect_dirty_flags = cmd->clean_when_opened;
 	thunk.hints_valid = hints_array_available(cmd, policy);
-DMINFO("%s -- %u", __func__, thunk.hints_valid);
 
 	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
 }
@@ -1162,7 +1152,6 @@ static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 		memcpy(cmd->policy_version, policy_version, sizeof(cmd->policy_version));
 
 		hint_size = dm_cache_policy_get_hint_size(policy);
-DMINFO("%s -- !policy_unchanged policy_name=\"%s\" hint_size=%llu", __func__, policy_name, (long long unsigned) hint_size);
 		if (!hint_size)
 			return 0; /* short-circuit hints initialization */
 		cmd->policy_hint_size = hint_size;

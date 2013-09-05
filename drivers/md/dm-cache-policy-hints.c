@@ -64,6 +64,9 @@ struct policy {
 	/* The cache hash */
 	struct hash chash;
 
+	void *hints_buffer;
+	unsigned hint_counter[4];
+
 	/* Flag to blog (re)setting hint_size via the message interface */
 	bool hint_size_set;
 };
@@ -72,14 +75,14 @@ struct policy {
 /* Low-level queue function. */
 static struct entry *queue_pop(struct list_head *q)
 {
-	struct list_head *elt;
+	if (!list_empty(q)) {
+		struct list_head *elt = q->next;
 
-	if (list_empty(q))
-		return NULL;
-
-	elt = q->next;
-	list_del(elt);
-	return list_entry(elt, struct entry, list);
+		list_del(elt);
+		return list_entry(elt, struct entry, list);
+	}
+	
+	return NULL;
 }
 /*----------------------------------------------------------------------------*/
 
@@ -260,8 +263,7 @@ static int find_free_cblock(struct policy *p, dm_cblock_t *result)
 
 static struct entry *alloc_cache_entry(struct policy *p)
 {
-	struct list_head *free = &p->queues.free;
-	struct entry *e = queue_pop(free);
+	struct entry *e = queue_pop(&p->queues.free);
 
 	if (e) {
 		BUG_ON(from_cblock(p->nr_cblocks_allocated) >= from_cblock(p->cache_size));
@@ -305,7 +307,9 @@ static void get_cache_block(struct policy *p, dm_oblock_t oblock, struct bio *bi
 	struct entry *e = alloc_cache_entry(p);
 
 	if (e) {
-		BUG_ON(find_free_cblock(p, &e->cblock));
+		int r = find_free_cblock(p, &e->cblock);
+
+		BUG_ON(r);
 		result->op = POLICY_NEW;
 
 	} else {
@@ -388,6 +392,159 @@ static void hints_destroy(struct dm_cache_policy *pe)
 	kfree(p);
 }
 
+/*----------------------------------------------------------------------------*/
+
+/* Hints endianess conversions */
+struct hints_ptrs {
+	__le64 *le64_hints;
+	__le32 *le32_hints;
+	__le16 *le16_hints;
+	uint8_t  *le8_hints;
+
+	uint64_t *u64_hints;
+	uint32_t *u32_hints;
+	uint16_t *u16_hints;
+	uint8_t  *u8_hints;
+};
+
+typedef int (*hints_xfer_fn_t) (struct hints_ptrs*, unsigned, unsigned, bool);
+static int hints_64_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
+{
+	if (to_disk)
+		p->le64_hints[idx] = cpu_to_le64(val);
+
+	else {
+		p->u64_hints[idx] = le64_to_cpu(p->le64_hints[idx]);
+		if (p->u64_hints[idx] != val) {
+			DMERR_LIMIT("%s -- hint value %llu != %u", __func__, p->u64_hints[idx], val);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int hints_32_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
+{
+	if (to_disk)
+		p->le32_hints[idx] = cpu_to_le32(val);
+
+	else {
+		p->u32_hints[idx] = le32_to_cpu(p->le32_hints[idx]);
+		if (p->u32_hints[idx] != val) {
+			DMERR_LIMIT("%s -- hint value %u != %u", __func__, p->u32_hints[idx], val);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int hints_16_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
+{
+	if (to_disk)
+		p->le16_hints[idx] = cpu_to_le16(val);
+
+	else {
+		p->u16_hints[idx] = le16_to_cpu(p->le16_hints[idx]);
+		if (p->u16_hints[idx] != val) {
+			DMERR_LIMIT("%s -- hint value %u != %u", __func__, p->u16_hints[idx], val);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int hints_8_xfer(struct hints_ptrs *p, unsigned idx, unsigned val, bool to_disk)
+{
+	if (to_disk)
+		p->le8_hints[idx] = val;
+
+	else if (p->u8_hints[idx] != val) {
+		DMERR_LIMIT("%s -- hint value %u != %u", __func__, p->u8_hints[idx], val);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static void calc_hint_value_counters(struct policy *p)
+{
+	unsigned div, rest = dm_cache_policy_get_hint_size(&p->policy), u;
+	
+	for (u = 3, div = 8; rest; u--, div >>= 1) {
+		p->hint_counter[u] = rest / div;
+		rest -= p->hint_counter[u] * div;
+DMINFO("%s -- u=%u c=%u", __func__, u, p->hint_counter[u]);
+	}
+}
+
+#define __le8 unsigned char
+#define PTR_INC(lhs, rhs, c) \
+	inc = 2 * p->hint_counter[c]; \
+	ptrs->le ## lhs ## _hints = (__le ## lhs  *) ptrs->le ## rhs ## _hints + inc; \
+	ptrs->u ## lhs ## _hints  = (uint ## lhs ## _t *) ptrs->u ## rhs ## _hints  + inc;
+
+static void set_hints_ptrs(struct policy *p, struct hints_ptrs *ptrs)
+{
+	unsigned inc;
+
+	ptrs->le64_hints = p->hints_buffer;
+	ptrs->u64_hints  = p->hints_buffer;
+
+	PTR_INC(32, 64, 3)
+	PTR_INC(16, 32, 2)
+	PTR_INC( 8, 16, 1)
+}
+
+static void __hints_xfer_disk(struct policy *p, bool to_disk)
+{
+	unsigned idx, u, val;
+	hints_xfer_fn_t hints_xfer_fns[] = {
+		hints_8_xfer,
+		hints_16_xfer,
+		hints_32_xfer,
+		hints_64_xfer
+	};
+
+	struct hints_ptrs hints_ptrs;
+static unsigned c = 0;
+ 
+	if (!p->hint_size_set) {
+		calc_hint_value_counters(p);
+		p->hint_size_set = true;
+	}	
+
+	/* Must happen after calc_hint_value_counters()! */
+	set_hints_ptrs(p, &hints_ptrs);
+
+	val = 1;
+	u = 4;
+	while (u--) {
+		for (idx = 0; idx < p->hint_counter[u]; idx++) {
+			if (hints_xfer_fns[u](&hints_ptrs, idx, val, to_disk))
+				return;
+else if (++c < 16)
+DMINFO("%s -- hint %u ok", __func__, val);
+
+			val++;
+		}
+	}
+
+	return;
+}
+
+static void hints_preset_and_to_disk(struct policy *p)
+{
+	__hints_xfer_disk(p, true);
+}
+
+static void hints_from_disk_and_check(struct policy *p)
+{
+	__hints_xfer_disk(p, false);
+}
+
 static int hints_load_mapping(struct dm_cache_policy *pe,
 			      dm_oblock_t oblock, dm_cblock_t cblock,
 			      void *hint, bool hint_valid)
@@ -404,19 +561,14 @@ static unsigned c = 0;
 	e->oblock = oblock;
 
 #define	LLU long long unsigned
-while (++c < 32)
-	DMINFO("%s -- hint_valid=%u hint_size=%llu", __func__, hint_valid, (LLU) dm_cache_policy_get_hint_size(pe));
+if (++c < 16)
+DMINFO("%s -- hint_valid=%u hint_size=%llu cblock=%llu oblock=%llu", __func__, hint_valid, (LLU) dm_cache_policy_get_hint_size(pe), (LLU) from_cblock(cblock), (LLU) from_oblock(oblock));
 
 	if (hint_valid) {
-		unsigned hint_size = dm_cache_policy_get_hint_size(pe) / 4;
-		__le32 *le_hints = hint;
-		uint32_t *ui_hints = hint;
-DMINFO("%s -- hint_size=%u", __func__, hint_size);
+		unsigned hint_size = dm_cache_policy_get_hint_size(pe);
 
-		while (hint_size--) {
-			ui_hints[hint_size] = le32_to_cpu(le_hints[hint_size]);
-			WARN_ON(ui_hints[hint_size] != hint_size);
-		}
+		memcpy(p->hints_buffer, hint, hint_size);
+		hints_from_disk_and_check(p);
 	}
 
 	alloc_cblock_and_insert_cache(p, e);
@@ -428,22 +580,19 @@ DMINFO("%s -- hint_size=%u", __func__, hint_size);
 static int hints_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, void *context)
 {
 	int r = 0;
-	unsigned hint_size = dm_cache_policy_get_hint_size(pe) / 4;
-	__le32 hints[64];
 	struct policy *p = to_policy(pe);
 	struct entry *e;
 static unsigned c = 0;
 
 DMINFO_LIMIT("%s", __func__);
-	while (hint_size--)
-		hints[hint_size] = cpu_to_le32(hint_size + 1);
+	hints_preset_and_to_disk(p);
 
 	mutex_lock(&p->lock);
 
 	list_for_each_entry(e, &p->queues.used, list) {
-while (++c < 32)
-	DMINFO("%s -- cblock=%llu oblock=%llu", __func__, (LLU) from_cblock(e->cblock), (LLU) from_oblock(e->oblock));
-		r = fn(context, e->cblock, e->oblock, (void*) &hints);
+if (++c < 16)
+DMINFO("%s -- cblock=%llu oblock=%llu", __func__, (LLU) from_cblock(e->cblock), (LLU) from_oblock(e->oblock));
+		r = fn(context, e->cblock, e->oblock, (void*) p->hints_buffer);
 		if (r)
 			break;
 	}
@@ -524,8 +673,11 @@ static int hints_set_config_value(struct dm_cache_policy *pe,
 			else {
 				int r = dm_cache_policy_set_hint_size(pe, tmp);
 
-				if (!r)
+				if (!r) {
+					calc_hint_value_counters(p);
 					p->hint_size_set = true;
+				}
+
 DMINFO("%s -- hint_size=%llu", __func__, (LLU) dm_cache_policy_get_hint_size(pe));
 				return r;
 			}
@@ -596,10 +748,16 @@ static struct dm_cache_policy *hints_policy_create(dm_cblock_t cache_size,
 	if (!p->allocation_bitset)
 		goto bad_free_cache_blocks_and_hash;
 
+	p->hints_buffer = kzalloc(DM_CACHE_POLICY_MAX_HINT_SIZE, GFP_KERNEL);
+	if (!p->hints_buffer)
+		goto bad_free_allocation_bitset;
+
 	p->hint_size_set = false;
 
 	return &p->policy;
 
+bad_free_allocation_bitset:
+	free_bitset(p->allocation_bitset);
 bad_free_cache_blocks_and_hash:
 	free_cache_blocks_and_hash(p);
 bad_free_policy:
@@ -612,7 +770,7 @@ bad_free_policy:
 static struct dm_cache_policy_type hints_policy_type = {
 	.name = "hints",
 	.version = {1, 0, 0},
-	.hint_size = 4, // DEFAULT_HINT_SIZE,
+	.hint_size = DEFAULT_HINT_SIZE,
 	.owner = THIS_MODULE,
 	.create = hints_policy_create
 };
