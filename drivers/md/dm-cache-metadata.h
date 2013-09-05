@@ -119,7 +119,7 @@ void dm_cache_dump(struct dm_cache_metadata *cmd);
 
 /*
  * The policy is invited to save a hint (void* sequence of bytes) for every
- * cblock (eg, for a hit count) and is reponsible to do endianess ceonversions.
+ * cblock (eg, for a hit count) and is reponsible to do endianess conversions.
  * These are stored against the policy name.
  * If policies are changed, then hints will be lost.  If the machine crashes,
  * hints will be lost.
@@ -143,4 +143,4 @@ int dm_cache_save_hint(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-#endif	/* DM_CACHE_METADATA_H */
+#endif /* DM_CACHE_METADATA_H */
