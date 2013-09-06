@@ -49,11 +49,11 @@ static int incr_era_counter(struct mq_era_policy *mq_era, const char *curr_era_c
 {
 	era_t curr_era_counter;
 	int r;
-	
+
 	/*
 	 * If the era counter value provided by the user matches the current
 	 * counter value while under lock, increment the counter (intention
-	 * is to prevent races).  Rollover problems are avoided by locking 
+	 * is to prevent races).  Rollover problems are avoided by locking
 	 * the counter at a maximum value (the application must take
 	 * appropriate action on this error to preserve correction, but
 	 * a properly behaved set of applications will never trigger it;
@@ -63,9 +63,9 @@ static int incr_era_counter(struct mq_era_policy *mq_era, const char *curr_era_c
 
 	if (kstrtou32(curr_era_counter_str, 10, &curr_era_counter))
 		return -EINVAL;
-		
+
 	mutex_lock(&mq_era->lock);
-	
+
 	if (mq_era->era_counter != curr_era_counter)
 		r = -ECANCELED;
 	else if (mq_era->era_counter >= MQ_ERA_MAX_ERA)
@@ -98,20 +98,20 @@ static int nested_walk(void *context, dm_cblock_t cblock, dm_oblock_t oblock, ui
 	DMDEBUG("calling parent walk_mappings function for cblock %u, "
 		"oblock %llu (era %u)", from_cblock(cblock), oblock,
 		ctx->mq_era->cb_to_era[from_cblock(cblock)]);
-	
-	/* 
+
+	/*
 	 * XXX need to consolidate the hint being provided by our caller (mq)
 	 * with the hint we want to preserve (era) once the hint size
 	 * restriction goes away.
 	 */
-	
-	return (*ctx->parent_fn)(ctx->parent_ctx, cblock, oblock, 
+
+	return (*ctx->parent_fn)(ctx->parent_ctx, cblock, oblock,
 				 ctx->mq_era->cb_to_era[from_cblock(cblock)]);
 }
 
 static int era_is_gt_value(era_t era, era_t value)
 {
-	return era > value; 
+	return era > value;
 }
 
 static int era_is_gte_value(era_t era, era_t value)
@@ -121,7 +121,7 @@ static int era_is_gte_value(era_t era, era_t value)
 
 static int era_is_lte_value(era_t era, era_t value)
 {
-	return era <= value; 
+	return era <= value;
 }
 
 static int era_is_lt_value(era_t era, era_t value)
@@ -154,7 +154,7 @@ static int find_oblocks(void *context, dm_cblock_t cblock,
 
 	if (ctx->next_ob_idx >= ctx->matches)
 		return -EOVERFLOW;
-	
+
 	era = ctx->mq_era->cb_to_era[from_cblock(cblock)];
 	if (ctx->era_match_fn(era, ctx->test_era)) {
 		DMDEBUG("cblock %u has era %u matching test_era %u; "
@@ -164,7 +164,7 @@ static int find_oblocks(void *context, dm_cblock_t cblock,
 		ctx->oblocks[ctx->next_ob_idx++] = oblock;
 		ctx->mq_era->cb_to_era[from_cblock(cblock)] = 0;
 	}
-	
+
 	return 0;
 }
 
@@ -184,14 +184,14 @@ static int cond_unmap_by_era(struct mq_era_policy *mq_era,
 
 	if (kstrtou32(test_era_str, 10, &test_era))
 		return -EINVAL;
-	
+
 	/*
 	 * This is a little convoluted, but is not expected to be a common
 	 * operation.
 	 */
 
 	mutex_lock(&mq_era->lock);
-	
+
 	/* While locked, count matches */
 	max_cb_idx = from_cblock(mq_era->cache_size);
 	for (matches = 0, cb_idx = 0; cb_idx < max_cb_idx; cb_idx++)
@@ -220,7 +220,7 @@ static int cond_unmap_by_era(struct mq_era_policy *mq_era,
 	r = mq_era->mq->walk_mappings(mq_era->mq, find_oblocks, &fo_ctx);
 	if (r)
 		goto free_and_out;
-	
+
 	/* Unmap each matching origin */
 	for (ob_idx = 0; ob_idx < fo_ctx.next_ob_idx; ob_idx++) {
 		DMDEBUG("removing mapping for oblock %llu.", fo_ctx.oblocks[ob_idx]);
@@ -278,7 +278,7 @@ static int mq_era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	}
 
 	mutex_unlock(&mq_era->lock);
-	
+
 	return r;
 }
 
@@ -307,19 +307,19 @@ static int mq_era_load_mapping(struct dm_cache_policy *p,
 {
 	struct mq_era_policy *mq_era = to_mq_era_policy(p);
 	int r;
-	
-	/* 
+
+	/*
 	 * XXX need to consolidate the hint being provided by our caller (mq)
 	 * with the hint we want to preserve (era) once the hint size
 	 * restriction goes away.
 	 */
-	
+
 	r = mq_era->mq->load_mapping(mq_era->mq, oblock, cblock, 0, 0);
 	if (!r && hint_valid &&
 	    (from_cblock(cblock) < from_cblock(mq_era->cache_size))) {
 		DMDEBUG("recovered era %u for cblock %u.", hint, cblock);
 		mq_era->cb_to_era[from_cblock(cblock)] = hint;
-		/* 
+		/*
 		 * Make sure the era counter starts higher than the highest
 		 * persisted era.
 		 */
@@ -344,7 +344,7 @@ static int mq_era_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 		.mq_era = mq_era
 	};
 	int r;
-	
+
 	/* XXX remove this */
 	DMDEBUG("call to mq_era_walk_mappings");
 
@@ -353,7 +353,7 @@ static int mq_era_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	r = mq_era->mq->walk_mappings(mq_era->mq, nested_walk, &nested_walk_ctx);
 
 	mutex_unlock(&mq_era->lock);
-	
+
 	return r;
 }
 
@@ -369,7 +369,7 @@ static void mq_era_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 			"to remove_mapping.", cblock, oblock);
 		mq_era->cb_to_era[from_cblock(cblock)] = 0;
 	}
-	
+
 	mq_era->mq->remove_mapping(mq_era->mq, oblock);
 
 	mutex_unlock(&mq_era->lock);
@@ -417,7 +417,7 @@ static void mq_era_tick(struct dm_cache_policy *p)
 }
 
 static int mq_era_set_config_value(struct dm_cache_policy *p,
-				   const char *key, 
+				   const char *key,
 				   const char *value)
 {
 	struct mq_era_policy *mq_era = to_mq_era_policy(p);
@@ -491,17 +491,17 @@ static struct dm_cache_policy *mq_era_create(dm_cblock_t cache_size,
 					    cache_block_size);
 	if (!mq_era->mq)
 		goto bad_policy_create;
-	
+
 	DMDEBUG("created mq_era %p, mq %p.", mq_era, mq_era->mq);
-			
+
 	return &mq_era->policy;
-	
+
 bad_policy_create:
 	kfree(mq_era->cb_to_era);
 bad_alloc_cb_to_era:
 	kfree(mq_era);
-	
-	return NULL;	
+
+	return NULL;
 }
 
 /*----------------------------------------------------------------*/
