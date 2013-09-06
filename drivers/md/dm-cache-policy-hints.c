@@ -389,6 +389,7 @@ static void hints_destroy(struct dm_cache_policy *pe)
 
 	free_bitset(p->allocation_bitset);
 	free_cache_blocks_and_hash(p);
+	kfree(p->hints_buffer);
 	kfree(p);
 }
 
