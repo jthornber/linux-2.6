@@ -31,7 +31,7 @@ typedef uint32_t era_t;
 
 struct mq_era_policy {
 	struct dm_cache_policy policy;
-	struct mutex lock;
+	struct mutex lock;	/* FIXME: spinlock? */
 	struct dm_cache_policy *mq;
 	dm_cblock_t cache_size;
 	era_t *cb_to_era;
