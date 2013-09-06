@@ -1144,8 +1144,6 @@ static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 		return -EINVAL;
 
 	if (!policy_unchanged(cmd, policy)) {
-		__le64 value[4];	/* FIXME: */
-		void *hint_value = &value;
 		size_t hint_size;
 
 		strncpy(cmd->policy_name, policy_name, sizeof(cmd->policy_name));
@@ -1166,11 +1164,11 @@ static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 		if (r)
 			return r;
 
-		memset(value, 0, sizeof(value));
+		memset(cmd->policy_hint_value_buffer, 0, hint_size);
 		__dm_bless_for_disk(&value);
 		r = dm_array_resize(&cmd->hint_info, cmd->hint_root, 0,
 				    from_cblock(cmd->cache_blocks),
-				    hint_value, &cmd->hint_root);
+				    cmd->policy_hint_value_buffer, &cmd->hint_root);
 		if (r)
 			return r;
 	}

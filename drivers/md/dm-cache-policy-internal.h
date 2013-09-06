@@ -124,7 +124,7 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
 
 const unsigned *dm_cache_policy_get_version(struct dm_cache_policy *p);
 
-#define DM_CACHE_POLICY_MAX_HINT_SIZE 256
+#define DM_CACHE_POLICY_MAX_HINT_SIZE 2023 /* FIXME: max 256! */
 int    dm_cache_policy_set_hint_size(struct dm_cache_policy *p, unsigned hint_size);
 size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p);
 

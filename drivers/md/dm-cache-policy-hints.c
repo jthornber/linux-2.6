@@ -186,8 +186,7 @@ static unsigned long *alloc_bitset(unsigned nr_cblocks)
 
 static void free_bitset(unsigned long *bits)
 {
-	if (bits)
-		vfree(bits);
+	vfree(bits);
 }
 /*----------------------------------------------------------------------------*/
 
@@ -485,16 +484,20 @@ static void __hints_xfer_disk(struct policy *p, bool to_disk)
 	/* Must happen after calc_hint_value_counters()! */
 	set_hints_ptrs(p, &hints_ptrs);
 
-	for (val = 1, u = ARRAY_SIZE(hints_xfer_fns); u--; val++) {
+	val = 1;
+	u = ARRAY_SIZE(hints_xfer_fns);
+	while (u--) {
 		for (idx = 0; idx < p->hint_counter[u]; idx++) {
 			/*
 			 * val only suitable because of 256 hint value limitation.
 			 *
 			 * An uint8_t maxes at 255, so we could theoretically
-			 * test hint sizes up to 2040 bytes with this limitation.
+			 * test hint sizes up to 2023 bytes with this limitation.
 			 */
 			if (hints_xfer_fns[u](&hints_ptrs, idx, val, to_disk))
 				return;
+
+			val++;
 		}
 	}
 
@@ -526,10 +529,11 @@ static int hints_load_mapping(struct dm_cache_policy *pe,
 	e->oblock = oblock;
 
 	if (hint_valid) {
-		unsigned hint_size = dm_cache_policy_get_hint_size(pe);
+		void *tmp = p->hints_buffer;
 
-		memcpy(p->hints_buffer, hint, hint_size);
+		p->hints_buffer = hint;
 		hints_from_disk_and_check(p);
+		p->hints_buffer = tmp;
 	}
 
 	alloc_cblock_and_insert_cache(p, e);
