@@ -14,8 +14,6 @@ dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
 dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
 dm-cache-mq-y   += dm-cache-policy-mq.o
 dm-cache-cleaner-y += dm-cache-policy-cleaner.o
-dm-cache-basic-y += dm-cache-policy-basic.o
-dm-cache-background-y += dm-cache-policy-background.o
 dm-cache-hints-y += dm-cache-policy-hints.o
 dm-cache-debug-y += dm-cache-policy-debug.o
 md-mod-y	+= md.o bitmap.o
@@ -53,11 +51,8 @@ obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
-obj-$(CONFIG_DM_CACHE_BACKGROUND) += dm-cache-background.o
 obj-$(CONFIG_DM_CACHE_HINTS) += dm-cache-hints.o
-obj-$(CONFIG_DM_CACHE_BASIC)	+= dm-cache-basic.o
 obj-$(CONFIG_DM_CACHE_CLEANER)	+= dm-cache-cleaner.o
-obj-$(CONFIG_DM_CACHE_DEBUG)	+= dm-cache-debug.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)

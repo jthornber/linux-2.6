@@ -278,34 +278,12 @@ config DM_CACHE_CLEANER
          A simple cache policy that writes back all data to the
          origin.  Used when decommissioning a dm-cache.
 
-config DM_CACHE_BACKGROUND
-       tristate "Background Cache Policy (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         A stcckable cache policy flushing out dirty blocks.
-
 config DM_CACHE_HINTS
        tristate "Hint Size Test Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
        default y
        ---help---
          A dumb cache policy just for the purpose to test variable hint size
-
-config DM_CACHE_BASIC
-       tristate "Basic Cache Policies (LRU,LFU,...) (EXPERIMENTAL)"
-       depends on DM_CACHE
-       select BTREE
-       default y
-       ---help---
-         Multiple basic cache policies.
-
-config DM_CACHE_DEBUG
-       tristate "Stackable Debug Cache Policies (LRU,LFU,...) (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         Stack to debug underlying policy module.
 
 config DM_MIRROR
        tristate "Mirror target"
