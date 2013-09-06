@@ -67,7 +67,7 @@ struct policy {
 	void *hints_buffer;
 	unsigned hint_counter[4];
 
-	/* Flag to blog (re)setting hint_size via the message interface */
+	/* Flag to block (re)setting hint_size via the message interface */
 	bool hint_size_set;
 };
 
@@ -98,8 +98,7 @@ static int alloc_hash(struct hash *hash, unsigned elts)
 
 static void free_hash(struct hash *hash)
 {
-	if (hash->table)
-		vfree(hash->table);
+	vfree(hash->table);
 }
 
 /* Free/alloc basic cache entry structures. */
