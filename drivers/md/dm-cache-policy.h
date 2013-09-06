@@ -140,8 +140,8 @@ struct dm_cache_policy {
 	/*
 	 * oblock must be a mapped block.  Must not block.
 	 */
-	int (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
-	int (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a
