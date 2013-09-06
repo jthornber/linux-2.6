@@ -27,21 +27,19 @@ static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, d
 	return p->lookup(p, oblock, cblock);
 }
 
-static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline int policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	if (p->set_dirty)
-		p->set_dirty(p, oblock);
+	return p->set_dirty ? p->set_dirty(p, oblock) : -EOPNOTSUPP;
 }
 
-static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline int policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	if (p->clear_dirty)
-		p->clear_dirty(p, oblock);
+	return p->clear_dirty ? p->clear_dirty(p, oblock) : -EOPNOTSUPP;
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p,
 				      dm_oblock_t oblock, dm_cblock_t cblock,
-				      uint32_t hint, bool hint_valid)
+				      void *hint, bool hint_valid)
 {
 	return p->load_mapping(p, oblock, cblock, hint, hint_valid);
 }
@@ -57,6 +55,13 @@ static inline int policy_writeback_work(struct dm_cache_policy *p,
 					dm_cblock_t *cblock)
 {
 	return p->writeback_work ? p->writeback_work(p, oblock, cblock) : -ENOENT;
+}
+
+static inline int policy_next_dirty_block(struct dm_cache_policy *p,
+					  dm_oblock_t *oblock,
+					  dm_cblock_t *cblock)
+{
+	return p->next_dirty_block ? p->next_dirty_block(p, oblock, cblock) : -ENOENT;
 }
 
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
@@ -87,7 +92,7 @@ static inline int policy_emit_config_values(struct dm_cache_policy *p, char *res
 	if (p->emit_config_values)
 		return p->emit_config_values(p, result, maxlen);
 
-	DMEMIT("0");
+	DMEMIT(" 0");
 	return 0;
 }
 
@@ -119,6 +124,8 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
 
 const unsigned *dm_cache_policy_get_version(struct dm_cache_policy *p);
 
+#define DM_CACHE_POLICY_MAX_HINT_SIZE 256 /* Max 2023 for the policy hints test module to work */
+int    dm_cache_policy_set_hint_size(struct dm_cache_policy *p, unsigned hint_size);
 size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p);
 
 /*----------------------------------------------------------------*/

@@ -8,6 +8,7 @@
 #define DM_CACHE_POLICY_H
 
 #include "dm-cache-block-types.h"
+#include "persistent-data/dm-btree.h"
 
 #include <linux/device-mapper.h>
 
@@ -79,7 +80,8 @@ struct policy_result {
 };
 
 typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
-			      dm_oblock_t oblock, uint32_t hint);
+			      dm_oblock_t oblock, void *hint)
+	__dm_written_to_disk(hint);
 
 /*
  * The cache policy object.  Just a bunch of methods.  It is envisaged that
@@ -130,7 +132,7 @@ struct dm_cache_policy {
 	 *
 	 * Must not block.
 	 *
-	 * Returns 0 if in cache, -ENOENT if not, < 0 for other errors (-EWOULDBLOCK
+	 * Returns 0 iff in cache, -ENOENT iff not, < 0 on error (-EWOULDBLOCK
 	 * would be typical).
 	 */
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
@@ -138,15 +140,15 @@ struct dm_cache_policy {
 	/*
 	 * oblock must be a mapped block.  Must not block.
 	 */
-	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
-	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	int (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	int (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a
 	 * mapping from the metadata device into the policy.
 	 */
 	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock,
-			    dm_cblock_t cblock, uint32_t hint, bool hint_valid);
+			    dm_cblock_t cblock, void *hint, bool hint_valid);
 
 	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn,
 			     void *context);
@@ -159,7 +161,14 @@ struct dm_cache_policy {
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
 
+	/*
+	 * writeback_work supporting the cache target to retrieve any dirty blocks to write back.
+	 *
+	 * next_dirty_block providing any next dirty block to the background policy for writeback,
+	 * thus allowing quicker eviction by evoiding demotion on cache block replacement.
+	 */
 	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
+	int (*next_dirty_block)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
 
 
 	/*
@@ -211,8 +220,7 @@ struct dm_cache_policy_type {
 
 	/*
 	 * Policies may store a hint for each each cache block.
-	 * Currently the size of this hint must be 0 or 4 bytes but we
-	 * expect to relax this in future.
+	 * Currently the size of this hint must <= 512 bytes.
 	 */
 	size_t hint_size;
 
@@ -227,4 +235,4 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type);
 
 /*----------------------------------------------------------------*/
 
-#endif	/* DM_CACHE_POLICY_H */
+#endif /* DM_CACHE_POLICY_H */
