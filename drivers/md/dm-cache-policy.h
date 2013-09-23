@@ -197,6 +197,16 @@ struct dm_cache_policy {
 	 * Book keeping ptr for the policy register, not for general use.
 	 */
 	void *private;
+
+	/*
+	 * Support for stackable policies. A policy stack consists of 0 or more
+	 * "non-terminal" policies (which can intercept requests to provide
+	 * additional functionality, but ultimately hand them down the stack)
+	 * followed by one "terminal" policy which actually runs a caching
+	 * algorithm.  This is the pointer to the "next" policy in a
+	 * non-terminal policy.  It will always be NULL in a terminal policy.
+	 */
+	struct dm_cache_policy *child;
 };
 
 /*----------------------------------------------------------------*/
