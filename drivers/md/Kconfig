@@ -275,14 +275,14 @@ config DM_CACHE_ERA
        depends on DM_CACHE
        default y
        ---help---
-         A cache policy shim that adds an "era" property to the 
-	 per-cache-block metadata, to facilitate the implementation of 
+         A cache policy shim that adds an "era" property to the
+	 per-cache-block metadata, to facilitate the implementation of
 	 cache coherency validation and recovery tools.  This mechanism
-         works as follows.  There is a monotonically increasing 32-bit 
-	 era counter associated with each cache instance.  Each cache 
+         works as follows.  There is a monotonically increasing 32-bit
+	 era counter associated with each cache instance.  Each cache
 	 block is tagged with the era during which it was last written.
-	 A device mapper message interface is provided to obtain the 
-	 current era, advance to the next era, and invalidate blocks 
+	 A device mapper message interface is provided to obtain the
+	 current era, advance to the next era, and invalidate blocks
 	 from before or after a given era.  Note that you can use this
 	 policy shim to add the era functionality to any cache policy
 	 via name concatenation -- specify era+mq instead of just mq to
