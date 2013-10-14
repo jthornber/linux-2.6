@@ -2638,13 +2638,13 @@ static dm_cblock_t get_cache_dev_size(struct cache *cache)
 
 static bool can_resize(struct cache *cache, dm_cblock_t new_size)
 {
-	if (new_size > cache->cache_size)
+	if (from_cblock(new_size) > from_cblock(cache->cache_size))
 		return true;
 
 	/*
 	 * We can't drop a dirty block.
 	 */
-	for (; new_size > cache->cache_size;
+	for (; from_cblock(new_size) > from_cblock(cache->cache_size);
 	     new_size = to_cblock(from_cblock(new_size) + 1)) {
 		if (is_dirty(cache, new_size)) {
 			DMERR("unable to shrink cache; cache block %llu is dirty",
