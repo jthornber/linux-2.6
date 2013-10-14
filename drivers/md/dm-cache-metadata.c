@@ -238,9 +238,9 @@ static int __setup_mapping_info(struct dm_cache_metadata *cmd)
 	dm_array_info_init(&cmd->info, cmd->tm, &vt);
 
 	if (cmd->policy_hint_size) {
-		if (cmd->policy_hint_size > DM_CACHE_POLICY_MAX_HINT_SIZE) {
-			DMERR("hint size is too large %d > %d",
-			      (int) cmd->policy_hint_size,
+		if (cmd->policy_hint_size > DM_CACHE_POLICY_MAX_HINT_SIZE ||
+		    cmd->policy_hint_size % 4) {
+			DMERR("hint size not divisible by 4 or larger than %d",
 			      (int) DM_CACHE_POLICY_MAX_HINT_SIZE);
 			return -EPERM;
 		}
