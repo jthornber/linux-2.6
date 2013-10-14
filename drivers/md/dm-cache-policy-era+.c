@@ -391,7 +391,7 @@ static int era_invalidate_mapping(struct dm_cache_policy *p,
 	int r;
 
 	if (!era->invalidate.bitset)
-		return -EINVAL;
+		return -ENODATA;
 
 	r = __find_invalidate_block(era, cblock);
 	if (r)

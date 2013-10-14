@@ -1106,8 +1106,6 @@ static int remove_mapping(struct mq_policy *mq,
 {
 	struct entry *e;
 
-	mutex_lock(&mq->lock);
-
 	e = hash_lookup(mq, oblock);
 
 	if (e && e->in_cache) {
