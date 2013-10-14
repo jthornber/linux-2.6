@@ -95,6 +95,54 @@ extern struct omap_hwmod_sysc_fields omap_hwmod_sysc_type3;
 #define MODULEMODE_HWCTRL		1
 #define MODULEMODE_SWCTRL		2
 
+#define DEBUG_OMAP2UART1_FLAGS	0
+#define DEBUG_OMAP2UART2_FLAGS	0
+#define DEBUG_OMAP2UART3_FLAGS	0
+#define DEBUG_OMAP3UART3_FLAGS	0
+#define DEBUG_OMAP3UART4_FLAGS	0
+#define DEBUG_OMAP4UART3_FLAGS	0
+#define DEBUG_OMAP4UART4_FLAGS	0
+#define DEBUG_TI81XXUART1_FLAGS	0
+#define DEBUG_TI81XXUART2_FLAGS	0
+#define DEBUG_TI81XXUART3_FLAGS	0
+#define DEBUG_AM33XXUART1_FLAGS	0
+
+#define DEBUG_OMAPUART_FLAGS	(HWMOD_INIT_NO_IDLE | HWMOD_INIT_NO_RESET)
+
+#if defined(CONFIG_DEBUG_OMAP2UART1)
+#undef DEBUG_OMAP2UART1_FLAGS
+#define DEBUG_OMAP2UART1_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_OMAP2UART2)
+#undef DEBUG_OMAP2UART2_FLAGS
+#define DEBUG_OMAP2UART2_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_OMAP2UART3)
+#undef DEBUG_OMAP2UART3_FLAGS
+#define DEBUG_OMAP2UART3_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_OMAP3UART3)
+#undef DEBUG_OMAP3UART3_FLAGS
+#define DEBUG_OMAP3UART3_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_OMAP3UART4)
+#undef DEBUG_OMAP3UART4_FLAGS
+#define DEBUG_OMAP3UART4_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_OMAP4UART3)
+#undef DEBUG_OMAP4UART3_FLAGS
+#define DEBUG_OMAP4UART3_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_OMAP4UART4)
+#undef DEBUG_OMAP4UART4_FLAGS
+#define DEBUG_OMAP4UART4_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_TI81XXUART1)
+#undef DEBUG_TI81XXUART1_FLAGS
+#define DEBUG_TI81XXUART1_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_TI81XXUART2)
+#undef DEBUG_TI81XXUART2_FLAGS
+#define DEBUG_TI81XXUART2_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_TI81XXUART3)
+#undef DEBUG_TI81XXUART3_FLAGS
+#define DEBUG_TI81XXUART3_FLAGS DEBUG_OMAPUART_FLAGS
+#elif defined(CONFIG_DEBUG_AM33XXUART1)
+#undef DEBUG_AM33XXUART1_FLAGS
+#define DEBUG_AM33XXUART1_FLAGS DEBUG_OMAPUART_FLAGS
+#endif
 
 /**
  * struct omap_hwmod_mux_info - hwmod specific mux configuration
@@ -463,6 +511,9 @@ struct omap_hwmod_omap4_prcm {
  *     is kept in force-standby mode. Failing to do so causes PM problems
  *     with musb on OMAP3630 at least. Note that musb has a dedicated register
  *     to control MSTANDBY signal when MIDLEMODE is set to force-standby.
+ * HWMOD_SWSUP_SIDLE_ACT: omap_hwmod code should manually bring the module
+ *     out of idle, but rely on smart-idle to the put it back in idle,
+ *     so the wakeups are still functional (Only known case for now is UART)
  */
 #define HWMOD_SWSUP_SIDLE			(1 << 0)
 #define HWMOD_SWSUP_MSTANDBY			(1 << 1)
@@ -476,21 +527,20 @@ struct omap_hwmod_omap4_prcm {
 #define HWMOD_EXT_OPT_MAIN_CLK			(1 << 9)
 #define HWMOD_BLOCK_WFI				(1 << 10)
 #define HWMOD_FORCE_MSTANDBY			(1 << 11)
+#define HWMOD_SWSUP_SIDLE_ACT			(1 << 12)
 
 /*
  * omap_hwmod._int_flags definitions
  * These are for internal use only and are managed by the omap_hwmod code.
  *
  * _HWMOD_NO_MPU_PORT: no path exists for the MPU to write to this module
- * _HWMOD_WAKEUP_ENABLED: set when the omap_hwmod code has enabled ENAWAKEUP
  * _HWMOD_SYSCONFIG_LOADED: set when the OCP_SYSCONFIG value has been cached
  * _HWMOD_SKIP_ENABLE: set if hwmod enabled during init (HWMOD_INIT_NO_IDLE) -
  *     causes the first call to _enable() to only update the pinmux
  */
 #define _HWMOD_NO_MPU_PORT			(1 << 0)
-#define _HWMOD_WAKEUP_ENABLED			(1 << 1)
-#define _HWMOD_SYSCONFIG_LOADED			(1 << 2)
-#define _HWMOD_SKIP_ENABLE			(1 << 3)
+#define _HWMOD_SYSCONFIG_LOADED			(1 << 1)
+#define _HWMOD_SKIP_ENABLE			(1 << 2)
 
 /*
  * omap_hwmod._state definitions
@@ -566,6 +616,7 @@ struct omap_hwmod_link {
  * @voltdm: pointer to voltage domain (filled in at runtime)
  * @dev_attr: arbitrary device attributes that can be passed to the driver
  * @_sysc_cache: internal-use hwmod flags
+ * @mpu_rt_idx: index of device address space for register target (for DT boot)
  * @_mpu_rt_va: cached register target start address (internal use)
  * @_mpu_port: cached MPU register target slave (internal use)
  * @opt_clks_cnt: number of @opt_clks
@@ -615,6 +666,7 @@ struct omap_hwmod {
 	struct list_head		node;
 	struct omap_hwmod_ocp_if	*_mpu_port;
 	u16				flags;
+	u8				mpu_rt_idx;
 	u8				response_lat;
 	u8				rst_lines_cnt;
 	u8				opt_clks_cnt;
@@ -642,9 +694,6 @@ int omap_hwmod_read_hardreset(struct omap_hwmod *oh, const char *name);
 
 int omap_hwmod_enable_clocks(struct omap_hwmod *oh);
 int omap_hwmod_disable_clocks(struct omap_hwmod *oh);
-
-int omap_hwmod_set_slave_idlemode(struct omap_hwmod *oh, u8 idlemode);
-int omap_hwmod_set_ocp_autoidle(struct omap_hwmod *oh, u8 autoidle);
 
 int omap_hwmod_reset(struct omap_hwmod *oh);
 void omap_hwmod_ocp_barrier(struct omap_hwmod *oh);
@@ -700,7 +749,9 @@ extern int omap2420_hwmod_init(void);
 extern int omap2430_hwmod_init(void);
 extern int omap3xxx_hwmod_init(void);
 extern int omap44xx_hwmod_init(void);
+extern int omap54xx_hwmod_init(void);
 extern int am33xx_hwmod_init(void);
+extern int dra7xx_hwmod_init(void);
 
 extern int __init omap_hwmod_register_links(struct omap_hwmod_ocp_if **ois);
 

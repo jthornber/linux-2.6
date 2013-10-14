@@ -43,8 +43,7 @@ static void set_threshold(struct threshold *t, dm_block_t value,
 	t->context = context;
 }
 
-static bool below_threshold(struct threshold *t,
-			    dm_block_t value)
+static bool below_threshold(struct threshold *t, dm_block_t value)
 {
 	return t->threshold_set && value <= t->threshold;
 }
@@ -611,6 +610,7 @@ static int sm_metadata_register_threshold_callback(struct dm_space_map *sm,
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	set_threshold(&smm->threshold, threshold, fn, context);
+
 	return 0;
 }
 
