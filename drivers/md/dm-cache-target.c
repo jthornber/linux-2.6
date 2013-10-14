@@ -659,12 +659,17 @@ static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
+static bool is_write_io(struct bio *bio)
+{
+	return bio_data_dir(bio) == WRITE;
+}
+
 static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
 				  dm_oblock_t oblock)
 {
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_origin(cache, bio);
-	if (bio_data_dir(bio) == WRITE)
+	if (is_write_io(bio))
 		clear_discard(cache, oblock_to_dblock(cache, oblock));
 }
 
@@ -672,7 +677,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 				 dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	remap_to_cache(cache, bio, cblock);
-	if (bio_data_dir(bio) == WRITE) {
+	if (is_write_io(bio)) {
 		set_dirty(cache, oblock, cblock);
 		clear_discard(cache, oblock_to_dblock(cache, oblock));
 	}
@@ -989,8 +994,8 @@ static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 
 static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 {
-	return (bio_data_dir(bio) == WRITE) &&
-		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
+	return is_write_io(bio) &&
+	       (bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
 }
 
 static void avoid_copy(struct dm_cache_migration *mg)
@@ -1255,21 +1260,16 @@ static bool spare_migration_bandwidth(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
-static bool is_write_io(struct bio *bio)
-{
-	return bio_data_dir(bio) == WRITE;
-}
-
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
 {
-	atomic_inc(bio_data_dir(bio) == READ ?
-		   &cache->stats.read_hit : &cache->stats.write_hit);
+	atomic_inc(is_write_io(bio) ?
+		   &cache->stats.write_hit : &cache->stats.read_hit);
 }
 
 static void inc_miss_counter(struct cache *cache, struct bio *bio)
 {
-	atomic_inc(bio_data_dir(bio) == READ ?
-		   &cache->stats.read_miss : &cache->stats.write_miss);
+	atomic_inc(is_write_io(bio) ?
+		   &cache->stats.write_miss : &cache->stats.read_miss);
 }
 
 static void issue_cache_bio(struct cache *cache, struct bio *bio,
