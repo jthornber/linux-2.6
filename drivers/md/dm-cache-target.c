@@ -2421,6 +2421,8 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				inc_miss_counter(cache, bio);
 				remap_to_origin_clear_discard(cache, bio, block);
+
+				cell_defer(cache, cell, false);
 			}
 
 		} else {
