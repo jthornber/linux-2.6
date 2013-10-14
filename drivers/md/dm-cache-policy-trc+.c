@@ -14,6 +14,8 @@
  *
  */
 
+/* FIXME: use from_[oc]block() */
+
 #include "dm-cache-policy.h"
 #include "dm-cache-policy-internal.h"
 #include "dm-cache-shim-utils.h"
@@ -85,16 +87,16 @@ static int trc_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return p->child->lookup(p->child, oblock, cblock);
 }
 
-static void trc_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static int trc_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu", p, oblock);
-	p->child->set_dirty(p->child, oblock);
+	return p->child->set_dirty(p->child, oblock);
 }
 
-static void trc_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static int trc_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu", p, oblock);
-	p->child->clear_dirty(p->child, oblock);
+	return p->child->clear_dirty(p->child, oblock);
 }
 
 static int trc_load_mapping(struct dm_cache_policy *p,
@@ -131,6 +133,13 @@ static void trc_force_mapping(struct dm_cache_policy *p,
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %llu", p, old_oblock, new_oblock);
 	p->child->force_mapping(p->child, old_oblock, new_oblock);
+}
+
+static int trc_invalidate_mapping(struct dm_cache_policy *p,
+				  dm_oblock_t *oblock, dm_cblock_t *cblock)
+{
+	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %u", p, from_oblock(*oblock), from_cblock(*cblock));
+	return p->child->invalidate_mapping(p->child, oblock, cblock);
 }
 
 static dm_cblock_t trc_residency(struct dm_cache_policy *p)
@@ -187,6 +196,7 @@ static void init_policy_functions(struct trc_policy *trc)
 	trc->policy.remove_mapping = trc_remove_mapping;
 	trc->policy.writeback_work = trc_writeback_work;
 	trc->policy.force_mapping = trc_force_mapping;
+	trc->policy.invalidate_mapping = trc_invalidate_mapping;
 	trc->policy.residency = trc_residency;
 	trc->policy.tick = trc_tick;
 	trc->policy.emit_config_values = trc_emit_config_values;
