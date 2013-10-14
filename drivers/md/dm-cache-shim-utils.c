@@ -71,31 +71,31 @@ static int shim_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 		    bool can_block, bool can_migrate, bool discarded_oblock,
 		    struct bio *bio, struct policy_result *result)
 {
-	return p->child->map(p->child, oblock, can_block, can_migrate,
-			     discarded_oblock, bio, result);
+	return policy_map(p->child, oblock, can_block, can_migrate,
+			  discarded_oblock, bio, result);
 }
 
 static int shim_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
 		       dm_cblock_t *cblock)
 {
-	return p->child->lookup(p->child, oblock, cblock);
+	return policy_lookup(p->child, oblock, cblock);
 }
 
 static int shim_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	return p->child->set_dirty(p->child, oblock);
+	return policy_set_dirty(p->child, oblock);
 }
 
 static int shim_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	return p->child->clear_dirty(p->child, oblock);
+	return policy_clear_dirty(p->child, oblock);
 }
 
 static int shim_load_mapping(struct dm_cache_policy *p,
 			     dm_oblock_t oblock, dm_cblock_t cblock,
 			     void *hint, bool hint_valid)
 {
-	return p->child->load_mapping(p->child, oblock, cblock, hint, hint_valid);
+	return policy_load_mapping(p->child, oblock, cblock, hint, hint_valid);
 }
 
 static int shim_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
@@ -115,55 +115,55 @@ static int shim_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void
 			      ;
 	my_ctx.cblock_to_hint_fn = NULL;
 
-	return p->child->walk_mappings(p->child, shim_nested_walk_apply, &my_ctx);
+	return policy_walk_mappings(p->child, shim_nested_walk_apply, &my_ctx);
 }
 
 static void shim_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	p->child->remove_mapping(p->child, oblock);
+	policy_remove_mapping(p->child, oblock);
 }
 
 static int shim_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
 			       dm_cblock_t *cblock)
 {
-	return p->child->writeback_work(p->child, oblock, cblock);
+	return policy_writeback_work(p->child, oblock, cblock);
 }
 
 static void shim_force_mapping(struct dm_cache_policy *p,
 			       dm_oblock_t current_oblock,
 			       dm_oblock_t new_oblock)
 {
-	p->child->force_mapping(p->child, current_oblock, new_oblock);
+	policy_force_mapping(p->child, current_oblock, new_oblock);
 }
 
 static int shim_invalidate_mapping(struct dm_cache_policy *p,
-				   dm_oblock_t *oblock,
-				   dm_cblock_t *cblock)
+				   dm_oblock_t *current_oblock,
+				   dm_cblock_t *current_cblock)
 {
-	return p->child->invalidate_mapping(p->child, oblock, cblock);
+	return policy_invalidate_mapping(p->child, current_oblock, current_cblock);
 }
 
 static dm_cblock_t shim_residency(struct dm_cache_policy *p)
 {
-	return p->child->residency(p->child);
+	return policy_residency(p->child);
 }
 
 static void shim_tick(struct dm_cache_policy *p)
 {
-	p->child->tick(p->child);
+	policy_tick(p->child);
 }
 
 static int shim_set_config_value(struct dm_cache_policy *p,
 				   const char *key,
 				   const char *value)
 {
-	return p->child->set_config_value(p->child, key, value);
+	return policy_set_config_value(p->child, key, value);
 }
 
 static int shim_emit_config_values(struct dm_cache_policy *p, char *result,
 				     unsigned maxlen)
 {
-	return p->child->emit_config_values(p->child, result, maxlen);
+	return policy_emit_config_values(p->child, result, maxlen);
 }
 
 void dm_cache_shim_utils_init_shim_policy(struct dm_cache_policy *p)
@@ -196,7 +196,7 @@ int dm_cache_shim_utils_walk_map_with_ctx(struct shim_walk_map_ctx *ctx)
 	 * consolidate hint data from all of the shims and the terminal policy.
 	 */
 
-	return p->child->walk_mappings(p->child, shim_nested_walk_apply, ctx);
+	return policy_walk_mappings(p->child, shim_nested_walk_apply, ctx);
 }
 EXPORT_SYMBOL_GPL(dm_cache_shim_utils_walk_map_with_ctx);
 
@@ -223,6 +223,6 @@ int dm_cache_shim_utils_walk_map(struct dm_cache_policy *p, policy_walk_fn fn,
 			    : NULL
 			    ;
 	my_ctx.cblock_to_hint_fn = hint_fn;
-	return p->child->walk_mappings(p->child, shim_nested_walk_apply, &my_ctx);
+	return policy_walk_mappings(p->child, shim_nested_walk_apply, &my_ctx);
 }
 EXPORT_SYMBOL_GPL(dm_cache_shim_utils_walk_map);
