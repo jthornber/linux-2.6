@@ -79,8 +79,8 @@ static struct dm_cache_policy *stack_root_create(const char *policy_stack_str,
 
 	if (!p)
 		return NULL;
-	t = &p->type;
 
+	t = &p->type;
 	dm_cache_shim_utils_init_shim_policy(&p->policy);
 	p->policy.walk_mappings = stack_root_walk_mappings;
 	p->policy.child = head;
@@ -101,19 +101,23 @@ static struct dm_cache_policy *stack_root_create(const char *policy_stack_str,
 		hint_size = dm_cache_policy_get_hint_size(child);
 		if (!hint_size && (child->child != NULL))
 			continue;
+
 		t->hint_size += hint_size;
 
 		seg_name = dm_cache_policy_get_name(child);
 		seg_name_len = strlen(seg_name);
+
 		if (cannonical_name_len + seg_name_len >= sizeof(t->name)) {
 			DMWARN("policy stack string '%s' is too long",
 			       policy_stack_str);
 			kfree(p);
 			return NULL;
 		}
+
 		strcpy(&t->name[cannonical_name_len], seg_name);
 		cannonical_name_len += seg_name_len;
 		version = dm_cache_policy_get_version(child);
+
 		for (i = 0; i < CACHE_POLICY_VERSION_SIZE; i++)
 			t->version[i] += version[i];
 	}
@@ -148,6 +152,16 @@ int dm_cache_stack_utils_string_is_policy_stack(const char *string)
 	return true;
 }
 
+static void __policy_destroy_stack(struct dm_cache_policy *head_p)
+{
+	struct dm_cache_policy *cur_p, *next_p;
+
+	for (cur_p = head_p; cur_p; cur_p = next_p) {
+		next_p = cur_p->child;
+		dm_cache_policy_destroy(cur_p);
+	}
+}
+
 struct dm_cache_policy *dm_cache_stack_utils_policy_stack_create(
 	const char *policy_stack_str,
 	dm_cblock_t cache_size,
@@ -179,12 +193,13 @@ struct dm_cache_policy *dm_cache_stack_utils_policy_stack_create(
 						origin_size, cache_block_size);
 		if (!next_p)
 			goto cleanup;
+
 		next_p->child = NULL;
-		if (p)
-			p->child = next_p;
-		else
-			head_p = next_p;
+
+		*(p ? &p->child : &head_p) = next_p;
+
 		p = next_p;
+
 		if (delim) {
 			delim[1] = saved_char;
 			policy_name = &delim[1];
@@ -195,28 +210,21 @@ struct dm_cache_policy *dm_cache_stack_utils_policy_stack_create(
 		next_p = stack_root_create(policy_stack_str, head_p);
 		if (!next_p)
 			goto cleanup;
+
 		head_p = next_p;
 	}
 
 	return head_p;
 
 cleanup:
-	for (p = head_p; p; p = next_p) {
-		next_p = p->child;
-		dm_cache_policy_destroy(p);
-	}
+	__policy_destroy_stack(head_p);
 	return NULL;
 }
 
 void dm_cache_stack_utils_policy_stack_destroy(struct dm_cache_policy *p)
 {
-	struct dm_cache_policy *head_p, *next_p;
+	struct dm_cache_policy *head_p = p;
 
-	head_p = p;
-	for (p = head_p->child; p; p = next_p) {
-		next_p = p->child;
-		dm_cache_policy_destroy(p);
-	}
-
+	__policy_destroy_stack(head_p->child);
 	stack_root_destroy(head_p);
 }
