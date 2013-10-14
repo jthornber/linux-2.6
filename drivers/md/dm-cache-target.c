@@ -67,9 +67,11 @@ static void free_bitset(unsigned long *bits)
 #define MIGRATION_COUNT_WINDOW 10
 
 /*
- * The block size of the device holding cache data must be >= 32KB
+ * The block size of the device holding cache data must be
+ * between 32KB and 1GB.
  */
 #define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (32 * 1024 >> SECTOR_SHIFT)
+#define DATA_DEV_BLOCK_SIZE_MAX_SECTORS (1024 * 1024 * 1024 >> SECTOR_SHIFT)
 
 /*
  * FIXME: the cache is read/write for the time being.
@@ -101,6 +103,8 @@ struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
 
+	struct dm_cache_metadata *cmd;
+
 	/*
 	 * Metadata is written to this device.
 	 */
@@ -115,11 +119,6 @@ struct cache {
 	 * The faster of the two data devices.  Typically an SSD.
 	 */
 	struct dm_dev *cache_dev;
-
-	/*
-	 * Cache features such as write-through.
-	 */
-	struct cache_features features;
 
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
@@ -138,8 +137,6 @@ struct cache {
 	uint32_t sectors_per_block;
 	int sectors_per_block_shift;
 
-	struct dm_cache_metadata *cmd;
-
 	spinlock_t lock;
 	struct bio_list deferred_bios;
 	struct bio_list deferred_flush_bios;
@@ -148,8 +145,8 @@ struct cache {
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
 	sector_t migration_threshold;
-	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
+	atomic_t nr_migrations;
 
 	/*
 	 * cache_size entries, dirty if set
@@ -160,9 +157,16 @@ struct cache {
 	/*
 	 * origin_blocks entries, discarded if set.
 	 */
-	uint32_t discard_block_size; /* a power of 2 times sectors per block */
 	dm_dblock_t discard_nr_blocks;
 	unsigned long *discard_bitset;
+	uint32_t discard_block_size; /* a power of 2 times sectors per block */
+
+	/*
+	 * Rather than reconstructing the table line for the status we just
+	 * save it and regurgitate.
+	 */
+	unsigned nr_ctr_args;
+	const char **ctr_args;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -187,14 +191,12 @@ struct cache {
 	bool loaded_mappings:1;
 	bool loaded_discards:1;
 
-	struct cache_stats stats;
-
 	/*
-	 * Rather than reconstructing the table line for the status we just
-	 * save it and regurgitate.
+	 * Cache features such as write-through.
 	 */
-	unsigned nr_ctr_args;
-	const char **ctr_args;
+	struct cache_features features;
+
+	struct cache_stats stats;
 };
 
 struct per_bio_data {
@@ -205,7 +207,7 @@ struct per_bio_data {
 	/*
 	 * writethrough fields.  These MUST remain at the end of this
 	 * structure and the 'cache' member must be the first as it
-	 * is used to determine the offsetof the writethrough fields.
+	 * is used to determine the offset of the writethrough fields.
 	 */
 	struct cache *cache;
 	dm_cblock_t cblock;
@@ -393,7 +395,7 @@ static int get_cell(struct cache *cache,
 	return r;
 }
 
- /*----------------------------------------------------------------*/
+/*----------------------------------------------------------------*/
 
 static bool is_dirty(struct cache *cache, dm_cblock_t b)
 {
@@ -419,11 +421,16 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 }
 
 /*----------------------------------------------------------------*/
+
 static bool block_size_is_power_of_two(struct cache *cache)
 {
 	return cache->sectors_per_block_shift >= 0;
 }
 
+/* gcc on ARM generates spurious references to __udivdi3 and __umoddi3 */
+#if defined(CONFIG_ARM) && __GNUC__ == 4 && __GNUC_MINOR__ <= 6
+__always_inline
+#endif
 static dm_block_t block_div(dm_block_t b, uint32_t n)
 {
 	do_div(b, n);
@@ -667,7 +674,7 @@ static void writethrough_endio(struct bio *bio, int err)
 
 	/*
 	 * We can't issue this bio directly, since we're in interrupt
-	 * context.  So it get's put on a bio list for processing by the
+	 * context.  So it gets put on a bio list for processing by the
 	 * worker thread.
 	 */
 	defer_writethrough_bio(pb->cache, bio);
@@ -1445,6 +1452,7 @@ static void do_worker(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(to_delayed_work(ws), struct cache, waker);
+	policy_tick(cache->policy);
 	wake_worker(cache);
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
 }
@@ -1681,24 +1689,25 @@ static int parse_origin_dev(struct cache_args *ca, struct dm_arg_set *as,
 static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 			    char **error)
 {
-	unsigned long tmp;
+	unsigned long block_size;
 
 	if (!at_least_one_arg(as, error))
 		return -EINVAL;
 
-	if (kstrtoul(dm_shift_arg(as), 10, &tmp) || !tmp ||
-	    tmp < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
-	    tmp & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+	if (kstrtoul(dm_shift_arg(as), 10, &block_size) || !block_size ||
+	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    block_size > DATA_DEV_BLOCK_SIZE_MAX_SECTORS ||
+	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		*error = "Invalid data block size";
 		return -EINVAL;
 	}
 
-	if (tmp > ca->cache_sectors) {
+	if (block_size > ca->cache_sectors) {
 		*error = "Data block size is larger than the cache device";
 		return -EINVAL;
 	}
 
-	ca->block_size = tmp;
+	ca->block_size = block_size;
 
 	return 0;
 }
@@ -1809,7 +1818,37 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 static struct kmem_cache *migration_cache;
 
-static int set_config_values(struct dm_cache_policy *p, int argc, const char **argv)
+#define NOT_CORE_OPTION 1
+
+static int process_config_option(struct cache *cache, const char *key, const char *value)
+{
+	unsigned long tmp;
+
+	if (!strcasecmp(key, "migration_threshold")) {
+		if (kstrtoul(value, 10, &tmp))
+			return -EINVAL;
+
+		cache->migration_threshold = tmp;
+		return 0;
+	}
+
+	return NOT_CORE_OPTION;
+}
+
+static int set_config_value(struct cache *cache, const char *key, const char *value)
+{
+	int r = process_config_option(cache, key, value);
+
+	if (r == NOT_CORE_OPTION)
+		r = policy_set_config_value(cache->policy, key, value);
+
+	if (r)
+		DMWARN("bad config value for %s: %s", key, value);
+
+	return r;
+}
+
+static int set_config_values(struct cache *cache, int argc, const char **argv)
 {
 	int r = 0;
 
@@ -1819,12 +1858,9 @@ static int set_config_values(struct dm_cache_policy *p, int argc, const char **a
 	}
 
 	while (argc) {
-		r = policy_set_config_value(p, argv[0], argv[1]);
-		if (r) {
-			DMWARN("policy_set_config_value failed: key = '%s', value = '%s'",
-			       argv[0], argv[1]);
-			return r;
-		}
+		r = set_config_value(cache, argv[0], argv[1]);
+		if (r)
+			break;
 
 		argc -= 2;
 		argv += 2;
@@ -1836,8 +1872,6 @@ static int set_config_values(struct dm_cache_policy *p, int argc, const char **a
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
 {
-	int r;
-
 	cache->policy =	dm_cache_policy_create(ca->policy_name,
 					       cache->cache_size,
 					       cache->origin_sectors,
@@ -1847,14 +1881,7 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 		return -ENOMEM;
 	}
 
-	r = set_config_values(cache->policy, ca->policy_argc, ca->policy_argv);
-	if (r) {
-		*error = "Error setting cache policy's config values";
-		dm_cache_policy_destroy(cache->policy);
-		cache->policy = NULL;
-	}
-
-	return r;
+	return 0;
 }
 
 /*
@@ -1886,7 +1913,7 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 	return discard_block_size;
 }
 
-#define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
+#define DEFAULT_MIGRATION_THRESHOLD 2048
 
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
@@ -1911,7 +1938,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
-	memcpy(&cache->features, &ca->features, sizeof(cache->features));
+	cache->features = ca->features;
 	ti->per_bio_data_size = get_per_bio_data_size(cache);
 
 	cache->callbacks.congested_fn = cache_is_congested;
@@ -1948,7 +1975,15 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	r = create_cache_policy(cache, ca, error);
 	if (r)
 		goto bad;
+
 	cache->policy_nr_args = ca->policy_argc;
+	cache->migration_threshold = DEFAULT_MIGRATION_THRESHOLD;
+
+	r = set_config_values(cache, ca->policy_argc, ca->policy_argv);
+	if (r) {
+		*error = "Error setting cache policy's config values";
+		goto bad;
+	}
 
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev,
 				     ca->block_size, may_format,
@@ -1967,10 +2002,10 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	INIT_LIST_HEAD(&cache->completed_migrations);
 	INIT_LIST_HEAD(&cache->need_commit_migrations);
-	cache->migration_threshold = DEFAULT_MIGRATION_THRESHOLD;
 	atomic_set(&cache->nr_migrations, 0);
 	init_waitqueue_head(&cache->migration_wait);
 
+	r = -ENOMEM;
 	cache->nr_dirty = 0;
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
@@ -2517,23 +2552,6 @@ err:
 	DMEMIT("Error");
 }
 
-#define NOT_CORE_OPTION 1
-
-static int process_config_option(struct cache *cache, char **argv)
-{
-	unsigned long tmp;
-
-	if (!strcasecmp(argv[0], "migration_threshold")) {
-		if (kstrtoul(argv[1], 10, &tmp))
-			return -EINVAL;
-
-		cache->migration_threshold = tmp;
-		return 0;
-	}
-
-	return NOT_CORE_OPTION;
-}
-
 /*
  * Supports <key> <value>.
  *
@@ -2541,17 +2559,12 @@ static int process_config_option(struct cache *cache, char **argv)
  */
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r;
 	struct cache *cache = ti->private;
 
 	if (argc != 2)
 		return -EINVAL;
 
-	r = process_config_option(cache, argv);
-	if (r == NOT_CORE_OPTION)
-		return policy_set_config_value(cache->policy, argv[0], argv[1]);
-
-	return r;
+	return set_config_value(cache, argv[0], argv[1]);
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
@@ -2599,9 +2612,17 @@ static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct cache *cache = ti->private;
+	uint64_t io_opt_sectors = limits->io_opt >> SECTOR_SHIFT;
 
-	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+	/*
+	 * If the system-determined stacked limits are compatible with the
+	 * cache's blocksize (io_opt is a factor) do not override them.
+	 */
+	if (io_opt_sectors < cache->sectors_per_block ||
+	    do_div(io_opt_sectors, cache->sectors_per_block)) {
+		blk_limits_io_min(limits, 0);
+		blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+	}
 	set_discard_limits(cache, limits);
 }
 
@@ -2609,7 +2630,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type cache_target = {
 	.name = "cache",
-	.version = {1, 1, 0},
+	.version = {1, 1, 1},
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,
