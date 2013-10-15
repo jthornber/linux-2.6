@@ -49,7 +49,7 @@ struct era_policy {
 	struct {
 		unsigned long *bitset;
 		dm_oblock_t *oblocks;
-		dm_cblock_t last_cblock;
+		unsigned long last_cblock;
 	} invalidate;
 
 };
@@ -111,7 +111,7 @@ static int alloc_invalidate(struct era_policy *era)
 		goto err;
 	}
 
-	era->invalidate.last_cblock = to_cblock(0);
+	era->invalidate.last_cblock = 0;
 	return 0;
 
 err:
@@ -378,10 +378,11 @@ static void era_force_mapping(struct dm_cache_policy *p, dm_oblock_t old_oblock,
 /* Find next block to invalidate. */
 static int __find_invalidate_block(struct era_policy *era, dm_cblock_t *cblock)
 {
-	*cblock = to_cblock(find_next_bit(era->invalidate.bitset, from_cblock(era->cache_size),
-								  from_cblock(era->invalidate.last_cblock)));
-	era->invalidate.last_cblock = *cblock;
-	return from_cblock(*cblock) < from_cblock(era->cache_size) ? 0 : -ENODATA;
+	int bit = find_next_bit(era->invalidate.bitset, from_cblock(era->cache_size), era->invalidate.last_cblock);
+
+	*cblock = to_cblock(bit);
+	era->invalidate.last_cblock = bit;
+	return bit < from_cblock(era->cache_size) ? 0 : -ENODATA;
 }
 
 static int era_invalidate_mapping(struct dm_cache_policy *p,
@@ -394,7 +395,7 @@ static int era_invalidate_mapping(struct dm_cache_policy *p,
 		return -ENODATA;
 
 	r = __find_invalidate_block(era, cblock);
-	if (r)
+	if (r < 0)
 		free_invalidate(era);
 
 	else {
