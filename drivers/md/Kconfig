@@ -298,21 +298,6 @@ config DM_CACHE_CLEANER
          A simple cache policy that writes back all data to the
          origin.  Used when decommissioning a dm-cache.
 
-config DM_CACHE_HINTS
-       tristate "Hint Size Test Cache Policy (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         A dumb cache policy just for the purpose to test variable hint size
-
-config DM_CACHE_TRC
-       tristate "Tracing Cache Policy shim (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         A cache policy shim that adds debug tracing for all cache policy
-	 interface function calls, along with a configurable trace level.
-
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM
@@ -458,7 +443,25 @@ config DM_DELAY
 config DM_FAKE_DISCARD
        tristate "A linear target that pretends to support discard"
        depends on DM_TEST_TARGETS
+       default y
        ---help---
        A target that pretends to support discard, with various parameters.
+
+config DM_CACHE_HINTS
+       tristate "Hint Size Test Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       depends on DM_TEST_TARGETS
+       default y
+       ---help---
+         A dumb cache policy just for the purpose to test variable hint size
+
+config DM_CACHE_TRC
+       tristate "Tracing Cache Policy shim (EXPERIMENTAL)"
+       depends on DM_CACHE
+       depends on DM_TEST_TARGETS
+       default y
+       ---help---
+         A cache policy shim that adds debug tracing for all cache policy
+	 interface function calls, along with a configurable trace level.
 
 endif # MD
