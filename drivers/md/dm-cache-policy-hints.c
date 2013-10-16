@@ -649,7 +649,7 @@ static int hints_emit_config_values(struct dm_cache_policy *pe, char *result, un
 {
 	ssize_t sz = 0;
 
-	DMEMIT("hint_size %llu", (long long unsigned) dm_cache_policy_get_hint_size(pe));
+	DMEMIT("2 hint_size %llu", (long long unsigned) dm_cache_policy_get_hint_size(pe));
 	return 0;
 }
 
