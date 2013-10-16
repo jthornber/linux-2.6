@@ -373,8 +373,7 @@ static int hints_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cbloc
 	if (!mutex_trylock(&p->lock))
 		return -EWOULDBLOCK;
 
-	if (!in_cache(p, oblock, cblock))
-		r = -ENOENT;
+	r = in_cache(p, oblock, cblock) ? 0 : -ENOENT;
 
 	mutex_unlock(&p->lock);
 

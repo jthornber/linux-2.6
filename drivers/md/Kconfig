@@ -313,6 +313,21 @@ config DM_CACHE_TRC
          A cache policy shim that adds debug tracing for all cache policy
 	 interface function calls, along with a configurable trace level.
 
+config DM_CACHE_BACKGROUND
+       tristate "Stackable Background Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         A stackable cache policy supporting writeback of dirty blocks
+
+config DM_CACHE_BASIC
+       tristate "Basic Cache Policies (LFU,LRU,...)  (EXPERIMENTAL)"
+       depends on DM_CACHE
+       select BTREE
+       default y
+       ---help---
+         The bunch of elimentary cache policies
+
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM

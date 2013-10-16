@@ -256,9 +256,9 @@ static int __setup_mapping_info(struct dm_cache_metadata *cmd)
 	dm_array_info_init(&cmd->info, cmd->tm, &vt);
 
 	if (cmd->policy_hint_size) {
-		if (cmd->policy_hint_size > DM_CACHE_POLICY_MAX_HINT_SIZE) {
-			DMERR("hint size is too large %d > %d",
-			      (int) cmd->policy_hint_size,
+		if (cmd->policy_hint_size > DM_CACHE_POLICY_MAX_HINT_SIZE ||
+		    cmd->policy_hint_size % 4) {
+			DMERR("hint size not divisible by 4 or larger than %d",
 			      (int) DM_CACHE_POLICY_MAX_HINT_SIZE);
 			return -EPERM;
 		}
@@ -737,7 +737,7 @@ static int block_unmapped_or_clean(struct dm_cache_metadata *cmd, dm_cblock_t b,
 	}
 
 	unpack_value(value, &ob, &flags);
-	*result = !((flags & (1 << M_VALID)) && (flags & (1 << M_DIRTY)));
+	*result = !((flags & M_VALID) && (flags & M_DIRTY));
 
 	return 0;
 }
@@ -760,7 +760,7 @@ static int blocks_are_unmapped_or_clean(struct dm_cache_metadata *cmd,
 			return 0;
 		}
 
-		begin++;
+		begin = to_cblock(from_cblock(begin) + 1);
 	}
 
 	return 0;
@@ -775,7 +775,7 @@ int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size)
 	down_write(&cmd->root_lock);
 	__dm_bless_for_disk(&null_mapping);
 
-	if (new_cache_size < cmd->cache_blocks) {
+	if (from_cblock(new_cache_size) < from_cblock(cmd->cache_blocks)) {
 		r = blocks_are_unmapped_or_clean(cmd, new_cache_size, cmd->cache_blocks, &clean);
 		if (r)
 			goto out;

@@ -140,8 +140,8 @@ struct dm_cache_policy {
 	/*
 	 * oblock must be a mapped block.  Must not block.
 	 */
-	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
-	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	int (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	int (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a
@@ -160,6 +160,21 @@ struct dm_cache_policy {
 	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
+
+	/*
+ 	 * Invalidate mapping for an origin block.
+ 	 *
+ 	 * Return:
+ 	 * 	-EINVAL: if not supported or no further invalidation request allowed
+ 	 * 	-EINODATA: no further invalidation request allowed
+ 	 * 	0 and @cblock: if mapped
+ 	 * 	-ENOENT:: if not.
+ 	 *
+ 	 * May return a _different_ oblock than the requested one
+ 	 * to allow the policy to rule which block to invalidate.
+ 	 *
+ 	 */
+	int (*invalidate_mapping)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
 
 	/*
 	 * writeback_work supporting the cache target to retrieve any dirty blocks to write back.
@@ -230,7 +245,7 @@ struct dm_cache_policy_type {
 
 	/*
 	 * Policies may store a hint for each each cache block.
-	 * Currently the size of this hint must <= 512 bytes.
+	 * Currently the size of this hint must <= 128 bytes.
 	 */
 	size_t hint_size;
 

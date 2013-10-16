@@ -254,7 +254,8 @@ struct mq_policy {
 	struct io_tracker tracker;
 
 	/*
-	 * We maintain two queues of entries.  The cache proper contains
+	 * We maintain three queues of entries.  The cache proper
+	 * consisting of a clean and a dirty queue contains
 	 * the currently active mappings.  Whereas the pre_cache tracks
 	 * blocks that are being hit frequently and potential candidates
 	 * for promotion to the cache.
@@ -991,42 +992,54 @@ static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t 
 
 // FIXME: can these block?
 // FIXME: duplication
-static void mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static int mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
+	int r = 0;
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
 
 	mutex_lock(&mq->lock);
 	e = hash_lookup(mq, oblock);
-	if (!e)
+	if (!e) {
+		r = -ENOENT;
 		DMWARN("mq_set_dirty called for a block that isn't in the cache");
-	else {
+
+	} else {
 		BUG_ON(!e->in_cache);
 
 		del(mq, e);
 		e->dirty = true;
 		push(mq, e);
 	}
+
 	mutex_unlock(&mq->lock);
+
+	return r;
 }
 
-static void mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static int mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
+	int r = 0;
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
 
 	mutex_lock(&mq->lock);
 	e = hash_lookup(mq, oblock);
-	if (!e)
+	if (!e) {
+		r = -ENOENT;
 		DMWARN("mq_clear_dirty called for a block that isn't in the cache");
-	else {
+
+	} else {
 		BUG_ON(!e->in_cache);
 
 		del(mq, e);
 		e->dirty = false;
 		push(mq, e);
 	}
+
 	mutex_unlock(&mq->lock);
+
+	return r;
 }
 
 static int mq_load_mapping(struct dm_cache_policy *p,
@@ -1088,23 +1101,41 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	return r;
 }
 
-static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
+static int remove_mapping(struct mq_policy *mq,
+			  dm_oblock_t oblock, dm_cblock_t *cblock)
 {
-	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
-
-	mutex_lock(&mq->lock);
 
 	e = hash_lookup(mq, oblock);
 
-	BUG_ON(!e || !e->in_cache);
+	if (e && e->in_cache) {
+		del(mq, e);
+		e->in_cache = false;
+		e->dirty = false;
 
-	del(mq, e);
-	e->in_cache = false;
-	e->dirty = false;
-	push(mq, e);
+		if (cblock) {
+			*cblock = e->cblock;
+			list_add(&e->list, &mq->free);
 
+		} else
+			push(mq, e);
+
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
+{
+	int r;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	r = remove_mapping(mq, oblock, NULL);
 	mutex_unlock(&mq->lock);
+
+	BUG_ON(r);
 }
 
 static int mq_writeback_work_(struct mq_policy *mq, dm_oblock_t *oblock,
@@ -1154,12 +1185,12 @@ static void force_mapping(struct mq_policy *mq,
 {
 	struct entry *e = hash_lookup(mq, current_oblock);
 
-	BUG_ON(!e || !e->in_cache);
-
-	del(mq, e);
-	e->oblock = new_oblock;
-	e->dirty = true;
-	push(mq, e);
+	if (e && e->in_cache) {
+		del(mq, e);
+		e->oblock = new_oblock;
+		e->dirty = true;
+		push(mq, e);
+	}
 }
 
 static void mq_force_mapping(struct dm_cache_policy *p,
@@ -1170,6 +1201,19 @@ static void mq_force_mapping(struct dm_cache_policy *p,
 	mutex_lock(&mq->lock);
 	force_mapping(mq, current_oblock, new_oblock);
 	mutex_unlock(&mq->lock);
+}
+
+static int mq_invalidate_mapping(struct dm_cache_policy *p,
+				 dm_oblock_t *oblock, dm_cblock_t *cblock)
+{
+	int r;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	r = remove_mapping(mq, *oblock, cblock);
+	mutex_unlock(&mq->lock);
+
+	return r;
 }
 
 static dm_cblock_t mq_residency(struct dm_cache_policy *p)
@@ -1237,6 +1281,7 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.writeback_work = mq_writeback_work;
 	mq->policy.force_mapping = mq_force_mapping;
+	mq->policy.invalidate_mapping = mq_invalidate_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
 	mq->policy.emit_config_values = mq_emit_config_values;
