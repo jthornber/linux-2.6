@@ -275,12 +275,11 @@ config DM_CACHE_MQ
 config DM_CACHE_ERA
        tristate "ERA+ Cache Policy shim (EXPERIMENTAL)"
        depends on DM_CACHE
-       default y
        ---help---
-         A cache policy shim that adds an "era" property to the
+	 A cache policy shim that adds an "era" property to the
 	 per-cache-block metadata, to facilitate the implementation of
-	 cache coherency validation and recovery tools.  This mechanism
-         works as follows.  There is a monotonically increasing 32-bit
+	 cache coherency validation and recovery tools.	 This mechanism
+	 works as follows.  There is a monotonically increasing 32-bit
 	 era counter associated with each cache instance.  Each cache
 	 block is tagged with the era during which it was last written.
 	 A device mapper message interface is provided to obtain the

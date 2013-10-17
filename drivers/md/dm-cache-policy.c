@@ -76,12 +76,10 @@ static struct dm_cache_policy_type *get_policy(const char *name)
 		return t;
 
 	/*
-	 * We also need to also check for dm-cache-name with no trailing + if
-	 * the passed-in name has a trailing +, in order to support loadable
-	 * policy shims.  The Makefile infrastructure makes it difficult to
-	 * include the + in the actual module filename.
+	 * We also need to check for dm-cache-<@name> with no trailing
+	 * DM_CACHE_POLICY_STACK_DELIM if @name has one, in order to
+	 * support loadable policy shims.
 	 */
-
 	n = strlcpy(name_wo_delim, name, sizeof(name_wo_delim));
 	if (n >= sizeof(name_wo_delim))
 		return NULL;
@@ -108,10 +106,10 @@ int dm_cache_policy_register(struct dm_cache_policy_type *type)
 {
 	int r;
 
-	/* One size fits all for now */
 	if (type->hint_size > DM_CACHE_POLICY_MAX_HINT_SIZE) {
-		DMWARN("hint size must be <= %llu but %llu supplied.",
-		       (unsigned long long) DM_CACHE_POLICY_MAX_HINT_SIZE, (unsigned long long) type->hint_size);
+		DMWARN("hint size must be <= %llu but %llu was supplied.",
+		       (unsigned long long) DM_CACHE_POLICY_MAX_HINT_SIZE,
+		       (unsigned long long) type->hint_size);
 		return -EINVAL;
 	}
 
@@ -146,10 +144,9 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 	struct dm_cache_policy_type *type;
 
 	if (dm_cache_stack_utils_string_is_policy_stack(name))
-		return dm_cache_stack_utils_policy_stack_create(name,
-						    		cache_size,
-						    		origin_size,
-						    		cache_block_size);
+		return dm_cache_stack_utils_policy_stack_create(name, cache_size,
+								origin_size,
+								cache_block_size);
 
 	type = get_policy(name);
 	if (!type) {

@@ -53,13 +53,15 @@ static int stack_root_walk_mappings(struct dm_cache_policy *p,
 	ctx.cblock_to_hint_fn = stack_root_cblock_to_hint;
 
 	hint_size = dm_cache_policy_get_hint_size(p);
-	if (hint_size && !(ctx.child_hint_buf = kzalloc(hint_size, GFP_KERNEL)))
-		return -ENOMEM;
+	if (hint_size) {
+		ctx.child_hint_buf = kzalloc(hint_size, GFP_KERNEL);
+		if (!ctx.child_hint_buf)
+			return -ENOMEM;
+	}
 
 	r = dm_cache_shim_utils_walk_map_with_ctx(&ctx);
 
-	if (ctx.child_hint_buf)
-		kfree(ctx.child_hint_buf);
+	kfree(ctx.child_hint_buf);
 
 	return r;
 }
@@ -95,7 +97,6 @@ static struct dm_cache_policy *stack_root_create(const char *policy_stack_str,
 	 * The composite version numbers of a policy stack do not include the
 	 * versions of the hintless policies for the same reason.
 	 */
-
 	cannonical_name_len = 0;
 	for (child = head; child; child = child->child) {
 		hint_size = dm_cache_policy_get_hint_size(child);
@@ -144,7 +145,6 @@ int dm_cache_stack_utils_string_is_policy_stack(const char *string)
 	 * individual shim policies, since this function is called on them
 	 * when the policy stack is constructed from the specified string.
 	 */
-
 	delim = strchr(string, DM_CACHE_POLICY_STACK_DELIM);
 	if (!delim || (delim[1] == '\0'))
 		return false;
@@ -162,15 +162,15 @@ static void __policy_destroy_stack(struct dm_cache_policy *head_p)
 	}
 }
 
-struct dm_cache_policy *dm_cache_stack_utils_policy_stack_create(
-	const char *policy_stack_str,
-	dm_cblock_t cache_size,
-	sector_t origin_size,
-	sector_t cache_block_size)
+struct dm_cache_policy *
+dm_cache_stack_utils_policy_stack_create(const char *policy_stack_str,
+					 dm_cblock_t cache_size,
+					 sector_t origin_size,
+					 sector_t cache_block_size)
 {
 	char policy_name_buf[CACHE_POLICY_NAME_SIZE];
 	struct dm_cache_policy *p, *head_p, *next_p;
-	char *policy_name, *delim, saved_char;
+	char *policy_name, *delim, uninitialized_var(saved_char);
 	int n;
 
 	n = strlcpy(policy_name_buf, policy_stack_str, sizeof(policy_name_buf));
@@ -195,9 +195,10 @@ struct dm_cache_policy *dm_cache_stack_utils_policy_stack_create(
 			goto cleanup;
 
 		next_p->child = NULL;
-
-		*(p ? &p->child : &head_p) = next_p;
-
+		if (p)
+			p->child = next_p;
+		else
+			head_p = next_p;
 		p = next_p;
 
 		if (delim) {
@@ -223,8 +224,6 @@ cleanup:
 
 void dm_cache_stack_utils_policy_stack_destroy(struct dm_cache_policy *p)
 {
-	struct dm_cache_policy *head_p = p;
-
-	__policy_destroy_stack(head_p->child);
-	stack_root_destroy(head_p);
+	__policy_destroy_stack(p->child);
+	stack_root_destroy(p);
 }

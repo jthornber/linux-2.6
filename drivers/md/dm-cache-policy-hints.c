@@ -102,7 +102,8 @@ static void free_hash(struct hash *hash)
 }
 
 /* Free/alloc basic cache entry structures. */
-static void __free_cache_entries(struct list_head *q) {
+static void __free_cache_entries(struct list_head *q)
+{
 	struct entry *e;
 
 	while ((e = queue_pop(q)))
@@ -459,7 +460,7 @@ static void set_hints_ptrs(struct policy *p, struct hints_ptrs *ptrs)
 
 	PTR_INC(32, 64, 3)
 	PTR_INC(16, 32, 2)
-	PTR_INC( 8, 16, 1)
+	PTR_INC(8,  16, 1)
 }
 
 static void __hints_xfer_disk(struct policy *p, bool to_disk)
@@ -551,7 +552,7 @@ static int hints_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, vo
 	mutex_lock(&p->lock);
 
 	list_for_each_entry(e, &p->queues.used, list) {
-		r = fn(context, e->cblock, e->oblock, (void*) p->hints_buffer);
+		r = fn(context, e->cblock, e->oblock, (void *) p->hints_buffer);
 		if (r)
 			break;
 	}
@@ -561,8 +562,7 @@ static int hints_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, vo
 	return r;
 }
 
-static struct entry *__hints_force_remove_mapping(struct policy *p,
-							      dm_oblock_t oblock)
+static struct entry *__hints_force_remove_mapping(struct policy *p, dm_oblock_t oblock)
 {
 	struct entry *e = lookup_cache_entry(p, oblock);
 
@@ -601,11 +601,6 @@ static void hints_force_mapping(struct dm_cache_policy *pe,
 	add_cache_entry(p, e);
 
 	mutex_unlock(&p->lock);
-}
-
-static int hints_next_dirty_block(struct dm_cache_policy *pe, dm_oblock_t *oblock, dm_cblock_t *cblock)
-{
-	return -ENOENT;
 }
 
 static dm_cblock_t hints_residency(struct dm_cache_policy *pe)
@@ -667,7 +662,6 @@ static void init_policy_functions(struct policy *p)
 	p->policy.walk_mappings = hints_walk_mappings;
 	p->policy.remove_mapping = hints_remove_mapping;
 	p->policy.writeback_work = NULL;
-	p->policy.next_dirty_block = hints_next_dirty_block;
 	p->policy.force_mapping = hints_force_mapping;
 	p->policy.residency = hints_residency;
 	p->policy.tick = NULL;
@@ -680,8 +674,11 @@ static struct dm_cache_policy *hints_policy_create(dm_cblock_t cache_size,
 						   sector_t block_size)
 {
 	int r;
-	struct policy *p = kzalloc(sizeof(*p), GFP_KERNEL);
+	struct policy *p;
 
+	BUILD_BUG_ON(DEFAULT_HINT_SIZE > 2023);
+
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return NULL;
 

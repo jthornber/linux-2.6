@@ -162,29 +162,20 @@ struct dm_cache_policy {
 			      dm_oblock_t new_oblock);
 
 	/*
- 	 * Invalidate mapping for an origin block.
- 	 *
- 	 * Return:
- 	 * 	-EINVAL: if not supported or no further invalidation request allowed
- 	 * 	-EINODATA: no further invalidation request allowed
- 	 * 	0 and @cblock: if mapped
- 	 * 	-ENOENT:: if not.
- 	 *
- 	 * May return a _different_ oblock than the requested one
- 	 * to allow the policy to rule which block to invalidate.
- 	 *
- 	 */
+	 * Invalidate mapping for an origin block.
+	 *
+	 * Return:
+	 *	-EINVAL: if not supported or no further invalidation request allowed
+	 *	-EINODATA: no further invalidation request allowed
+	 *	0 and @cblock: if mapped
+	 *	-ENOENT:: if not.
+	 *
+	 * May return a _different_ oblock than the requested one
+	 * to allow the policy to rule which block to invalidate.
+	 */
 	int (*invalidate_mapping)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
 
-	/*
-	 * writeback_work supporting the cache target to retrieve any dirty blocks to write back.
-	 *
-	 * next_dirty_block providing any next dirty block to the background policy for writeback,
-	 * thus allowing quicker eviction by evoiding demotion on cache block replacement.
-	 */
 	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
-	int (*next_dirty_block)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
-
 
 	/*
 	 * How full is the cache?
@@ -244,8 +235,9 @@ struct dm_cache_policy_type {
 	unsigned version[CACHE_POLICY_VERSION_SIZE];
 
 	/*
-	 * Policies may store a hint for each each cache block.
-	 * Currently the size of this hint must <= 128 bytes.
+	 * Policies may store a hint for each cache block.
+	 * Currently the size of this hint must be <=
+	 * DM_CACHE_POLICY_MAX_HINT_SIZE bytes.
 	 */
 	size_t hint_size;
 

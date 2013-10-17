@@ -258,9 +258,9 @@ static int __setup_mapping_info(struct dm_cache_metadata *cmd)
 	if (cmd->policy_hint_size) {
 		if (cmd->policy_hint_size > DM_CACHE_POLICY_MAX_HINT_SIZE ||
 		    cmd->policy_hint_size % 4) {
-			DMERR("hint size not divisible by 4 or larger than %d",
+			DMERR("hint size not divisible by 4 or is larger than %d",
 			      (int) DM_CACHE_POLICY_MAX_HINT_SIZE);
-			return -EPERM;
+			return -EINVAL;
 		}
 
 		vt.size = cmd->policy_hint_size;
@@ -277,7 +277,7 @@ static int __setup_mapping_info(struct dm_cache_metadata *cmd)
 	return 0;
 }
 
-static void __teardown_mapping_info(struct dm_cache_metadata *cmd)
+static void __destroy_mapping_info(struct dm_cache_metadata *cmd)
 {
 	if (cmd->policy_hint_value_buffer)
 		kfree(cmd->policy_hint_value_buffer);
@@ -379,7 +379,7 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	return 0;
 
 bad:
-	__teardown_mapping_info(cmd);
+	__destroy_mapping_info(cmd);
 bad_mapping_info:
 	dm_tm_destroy(cmd->tm);
 	dm_sm_destroy(cmd->metadata_sm);
@@ -698,7 +698,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
-		__teardown_mapping_info(cmd);
+		__destroy_mapping_info(cmd);
 		kfree(cmd);
 		return ERR_PTR(r);
 	}
@@ -715,7 +715,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
 	__destroy_persistent_data_objects(cmd);
-	__teardown_mapping_info(cmd);
+	__destroy_mapping_info(cmd);
 	kfree(cmd);
 }
 

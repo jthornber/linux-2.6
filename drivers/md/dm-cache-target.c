@@ -63,7 +63,7 @@ static void free_bitset(unsigned long *bits)
 
 /*
  * There are a couple of places where we let a bio run, but want to do some
- * work before calling it's endio function.  We do this by temporarily
+ * work before calling its endio function.  We do this by temporarily
  * changing the endio fn.
  */
 struct hook_info {
@@ -72,8 +72,7 @@ struct hook_info {
 };
 
 static void hook_bio(struct hook_info *h, struct bio *bio,
-		     bio_end_io_t *bi_end_io,
-		     void *bi_private)
+		     bio_end_io_t *bi_end_io, void *bi_private)
 {
 	h->bi_end_io = bio->bi_end_io;
 	h->bi_private = bio->bi_private;
@@ -495,6 +494,7 @@ __always_inline
 static dm_block_t block_div(dm_block_t b, uint32_t n)
 {
 	do_div(b, n);
+
 	return b;
 }
 
@@ -509,6 +509,7 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 		discard_blocks >>= cache->sectors_per_block_shift;
 
 	b = block_div(b, discard_blocks);
+
 	return to_dblock(b);
 }
 
@@ -916,7 +917,6 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 		} else {
 			if (mg->invalidate)
 				policy_remove_mapping(cache->policy, mg->old_oblock);
-	
 			cleanup_migration(mg);
 		}
 
@@ -2753,7 +2753,7 @@ static int resize_cache_dev(struct cache *cache, dm_cblock_t new_size)
 	return 0;
 }
 
-static int cache_preresume_(struct dm_target *ti)
+static int cache_preresume(struct dm_target *ti)
 {
 	int r = 0;
 	struct cache *cache = ti->private;
@@ -2799,14 +2799,6 @@ static int cache_preresume_(struct dm_target *ti)
 		cache->loaded_discards = true;
 	}
 
-	return r;
-}
-
-static int cache_preresume(struct dm_target *ti)
-{
-	int r = cache_preresume_(ti);
-	if (r)
-		DMERR("cache_preresume failed");
 	return r;
 }
 
@@ -2885,9 +2877,10 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		else if (writeback_mode(&cache->features))
 			DMEMIT("1 writeback ");
 
-		else
-			DMERR("internal error: unknown io mode: %d",
-			      (int) cache->features.io_mode);
+		else {
+			DMERR("internal error: unknown io mode: %d", (int) cache->features.io_mode);
+			goto err;
+		}
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 		if (sz < maxlen) {
@@ -2982,7 +2975,7 @@ DMINFO("%s -- begin=%llu end=%llu", __func__, begin, end); /* FIXME: REMOVEME */
 
 /*
  * Supports
- * 	"<key> <value>"
+ *	"<key> <value>"
  * and
  *     "invalidate_mappings <begin_origin_block> <end_origin_block>".
  *
@@ -3067,7 +3060,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type cache_target = {
 	.name = "cache",
-	.version = {1, 2, 1},
+	.version = {1, 2, 0},
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,

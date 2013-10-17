@@ -57,16 +57,9 @@ static inline int policy_writeback_work(struct dm_cache_policy *p,
 	return p->writeback_work ? p->writeback_work(p, oblock, cblock) : -ENOENT;
 }
 
-static inline int policy_next_dirty_block(struct dm_cache_policy *p,
-					  dm_oblock_t *oblock,
-					  dm_cblock_t *cblock)
-{
-	return p->next_dirty_block ? p->next_dirty_block(p, oblock, cblock) : -ENOENT;
-}
-
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	return p->remove_mapping(p, oblock);
+	p->remove_mapping(p, oblock);
 }
 
 static inline void policy_force_mapping(struct dm_cache_policy *p,
@@ -130,7 +123,7 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
 
 const unsigned *dm_cache_policy_get_version(struct dm_cache_policy *p);
 
-#define DM_CACHE_POLICY_MAX_HINT_SIZE 128 /* Max 2023 for the policy hints test module to work */
+#define DM_CACHE_POLICY_MAX_HINT_SIZE 128
 int    dm_cache_policy_set_hint_size(struct dm_cache_policy *p, unsigned hint_size);
 size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p);
 

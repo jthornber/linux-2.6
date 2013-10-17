@@ -76,27 +76,27 @@ static int trc_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %u %u %u %p %p", p,
 		   oblock, can_block, can_migrate, discarded_oblock,
 		   bio, result);
-	return p->child->map(p->child, oblock, can_block, can_migrate,
-			     discarded_oblock, bio, result);
+	return policy_map(p->child, oblock, can_block, can_migrate,
+			  discarded_oblock, bio, result);
 }
 
 static int trc_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
 		      dm_cblock_t *cblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %p", p, oblock, cblock);
-	return p->child->lookup(p->child, oblock, cblock);
+	return policy_lookup(p->child, oblock, cblock);
 }
 
 static int trc_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu", p, oblock);
-	return p->child->set_dirty(p->child, oblock);
+	return policy_set_dirty(p->child, oblock);
 }
 
 static int trc_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu", p, oblock);
-	return p->child->clear_dirty(p->child, oblock);
+	return policy_clear_dirty(p->child, oblock);
 }
 
 static int trc_load_mapping(struct dm_cache_policy *p,
@@ -105,10 +105,11 @@ static int trc_load_mapping(struct dm_cache_policy *p,
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %u %p %u", p, oblock,
 		   cblock, hint, hint_valid);
-	return p->child->load_mapping(p->child, oblock, cblock, hint, hint_valid);
+	return policy_load_mapping(p->child, oblock, cblock, hint, hint_valid);
 }
 
-static int trc_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
+static int trc_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
+			     void *context)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %p %p", p, fn, context);
 	return dm_cache_shim_utils_walk_map(p, fn, context, NULL);
@@ -117,41 +118,42 @@ static int trc_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void 
 static void trc_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu", p, oblock);
-	p->child->remove_mapping(p->child, oblock);
+	policy_remove_mapping(p->child, oblock);
 }
 
 static int trc_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
 			      dm_cblock_t *cblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_VERBOSE, p, "%p %p %p", p, oblock, cblock);
-	return p->child->writeback_work(p->child, oblock, cblock);
+	return policy_writeback_work(p->child, oblock, cblock);
 }
 
 static void trc_force_mapping(struct dm_cache_policy *p,
 			       dm_oblock_t old_oblock,
 			       dm_oblock_t new_oblock)
 {
-	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %llu", p, old_oblock, new_oblock);
-	p->child->force_mapping(p->child, old_oblock, new_oblock);
+	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %llu",
+		   p, old_oblock, new_oblock);
+	policy_force_mapping(p->child, old_oblock, new_oblock);
 }
 
 static int trc_invalidate_mapping(struct dm_cache_policy *p,
 				  dm_oblock_t *oblock, dm_cblock_t *cblock)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %llu %u", p, from_oblock(*oblock), from_cblock(*cblock));
-	return p->child->invalidate_mapping(p->child, oblock, cblock);
+	return policy_invalidate_mapping(p->child, oblock, cblock);
 }
 
 static dm_cblock_t trc_residency(struct dm_cache_policy *p)
 {
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p", p);
-	return p->child->residency(p->child);
+	return policy_residency(p->child);
 }
 
 static void trc_tick(struct dm_cache_policy *p)
 {
 	DM_TRC_OUT(DM_TRC_LEV_VERBOSE, p, "%p", p);
-	p->child->tick(p->child);
+	policy_tick(p->child);
 }
 
 static int trc_set_config_value(struct dm_cache_policy *p,
@@ -165,7 +167,7 @@ static int trc_set_config_value(struct dm_cache_policy *p,
 	if (!strcasecmp(key, "set_trace_level"))
 		r = set_trace_level(p, value);
 	else
-		r = p->child->set_config_value(p->child, key, value);
+		r = policy_set_config_value(p->child, key, value);
 
 	return r;
 }
@@ -179,7 +181,7 @@ static int trc_emit_config_values(struct dm_cache_policy *p, char *result,
 	DM_TRC_OUT(DM_TRC_LEV_NORMAL, p, "%p %p %u", p, result, maxlen);
 
 	DMEMIT("trace_level %u ", trc->trace_level);
-	return p->child->emit_config_values(p->child, result + sz, maxlen - sz);
+	return policy_emit_config_values(p->child, result + sz, maxlen - sz);
 }
 
 /* Init the policy plugin interface function pointers. */

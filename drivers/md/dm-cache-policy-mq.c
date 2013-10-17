@@ -1101,8 +1101,8 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	return r;
 }
 
-static int remove_mapping(struct mq_policy *mq,
-			  dm_oblock_t oblock, dm_cblock_t *cblock)
+static int __remove_mapping(struct mq_policy *mq,
+			    dm_oblock_t oblock, dm_cblock_t *cblock)
 {
 	struct entry *e;
 
@@ -1116,7 +1116,6 @@ static int remove_mapping(struct mq_policy *mq,
 		if (cblock) {
 			*cblock = e->cblock;
 			list_add(&e->list, &mq->free);
-
 		} else
 			push(mq, e);
 
@@ -1132,13 +1131,13 @@ static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	r = remove_mapping(mq, oblock, NULL);
+	r = __remove_mapping(mq, oblock, NULL);
 	mutex_unlock(&mq->lock);
 
 	BUG_ON(r);
 }
 
-static int mq_writeback_work_(struct mq_policy *mq, dm_oblock_t *oblock,
+static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 			      dm_cblock_t *cblock)
 {
 	struct entry *e = pop(mq, &mq->cache_dirty);
@@ -1148,6 +1147,7 @@ static int mq_writeback_work_(struct mq_policy *mq, dm_oblock_t *oblock,
 		/*
 		 * mq->tick - 1 because we don't want a flurry of
 		 * writebacks every time the tick rolls over.
+		 * FIXME: This code prevents complete writeback
 		 */
 		if (e->tick >= (mq->tick - 1))
 			push(mq, e);
@@ -1174,14 +1174,14 @@ static int mq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	r = mq_writeback_work_(mq, oblock, cblock);
+	r = __mq_writeback_work(mq, oblock, cblock);
 	mutex_unlock(&mq->lock);
 
 	return r;
 }
 
-static void force_mapping(struct mq_policy *mq,
-			  dm_oblock_t current_oblock, dm_oblock_t new_oblock)
+static void __force_mapping(struct mq_policy *mq,
+			    dm_oblock_t current_oblock, dm_oblock_t new_oblock)
 {
 	struct entry *e = hash_lookup(mq, current_oblock);
 
@@ -1199,7 +1199,7 @@ static void mq_force_mapping(struct dm_cache_policy *p,
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	force_mapping(mq, current_oblock, new_oblock);
+	__force_mapping(mq, current_oblock, new_oblock);
 	mutex_unlock(&mq->lock);
 }
 
@@ -1210,7 +1210,7 @@ static int mq_invalidate_mapping(struct dm_cache_policy *p,
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	r = remove_mapping(mq, *oblock, cblock);
+	r = __remove_mapping(mq, *oblock, cblock);
 	mutex_unlock(&mq->lock);
 
 	return r;

@@ -378,7 +378,8 @@ static void era_force_mapping(struct dm_cache_policy *p, dm_oblock_t old_oblock,
 /* Find next block to invalidate. */
 static int __find_invalidate_block(struct era_policy *era, dm_cblock_t *cblock)
 {
-	int bit = find_next_bit(era->invalidate.bitset, from_cblock(era->cache_size), era->invalidate.last_cblock);
+	int bit = find_next_bit(era->invalidate.bitset, from_cblock(era->cache_size),
+				era->invalidate.last_cblock);
 
 	*cblock = to_cblock(bit);
 	era->invalidate.last_cblock = bit;
@@ -429,7 +430,6 @@ static int era_set_config_value(struct dm_cache_policy *p, const char *key,
 		{ "unmap_blocks_from_earlier_eras",         cond_unmap_by_era, era_is_lt_value },
 		{ NULL }
 	};
-		
 
 	for (vh = value_handlers; vh->cmd; vh++) {
 		if (!strcasecmp(key, vh->cmd))
@@ -479,7 +479,6 @@ static struct dm_cache_policy *era_create(dm_cblock_t cache_size,
 				 sizeof(*era->cb_to_era));
 	if (era->cb_to_era) {
 		era->era_counter = 1;
-
 		return &era->policy;
 	}
 

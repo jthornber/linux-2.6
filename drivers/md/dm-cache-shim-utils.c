@@ -28,14 +28,13 @@
 static int shim_nested_walk_apply(void *context, dm_cblock_t cblock,
 				  dm_oblock_t oblock, void *hint)
 {
-	struct shim_walk_map_ctx *ctx = (struct shim_walk_map_ctx *)context;
+	struct shim_walk_map_ctx *ctx = context;
 	struct dm_cache_policy *p;
 	int child_hint_size;
 	void *my_hint;
 
 	/* Save off our child's hint */
-	if (ctx->child_hint_buf)
-	{
+	if (ctx->child_hint_buf) {
 		p = ctx->my_policy;
 		child_hint_size = dm_cache_policy_get_hint_size(p->child);
 		if (child_hint_size && hint)
@@ -43,16 +42,12 @@ static int shim_nested_walk_apply(void *context, dm_cblock_t cblock,
 	}
 
 	/* Provide my hint or NULL up the stack */
-	my_hint = ctx->cblock_to_hint_fn
-		? ctx->cblock_to_hint_fn(ctx, cblock, oblock)
-		: NULL
-		;
+	my_hint = ctx->cblock_to_hint_fn ?
+		ctx->cblock_to_hint_fn(ctx, cblock, oblock) : NULL;
 
 	/* Reverse recurse, unless short-circuted */
-	return (ctx->parent_fn)
-	       ? (*ctx->parent_fn)(ctx->parent_ctx, cblock, oblock, my_hint)
-	       : 0
-	       ;
+	return (ctx->parent_fn) ?
+		(*ctx->parent_fn)(ctx->parent_ctx, cblock, oblock, my_hint) : 0;
 }
 
 /*----------------------------------------------------------------*/
@@ -98,7 +93,8 @@ static int shim_load_mapping(struct dm_cache_policy *p,
 	return policy_load_mapping(p->child, oblock, cblock, hint, hint_valid);
 }
 
-static int shim_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void *context)
+static int shim_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
+			      void *context)
 {
 	struct shim_walk_map_ctx my_ctx, *parent_ctx;
 	int my_hint_size;
@@ -109,10 +105,8 @@ static int shim_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn, void
 	my_ctx.parent_ctx = parent_ctx;
 	my_ctx.parent_fn = fn;
 	my_ctx.my_policy = p;
-	my_ctx.child_hint_buf = (parent_ctx->child_hint_buf)
-			      ? &parent_ctx->child_hint_buf[my_hint_size]
-			      : NULL
-			      ;
+	my_ctx.child_hint_buf = (parent_ctx->child_hint_buf) ?
+		&parent_ctx->child_hint_buf[my_hint_size] : NULL;
 	my_ctx.cblock_to_hint_fn = NULL;
 
 	return policy_walk_mappings(p->child, shim_nested_walk_apply, &my_ctx);
@@ -137,10 +131,9 @@ static void shim_force_mapping(struct dm_cache_policy *p,
 }
 
 static int shim_invalidate_mapping(struct dm_cache_policy *p,
-				   dm_oblock_t *current_oblock,
-				   dm_cblock_t *current_cblock)
+				   dm_oblock_t *oblock, dm_cblock_t *cblock)
 {
-	return policy_invalidate_mapping(p->child, current_oblock, current_cblock);
+	return policy_invalidate_mapping(p->child, oblock, cblock);
 }
 
 static dm_cblock_t shim_residency(struct dm_cache_policy *p)
@@ -154,14 +147,13 @@ static void shim_tick(struct dm_cache_policy *p)
 }
 
 static int shim_set_config_value(struct dm_cache_policy *p,
-				   const char *key,
-				   const char *value)
+				 const char *key, const char *value)
 {
 	return policy_set_config_value(p->child, key, value);
 }
 
 static int shim_emit_config_values(struct dm_cache_policy *p, char *result,
-				     unsigned maxlen)
+				   unsigned maxlen)
 {
 	return policy_emit_config_values(p->child, result, maxlen);
 }
@@ -195,7 +187,6 @@ int dm_cache_shim_utils_walk_map_with_ctx(struct shim_walk_map_ctx *ctx)
 	 * to provide the top-level context that contains the buffer used to
 	 * consolidate hint data from all of the shims and the terminal policy.
 	 */
-
 	return policy_walk_mappings(p->child, shim_nested_walk_apply, ctx);
 }
 EXPORT_SYMBOL_GPL(dm_cache_shim_utils_walk_map_with_ctx);
@@ -211,18 +202,16 @@ int dm_cache_shim_utils_walk_map(struct dm_cache_policy *p, policy_walk_fn fn,
 	 * Handles packing up the hint data, in conjunction with
 	 * shim_nested_walk_apply.
 	 */
-
 	parent_ctx = (struct shim_walk_map_ctx *)context;
 	my_hint_size = dm_cache_policy_get_hint_size(p);
 
 	my_ctx.parent_ctx = parent_ctx;
 	my_ctx.parent_fn = fn;
 	my_ctx.my_policy = p;
-	my_ctx.child_hint_buf = (parent_ctx && parent_ctx->child_hint_buf)
-			    ? &parent_ctx->child_hint_buf[my_hint_size]
-			    : NULL
-			    ;
+	my_ctx.child_hint_buf = (parent_ctx && parent_ctx->child_hint_buf) ?
+		&parent_ctx->child_hint_buf[my_hint_size] : NULL;
 	my_ctx.cblock_to_hint_fn = hint_fn;
+
 	return policy_walk_mappings(p->child, shim_nested_walk_apply, &my_ctx);
 }
 EXPORT_SYMBOL_GPL(dm_cache_shim_utils_walk_map);
