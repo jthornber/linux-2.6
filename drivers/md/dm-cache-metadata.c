@@ -415,6 +415,12 @@ static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 	return 0;
 }
 
+static bool using_variable_size_hints(struct cache_disk_superblock *disk_super)
+{
+	unsigned long iflags = le32_to_cpu(disk_super->incompat_flags);
+	return test_bit(DM_CACHE_VARIABLE_HINT_SIZE, &iflags);
+}
+
 static int __open_metadata(struct dm_cache_metadata *cmd)
 {
 	int r;
@@ -442,6 +448,13 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 		DMERR("tm_open_with_sm failed");
 		goto bad;
 	}
+
+	// we need to set the hint size before calling
+	// __setup_mapping_info()
+	if (using_variable_size_hints(disk_super))
+		cmd->policy_hint_size = le32_to_cpu(disk_super->policy_hint_size);
+	else
+		cmd->policy_hint_size = 4u;
 
 	r = __setup_mapping_info(cmd);
 	if (r < 0)
@@ -534,7 +547,11 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->policy_version[0] = le32_to_cpu(disk_super->policy_version[0]);
 	cmd->policy_version[1] = le32_to_cpu(disk_super->policy_version[1]);
 	cmd->policy_version[2] = le32_to_cpu(disk_super->policy_version[2]);
-	cmd->policy_hint_size = le32_to_cpu(disk_super->policy_hint_size);
+
+	if (using_variable_size_hints(disk_super))
+		cmd->policy_hint_size = le32_to_cpu(disk_super->policy_hint_size);
+	else
+		cmd->policy_hint_size = 4u;
 
 	cmd->stats.read_hits = le32_to_cpu(disk_super->read_hits);
 	cmd->stats.read_misses = le32_to_cpu(disk_super->read_misses);
@@ -631,6 +648,14 @@ static int __commit_transaction(struct dm_cache_metadata *cmd,
 	disk_super->policy_version[0] = cpu_to_le32(cmd->policy_version[0]);
 	disk_super->policy_version[1] = cpu_to_le32(cmd->policy_version[1]);
 	disk_super->policy_version[2] = cpu_to_le32(cmd->policy_version[2]);
+
+	if (cmd->policy_hint_size != 4) {
+		unsigned long iflags = 0;
+		set_bit(DM_CACHE_VARIABLE_HINT_SIZE, &iflags);
+		disk_super->incompat_flags = cpu_to_le32(iflags);
+	} else
+		disk_super->incompat_flags = cpu_to_le32(0u);
+
 	disk_super->policy_hint_size =  cpu_to_le32(cmd->policy_hint_size);
 
 	disk_super->read_hits = cpu_to_le32(cmd->stats.read_hits);

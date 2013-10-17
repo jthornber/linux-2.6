@@ -49,7 +49,12 @@
  */
 #define DM_CACHE_FEATURE_COMPAT_SUPP	  0UL
 #define DM_CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
-#define DM_CACHE_FEATURE_INCOMPAT_SUPP	  0UL
+
+enum dm_cache_incompat_bits {
+	DM_CACHE_VARIABLE_HINT_SIZE = 0
+};
+
+#define DM_CACHE_FEATURE_INCOMPAT_SUPP	  (1 << DM_CACHE_VARIABLE_HINT_SIZE)
 
 /*
  * Reopens or creates a new, empty metadata volume.
