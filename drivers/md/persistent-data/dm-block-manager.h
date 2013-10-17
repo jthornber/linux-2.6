@@ -108,11 +108,6 @@ int dm_bm_unlock(struct dm_block *b);
 int dm_bm_flush_and_unlock(struct dm_block_manager *bm,
 			   struct dm_block *superblock);
 
- /*
-  * Request data be prefetched into the cache.
-  */
-void dm_bm_prefetch(struct dm_block_manager *bm, dm_block_t b);
-
 /*
  * Request data is prefetched into the cache.
  */
