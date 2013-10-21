@@ -2521,7 +2521,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
 
 			cell_defer(cache, cell, false);
-
 		}
 		break;
 
