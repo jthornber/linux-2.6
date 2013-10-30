@@ -206,6 +206,7 @@ struct cache {
 	atomic_t nr_migrations;
 
 	wait_queue_head_t quiescing_wait;
+	atomic_t quiescing;
 	atomic_t quiescing_ack;
 
 	/*
@@ -246,7 +247,6 @@ struct cache {
 
 	bool need_tick_bio:1;
 	bool sized:1;
-	bool quiescing:1;
 	bool invalidate:1;
 	bool commit_requested:1;
 	bool loaded_mappings:1;
@@ -1554,14 +1554,7 @@ static void writeback_some_dirty_blocks(struct cache *cache)
  *--------------------------------------------------------------*/
 static bool is_quiescing(struct cache *cache)
 {
-	int r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	r = cache->quiescing;
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	return r;
+	return atomic_read(&cache->quiescing);
 }
 
 static void ack_quiescing(struct cache *cache)
@@ -1579,23 +1572,13 @@ static void wait_for_quiescing_ack(struct cache *cache)
 
 static void start_quiescing(struct cache *cache)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	cache->quiescing = true;
-	spin_unlock_irqrestore(&cache->lock, flags);
-
+	atomic_inc(&cache->quiescing);
 	wait_for_quiescing_ack(cache);
 }
 
 static void stop_quiescing(struct cache *cache)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	cache->quiescing = false;
-	spin_unlock_irqrestore(&cache->lock, flags);
-
+	atomic_set(&cache->quiescing, 0);
 	atomic_set(&cache->quiescing_ack, 0);
 }
 
@@ -2310,6 +2293,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	init_waitqueue_head(&cache->migration_wait);
 
 	init_waitqueue_head(&cache->quiescing_wait);
+	atomic_set(&cache->quiescing, 0);
 	atomic_set(&cache->quiescing_ack, 0);
 
 	r = -ENOMEM;
@@ -2371,7 +2355,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->need_tick_bio = true;
 	cache->sized = false;
-	cache->quiescing = false;
 	cache->invalidate = false;
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
