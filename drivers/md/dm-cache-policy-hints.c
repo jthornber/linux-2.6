@@ -1,7 +1,7 @@
 /*
- * Copyright (C) 2013 Red Hat. All rights reserved.
+ * Copyright (C) 2013 Red Hat.
  *
- * This file is released under the GPL.
+ * This file is released under the GPLv2.
  *
  * TESTING! NOT FOR PRODUCTION USE!
  *
@@ -15,6 +15,9 @@
 #include <linux/hash.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache-policy-hints"
 
@@ -446,10 +449,12 @@ static void calc_hint_value_counters(struct policy *p)
 }
 
 /* Macro to set hint ptr for width on LHS based on RHS width<<1 */
-#define PTR_INC(lhs, rhs, c) \
+#define DM_PTR_INC(lhs, rhs, c) \
+do { \
 	inc = 2 * p->hint_counter[c]; \
 	ptrs->le ## lhs ## _hints = (__le ## lhs  *) ptrs->le ## rhs ## _hints + inc; \
-	ptrs->u ## lhs ## _hints  = (uint ## lhs ## _t *) ptrs->u ## rhs ## _hints  + inc;
+	ptrs->u ## lhs ## _hints  = (uint ## lhs ## _t *) ptrs->u ## rhs ## _hints  + inc; \
+} while (0)
 
 static void set_hints_ptrs(struct policy *p, struct hints_ptrs *ptrs)
 {
@@ -458,9 +463,9 @@ static void set_hints_ptrs(struct policy *p, struct hints_ptrs *ptrs)
 	ptrs->le64_hints = p->hints_buffer;
 	ptrs->u64_hints  = p->hints_buffer;
 
-	PTR_INC(32, 64, 3)
-	PTR_INC(16, 32, 2)
-	PTR_INC(8,  16, 1)
+	DM_PTR_INC(32, 64, 3);
+	DM_PTR_INC(16, 32, 2);
+	DM_PTR_INC(8,  16, 1);
 }
 
 static void __hints_xfer_disk(struct policy *p, bool to_disk)
@@ -552,6 +557,7 @@ static int hints_walk_mappings(struct dm_cache_policy *pe, policy_walk_fn fn, vo
 	mutex_lock(&p->lock);
 
 	list_for_each_entry(e, &p->queues.used, list) {
+		__dm_bless_for_disk(p->hints_buffer);
 		r = fn(context, e->cblock, e->oblock, (void *) p->hints_buffer);
 		if (r)
 			break;

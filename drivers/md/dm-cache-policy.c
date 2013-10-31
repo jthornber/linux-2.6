@@ -151,13 +151,13 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 	type = get_policy(name);
 	if (!type) {
 		DMWARN("unknown policy type");
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	p = type->create(cache_size, origin_size, cache_block_size);
 	if (!p) {
 		put_policy(type);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 	p->private = type;
 
@@ -213,5 +213,13 @@ int dm_cache_policy_set_hint_size(struct dm_cache_policy *p, unsigned hint_size)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_set_hint_size);
+
+bool dm_cache_policy_is_shim(struct dm_cache_policy *p)
+{
+	struct dm_cache_policy_type *t = p->private;
+
+	return (t->features & DM_CACHE_POLICY_SHIM) ? true : false;
+}
+EXPORT_SYMBOL_GPL(dm_cache_policy_is_shim);
 
 /*----------------------------------------------------------------*/

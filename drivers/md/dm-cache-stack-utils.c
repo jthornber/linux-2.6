@@ -20,9 +20,9 @@
 #include "dm-cache-policy.h"
 #include "dm.h"
 
-#include <linux/slab.h>
-
 #include <linux/delay.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 
 #define DM_MSG_PREFIX "cache-stack-utils"
 
@@ -74,9 +74,7 @@ static struct dm_cache_policy *stack_root_create(const char *policy_stack_str,
 	struct dm_cache_policy_type *t;
 	const unsigned *version;
 	const char *seg_name;
-	int cannonical_name_len;
-	int seg_name_len;
-	int hint_size;
+	size_t canonical_name_len, hint_size;
 	int i;
 
 	if (!p)
@@ -88,7 +86,7 @@ static struct dm_cache_policy *stack_root_create(const char *policy_stack_str,
 	p->policy.child = head;
 
 	/*
-	 * We compose the cannonical name for this policy stack by removing
+	 * We compose the canonical name for this policy stack by removing
 	 * any shim policies that do not have hint data.  This is intended
 	 * to allow for a class of shim policies that can be inserted into,
 	 * or removed from, the policy stack without causing the in-flash
@@ -97,26 +95,35 @@ static struct dm_cache_policy *stack_root_create(const char *policy_stack_str,
 	 * The composite version numbers of a policy stack do not include the
 	 * versions of the hintless policies for the same reason.
 	 */
-	cannonical_name_len = 0;
+	canonical_name_len = 0;
 	for (child = head; child; child = child->child) {
 		hint_size = dm_cache_policy_get_hint_size(child);
-		if (!hint_size && (child->child != NULL))
+
+#if 0
+		/* FIXME: avoids policy name in t->name, thus leaving an non-destroyable stack. */
+		if (!hint_size && child->child)
 			continue;
+#endif
 
 		t->hint_size += hint_size;
 
 		seg_name = dm_cache_policy_get_name(child);
-		seg_name_len = strlen(seg_name);
+		canonical_name_len += strlen(seg_name) + (dm_cache_policy_is_shim(child) ? 1 : 0);
 
-		if (cannonical_name_len + seg_name_len >= sizeof(t->name)) {
+		if (canonical_name_len >= sizeof(t->name)) {
 			DMWARN("policy stack string '%s' is too long",
 			       policy_stack_str);
 			kfree(p);
 			return NULL;
 		}
 
-		strcpy(&t->name[cannonical_name_len], seg_name);
-		cannonical_name_len += seg_name_len;
+		strcat(t->name, seg_name);
+
+		if (dm_cache_policy_is_shim(child)) {
+			t->name[canonical_name_len - 1] = DM_CACHE_POLICY_STACK_DELIM;
+			t->name[canonical_name_len] = '\0';
+		}
+
 		version = dm_cache_policy_get_version(child);
 
 		for (i = 0; i < CACHE_POLICY_VERSION_SIZE; i++)
@@ -179,15 +186,13 @@ dm_cache_stack_utils_policy_stack_create(const char *policy_stack_str,
 		return NULL;
 	}
 
-	policy_name = &policy_name_buf[0];
+	policy_name = policy_name_buf;
 	p = head_p = next_p = NULL;
 
 	do {
 		delim = strchr(policy_name, DM_CACHE_POLICY_STACK_DELIM);
-		if (delim) {
-			saved_char = delim[1];
-			delim[1] = '\0';
-		}
+		if (delim)
+			*delim = '\0';
 
 		next_p = dm_cache_policy_create(policy_name, cache_size,
 						origin_size, cache_block_size);
@@ -202,8 +207,13 @@ dm_cache_stack_utils_policy_stack_create(const char *policy_stack_str,
 		p = next_p;
 
 		if (delim) {
-			delim[1] = saved_char;
-			policy_name = &delim[1];
+			if (!dm_cache_policy_is_shim(next_p)) {
+				DMERR("%s is no shim policy", policy_name);
+				goto cleanup;
+			}
+
+			*delim = DM_CACHE_POLICY_STACK_DELIM;
+			policy_name = delim + 1;
 		}
 	} while (delim);
 

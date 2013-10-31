@@ -153,6 +153,7 @@ static void queue_init(struct queue *q)
 
 /*
  * Checks to see if the queue is empty.
+ * FIXME: reduce cpu usage.
  */
 static bool queue_empty(struct queue *q)
 {
@@ -254,11 +255,11 @@ struct mq_policy {
 	struct io_tracker tracker;
 
 	/*
-	 * We maintain three queues of entries.  The cache proper
-	 * consisting of a clean and a dirty queue contains
-	 * the currently active mappings.  Whereas the pre_cache tracks
-	 * blocks that are being hit frequently and potential candidates
-	 * for promotion to the cache.
+	 * We maintain three queues of entries.  The cache proper,
+	 * consisting of a clean and dirty queue, contains the currently
+	 * active mappings.  Whereas the pre_cache tracks blocks that
+	 * are being hit frequently and potential candidates for promotion
+	 * to the cache.
 	 */
 	struct queue pre_cache;
 	struct queue cache_clean;
@@ -583,7 +584,8 @@ static bool updated_this_tick(struct mq_policy *mq, struct entry *e)
  * of the entries.
  *
  * At the moment the threshold is taken by averaging the hit counts of some
- * of the entries in the cache (the first 20 entries of the first level).
+ * of the entries in the cache (the first 20 entries across all levels in
+ * ascending order, giving preference to the clean entries at each level).
  *
  * We can be much cleverer than this though.  For example, each promotion
  * could bump up the threshold helping to prevent churn.  Much more to do
@@ -707,18 +709,18 @@ static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock, dm_cblock_t 
 static unsigned adjusted_promote_threshold(struct mq_policy *mq,
 					   bool discarded_oblock, int data_dir)
 {
-	if (data_dir == WRITE) {
-		if (discarded_oblock && (any_free_cblocks(mq) || any_clean_cblocks(mq))) {
-			/*
-			 * We don't need to do any copying at all, so give this a
-			 * very low threshold.
-			 */
-			return DISCARDED_PROMOTE_THRESHOLD;
-		} else
-			return mq->promote_threshold + WRITE_PROMOTE_THRESHOLD;
+	if (data_dir == READ)
+		return mq->promote_threshold + READ_PROMOTE_THRESHOLD;
+
+	if (discarded_oblock && (any_free_cblocks(mq) || any_clean_cblocks(mq))) {
+		/*
+		 * We don't need to do any copying at all, so give this a
+		 * very low threshold.
+		 */
+		return DISCARDED_PROMOTE_THRESHOLD;
 	}
 
-	return mq->promote_threshold + READ_PROMOTE_THRESHOLD;
+	return mq->promote_threshold + WRITE_PROMOTE_THRESHOLD;
 }
 
 static bool should_promote(struct mq_policy *mq, struct entry *e,
@@ -990,9 +992,8 @@ static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t 
 	return r;
 }
 
-// FIXME: can these block?
-// FIXME: duplication
-static int mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+// FIXME: can __mq_set_clear_dirty block?
+static int __mq_set_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock, bool set)
 {
 	int r = 0;
 	struct mq_policy *mq = to_mq_policy(p);
@@ -1002,44 +1003,27 @@ static int mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 	e = hash_lookup(mq, oblock);
 	if (!e) {
 		r = -ENOENT;
-		DMWARN("mq_set_dirty called for a block that isn't in the cache");
-
+		DMWARN("__mq_set_clear_dirty called for a block that isn't in the cache");
 	} else {
 		BUG_ON(!e->in_cache);
 
 		del(mq, e);
-		e->dirty = true;
+		e->dirty = set;
 		push(mq, e);
 	}
-
 	mutex_unlock(&mq->lock);
 
 	return r;
 }
 
+static int mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+{
+	return __mq_set_clear_dirty(p, oblock, true);
+}
+
 static int mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	int r = 0;
-	struct mq_policy *mq = to_mq_policy(p);
-	struct entry *e;
-
-	mutex_lock(&mq->lock);
-	e = hash_lookup(mq, oblock);
-	if (!e) {
-		r = -ENOENT;
-		DMWARN("mq_clear_dirty called for a block that isn't in the cache");
-
-	} else {
-		BUG_ON(!e->in_cache);
-
-		del(mq, e);
-		e->dirty = false;
-		push(mq, e);
-	}
-
-	mutex_unlock(&mq->lock);
-
-	return r;
+	return __mq_set_clear_dirty(p, oblock, false);
 }
 
 static int mq_load_mapping(struct dm_cache_policy *p,
@@ -1142,29 +1126,15 @@ static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 {
 	struct entry *e = pop(mq, &mq->cache_dirty);
 
-	if (e) {
-#if 0
-		/*
-		 * mq->tick - 1 because we don't want a flurry of
-		 * writebacks every time the tick rolls over.
-		 * FIXME: This code prevents complete writeback
-		 */
-		if (e->tick >= (mq->tick - 1))
-			push(mq, e);
+	if (!e)
+		return -ENODATA;
 
-		else {
-#endif
-			*oblock = e->oblock;
-			*cblock = e->cblock;
-			e->dirty = false;
-			push(mq, e);
-			return 0;
-#if 0
-		}
-#endif
-	}
+	*oblock = e->oblock;
+	*cblock = e->cblock;
+	e->dirty = false;
+	push(mq, e);
 
-	return -ENODATA;
+	return 0;
 }
 
 static int mq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,

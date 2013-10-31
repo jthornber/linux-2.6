@@ -528,6 +528,9 @@ extern struct ratelimit_state dm_ratelimit_state;
 			       "\n", ## arg); \
 	} while (0)
 
+#define DMTRACE(f, arg...) \
+	trace_printk(DM_NAME ": " DM_MSG_PREFIX ": " f "\n", ## arg)
+
 #ifdef CONFIG_DM_DEBUG
 #  define DMDEBUG(f, arg...) \
 	printk(KERN_DEBUG DM_NAME ": " DM_MSG_PREFIX " DEBUG: " f "\n", ## arg)

@@ -1036,12 +1036,11 @@ static void issue_copy(struct dm_cache_migration *mg)
 		struct bio *bio = mg->new_ocell->holder;
 
 		avoid = is_discarded_oblock(cache, mg->new_oblock);
-#if 0
+
 		if (!avoid && bio_writes_complete_block(cache, bio)) {
 			issue_overwrite(mg, bio);
 			return;
 		}
-#endif
 	}
 
 	avoid ? avoid_copy(mg) : issue_copy_real(mg);
@@ -1429,7 +1428,7 @@ static int need_commit_due_to_time(struct cache *cache)
 
 static int commit_if_needed(struct cache *cache)
 {
-	int r;
+	int r = 0;
 
 	if ((cache->commit_requested || need_commit_due_to_time(cache)) &&
 	    dm_cache_changed_this_transaction(cache->cmd)) {
@@ -1437,9 +1436,7 @@ static int commit_if_needed(struct cache *cache)
 		cache->commit_requested = false;
 		r = dm_cache_commit(cache->cmd, false);
 		cache->last_commit_jiffies = jiffies;
-
-	} else
-		r = 0;
+	}
 
 	return r;
 }
@@ -1610,14 +1607,11 @@ static void invalidate_mappings(struct cache *cache)
 {
 	dm_oblock_t oblock, end;
 	unsigned long long count = 0;
-unsigned long long start; /* FIXME: REMOVEME */
 
 	smp_rmb();
 
 	if (!cache->invalidate)
 		return;
-
-start = jiffies; /* FIXME: REMOVEME */
 
 	oblock = cache->begin_invalidate;
 	end    = to_oblock(from_oblock(cache->end_invalidate) + 1);
@@ -1630,7 +1624,7 @@ start = jiffies; /* FIXME: REMOVEME */
 		r = policy_invalidate_mapping(cache->policy, &given_oblock, &cblock);
 		/*
 		 * Policy either doesn't suport invalidation (yet) or
-		 * doesn't offer any more blocks to invalidate (e.g. era+).
+		 * doesn't offer any more blocks to invalidate (e.g. era).
 		  */
 		if (r == -EINVAL) {
 			DMWARN("policy doesn't support invalidation (yet).");
@@ -1661,7 +1655,6 @@ start = jiffies; /* FIXME: REMOVEME */
 	}
 
 	cache->invalidate = false;
-DMINFO("%llu mappings invalidated in %llu jiffies", count, jiffies -  start); /* FIXME: REMOVEME */
 }
 
 static int more_work(struct cache *cache)
@@ -2144,14 +2137,15 @@ static int set_config_values(struct cache *cache, int argc, const char **argv)
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
 {
-	cache->policy =	dm_cache_policy_create(ca->policy_name,
-					       cache->cache_size,
-					       cache->origin_sectors,
-					       cache->sectors_per_block);
-	if (!cache->policy) {
+	struct dm_cache_policy *p = dm_cache_policy_create(ca->policy_name,
+							   cache->cache_size,
+							   cache->origin_sectors,
+							   cache->sectors_per_block);
+	if (IS_ERR(p)) {
 		*error = "Error creating cache's policy";
-		return -ENOMEM;
+		return PTR_ERR(p);
 	}
+	cache->policy = p;
 
 	return 0;
 }
@@ -2275,6 +2269,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 			*error = "dm_cache_metadata_all_clean() failed";
 			goto bad;
 		}
+
 		if (!all_clean) {
 			*error = "Cannot enter passthrough mode unless all blocks are clean";
 			r = -EINVAL;
@@ -2621,6 +2616,8 @@ static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock,
 		     void *hint)
 {
 	struct cache *cache = context;
+
+	__dm_bless_for_disk(hint);
 	return dm_cache_save_hint(cache->cmd, cblock, hint);
 }
 
@@ -2733,10 +2730,10 @@ static bool can_resize(struct cache *cache, dm_cblock_t new_size)
 		return true;
 
 	/*
-	 * We can't drop a dirty block.
+	 * We can't drop a dirty block when shrinking the cache.
 	 */
-	for (; from_cblock(new_size) > from_cblock(cache->cache_size);
-	     new_size = to_cblock(from_cblock(new_size) + 1)) {
+	while (from_cblock(new_size) < from_cblock(cache->cache_size)) {
+		new_size = to_cblock(from_cblock(new_size) + 1);
 		if (is_dirty(cache, new_size)) {
 			DMERR("unable to shrink cache; cache block %llu is dirty",
 			      (unsigned long long) from_cblock(new_size));
@@ -2969,9 +2966,9 @@ static int set_invalidate_mappings(struct cache *cache, char **argv)
 		return -EINVAL;
 	}
 
-DMINFO("%s -- begin=%llu end=%llu", __func__, begin, end); /* FIXME: REMOVEME */
-
-	/* Pass begin and end origin blocks to the worker and wake it. */
+	/*
+	 * Pass begin and end origin blocks to the worker and wake it.
+	 */
 	cache->begin_invalidate = to_oblock(begin);
 	cache->end_invalidate = to_oblock(end);
 	cache->invalidate = true;

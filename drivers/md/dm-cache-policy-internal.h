@@ -91,7 +91,7 @@ static inline int policy_emit_config_values(struct dm_cache_policy *p, char *res
 	if (p->emit_config_values)
 		return p->emit_config_values(p, result, maxlen);
 
-	DMEMIT(" 0");
+	DMEMIT("0");
 	return 0;
 }
 
@@ -123,9 +123,16 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p);
 
 const unsigned *dm_cache_policy_get_version(struct dm_cache_policy *p);
 
-#define DM_CACHE_POLICY_MAX_HINT_SIZE 128
+#define DM_CACHE_POLICY_DEF_HINT_SIZE 4U
+#define DM_CACHE_POLICY_MAX_HINT_SIZE 128U
 int    dm_cache_policy_set_hint_size(struct dm_cache_policy *p, unsigned hint_size);
 size_t dm_cache_policy_get_hint_size(struct dm_cache_policy *p);
+
+/*
+ * Return bool that reflects whether or not policy is only a shim
+ * layer in a policy stack.
+ */
+bool dm_cache_policy_is_shim(struct dm_cache_policy *p);
 
 /*----------------------------------------------------------------*/
 
