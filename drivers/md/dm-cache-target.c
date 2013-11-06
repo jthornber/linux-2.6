@@ -1603,58 +1603,76 @@ static void requeue_deferred_io(struct cache *cache)
 		bio_endio(bio, DM_ENDIO_REQUEUE);
 }
 
+
 static void invalidate_mappings(struct cache *cache)
 {
-	dm_oblock_t oblock, end;
-	unsigned long long count = 0;
+        dm_oblock_t requested_oblock, begin, end;
+        unsigned long long count = 0;
 
-	smp_rmb();
+        smp_rmb();
+        if (!cache->invalidate)
+                return;
 
-	if (!cache->invalidate)
-		return;
+        begin = requested_oblock = cache->begin_invalidate;
+        end = to_oblock(from_oblock(cache->end_invalidate));
 
-	oblock = cache->begin_invalidate;
-	end    = to_oblock(from_oblock(cache->end_invalidate) + 1);
+        while (from_oblock(requested_oblock) <= from_oblock(end)) {
+                int r;
+                dm_cblock_t cblock;
+                dm_oblock_t given_oblock = requested_oblock;
 
-	while (oblock != end) {
-		int r;
-		dm_cblock_t cblock;
-		dm_oblock_t given_oblock = oblock;
+                /*
+                 * Policy either doesn't suport invalidation (yet)
+                 */
+                r = policy_invalidate_mapping(cache->policy, &given_oblock, &cblock);
+                if (r == -EINVAL) {
+                        DMWARN("policy doesn't support invalidation (yet).");
+                        break;
+                }
 
-		r = policy_invalidate_mapping(cache->policy, &given_oblock, &cblock);
-		/*
-		 * Policy either doesn't suport invalidation (yet) or
-		 * doesn't offer any more blocks to invalidate (e.g. era).
-		  */
-		if (r == -EINVAL) {
-			DMWARN("policy doesn't support invalidation (yet).");
-			break;
-		}
+                /*
+                 * Policy doesn't offer any more blocks to invalidate (e.g. 'era').
+                 */
+                if (r == -ENODATA)
+                        break;
 
-		if (r == -ENODATA)
-			break;
+                /*
+                 * Policy can hand back a different oblock than the
+                 * requested one at will (e.g. 'era')!
+                 *
+                 * Check if the given one is within our begin/end range
+                 * and reload the mapping if not, else remove mapping
+                 * from persistent cache metadata and request a commit.
+                 */
+                else if (!r) {
+                        if (from_oblock(given_oblock) < from_oblock(begin) ||
+                            from_oblock(given_oblock) > from_oblock(end)) {
+                                r = policy_load_mapping(cache->policy, given_oblock, cblock, NULL, false);
+                                BUG_ON(r);
 
-		else if (!r) {
-			if (dm_cache_remove_mapping(cache->cmd, cblock)) {
-				DMWARN_LIMIT("invalidation failed; couldn't update on disk metadata");
-				r = policy_load_mapping(cache->policy, given_oblock, cblock, NULL, false);
-				BUG_ON(r);
+                        } else if (dm_cache_remove_mapping(cache->cmd, cblock)) {
+                                DMWARN_LIMIT("invalidation failed; couldn't update on disk metadata");
+                                r = policy_load_mapping(cache->policy, given_oblock, cblock, NULL, false);
+                                BUG_ON(r);
 
-			} else {
-				/*
-				 * FIXME: we are cautious and keep this even though all
-				 *        blocks _should_ be clean in passthrough mode.
-				 */
-				clear_dirty(cache, given_oblock, cblock);
-				cache->commit_requested = true;
-				count++;
-			}
-		}
+                        } else {
+                                /*
+                                 * FIXME: we are cautious and keep this even though all
+                                 *        blocks _should_ be clean in passthrough mode.
+                                 */
+                                clear_dirty(cache, given_oblock, cblock);
+                                cache->commit_requested = true;
+                                count++; /* FIXME: REMOVEME: */
+                        }
 
-		oblock = to_oblock(from_oblock(oblock) + 1);
-	}
+                } else
+                        DMERR("invalid policy_invalidate_mapping return code %d", r);
 
-	cache->invalidate = false;
+                requested_oblock = to_oblock(from_oblock(requested_oblock) + 1);
+        }
+
+        cache->invalidate = false;
+        smp_wmb();
 }
 
 static int more_work(struct cache *cache)
