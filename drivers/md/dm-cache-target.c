@@ -2143,7 +2143,7 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 							   cache->sectors_per_block);
 	if (IS_ERR(p)) {
 		*error = "Error creating cache's policy";
-		return PTR_ERR(p);
+		return -ENOMEM;
 	}
 	cache->policy = p;
 

@@ -196,7 +196,7 @@ dm_cache_stack_utils_policy_stack_create(const char *policy_stack_str,
 
 		next_p = dm_cache_policy_create(policy_name, cache_size,
 						origin_size, cache_block_size);
-		if (!next_p)
+		if (IS_ERR(next_p))
 			goto cleanup;
 
 		next_p->child = NULL;
