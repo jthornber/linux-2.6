@@ -308,46 +308,36 @@ static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	return r;
 }
 
+static void load_era(struct era_policy *era, dm_cblock_t cblock, __le32 *hint)
+{
+	era_t recovered_era = le32_to_cpu(*hint);
+	era->eras[from_cblock(cblock)] = recovered_era;
+
+	/*
+	 * Make sure the current era is the highest seen.
+	 */
+
+	/*
+	 * FIXME: problem if era incremented then suspend/resume without
+	 * any cblock eras being updated.
+	 */
+	if (recovered_era >= atomic64_read(&era->current_era))
+		atomic64_set(&era->current_era, recovered_era);
+}
+
 static int era_load_mapping(struct dm_cache_policy *p,
 			    dm_oblock_t oblock, dm_cblock_t cblock,
 			    void *hint, bool hint_valid)
 {
 	struct era_policy *era = to_era_policy(p);
-	struct dm_cache_policy *child;
-	__le32 *le32_hint;
-	era_t recovered_era;
-	int r;
+	struct dm_cache_policy *child = era->policy.child;
 
-	child = era->policy.child;
+	if (hint_valid) {
+		load_era(era, cblock, (__le32 *) hint);
+		return policy_load_mapping(child, oblock, cblock, hint + sizeof(__le32), hint_valid);
 
-	le32_hint = (__le32 *)hint;
-	hint = &le32_hint[1];
-
-	r = policy_load_mapping(child, oblock, cblock, hint, hint_valid);
-
-	/* FIXME: recovered area valid on reload called from cache core invalidate mapping error path? */
-	if (!r && hint_valid &&
-	    (from_cblock(cblock) < from_cblock(era->cache_size))) {
-		recovered_era = le32_to_cpu(*le32_hint);
-		era->eras[from_cblock(cblock)] = recovered_era;
-
-		/*
-		 * Make sure the era counter starts higher than the highest
-		 * persisted era.
-		 */
-		if (recovered_era >= atomic64_read(&era->current_era)) {
-			atomic64_set(&era->current_era, recovered_era);
-
-			/*
-			 * There are no concurrent accesses, so there's no
-			 * race here.
-			 */
-			if (atomic64_read(&era->current_era) < ERA_OVERFLOW)
-				atomic64_inc(&era->current_era);
-		}
-	}
-
-	return r;
+	} else
+		return 	policy_load_mapping(child, oblock, cblock, NULL, hint_valid);
 }
 
 static int era_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
