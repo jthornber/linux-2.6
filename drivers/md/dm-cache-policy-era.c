@@ -410,7 +410,7 @@ static int era_set_config_value(struct dm_cache_policy *p, const char *key,
 {
 	struct era_policy *era = to_era_policy(p);
 	struct config_value_handler *vh, value_handlers[] = {
-		{ "increment_current_era",                  incr_current_era,  NULL },
+		{ "increment_era",                          incr_current_era,  NULL },
 		{ "unmap_blocks_from_later_eras",           cond_unmap_by_era, era_is_gt_value },
 		{ "unmap_blocks_from_this_era_and_later",   cond_unmap_by_era, era_is_gte_value },
 		{ "unmap_blocks_from_this_era_and_earlier", cond_unmap_by_era, era_is_lte_value },
