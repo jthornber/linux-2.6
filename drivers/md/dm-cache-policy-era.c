@@ -261,12 +261,16 @@ static void era_destroy(struct dm_cache_policy *p)
 	kfree(era);
 }
 
+static void __update_era(struct era_policy *era, dm_cblock_t b)
+{
+	era->cb_to_era[from_cblock(b)] = atomic64_read(&era->era_counter);
+}
+
 static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 		      bool can_block, bool can_migrate, bool discarded_oblock,
 		      struct bio *bio, struct policy_result *result)
 {
 	struct era_policy *era = to_era_policy(p);
-	uint32_t cb_idx;
 	int r;
 
 	result->op = POLICY_MISS;
@@ -280,13 +284,23 @@ static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	/* Check for a mapping */
 	r = policy_map(p->child, oblock, can_block, can_migrate,
 		       discarded_oblock, bio, result);
+	if (r)
+		return r;
 
-	/* If we got a hit and this is a write, update the era for the block */
-	/* FIXME: POLICY_REPLACE, POLICY_DEMOTE ? */
-	if (!r && (bio_data_dir(bio) == WRITE) && (result->op == POLICY_HIT)) {
-		cb_idx = from_cblock(result->cblock);
-		BUG_ON(cb_idx >= from_cblock(era->cache_size));
-		era->cb_to_era[cb_idx] = atomic64_read(&era->era_counter);
+	switch (result->op) {
+	case POLICY_HIT:
+		if (bio_data_dir(bio) == WRITE)
+			__update_era(era, result->cblock);
+		break;
+
+	case POLICY_MISS:
+		/* do nothing */
+		break;
+
+	case POLICY_NEW:
+	case POLICY_REPLACE:
+		__update_era(era, result->cblock);
+		break;
 	}
 
 	mutex_unlock(&era->lock);
