@@ -32,7 +32,8 @@
 #define DM_MSG_PREFIX "cache-policy-era"
 
 typedef uint32_t era_t;
-#define ERA_MAX_ERA UINT_MAX
+
+#define ERA_MAX_ERA (~((uint32_t) 0))
 
 struct era_policy {
 	struct dm_cache_policy policy;
@@ -42,8 +43,7 @@ struct era_policy {
 	dm_cblock_t cache_size;
 
 	era_t *cb_to_era;
-
-	era_t era_counter;
+	atomic64_t era_counter;
 
 	/* Temporary store for unmap information during invalidation. */
 	struct {
@@ -141,14 +141,14 @@ static int incr_era_counter(struct era_policy *era, const char *curr_era_str,
 	if (kstrtou32(curr_era_str, 10, &curr_era_counter))
 		return -EINVAL;
 
-	smp_rmb();
-	if (era->era_counter != curr_era_counter)
+	if (atomic64_read(&era->era_counter) != curr_era_counter)
 		r = -ECANCELED;
-	else if (era->era_counter >= ERA_MAX_ERA)
+
+	else if (atomic64_read(&era->era_counter) >= ERA_MAX_ERA)
 		r = -EOVERFLOW;
+
 	else {
-		era->era_counter++;
-		smp_wmb();
+		atomic64_inc(&era->era_counter);
 		r = 0;
 	}
 
@@ -286,8 +286,7 @@ static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	if (!r && (bio_data_dir(bio) == WRITE) && (result->op == POLICY_HIT)) {
 		cb_idx = from_cblock(result->cblock);
 		BUG_ON(cb_idx >= from_cblock(era->cache_size));
-		smp_rmb();
-		era->cb_to_era[cb_idx] = era->era_counter;
+		era->cb_to_era[cb_idx] = atomic64_read(&era->era_counter);
 	}
 
 	mutex_unlock(&era->lock);
@@ -322,12 +321,15 @@ static int era_load_mapping(struct dm_cache_policy *p,
 		 * Make sure the era counter starts higher than the highest
 		 * persisted era.
 		 */
-		smp_rmb();
-		if (recovered_era >= era->era_counter) {
-			era->era_counter = recovered_era;
-			if (era->era_counter < ERA_MAX_ERA)
-				era->era_counter++;
-			smp_wmb();
+		if (recovered_era >= atomic64_read(&era->era_counter)) {
+			atomic64_set(&era->era_counter, recovered_era);
+
+			/*
+			 * There are no concurrent accesses, so there's no
+			 * race here.
+			 */
+			if (atomic64_read(&era->era_counter) < ERA_MAX_ERA)
+				atomic64_inc(&era->era_counter);
 		}
 	}
 
@@ -349,8 +351,7 @@ static void era_force_mapping(struct dm_cache_policy *p, dm_oblock_t old_oblock,
 	mutex_lock(&era->lock);
 
 	if (!policy_lookup(p->child, old_oblock, &cblock)) {
-		smp_rmb();
-		era->cb_to_era[from_cblock(cblock)] = era->era_counter;
+		era->cb_to_era[from_cblock(cblock)] = atomic64_read(&era->era_counter);
 	}
 
 	policy_force_mapping(p->child, old_oblock, new_oblock);
@@ -431,9 +432,7 @@ static int era_emit_config_values(struct dm_cache_policy *p, char *result,
 	struct era_policy *era = to_era_policy(p);
 	ssize_t sz = 0;
 
-	smp_rmb();
-
-	DMEMIT("era_counter %u ", era->era_counter);
+	DMEMIT("era_counter %u ", (unsigned) atomic64_read(&era->era_counter));
 	return policy_emit_config_values(p->child, result + sz, maxlen - sz);
 }
 
@@ -468,7 +467,7 @@ static struct dm_cache_policy *era_create(dm_cblock_t cache_size,
 	era->cb_to_era = vzalloc(from_cblock(era->cache_size) *
 				 sizeof(*era->cb_to_era));
 	if (era->cb_to_era) {
-		era->era_counter = 1;
+		atomic64_set(&era->era_counter, 0);
 		return &era->policy;
 	}
 
