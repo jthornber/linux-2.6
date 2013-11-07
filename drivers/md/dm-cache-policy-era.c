@@ -33,7 +33,7 @@
 
 typedef uint32_t era_t;
 
-#define ERA_MAX_ERA (~((uint32_t) 0))
+#define ERA_OVERFLOW (~((uint32_t) 0))
 
 struct era_policy {
 	struct dm_cache_policy policy;
@@ -42,8 +42,8 @@ struct era_policy {
 
 	dm_cblock_t cache_size;
 
-	era_t *cb_to_era;
-	atomic64_t era_counter;
+	era_t *eras;
+	atomic64_t current_era;
 
 	/* Temporary store for unmap information during invalidation. */
 	struct {
@@ -121,10 +121,10 @@ err:
 
 typedef int (*era_match_fn_t)(era_t, era_t);
 
-static int incr_era_counter(struct era_policy *era, const char *curr_era_str,
+static int incr_current_era(struct era_policy *era, const char *curr_era_str,
 			    era_match_fn_t dummy)
 {
-	era_t curr_era_counter;
+	era_t curr_current_era;
 	int r;
 
 	/*
@@ -138,17 +138,17 @@ static int incr_era_counter(struct era_policy *era, const char *curr_era_str,
 	 * and is 32 bits.
 	 */
 
-	if (kstrtou32(curr_era_str, 10, &curr_era_counter))
+	if (kstrtou32(curr_era_str, 10, &curr_current_era))
 		return -EINVAL;
 
-	if (atomic64_read(&era->era_counter) != curr_era_counter)
+	if (atomic64_read(&era->current_era) != curr_current_era)
 		r = -ECANCELED;
 
-	else if (atomic64_read(&era->era_counter) >= ERA_MAX_ERA)
+	else if (atomic64_read(&era->current_era) >= ERA_OVERFLOW)
 		r = -EOVERFLOW;
 
 	else {
-		atomic64_inc(&era->era_counter);
+		atomic64_inc(&era->current_era);
 		r = 0;
 	}
 
@@ -160,7 +160,7 @@ static void *era_cblock_to_hint(struct shim_walk_map_ctx *ctx,
 {
 	struct era_policy *era = to_era_policy(ctx->my_policy);
 	era_t era_val;
-	era_val = era->cb_to_era[from_cblock(cblock)];
+	era_val = era->eras[from_cblock(cblock)];
 	ctx->le32_buf = cpu_to_le32(era_val);
 	return &ctx->le32_buf;
 }
@@ -195,7 +195,7 @@ static int era_inval_oblocks(void *context, dm_cblock_t cblock,
 			     dm_oblock_t oblock, void *unused)
 {
 	struct inval_oblocks_ctx *ctx = (struct inval_oblocks_ctx *)context;
-	era_t act_era = ctx->era->cb_to_era[from_cblock(cblock)];
+	era_t act_era = ctx->era->eras[from_cblock(cblock)];
 
 	if (ctx->era_match_fn(act_era, ctx->test_era)) {
 		set_bit(from_cblock(cblock), ctx->era->invalidate.bitset);
@@ -257,13 +257,13 @@ static void era_destroy(struct dm_cache_policy *p)
 	struct era_policy *era = to_era_policy(p);
 
 	free_invalidate(era);
-	vfree(era->cb_to_era);
+	vfree(era->eras);
 	kfree(era);
 }
 
 static void __update_era(struct era_policy *era, dm_cblock_t b)
 {
-	era->cb_to_era[from_cblock(b)] = atomic64_read(&era->era_counter);
+	era->eras[from_cblock(b)] = atomic64_read(&era->current_era);
 }
 
 static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
@@ -329,21 +329,21 @@ static int era_load_mapping(struct dm_cache_policy *p,
 	if (!r && hint_valid &&
 	    (from_cblock(cblock) < from_cblock(era->cache_size))) {
 		recovered_era = le32_to_cpu(*le32_hint);
-		era->cb_to_era[from_cblock(cblock)] = recovered_era;
+		era->eras[from_cblock(cblock)] = recovered_era;
 
 		/*
 		 * Make sure the era counter starts higher than the highest
 		 * persisted era.
 		 */
-		if (recovered_era >= atomic64_read(&era->era_counter)) {
-			atomic64_set(&era->era_counter, recovered_era);
+		if (recovered_era >= atomic64_read(&era->current_era)) {
+			atomic64_set(&era->current_era, recovered_era);
 
 			/*
 			 * There are no concurrent accesses, so there's no
 			 * race here.
 			 */
-			if (atomic64_read(&era->era_counter) < ERA_MAX_ERA)
-				atomic64_inc(&era->era_counter);
+			if (atomic64_read(&era->current_era) < ERA_OVERFLOW)
+				atomic64_inc(&era->current_era);
 		}
 	}
 
@@ -365,7 +365,7 @@ static void era_force_mapping(struct dm_cache_policy *p, dm_oblock_t old_oblock,
 	mutex_lock(&era->lock);
 
 	if (!policy_lookup(p->child, old_oblock, &cblock)) {
-		era->cb_to_era[from_cblock(cblock)] = atomic64_read(&era->era_counter);
+		era->eras[from_cblock(cblock)] = atomic64_read(&era->current_era);
 	}
 
 	policy_force_mapping(p->child, old_oblock, new_oblock);
@@ -419,7 +419,7 @@ static int era_set_config_value(struct dm_cache_policy *p, const char *key,
 {
 	struct era_policy *era = to_era_policy(p);
 	struct config_value_handler *vh, value_handlers[] = {
-		{ "increment_era_counter",                  incr_era_counter,  NULL },
+		{ "increment_current_era",                  incr_current_era,  NULL },
 		{ "unmap_blocks_from_later_eras",           cond_unmap_by_era, era_is_gt_value },
 		{ "unmap_blocks_from_this_era_and_later",   cond_unmap_by_era, era_is_gte_value },
 		{ "unmap_blocks_from_this_era_and_earlier", cond_unmap_by_era, era_is_lte_value },
@@ -446,7 +446,7 @@ static int era_emit_config_values(struct dm_cache_policy *p, char *result,
 	struct era_policy *era = to_era_policy(p);
 	ssize_t sz = 0;
 
-	DMEMIT("era_counter %u ", (unsigned) atomic64_read(&era->era_counter));
+	DMEMIT("current_era %u ", (unsigned) atomic64_read(&era->current_era));
 	return policy_emit_config_values(p->child, result + sz, maxlen - sz);
 }
 
@@ -478,10 +478,10 @@ static struct dm_cache_policy *era_create(dm_cblock_t cache_size,
 	era->cache_size = cache_size;
 	mutex_init(&era->lock);
 
-	era->cb_to_era = vzalloc(from_cblock(era->cache_size) *
-				 sizeof(*era->cb_to_era));
-	if (era->cb_to_era) {
-		atomic64_set(&era->era_counter, 0);
+	era->eras = vzalloc(from_cblock(era->cache_size) *
+				 sizeof(*era->eras));
+	if (era->eras) {
+		atomic64_set(&era->current_era, 0);
 		return &era->policy;
 	}
 
