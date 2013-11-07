@@ -286,7 +286,7 @@ static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 	r = policy_map(p->child, oblock, can_block, can_migrate,
 		       discarded_oblock, bio, result);
 	if (r)
-		return r;
+		goto out;
 
 	switch (result->op) {
 	case POLICY_HIT:
@@ -304,8 +304,8 @@ static int era_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 		break;
 	}
 
+out:
 	mutex_unlock(&era->lock);
-
 	return r;
 }
 
