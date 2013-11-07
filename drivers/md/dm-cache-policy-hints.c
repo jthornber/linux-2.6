@@ -646,11 +646,16 @@ static int hints_set_config_value(struct dm_cache_policy *pe,
 	return -EINVAL;
 }
 
+static unsigned hints_count_config_pairs(struct dm_cache_policy *p)
+{
+	return 1;
+}
+
 static int hints_emit_config_values(struct dm_cache_policy *pe, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 
-	DMEMIT("2 hint_size %llu", (long long unsigned) dm_cache_policy_get_hint_size(pe));
+	DMEMIT("hint_size %llu", (long long unsigned) dm_cache_policy_get_hint_size(pe));
 	return 0;
 }
 
@@ -671,6 +676,7 @@ static void init_policy_functions(struct policy *p)
 	p->policy.force_mapping = hints_force_mapping;
 	p->policy.residency = hints_residency;
 	p->policy.tick = NULL;
+	p->policy.count_config_pairs = hints_count_config_pairs;
 	p->policy.emit_config_values = hints_emit_config_values;
 	p->policy.set_config_value = hints_set_config_value;
 }

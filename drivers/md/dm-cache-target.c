@@ -2907,6 +2907,8 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 		if (sz < maxlen) {
+			DMEMIT("%u ", policy_count_config_pairs(cache->policy) * 2);
+
 			r = policy_emit_config_values(cache->policy, result + sz, maxlen - sz);
 			if (r)
 				DMERR("policy_emit_config_values returned %d", r);

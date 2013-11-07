@@ -85,6 +85,11 @@ static inline void policy_tick(struct dm_cache_policy *p)
 		return p->tick(p);
 }
 
+static inline unsigned policy_count_config_pairs(struct dm_cache_policy *p)
+{
+	return p->count_config_pairs ? p->count_config_pairs(p) : 0;
+}
+
 static inline int policy_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;

@@ -420,6 +420,11 @@ static int era_set_config_value(struct dm_cache_policy *p, const char *key,
 	return policy_set_config_value(p->child, key, value);
 }
 
+static unsigned era_count_config_pairs(struct dm_cache_policy *p)
+{
+	return policy_count_config_pairs(p->child) + 1;
+}
+
 static int era_emit_config_values(struct dm_cache_policy *p, char *result,
 				  unsigned maxlen)
 {
@@ -427,6 +432,7 @@ static int era_emit_config_values(struct dm_cache_policy *p, char *result,
 	ssize_t sz = 0;
 
 	smp_rmb();
+
 	DMEMIT("era_counter %u ", era->era_counter);
 	return policy_emit_config_values(p->child, result + sz, maxlen - sz);
 }
@@ -441,6 +447,7 @@ static void init_policy_functions(struct era_policy *era)
 	era->policy.walk_mappings = era_walk_mappings;
 	era->policy.force_mapping = era_force_mapping;
 	era->policy.invalidate_mapping = era_invalidate_mapping;
+	era->policy.count_config_pairs = era_count_config_pairs;
 	era->policy.emit_config_values = era_emit_config_values;
 	era->policy.set_config_value = era_set_config_value;
 }

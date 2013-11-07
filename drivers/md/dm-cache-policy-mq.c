@@ -1230,12 +1230,17 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 	return 0;
 }
 
+static unsigned mq_count_config_pairs(struct dm_cache_policy *p)
+{
+	return 2;
+}
+
 static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	DMEMIT("4 random_threshold %u sequential_threshold %u",
+	DMEMIT("random_threshold %u sequential_threshold %u",
 	       mq->tracker.thresholds[PATTERN_RANDOM],
 	       mq->tracker.thresholds[PATTERN_SEQUENTIAL]);
 
@@ -1258,6 +1263,7 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.invalidate_mapping = mq_invalidate_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
+	mq->policy.count_config_pairs = mq_count_config_pairs;
 	mq->policy.emit_config_values = mq_emit_config_values;
 	mq->policy.set_config_value = mq_set_config_value;
 }

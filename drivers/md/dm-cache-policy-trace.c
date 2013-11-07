@@ -161,6 +161,11 @@ static int trace_set_config_value(struct dm_cache_policy *p,
 	return r;
 }
 
+static unsigned trace_count_config_values(struct dm_cache_policy *p)
+{
+	return policy_count_config_values(p->child, result) + 1;
+}
+
 static int trace_emit_config_values(struct dm_cache_policy *p, char *result,
 				    unsigned maxlen)
 {
@@ -189,6 +194,7 @@ static void init_policy_functions(struct trace_policy *trace)
 	trace->policy.invalidate_mapping = trace_invalidate_mapping;
 	trace->policy.residency = trace_residency;
 	trace->policy.tick = trace_tick;
+	trace->policy.count_config_pairs = trace_count_config_pairs;
 	trace->policy.emit_config_values = trace_emit_config_values;
 	trace->policy.set_config_value = trace_set_config_value;
 }

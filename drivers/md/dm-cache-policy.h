@@ -219,8 +219,14 @@ struct dm_cache_policy {
 	/*
 	 * Configuration.
 	 */
+	unsigned (*count_config_pairs)(struct dm_cache_policy *p);
+
+	/*
+	 * Emits just the config values, no arg count in front.
+	 */
 	int (*emit_config_values)(struct dm_cache_policy *p,
 				  char *result, unsigned maxlen);
+
 	int (*set_config_value)(struct dm_cache_policy *p,
 				const char *key, const char *value);
 

@@ -152,6 +152,11 @@ static int shim_set_config_value(struct dm_cache_policy *p,
 	return policy_set_config_value(p->child, key, value);
 }
 
+static unsigned shim_count_config_pairs(struct dm_cache_policy *p)
+{
+	return policy_count_config_pairs(p->child);
+}
+
 static int shim_emit_config_values(struct dm_cache_policy *p, char *result,
 				   unsigned maxlen)
 {
@@ -173,6 +178,7 @@ void dm_cache_shim_utils_init_shim_policy(struct dm_cache_policy *p)
 	p->invalidate_mapping = shim_invalidate_mapping;
 	p->residency = shim_residency;
 	p->tick = shim_tick;
+	p->count_config_pairs = shim_count_config_pairs;
 	p->emit_config_values = shim_emit_config_values;
 	p->set_config_value = shim_set_config_value;
 }
