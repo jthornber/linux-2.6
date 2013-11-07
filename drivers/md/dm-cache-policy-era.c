@@ -29,6 +29,8 @@
 
 #include <linux/delay.h>
 
+/*----------------------------------------------------------------*/
+
 #define DM_MSG_PREFIX "cache-policy-era"
 
 typedef uint32_t era_t;
@@ -38,7 +40,7 @@ typedef uint32_t era_t;
 struct era_policy {
 	struct dm_cache_policy policy;
 
-	struct mutex lock;	/* FIXME: spinlock? */
+	struct mutex lock;
 
 	dm_cblock_t cache_size;
 
@@ -117,7 +119,6 @@ err:
 	free_invalidate(era);
 	return -ENOMEM;
 }
-
 
 typedef int (*era_match_fn_t)(era_t, era_t);
 
