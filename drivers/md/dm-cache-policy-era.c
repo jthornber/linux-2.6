@@ -122,38 +122,39 @@ err:
 
 typedef int (*era_match_fn_t)(era_t, era_t);
 
-static int incr_current_era(struct era_policy *era, const char *curr_era_str,
-			    era_match_fn_t dummy)
+/*
+ * If the era counter value provided by the user matches the current
+ * counter value while under lock, increment the counter (intention is to
+ * prevent races).  Rollover problems are avoided by locking the counter at
+ * a maximum value.  The application must take appropriate action on this
+ * error to preserve correction, but a properly behaved set of applications
+ * will never trigger it; the era counter is meant to increment less than
+ * once a second and is 32 bits.
+ */
+static int increment_era(struct era_policy *era, const char *old_era_str,
+			 era_match_fn_t dummy)
 {
-	era_t curr_current_era;
-	int r;
+	era_t old_era;
 
-	/*
-	 * If the era counter value provided by the user matches the current
-	 * counter value while under lock, increment the counter (intention
-	 * is to prevent races).  Rollover problems are avoided by locking
-	 * the counter at a maximum value.  The application must take
-	 * appropriate action on this error to preserve correction, but
-	 * a properly behaved set of applications will never trigger it;
-	 * the era counter is meant to increment less than once a second
-	 * and is 32 bits.
-	 */
-
-	if (kstrtou32(curr_era_str, 10, &curr_current_era))
+	if (kstrtou32(old_era_str, 10, &old_era)) {
+		DMERR("couldn't parse old era");
 		return -EINVAL;
-
-	if (atomic64_read(&era->current_era) != curr_current_era)
-		r = -ECANCELED;
-
-	else if (atomic64_read(&era->current_era) >= ERA_OVERFLOW)
-		r = -EOVERFLOW;
-
-	else {
-		atomic64_inc(&era->current_era);
-		r = 0;
 	}
 
-	return r;
+	if (old_era != atomic64_read(&era->current_era)) {
+		DMERR("old era doesn't match, got %u, expected %u",
+		      (unsigned) old_era,
+		      (unsigned) atomic64_read(&era->current_era));
+		return -ECANCELED;
+	}
+
+	if (atomic64_read(&era->current_era) >= ERA_OVERFLOW) {
+		DMERR("era has overflowed");
+		return -EOVERFLOW;
+	}
+
+	atomic64_inc(&era->current_era);
+	return 0;
 }
 
 static void *era_cblock_to_hint(struct shim_walk_map_ctx *ctx,
@@ -410,7 +411,7 @@ static int era_set_config_value(struct dm_cache_policy *p, const char *key,
 {
 	struct era_policy *era = to_era_policy(p);
 	struct config_value_handler *vh, value_handlers[] = {
-		{ "increment_era",                          incr_current_era,  NULL },
+		{ "increment_era",                          increment_era,  NULL },
 		{ "unmap_blocks_from_later_eras",           cond_unmap_by_era, era_is_gt_value },
 		{ "unmap_blocks_from_this_era_and_later",   cond_unmap_by_era, era_is_gte_value },
 		{ "unmap_blocks_from_this_era_and_earlier", cond_unmap_by_era, era_is_lte_value },
