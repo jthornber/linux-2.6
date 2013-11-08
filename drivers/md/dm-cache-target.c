@@ -150,6 +150,25 @@ struct cache_stats {
 	atomic_t discard_count;
 };
 
+/*
+ * Defines a range of cblocks, begin to (end - 1) are in the range.  end is
+ * the one-past-the-end value.
+ */
+struct cblock_range {
+	dm_cblock_t begin;
+	dm_cblock_t end;
+};
+
+struct invalidation_request {
+	struct list_head list;
+	struct cblock_range *cblocks;
+
+	atomic_t complete;
+	int err;
+
+	wait_queue_head_t result_wait;
+};
+
 struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -181,12 +200,6 @@ struct cache {
 	 * Size of the cache device in blocks.
 	 */
 	dm_cblock_t cache_size;
-
-	/*
-	 * Original block begin/end range to invalidate any mapped cache entries for.
-	 */
-	dm_oblock_t begin_invalidate;
-	dm_oblock_t end_invalidate;
 
 	/*
 	 * Fields for converting from sectors to blocks.
@@ -258,6 +271,12 @@ struct cache {
 	struct cache_features features;
 
 	struct cache_stats stats;
+
+	/*
+	 * Invalidation fields.
+	 */
+	spinlock_t invalidation_lock;
+	struct list_head invalidation_requests;
 };
 
 struct per_bio_data {
@@ -1547,6 +1566,42 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 }
 
 /*----------------------------------------------------------------
+ * Invalidations.
+ * Dropping something from the cache *without* writing back.
+ *--------------------------------------------------------------*/
+
+static void process_invalidation_request(struct cache *cache, struct invalidation_request *req)
+{
+	int r = 0;
+	uint64_t begin = from_cblock(req->cblocks->begin);
+	uint64_t end = from_cblock(req->cblocks->end);
+
+	while (begin != end) {
+		policy_remove_cblock(cache->policy, to_cblock(begin));
+		cache->commit_requested = true;
+        }
+
+	req->err = r;
+	atomic_set(&req->complete, 1);
+
+	wake_up(&req->result_wait);
+}
+
+static void process_invalidation_requests(struct cache *cache)
+{
+	struct list_head list;
+	struct invalidation_request *req, *tmp;
+
+	INIT_LIST_HEAD(&list);
+	spin_lock(&cache->invalidation_lock);
+	list_splice_init(&cache->invalidation_requests, &list);
+	spin_unlock(&cache->invalidation_lock);
+
+	list_for_each_entry_safe (req, tmp, &list, list)
+		process_invalidation_request(cache, req);
+}
+
+/*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
 static bool is_quiescing(struct cache *cache)
@@ -1603,80 +1658,6 @@ static void requeue_deferred_io(struct cache *cache)
 		bio_endio(bio, DM_ENDIO_REQUEUE);
 }
 
-
-static void invalidate_mappings(struct cache *cache)
-{
-#if 0
-        dm_oblock_t requested_oblock, begin, end;
-        unsigned long long count = 0;
-
-        smp_rmb();
-        if (!cache->invalidate)
-                return;
-
-        begin = requested_oblock = cache->begin_invalidate;
-        end = to_oblock(from_oblock(cache->end_invalidate));
-
-        while (from_oblock(requested_oblock) <= from_oblock(end)) {
-                int r;
-                dm_cblock_t cblock;
-                dm_oblock_t given_oblock = requested_oblock;
-
-                /*
-                 * Policy either doesn't suport invalidation (yet)
-                 */
-                r = policy_invalidate_mapping(cache->policy, &given_oblock, &cblock);
-                if (r == -EINVAL) {
-                        DMWARN("policy doesn't support invalidation (yet).");
-                        break;
-                }
-
-                /*
-                 * Policy doesn't offer any more blocks to invalidate (e.g. 'era').
-                 */
-                if (r == -ENODATA)
-                        break;
-
-                /*
-                 * Policy can hand back a different oblock than the
-                 * requested one at will (e.g. 'era')!
-                 *
-                 * Check if the given one is within our begin/end range
-                 * and reload the mapping if not, else remove mapping
-                 * from persistent cache metadata and request a commit.
-                 */
-                else if (!r) {
-                        if (from_oblock(given_oblock) < from_oblock(begin) ||
-                            from_oblock(given_oblock) > from_oblock(end)) {
-                                r = policy_load_mapping(cache->policy, given_oblock, cblock, NULL, false);
-                                BUG_ON(r);
-
-                        } else if (dm_cache_remove_mapping(cache->cmd, cblock)) {
-                                DMWARN_LIMIT("invalidation failed; couldn't update on disk metadata");
-                                r = policy_load_mapping(cache->policy, given_oblock, cblock, NULL, false);
-                                BUG_ON(r);
-
-                        } else {
-                                /*
-                                 * FIXME: we are cautious and keep this even though all
-                                 *        blocks _should_ be clean in passthrough mode.
-                                 */
-                                clear_dirty(cache, given_oblock, cblock);
-                                cache->commit_requested = true;
-                                count++; /* FIXME: REMOVEME: */
-                        }
-
-                } else
-                        DMERR("invalid policy_invalidate_mapping return code %d", r);
-
-                requested_oblock = to_oblock(from_oblock(requested_oblock) + 1);
-        }
-
-        cache->invalidate = false;
-        smp_wmb();
-#endif
-}
-
 static int more_work(struct cache *cache)
 {
 	if (is_quiescing(cache))
@@ -1702,7 +1683,7 @@ static void do_worker(struct work_struct *ws)
 			writeback_some_dirty_blocks(cache);
 			process_deferred_writethrough_bios(cache);
 			process_deferred_bios(cache);
-			invalidate_mappings(cache);
+			process_invalidation_requests(cache);
 		}
 
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
@@ -2383,6 +2364,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	atomic_set(&cache->stats.commit_count, 0);
 	atomic_set(&cache->stats.discard_count, 0);
 
+	spin_lock_init(&cache->invalidation_lock);
+
 	*result = cache;
 	return 0;
 
@@ -2938,73 +2921,127 @@ err:
 	DMEMIT("Error");
 }
 
-static int get_origin_block(struct cache *cache, const char *what,
-			    char *arg, unsigned long long *val)
+/*
+ * A cache block range can take two forms:
+ *
+ * i) A single cblock, eg. '3456'
+ * ii) A begin and end cblock with dots between, eg. 123..234
+ */
+static int parse_cblock_range(struct cache *cache, const char *str, struct cblock_range *result)
 {
-	unsigned long long last_block = from_oblock(cache->origin_blocks) - 1;
+	char dummy;
+	uint64_t b, e;
+	int r;
 
-	if (!strcmp(arg, "begin"))
-		*val = 0;
+	/*
+	 * Try and parse form (ii) first.
+	 */
+	r = sscanf(str, "%llu..%llu%c", &b, &e, &dummy);
+	if (r < 0)
+		return r;
 
-	else if (!strcmp(arg, "end"))
-		*val = last_block;
+	if (r == 2) {
+		result->begin = to_cblock(b);
+		result->end = to_cblock(e);
+		return 0;
+	}
 
-	else if (kstrtoull(arg, 10, val)) {
-		DMERR("%s origin block invalid", what);
+	/*
+	 * That didn't work, try form (i).
+	 */
+	r = sscanf(str, "%llu%c", &b, &dummy);
+	if (r < 0)
+		return r;
+
+	if (r == 1) {
+		result->begin = to_cblock(b);
+		result->end = to_cblock(from_cblock(result->begin) + 1u);
+		return 0;
+	}
+
+	DMERR("invalid cblock range '%s'", str);
+	return -EINVAL;
+}
+
+static int validate_cblock_range(struct cache *cache, struct cblock_range *range)
+{
+	uint64_t b = from_cblock(range->begin);
+	uint64_t e = from_cblock(range->end);
+	uint64_t n = from_cblock(cache->cache_size);
+
+	if (b >= n) {
+		DMERR("begin cblock out of range: %llu >= %llu", b, n);
 		return -EINVAL;
+	}
 
-	} else if (*val > last_block) {
-		*val = last_block;
-		DMERR("%s origin block adjusted to EOD=%llu", what, *val);
+	if (e > n) {
+		DMERR("end cblock out of range: %llu > %llu", e, n);
+		return -EINVAL;
+	}
+
+	if (b >= e) {
+		DMERR("invalid cblock range: %llu >= %llu", b, e);
+		return -EINVAL;
 	}
 
 	return 0;
 }
 
-static int set_invalidate_mappings(struct cache *cache, char **argv)
+static int request_invalidation(struct cache *cache, struct cblock_range *range)
 {
-	unsigned long long begin, end;
+	struct invalidation_request req;
 
-	if (strcasecmp(argv[0], "invalidate_mappings"))
-		return -EINVAL;
+	INIT_LIST_HEAD(&req.list);
+	req.cblocks = range;
+	atomic_set(&req.complete, 0);
+	req.err = 0;
+	init_waitqueue_head(&req.result_wait);
 
-	if (!passthrough_mode(&cache->features)) {
-		DMERR("cache has to be in passthrough mode for invalidation!");
-		return -EPERM;
-	}
-
-	if (cache->invalidate) {
-		DMERR("cache is processing invalidation");
-		return -EPERM;
-	}
-
-	if (get_origin_block(cache, "begin", argv[1], &begin) ||
-	    get_origin_block(cache, "end", argv[2], &end))
-		return -EINVAL;
-
-	if (begin > end) {
-		DMERR("begin origin block > end origin block");
-		return -EINVAL;
-	}
-
-	/*
-	 * Pass begin and end origin blocks to the worker and wake it.
-	 */
-	cache->begin_invalidate = to_oblock(begin);
-	cache->end_invalidate = to_oblock(end);
-	cache->invalidate = true;
-	smp_wmb();
-
+	spin_lock(&cache->invalidation_lock);
+	list_add(&req.list, &cache->invalidation_requests);
+	spin_unlock(&cache->invalidation_lock);
 	wake_worker(cache);
 
-	return 0;
+	wait_event(req.result_wait, atomic_read(&req.complete));
+	return req.err;
+}
+
+static int process_invalidate_cblocks_message(struct cache *cache, unsigned count, const char **cblock_ranges)
+{
+	int r;
+	unsigned i;
+	struct cblock_range range;
+
+	if (!passthrough_mode(&cache->features)) {
+		DMERR("cache has to be in passthrough mode for invalidation");
+		return -EPERM;
+	}
+
+	for (i = 0; i < count; i++) {
+		r = parse_cblock_range(cache, cblock_ranges[i], &range);
+		if (r)
+			break;
+
+		r = validate_cblock_range(cache, &range);
+		if (r)
+			break;
+
+		/*
+		 * Pass begin and end origin blocks to the worker and wake it.
+		 */
+		r = request_invalidation(cache, &range);
+		if (r)
+			break;
+	}
+
+	return r;
 }
 
 /*
  * Supports
  *	"<key> <value>"
  * and
- *     "invalidate_mappings <begin_origin_block> <end_origin_block>".
+ *     "invalidate_cblocks [(<begin>)|(<begin>..<end>)]*
  *
  * The key migration_threshold is supported by the cache target core.
  */
@@ -3012,16 +3049,16 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
 	struct cache *cache = ti->private;
 
-	switch (argc) {
-	case 2:
-		return set_config_value(cache, argv[0], argv[1]);
-
-	case 3:
-		return set_invalidate_mappings(cache, argv);
-
-	default:
+	if (!argc)
 		return -EINVAL;
-	}
+
+	if (!strcmp(argv[0], "invalidate_cblocks"))
+		process_invalidate_cblocks_message(cache, argc - 1, (const char **) argv + 1);
+
+	if (argc != 2)
+		return -EINVAL;
+
+	return set_config_value(cache, argv[0], argv[1]);
 }
 
 static int cache_iterate_devices(struct dm_target *ti,

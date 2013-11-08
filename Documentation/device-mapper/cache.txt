@@ -231,6 +231,16 @@ The message format is:
 E.g.
    dmsetup message my_cache 0 sequential_threshold 1024
 
+
+Invalidation is removing an entry from the cache without writing it
+back.  Cache blocks can be invalidated via the invalidate_cblocks
+message, which takes an arbitrary number of cblock ranges.
+
+   invalidate_cblocks [<cblock>|<cblock begin>..<cblock end>]*
+
+eg.
+   dmsetup message my_cache 0 invalidate_cblocks 2345 3456..4567 5678..6789
+
 Examples
 ========
 
