@@ -157,6 +157,7 @@ struct dm_cache_policy {
 	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
+	void (*remove_cblock)(struct dm_cache_policy *p, dm_cblock_t cblock);
 
 	/*
 	 * Provide a dirty block to be written back by the core target.
