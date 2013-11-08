@@ -27,14 +27,16 @@ static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, d
 	return p->lookup(p, oblock, cblock);
 }
 
-static inline int policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	return p->set_dirty ? p->set_dirty(p, oblock) : -EINVAL;
+	if (p->set_dirty)
+		p->set_dirty(p, oblock);
 }
 
-static inline int policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	return p->clear_dirty ? p->clear_dirty(p, oblock) : -EINVAL;
+	if (p->clear_dirty)
+		p->clear_dirty(p, oblock);
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p,
@@ -66,12 +68,6 @@ static inline void policy_force_mapping(struct dm_cache_policy *p,
 					dm_oblock_t current_oblock, dm_oblock_t new_oblock)
 {
 	return p->force_mapping(p, current_oblock, new_oblock);
-}
-
-static inline int policy_invalidate_mapping(struct dm_cache_policy *p,
-					    dm_oblock_t *oblock, dm_cblock_t *cblock)
-{
-	return p->invalidate_mapping ? p->invalidate_mapping(p, oblock, cblock) : -EINVAL;
 }
 
 static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)

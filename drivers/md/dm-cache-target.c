@@ -1606,6 +1606,7 @@ static void requeue_deferred_io(struct cache *cache)
 
 static void invalidate_mappings(struct cache *cache)
 {
+#if 0
         dm_oblock_t requested_oblock, begin, end;
         unsigned long long count = 0;
 
@@ -1673,6 +1674,7 @@ static void invalidate_mappings(struct cache *cache)
 
         cache->invalidate = false;
         smp_wmb();
+#endif
 }
 
 static int more_work(struct cache *cache)

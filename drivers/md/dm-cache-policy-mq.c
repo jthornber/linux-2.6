@@ -992,38 +992,34 @@ static int mq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t 
 	return r;
 }
 
-// FIXME: can __mq_set_clear_dirty block?
-static int __mq_set_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock, bool set)
+static void __mq_set_clear_dirty(struct mq_policy *mq, dm_oblock_t oblock, bool set)
 {
-	int r = 0;
-	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
 
-	mutex_lock(&mq->lock);
 	e = hash_lookup(mq, oblock);
-	if (!e) {
-		r = -ENOENT;
-		DMWARN("__mq_set_clear_dirty called for a block that isn't in the cache");
-	} else {
-		BUG_ON(!e->in_cache);
+	BUG_ON(!e || !e->in_cache);
 
-		del(mq, e);
-		e->dirty = set;
-		push(mq, e);
-	}
+	del(mq, e);
+	e->dirty = set;
+	push(mq, e);
+}
+
+static void mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+{
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	__mq_set_clear_dirty(mq, oblock, true);
 	mutex_unlock(&mq->lock);
-
-	return r;
 }
 
-static int mq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static void mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	return __mq_set_clear_dirty(p, oblock, true);
-}
+	struct mq_policy *mq = to_mq_policy(p);
 
-static int mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
-{
-	return __mq_set_clear_dirty(p, oblock, false);
+	mutex_lock(&mq->lock);
+	__mq_set_clear_dirty(mq, oblock, false);
+	mutex_unlock(&mq->lock);
 }
 
 static int mq_load_mapping(struct dm_cache_policy *p,
@@ -1260,7 +1256,6 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.remove_mapping = mq_remove_mapping;
 	mq->policy.writeback_work = mq_writeback_work;
 	mq->policy.force_mapping = mq_force_mapping;
-	mq->policy.invalidate_mapping = mq_invalidate_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
 	mq->policy.count_config_pairs = mq_count_config_pairs;

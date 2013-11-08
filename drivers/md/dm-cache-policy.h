@@ -137,22 +137,8 @@ struct dm_cache_policy {
 	 */
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
 
-	/*
-	 * set/clear a blocks dirty state.
-	 *
-	 * oblock is the block we want to change state for.  Must not block.
-	 *
-	 * Returns:
-	 *
-	 * 0	   if block is in cache _and_ set/clear respectively succeded
-	 *
-	 * -EINVAL if block is in cache _but_ block was already set to dirty
-	 *	   on a set call / clean on a clean call
-	 *
-	 * -ENOENT if block is not in cache
-	 */
-	int (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
-	int (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a
@@ -171,25 +157,6 @@ struct dm_cache_policy {
 	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
-
-	/*
-	 * Invalidate mapping for an origin block.
-	 *
-	 * Returns:
-	 *
-	 * 0 and @cblock,@oblock: if mapped, the policy returns the cache block
-	 *			  and optionally changes the original block (e.g. era)
-	 *
-	 * -EINVAL: invalidation not supported
-	 *
-	 * -ENOENT: no entry for @oblock in the cache
-	 *
-	 * -ENODATA: all possible invalidation requests processed
-	 *
-	 * May return a _different_ oblock than the requested one
-	 * to allow the policy to rule which block to invalidate (e.g. era).
-	 */
-	int (*invalidate_mapping)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
 
 	/*
 	 * Provide a dirty block to be written back by the core target.
@@ -234,24 +201,9 @@ struct dm_cache_policy {
 	 * Book keeping ptr for the policy register, not for general use.
 	 */
 	void *private;
-
-	/*
-	 * Support for stackable policies. A policy stack consists of 0 or more
-	 * "non-terminal" policies (which can intercept requests to provide
-	 * additional functionality, but ultimately hand them down the stack)
-	 * followed by one "terminal" policy which actually runs a caching
-	 * algorithm.  This is the pointer to the "next" policy in a
-	 * non-terminal policy.  It will always be NULL in a terminal policy.
-	 */
-	struct dm_cache_policy *child;
 };
 
 /*----------------------------------------------------------------*/
-
-/*
- * Indicates that a policy is only a shim layer in a policy stack.
- */
-#define	DM_CACHE_POLICY_SHIM	 (1 << 0)
 
 /*
  * We maintain a little register of the different policy types.
@@ -281,8 +233,6 @@ struct dm_cache_policy_type {
 	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
 					  sector_t origin_size,
 					  sector_t block_size);
-
-	unsigned long features;
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);
