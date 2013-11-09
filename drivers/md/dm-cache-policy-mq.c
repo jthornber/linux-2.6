@@ -297,15 +297,8 @@ static struct entry *alloc_particular_entry(struct entry_pool *ep, dm_cblock_t c
 	return e;
 }
 
-// FIXME: remove once initial testing has been done.
-static void check_entry(struct entry_pool *ep, struct entry *e)
-{
-	BUG_ON(e < ep->entries || e > ep->entries_end);
-}
-
 static void free_entry(struct entry_pool *ep, struct entry *e)
 {
-	check_entry(ep, e);
 	BUG_ON(!ep->nr_allocated);
 	ep->nr_allocated--;
 	list_add(&e->list, &ep->free);
@@ -316,7 +309,6 @@ static bool epool_empty(struct entry_pool *ep)
 	return list_empty(&ep->free);
 }
 
-// FIXME: this shouldn't be needed
 static bool in_pool(struct entry_pool *ep, struct entry *e)
 {
 	return e > ep->entries && e < ep->entries_end;
@@ -324,7 +316,6 @@ static bool in_pool(struct entry_pool *ep, struct entry *e)
 
 static dm_cblock_t infer_cblock(struct entry_pool *ep, struct entry *e)
 {
-	check_entry(ep, e);
 	return to_cblock(e - ep->entries);
 }
 
