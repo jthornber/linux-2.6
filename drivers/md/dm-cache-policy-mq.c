@@ -311,7 +311,7 @@ static void free_entry(struct entry_pool *ep, struct entry *e)
 static struct entry *epool_find(struct entry_pool *ep, dm_cblock_t cblock)
 {
 	struct entry *e = ep->entries + from_cblock(cblock);
-	return e->hlist.next ? e : NULL;
+	return e->hlist.pprev ? e : NULL;
 }
 
 static bool epool_empty(struct entry_pool *ep)
@@ -1039,23 +1039,29 @@ static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 	BUG_ON(r);
 }
 
-static void __remove_cblock(struct mq_policy *mq, dm_cblock_t cblock)
+static int __remove_cblock(struct mq_policy *mq, dm_cblock_t cblock)
 {
 	struct entry *e = epool_find(&mq->cache_pool, cblock);
 
-	if (e) {
-		del(mq, e);
-		free_entry(&mq->cache_pool, e);
-	}
+	if (!e)
+		return -ENODATA;
+
+	del(mq, e);
+	free_entry(&mq->cache_pool, e);
+
+	return 0;
 }
 
-static void mq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
+static int mq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
+	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	__remove_cblock(mq, cblock);
+	r = __remove_cblock(mq, cblock);
 	mutex_unlock(&mq->lock);
+
+	return r;
 }
 
 static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,

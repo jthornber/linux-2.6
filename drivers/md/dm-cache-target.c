@@ -1577,9 +1577,25 @@ static void process_invalidation_request(struct cache *cache, struct invalidatio
 	uint64_t end = from_cblock(req->cblocks->end);
 
 	while (begin != end) {
-		policy_remove_cblock(cache->policy, to_cblock(begin));
-		cache->commit_requested = true;
+		r = policy_remove_cblock(cache->policy, to_cblock(begin));
+		if (!r) {
+			r = dm_cache_remove_mapping(cache->cmd, to_cblock(begin));
+			if (r)
+				break;
+
+		} else if (r == -ENODATA) {
+			/* harmless, already unmapped */
+			r = 0;
+
+		} else {
+			DMERR("policy_remove_cblock failed");
+			break;
+		}
+
+		begin++;
         }
+
+	cache->commit_requested = true;
 
 	req->err = r;
 	atomic_set(&req->complete, 1);
@@ -3009,7 +3025,7 @@ static int request_invalidation(struct cache *cache, struct cblock_range *range)
 
 static int process_invalidate_cblocks_message(struct cache *cache, unsigned count, const char **cblock_ranges)
 {
-	int r;
+	int r = 0;
 	unsigned i;
 	struct cblock_range range;
 
@@ -3054,7 +3070,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 
 	if (!strcmp(argv[0], "invalidate_cblocks"))
-		process_invalidate_cblocks_message(cache, argc - 1, (const char **) argv + 1);
+		return process_invalidate_cblocks_message(cache, argc - 1, (const char **) argv + 1);
 
 	if (argc != 2)
 		return -EINVAL;

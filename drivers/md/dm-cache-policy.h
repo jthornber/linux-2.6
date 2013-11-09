@@ -161,10 +161,10 @@ struct dm_cache_policy {
 	/*
 	 * This is called via the invalidate_cblocks message.  It is
 	 * possible the particular cblock has already been removed due to a
-	 * write io in passthrough mode.  The policies need to handle this
-	 * gracefully.
+	 * write io in passthrough mode.  In which case this should return
+	 * -ENODATA.
 	 */
-	void (*remove_cblock)(struct dm_cache_policy *p, dm_cblock_t cblock);
+	int (*remove_cblock)(struct dm_cache_policy *p, dm_cblock_t cblock);
 
 	/*
 	 * Provide a dirty block to be written back by the core target.
