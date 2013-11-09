@@ -2365,6 +2365,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	atomic_set(&cache->stats.discard_count, 0);
 
 	spin_lock_init(&cache->invalidation_lock);
+	INIT_LIST_HEAD(&cache->invalidation_requests);
 
 	*result = cache;
 	return 0;
