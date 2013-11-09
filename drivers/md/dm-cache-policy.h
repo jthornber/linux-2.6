@@ -157,6 +157,13 @@ struct dm_cache_policy {
 	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
+
+	/*
+	 * This is called via the invalidate_cblocks message.  It is
+	 * possible the particular cblock has already been removed due to a
+	 * write io in passthrough mode.  The policies need to handle this
+	 * gracefully.
+	 */
 	void (*remove_cblock)(struct dm_cache_policy *p, dm_cblock_t cblock);
 
 	/*
