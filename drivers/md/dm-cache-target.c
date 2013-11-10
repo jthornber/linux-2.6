@@ -903,7 +903,6 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 			cleanup_migration(mg);
 			return;
 		}
-
 	} else {
 		if (dm_cache_insert_mapping(cache->cmd, mg->cblock, mg->new_oblock)) {
 			DMWARN_LIMIT("promotion failed; couldn't update on disk metadata");
@@ -2632,11 +2631,9 @@ static int write_discard_bitset(struct cache *cache)
 }
 
 static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock,
-		     void *hint)
+		     uint32_t hint)
 {
 	struct cache *cache = context;
-
-	__dm_bless_for_disk(hint);
 	return dm_cache_save_hint(cache->cmd, cblock, hint);
 }
 
@@ -2704,7 +2701,7 @@ static void cache_postsuspend(struct dm_target *ti)
 }
 
 static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
-			bool dirty, void *hint, bool hint_valid)
+			bool dirty, uint32_t hint, bool hint_valid)
 {
 	int r;
 	struct cache *cache = context;
@@ -2909,8 +2906,6 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 		if (sz < maxlen) {
-			DMEMIT("%u ", policy_count_config_pairs(cache->policy) * 2);
-
 			r = policy_emit_config_values(cache->policy, result + sz, maxlen - sz);
 			if (r)
 				DMERR("policy_emit_config_values returned %d", r);
@@ -2944,7 +2939,8 @@ err:
  * i) A single cblock, eg. '3456'
  * ii) A begin and end cblock with dots between, eg. 123..234
  */
-static int parse_cblock_range(struct cache *cache, const char *str, struct cblock_range *result)
+static int parse_cblock_range(struct cache *cache, const char *str,
+			      struct cblock_range *result)
 {
 	char dummy;
 	uint64_t b, e;
@@ -3023,7 +3019,8 @@ static int request_invalidation(struct cache *cache, struct cblock_range *range)
 	return req.err;
 }
 
-static int process_invalidate_cblocks_message(struct cache *cache, unsigned count, const char **cblock_ranges)
+static int process_invalidate_cblocks_message(struct cache *cache, unsigned count,
+					      const char **cblock_ranges)
 {
 	int r = 0;
 	unsigned i;

@@ -6,7 +6,6 @@
 
 #include "dm-cache-policy.h"
 #include "dm.h"
-#include "persistent-data/dm-btree.h"
 
 #include <linux/hash.h>
 #include <linux/module.h>
@@ -960,7 +959,7 @@ static void mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 
 static int mq_load_mapping(struct dm_cache_policy *p,
 			   dm_oblock_t oblock, dm_cblock_t cblock,
-			   void *hint, bool hint_valid)
+			   uint32_t hint, bool hint_valid)
 {
 	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
@@ -968,7 +967,7 @@ static int mq_load_mapping(struct dm_cache_policy *p,
 	e = alloc_particular_entry(&mq->cache_pool, cblock);
 	e->oblock = oblock;
 	e->dirty = false;	/* this gets corrected in a minute */
-	e->hit_count = hint_valid ? le32_to_cpu(*((__le32 *) hint)) : 1;
+	e->hit_count = hint_valid ? hint : 1;
 	e->generation = mq->generation;
 	push(mq, e);
 
@@ -984,10 +983,8 @@ static int mq_save_hints(struct mq_policy *mq, struct queue *q,
 
 	for (level = 0; level < NR_QUEUE_LEVELS; level++)
 		list_for_each_entry(e, q->qs + level, list) {
-			__le32 value = cpu_to_le32(e->hit_count);
-			__dm_bless_for_disk(&value);
-
-			r = fn(context, infer_cblock(&mq->cache_pool, e), e->oblock, &value);
+			r = fn(context, infer_cblock(&mq->cache_pool, e),
+			       e->oblock, e->hit_count);
 			if (r)
 				return r;
 		}
@@ -1160,17 +1157,12 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 	return 0;
 }
 
-static unsigned mq_count_config_pairs(struct dm_cache_policy *p)
-{
-	return 2;
-}
-
 static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	DMEMIT("random_threshold %u sequential_threshold %u",
+	DMEMIT("4 random_threshold %u sequential_threshold %u",
 	       mq->tracker.thresholds[PATTERN_RANDOM],
 	       mq->tracker.thresholds[PATTERN_SEQUENTIAL]);
 
@@ -1193,7 +1185,6 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.force_mapping = mq_force_mapping;
 	mq->policy.residency = mq_residency;
 	mq->policy.tick = mq_tick;
-	mq->policy.count_config_pairs = mq_count_config_pairs;
 	mq->policy.emit_config_values = mq_emit_config_values;
 	mq->policy.set_config_value = mq_set_config_value;
 }
@@ -1257,7 +1248,7 @@ bad_pre_cache_init:
 
 static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
@@ -1265,7 +1256,7 @@ static struct dm_cache_policy_type mq_policy_type = {
 
 static struct dm_cache_policy_type default_policy_type = {
 	.name = "default",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create
