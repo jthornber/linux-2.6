@@ -321,7 +321,7 @@ static bool epool_empty(struct entry_pool *ep)
 
 static bool in_pool(struct entry_pool *ep, struct entry *e)
 {
-	return e > ep->entries && e < ep->entries_end;
+	return e >= ep->entries && e < ep->entries_end;
 }
 
 static dm_cblock_t infer_cblock(struct entry_pool *ep, struct entry *e)
