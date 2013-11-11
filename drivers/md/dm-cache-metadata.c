@@ -713,6 +713,7 @@ static int blocks_are_unmapped_or_clean(struct dm_cache_metadata *cmd,
 					bool *result)
 {
 	int r;
+	*result = true;
 
 	while (begin != end) {
 		r = block_unmapped_or_clean(cmd, begin, result);
