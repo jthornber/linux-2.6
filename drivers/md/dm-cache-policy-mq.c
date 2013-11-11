@@ -1009,31 +1009,24 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	return r;
 }
 
-static int __remove_mapping(struct mq_policy *mq,
-			    dm_oblock_t oblock, dm_cblock_t *cblock)
+static void __remove_mapping(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
 {
 	struct entry *e;
 
 	e = hash_lookup(mq, oblock);
-
-	if (!e || !in_cache(mq, e))
-		return -ENOENT;
+	BUG_ON(!e || !in_cache(mq, e));
 
 	del(mq, e);
 	free_entry(&mq->cache_pool, e);
-	return 0;
 }
 
 static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 {
-	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	r = __remove_mapping(mq, oblock, NULL);
+	__remove_mapping(mq, oblock, NULL);
 	mutex_unlock(&mq->lock);
-
-	BUG_ON(r);
 }
 
 static int __remove_cblock(struct mq_policy *mq, dm_cblock_t cblock)

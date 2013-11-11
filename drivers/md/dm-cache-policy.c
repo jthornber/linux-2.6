@@ -53,18 +53,22 @@ static struct dm_cache_policy_type *get_policy_once(const char *name)
 
 static struct dm_cache_policy_type *get_policy(const char *name)
 {
-        struct dm_cache_policy_type *t;
+	struct dm_cache_policy_type *t;
 
-        t = get_policy_once(name);
-        if (IS_ERR(t))
+	t = get_policy_once(name);
+	if (IS_ERR(t))
+		return NULL;
+
+	if (t)
 		return t;
 
-        if (t)
-                return t;
+	request_module("dm-cache-%s", name);
 
-        request_module("dm-cache-%s", name);
+	t = get_policy_once(name);
+	if (IS_ERR(t))
+		return NULL;
 
-        return get_policy_once(name);
+	return t;
 }
 
 static void put_policy(struct dm_cache_policy_type *t)
@@ -113,7 +117,7 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 	struct dm_cache_policy_type *type;
 
 	type = get_policy(name);
-	if (IS_ERR(type)) {
+	if (!type) {
 		DMWARN("unknown policy type");
 		return ERR_PTR(-EINVAL);
 	}
