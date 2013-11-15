@@ -550,7 +550,7 @@ static int crypt_iv_lmk_one(struct crypt_config *cc, u8 *iv,
 		char ctx[crypto_shash_descsize(lmk->hash_tfm)];
 	} sdesc;
 	struct md5_state md5state;
-	u32 buf[4];
+	__le32 buf[4];
 	int i, r;
 
 	sdesc.desc.tfm = lmk->hash_tfm;
@@ -706,18 +706,21 @@ static int crypt_iv_tcw_whitening(struct crypt_config *cc,
 
 	/* xor whitening with sector number */
 	memcpy(buf, tcw->whitening, TCW_WHITENING_SIZE);
-	crypto_xor(buf, (u8*)&sector, 8);
-	crypto_xor(&buf[8], (u8*)&sector, 8);
+	crypto_xor(buf, (u8 *)&sector, 8);
+	crypto_xor(&buf[8], (u8 *)&sector, 8);
 
 	/* calculate crc32 for every 32bit part and xor it */
 	sdesc.desc.tfm = tcw->crc32_tfm;
 	sdesc.desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 	for (i = 0; i < 4; i++) {
-		if ((r = crypto_shash_init(&sdesc.desc)))
+		r = crypto_shash_init(&sdesc.desc);
+		if (r)
 			goto out;
-		if ((r = crypto_shash_update(&sdesc.desc, &buf[i * 4], 4)))
+		r = crypto_shash_update(&sdesc.desc, &buf[i * 4], 4);
+		if (r)
 			goto out;
-		if ((r = crypto_shash_final(&sdesc.desc, &buf[i * 4])))
+		r = crypto_shash_final(&sdesc.desc, &buf[i * 4]);
+		if (r)
 			goto out;
 	}
 	crypto_xor(&buf[0], &buf[12], 4);
@@ -748,9 +751,9 @@ static int crypt_iv_tcw_gen(struct crypt_config *cc, u8 *iv,
 
 	/* Calculate IV */
 	memcpy(iv, tcw->iv_seed, cc->iv_size);
-	crypto_xor(iv, (u8*)&sector, 8);
+	crypto_xor(iv, (u8 *)&sector, 8);
 	if (cc->iv_size > 8)
-		crypto_xor(&iv[8], (u8*)&sector, cc->iv_size - 8);
+		crypto_xor(&iv[8], (u8 *)&sector, cc->iv_size - 8);
 
 	return r;
 }
@@ -1663,9 +1666,11 @@ static int crypt_ctr_cipher(struct dm_target *ti,
 		cc->iv_gen_ops = &crypt_iv_null_ops;
 	else if (strcmp(ivmode, "lmk") == 0) {
 		cc->iv_gen_ops = &crypt_iv_lmk_ops;
-		/* Version 2 and 3 is recognised according
+		/*
+		 * Version 2 and 3 is recognised according
 		 * to length of provided multi-key string.
 		 * If present (version 3), last key is used as IV seed.
+		 * All keys (including IV seed) are always the same size.
 		 */
 		if (cc->key_size % cc->key_parts) {
 			cc->key_parts++;

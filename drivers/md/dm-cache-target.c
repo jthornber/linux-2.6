@@ -2937,7 +2937,7 @@ err:
  * A cache block range can take two forms:
  *
  * i) A single cblock, eg. '3456'
- * ii) A begin and end cblock with dots between, eg. 123..234
+ * ii) A begin and end cblock with dots between, eg. 123-234
  */
 static int parse_cblock_range(struct cache *cache, const char *str,
 			      struct cblock_range *result)
@@ -2949,7 +2949,7 @@ static int parse_cblock_range(struct cache *cache, const char *str,
 	/*
 	 * Try and parse form (ii) first.
 	 */
-	r = sscanf(str, "%llu..%llu%c", &b, &e, &dummy);
+	r = sscanf(str, "%llu-%llu%c", &b, &e, &dummy);
 	if (r < 0)
 		return r;
 
@@ -3055,7 +3055,7 @@ static int process_invalidate_cblocks_message(struct cache *cache, unsigned coun
  * Supports
  *	"<key> <value>"
  * and
- *     "invalidate_cblocks [(<begin>)|(<begin>..<end>)]*
+ *     "invalidate_cblocks [(<begin>)|(<begin>-<end>)]*
  *
  * The key migration_threshold is supported by the cache target core.
  */
@@ -3066,7 +3066,7 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 	if (!argc)
 		return -EINVAL;
 
-	if (!strcmp(argv[0], "invalidate_cblocks"))
+	if (!strcasecmp(argv[0], "invalidate_cblocks"))
 		return process_invalidate_cblocks_message(cache, argc - 1, (const char **) argv + 1);
 
 	if (argc != 2)

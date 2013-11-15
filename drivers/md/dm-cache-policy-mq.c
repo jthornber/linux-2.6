@@ -309,7 +309,7 @@ static void free_entry(struct entry_pool *ep, struct entry *e)
 static struct entry *epool_find(struct entry_pool *ep, dm_cblock_t cblock)
 {
 	struct entry *e = ep->entries + from_cblock(cblock);
-	return e->hlist.pprev ? e : NULL;
+	return !hlist_unhashed(&e->hlist) ? e : NULL;
 }
 
 static bool epool_empty(struct entry_pool *ep)
@@ -729,18 +729,15 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 	int r = 0;
 	bool updated = updated_this_tick(mq, e);
 
+	requeue_and_update_tick(mq, e);
+
 	if ((!discarded_oblock && updated) ||
-	    !should_promote(mq, e, discarded_oblock, data_dir)) {
-		requeue_and_update_tick(mq, e);
+	    !should_promote(mq, e, discarded_oblock, data_dir))
 		result->op = POLICY_MISS;
-
-	} else if (!can_migrate)
+	else if (!can_migrate)
 		r = -EWOULDBLOCK;
-
-	else {
-		requeue_and_update_tick(mq, e);
+	else
 		r = pre_cache_to_cache(mq, e, result);
-	}
 
 	return r;
 }
@@ -1011,7 +1008,7 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	return r;
 }
 
-static void __remove_mapping(struct mq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
+static void __remove_mapping(struct mq_policy *mq, dm_oblock_t oblock)
 {
 	struct entry *e;
 
@@ -1027,7 +1024,7 @@ static void mq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	__remove_mapping(mq, oblock, NULL);
+	__remove_mapping(mq, oblock);
 	mutex_unlock(&mq->lock);
 }
 
