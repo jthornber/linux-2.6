@@ -108,7 +108,7 @@ static struct bloom_filter *filter_create(struct dm_disk_bitset *info, dm_block_
 static struct bloom_filter *filter_recreate(struct bloom_filter *f)
 {
 	memset(f->bits, 0, bitset_size(f->nr_bits));
-	return setup_on_disk_bitset(info, nr_bits, &f->root);
+	return setup_on_disk_bitset(info, f->nr_bits, &f->root);
 }
 
 #define MULTIPLIER 0x9e37fffffffc0001UL
@@ -472,16 +472,17 @@ static void metadata_close(struct era_metadata *md)
 	kfree(md);
 }
 
-static int metadata_resize(struct era_metadata *md, dm_block_t new_size)
+static int metadata_resize(struct era_metadata *md, void *arg)
 {
-	struct bloom_filter *new_filter = filter_create(&md->bitset_info, new_size);
+	dm_block_t *new_size = arg;
+	struct bloom_filter *new_filter = filter_create(&md->bitset_info, *new_size);
 
 	if (!new_filter)
 		return -ENOMEM;
 
-	md->nr_blocks = new_size;
+	md->nr_blocks = *new_size;
 	filter_destroy(swap_filter(md, new_filter));
-	atomic_inc(&md->current_era);
+	atomic64_inc(&md->current_era);
 
 	// FIXME: archive the old root, and record the new one, commit
 	// metadata, explain why it's safe to crash here.
@@ -594,7 +595,9 @@ struct era {
 struct rpc {
 	struct list_head list;
 
-	int (*fn)(struct era_metadata *);
+	int (*fn0)(struct era_metadata *);
+	int (*fn1)(struct era_metadata *, void *);
+	void *arg;
 	int result;
 
 	wait_queue_head_t wait;
@@ -682,7 +685,7 @@ static void process_rpc_calls(struct era *era)
 	spin_unlock(&era->rpc_lock);
 
 	list_for_each_entry_safe (rpc, tmp, &calls, list) {
-		rpc->result = rpc->fn(era->md);
+		rpc->result = rpc->fn0 ? rpc->fn0(era->md) : rpc->fn1(era->md, rpc->arg);
 		need_commit = true;
 	}
 
@@ -718,22 +721,48 @@ static void defer_bio(struct era *era, struct bio *bio)
 /*
  * Make an rpc call to the worker to change the metadata.
  */
-static int in_worker(struct era *era, int (*fn)(struct era_metadata *))
+static int perform_rpc(struct era *era, struct rpc *rpc)
 {
-	struct rpc rpc;
-	rpc.fn = fn;
-	rpc.result = 0;
-	init_waitqueue_head(&rpc.wait);
-	atomic_set(&rpc.complete, 0);
+	rpc->result = 0;
+	init_waitqueue_head(&rpc->wait);
+	atomic_set(&rpc->complete, 0);
 
 	spin_lock(&era->rpc_lock);
-	list_add(&rpc.list, &era->rpc_calls);
+	list_add(&rpc->list, &era->rpc_calls);
 	spin_unlock(&era->rpc_lock);
 
 	wake_worker(era);
-	wait_event(rpc.wait, atomic_read(&rpc.complete));
+	wait_event(rpc->wait, atomic_read(&rpc->complete));
 
-	return rpc.result;
+	return rpc->result;
+}
+
+static int in_worker0(struct era *era, int (*fn)(struct era_metadata *))
+{
+	struct rpc rpc;
+	rpc.fn0 = fn;
+	rpc.fn1 = NULL;
+
+	return perform_rpc(era, &rpc);
+}
+
+static int in_worker1(struct era *era, int (*fn)(struct era_metadata *, void *), void *arg)
+{
+	struct rpc rpc;
+	rpc.fn0 = NULL;
+	rpc.fn1 = fn;
+	rpc.arg = arg;
+
+	return perform_rpc(era, &rpc);
+}
+
+/*
+ * This assumes no more wake-worker calls are going to be made (a safe
+ * assumption if we're in post suspend).
+ */
+static void stop_worker(struct era *era)
+{
+	flush_workqueue(era->wq);
 }
 
 /*----------------------------------------------------------------
@@ -892,18 +921,28 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 
 static void era_postsuspend(struct dm_target *ti)
 {
-	// FIXME: finish
+	struct era *era = ti->private;
+	stop_worker(era);
+}
+
+static dm_block_t calc_nr_blocks(struct era *era)
+{
+	return dm_sector_div_up(era->ti->len, era->block_size);
 }
 
 static int era_preresume(struct dm_target *ti)
 {
-	// FIXME: finish
-	return -1;
-}
+	struct era *era = ti->private;
+	dm_block_t new_size = calc_nr_blocks(era);
 
-static void era_resume(struct dm_target *ti)
-{
-	// FIXME: finish
+	if (era->nr_blocks != new_size) {
+		int r = in_worker1(era, metadata_resize, &new_size);
+		if (r)
+			return r;
+	}
+
+	era->nr_blocks = new_size;
+	return 0;
 }
 
 /*
@@ -947,13 +986,13 @@ static int era_message(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	if (!strcasecmp(argv[0], "checkpoint"))
-		return in_worker(era, metadata_checkpoint);
+		return in_worker0(era, metadata_checkpoint);
 
 	if (!strcasecmp(argv[0], "take_metadata_snap"))
-		return in_worker(era, metadata_take_snap);
+		return in_worker0(era, metadata_take_snap);
 
 	if (!strcasecmp(argv[0], "drop_metadata-snap"))
-		return in_worker(era, metadata_drop_snap);
+		return in_worker0(era, metadata_drop_snap);
 
 	DMERR("unsupported message '%s'", argv[0]);
 	return -EINVAL;
@@ -1014,7 +1053,6 @@ static struct target_type era_target = {
 	.map = era_map,
 	.postsuspend = era_postsuspend,
 	.preresume = era_preresume,
-	.resume = era_resume,
 	.status = era_status,
 	.message = era_message,
 	.iterate_devices = era_iterate_devices,
