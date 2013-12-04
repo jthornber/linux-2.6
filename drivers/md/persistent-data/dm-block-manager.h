@@ -125,6 +125,7 @@ void dm_bm_prefetch(struct dm_block_manager *bm, dm_block_t b);
  * be returned if you do.
  */
 void dm_bm_set_read_only(struct dm_block_manager *bm);
+void dm_bm_set_read_write(struct dm_block_manager *bm);
 
 u32 dm_bm_checksum(const void *data, size_t len, u32 init_xor);
 
