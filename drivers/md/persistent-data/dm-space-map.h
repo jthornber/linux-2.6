@@ -55,21 +55,21 @@ struct dm_space_map {
 	int (*new_block)(struct dm_space_map *sm, dm_block_t *b);
 
 	/*
-	 * You can register 1 threshold callback.  This is edge triggered
-	 * when the free space in the space map drops below the threshold.
-	 */
-	int (*register_threshold_callback)(struct dm_space_map *sm,
-					   dm_block_t threshold,
-					   dm_sm_threshold_fn fn,
-					   void *context);
-
-	/*
 	 * The root contains all the information needed to fix the space map.
 	 * Generally this info is small, so squirrel it away in a disk block
 	 * along with other info.
 	 */
 	int (*root_size)(struct dm_space_map *sm, size_t *result);
 	int (*copy_root)(struct dm_space_map *sm, void *copy_to_here_le, size_t len);
+
+	/*
+	 * You can register one threshold callback which is edge-triggered
+	 * when the free space in the space map drops below the threshold.
+	 */
+	int (*register_threshold_callback)(struct dm_space_map *sm,
+					   dm_block_t threshold,
+					   dm_sm_threshold_fn fn,
+					   void *context);
 };
 
 /*----------------------------------------------------------------*/
@@ -132,6 +132,16 @@ static inline int dm_sm_new_block(struct dm_space_map *sm, dm_block_t *b)
 	return sm->new_block(sm, b);
 }
 
+static inline int dm_sm_root_size(struct dm_space_map *sm, size_t *result)
+{
+	return sm->root_size(sm, result);
+}
+
+static inline int dm_sm_copy_root(struct dm_space_map *sm, void *copy_to_here_le, size_t len)
+{
+	return sm->copy_root(sm, copy_to_here_le, len);
+}
+
 static inline int dm_sm_register_threshold_callback(struct dm_space_map *sm,
 						    dm_block_t threshold,
 						    dm_sm_threshold_fn fn,
@@ -143,14 +153,5 @@ static inline int dm_sm_register_threshold_callback(struct dm_space_map *sm,
 	return -EINVAL;
 }
 
-static inline int dm_sm_root_size(struct dm_space_map *sm, size_t *result)
-{
-	return sm->root_size(sm, result);
-}
-
-static inline int dm_sm_copy_root(struct dm_space_map *sm, void *copy_to_here_le, size_t len)
-{
-	return sm->copy_root(sm, copy_to_here_le, len);
-}
 
 #endif	/* _LINUX_DM_SPACE_MAP_H */
