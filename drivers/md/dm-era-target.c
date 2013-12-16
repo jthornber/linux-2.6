@@ -102,10 +102,10 @@ static struct bloom_filter *filter_create(struct dm_disk_bitset *info, dm_block_
 }
 
 /*
- * Reuses already allocated memory.  This does *not* free the on disk
+ * Reuses already allocated memory.  This does not free the on disk
  * bitset.
  */
-static struct bloom_filter *filter_recreate(struct bloom_filter *f)
+static int filter_recreate(struct dm_disk_bitset *info, struct bloom_filter *f)
 {
 	memset(f->bits, 0, bitset_size(f->nr_bits));
 	return setup_on_disk_bitset(info, f->nr_bits, &f->root);
@@ -296,14 +296,17 @@ static struct dm_block_validator sb_validator = {
 struct era_metadata {
 	struct block_device *bdev;
 	struct dm_block_manager *bm;
-	struct dm_space_map *metadata_sm;
+	struct dm_space_map *sm;
 	struct dm_transaction_manager *tm;
+
+	dm_block_t block_size;
 	unsigned nr_blocks;
 
 	atomic64_t current_era;
 	struct bloom_filter *current_filter;
 
 	struct dm_disk_bitset bitset_info;
+	struct dm_btree_info bloom_tree_info;
 	struct dm_array_info array_info;
 };
 
@@ -356,10 +359,138 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, bool *result)
 	return dm_bm_unlock(b);
 }
 
+static void bf_inc(void *context, const void *value)
+{
+	struct era_metadata *md = context;
+	struct bloom_description bd;
+	dm_block_t b;
+
+	memcpy(&bd, value, sizeof(bd));
+	b = le64_to_cpu(bd.bloom_root);
+
+	dm_tm_inc(md->tm, b);
+}
+
+static void bf_dec(void *context, const void *value)
+{
+	struct era_metadata *md = context;
+	struct bloom_description bd;
+	dm_block_t b;
+
+	memcpy(&bd, value, sizeof(bd));
+	b = le64_to_cpu(bd.bloom_root);
+
+	dm_btree_del(&md->bloom_tree_info, b);
+}
+
+static int bf_eq(void *context, const void *value1, const void *value2)
+{
+	return !memcmp(value1, value2, sizeof(struct bloom_description));
+}
+
+/*----------------------------------------------------------------*/
+
+static void setup_infos(struct era_metadata *md)
+{
+	dm_disk_bitset_init(md->tm, &md->bitset_info);
+
+	{
+		struct dm_btree_value_type *vt = &md->bloom_tree_info.value_type;
+		md->bloom_tree_info.tm = md->tm;
+		md->bloom_tree_info.levels = 1;
+		vt->context = md;
+		vt->size = sizeof(struct bloom_description);
+		vt->inc = bf_inc;
+		vt->dec = bf_dec;
+		vt->equal = bf_eq;
+	}
+
+	{
+		struct dm_btree_value_type vt;
+		vt.context = NULL;
+		vt.size = sizeof(__le64);
+		vt.inc = NULL;
+		vt.dec = NULL;
+		vt.equal = NULL;
+
+		dm_array_info_init(&md->array_info, md->tm, &vt);
+	}
+}
+
+/*----------------------------------------------------------------*/
+
+static int write_initial_superblock(struct era_metadata *md)
+{
+	int r;
+	size_t metadata_len;
+	struct dm_block *sblock;
+	struct superblock_disk *disk;
+
+	r = superblock_lock_zero(md, &sblock);
+	if (r)
+		return r;
+
+	disk = dm_block_data(sblock);
+	disk->flags = cpu_to_le32(0ul);
+	memset(disk, 0, sizeof(disk->uuid));
+	disk->version = cpu_to_le32(MAX_ERA_VERSION);
+
+	r = dm_sm_root_size(md->sm, &metadata_len);
+	if (r < 0)
+		goto bad_locked;
+
+	r = dm_sm_copy_root(md->sm, &disk->metadata_space_map_root,
+			    metadata_len);
+	if (r < 0)
+		goto bad_locked;
+
+	disk->data_block_size = cpu_to_le32(md->block_size);
+	disk->metadata_block_size = cpu_to_le32(METADATA_BLOCK_SIZE);
+	disk->nr_blocks = cpu_to_le32(0);
+	disk->current_era = cpu_to_le32(atomic64_read(&md->current_era));
+	memset(&disk->current_bloom, 0, sizeof(disk->current_bloom));
+
+	{
+		dm_block_t root;
+		r = dm_btree_empty(&md->bloom_tree_info, &root);
+		if (r)
+			goto bad_locked;
+
+		disk->bloom_filters_root = cpu_to_le64(root);
+	}
+
+	{
+		dm_block_t root;
+		r = dm_array_empty(&md->array_info, &root);
+		if (r)
+			goto bad_locked;
+
+		disk->era_array_root = cpu_to_le64(root);
+	}
+
+	return dm_tm_commit(md->tm, sblock);
+
+bad_locked:
+	// FIXME: this means the superblock will still get written
+	dm_bm_unlock(sblock);
+	return r;
+}
+
+/*
+ * Assumes block_size and the infos are set.
+ */
 static int format_metadata(struct era_metadata *md)
 {
-	// FIXME: finish
-	return -EINVAL;
+	int r;
+
+	r = dm_tm_create_with_sm(md->bm, SUPERBLOCK_LOCATION,
+				 &md->tm, &md->sm);
+	if (r < 0) {
+		DMERR("dm_tm_create_with_sm failed");
+		return r;
+	}
+
+	return write_initial_superblock(md);
 }
 
 static int open_metadata(struct era_metadata *md)
@@ -378,13 +509,11 @@ static int open_metadata(struct era_metadata *md)
 	r = dm_tm_open_with_sm(md->bm, SUPERBLOCK_LOCATION,
 			       disk->metadata_space_map_root,
 			       sizeof(disk->metadata_space_map_root),
-			       &md->tm, &md->metadata_sm);
+			       &md->tm, &md->sm);
 	if (r) {
 		DMERR("dm_tm_open_with_sm failed");
 		goto bad;
 	}
-
-	// FIXME: setup btrees etc
 
 	return dm_bm_unlock(sblock);
 
@@ -429,7 +558,7 @@ static int create_persistent_data_objects(struct era_metadata *md, bool may_form
 
 static void destroy_persistent_data_objects(struct era_metadata *md)
 {
-	dm_sm_destroy(md->metadata_sm);
+	dm_sm_destroy(md->sm);
 	dm_tm_destroy(md->tm);
 	dm_block_manager_destroy(md->bm);
 }
@@ -451,11 +580,14 @@ static struct bloom_filter *swap_filter(struct era_metadata *md, struct bloom_fi
  * the lower level ones.
  *--------------------------------------------------------------*/
 static struct era_metadata *metadata_open(struct block_device *bdev,
-					  sector_t data_block_size,
+					  sector_t block_size,
 					  bool may_format)
 {
 	int r;
 	struct era_metadata *md = kzalloc(sizeof(*md), GFP_KERNEL);
+
+	md->block_size = block_size;
+	setup_infos(md);
 
 	r = create_persistent_data_objects(md, may_format);
 	if (r) {
@@ -579,6 +711,7 @@ struct era {
 	struct dm_dev *origin_dev;
 
 	uint32_t block_size;
+	dm_block_t nr_blocks;
 	unsigned sectors_per_block_shift;
 	struct era_metadata *md;
 
