@@ -13,6 +13,13 @@
 
 #define DM_MSG_PREFIX "era"
 
+#define SUPERBLOCK_LOCATION 0
+#define SUPERBLOCK_MAGIC 2126579579
+#define SUPERBLOCK_CSUM_XOR 146538381
+#define MIN_ERA_VERSION 1
+#define MAX_ERA_VERSION 1
+#define INVALID_BLOOM_ROOT SUPERBLOCK_LOCATION
+
 /*----------------------------------------------------------------
  * Bloom filter
  *--------------------------------------------------------------*/
@@ -21,23 +28,28 @@
 #define BLOOM_MIN_SHIFT 10
 #define BLOOM_MAX_SHIFT 30
 
+struct bloom_metadata {
+	uint32_t nr_blocks;
+	uint32_t nr_bits;
+	atomic64_t nr_set;
+
+	dm_block_t root;
+};
+
 struct bloom_filter {
-	unsigned nr_bits;
+	struct bloom_metadata md;
+
 	unsigned mask;
 	unsigned long *bits;
-
-	atomic_t nr_set;
-	dm_block_t root;
 };
 
 /*
  * This does not free off the on disk bitset as this will normally be done
  * after digesting into the era array.
  */
-static void filter_destroy(struct bloom_filter *f)
+static void filter_free(struct bloom_filter *f)
 {
 	vfree(f->bits);
-	kfree(f);
 }
 
 static int setup_on_disk_bitset(struct dm_disk_bitset *info,
@@ -68,47 +80,47 @@ static size_t bitset_size(unsigned nr_bits)
 	return sizeof(unsigned long) * dm_div_up(nr_bits, BITS_PER_LONG);
 }
 
-static struct bloom_filter *filter_create(struct dm_disk_bitset *info, dm_block_t nr_blocks)
+/*
+ * Allocates memory for the in core bitset.
+ */
+static int filter_alloc(struct bloom_filter *f, dm_block_t nr_blocks)
 {
-	int r;
 	unsigned nr_bits;
-	struct bloom_filter *f;
 
 	nr_bits = nr_blocks;
 	do_div(nr_bits, ERA_DIVIDER);
 	nr_bits = calc_bloom_filter_size((unsigned) nr_bits);
+	f->md.nr_blocks = nr_blocks;
+	f->md.nr_bits = nr_bits;
+	f->md.root = INVALID_BLOOM_ROOT;
+	atomic64_set(&f->md.nr_set, 0);
 
-	f = kzalloc(sizeof(*f), GFP_NOWAIT);
-	if (!f)
-		return NULL;
-
+	f->mask = nr_bits - 1;
 	f->bits = vzalloc(bitset_size(nr_bits));
 	if (!f->bits) {
-		filter_destroy(f);
-		return NULL;
+		DMERR("filter_init: couldn't allocate in memory bitset");
+		return -ENOMEM;
 	}
 
-	f->nr_bits = nr_bits;
-	f->mask = nr_bits - 1;
-	r = setup_on_disk_bitset(info, nr_bits, &f->root);
-	if (r) {
-		filter_destroy(f);
-		return NULL;
-	}
-
-	atomic_set(&f->nr_set, 0);
-
-	return f;
+	return 0;
 }
 
 /*
- * Reuses already allocated memory.  This does not free the on disk
- * bitset.
+ * Wipes the in-core bitset, and creates a new on disk bitset.
  */
-static int filter_recreate(struct dm_disk_bitset *info, struct bloom_filter *f)
+static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
 {
-	memset(f->bits, 0, bitset_size(f->nr_bits));
-	return setup_on_disk_bitset(info, f->nr_bits, &f->root);
+	int r;
+
+	memset(f->bits, 0, bitset_size(f->md.nr_bits));
+
+	r = setup_on_disk_bitset(info, f->md.nr_bits, &f->md.root);
+	if (r) {
+		DMERR("filter_init: setup_on_disk_bitset failed");
+		return r;
+	}
+
+	return 0;
 }
 
 #define MULTIPLIER 0x9e37fffffffc0001UL
@@ -160,9 +172,9 @@ static int filter_mark(struct dm_disk_bitset *info,
 	unsigned p;
 	uint32_t h1, h2;
 
-	atomic_inc(&f->nr_set);
+	atomic64_inc(&f->md.nr_set);
 	h1 = hash1(block) &f->mask;
-	r = dm_bitset_set_bit(info, f->root, h1, &f->root);
+	r = dm_bitset_set_bit(info, f->md.root, h1, &f->md.root);
 	if (r)
 		return r;
 
@@ -172,7 +184,7 @@ static int filter_mark(struct dm_disk_bitset *info,
 		h2 = (h2 + p) & f->mask;
 
 		if (!test_and_set_bit(h1, f->bits)) {
-			r = dm_bitset_set_bit(info, f->root, h1, &f->root);
+			r = dm_bitset_set_bit(info, f->md.root, h1, &f->md.root);
 			if (r)
 				return r;
 		}
@@ -186,10 +198,11 @@ static int filter_mark(struct dm_disk_bitset *info,
  *--------------------------------------------------------------*/
 #define SPACE_MAP_ROOT_SIZE 128
 
-struct bloom_description {
+struct bloom_disk {
+	__le32 nr_blocks;
 	__le32 nr_bits;
-	__le32 hash_fns_and_probes;
-	__le64 bloom_root;
+	__le32 nr_set;
+	__le64 root;
 } __packed;
 
 struct superblock_disk {
@@ -208,21 +221,18 @@ struct superblock_disk {
 	__le32 nr_blocks;
 
 	__le32 current_era;
-	struct bloom_description current_bloom;
+	struct bloom_disk current_bloom;
 
-	__le64 bloom_filters_root;
+	/*
+	 * Only these two fields are valid within the metadata snapshot.
+	 */
+	__le64 bloom_tree_root;
 	__le64 era_array_root;
 } __packed;
 
 /*----------------------------------------------------------------
  * Superblock validation
  *--------------------------------------------------------------*/
-#define SUPERBLOCK_LOCATION 0
-#define SUPERBLOCK_MAGIC 2126579579
-#define SUPERBLOCK_CSUM_XOR 146538381
-#define MIN_ERA_VERSION 1
-#define MAX_ERA_VERSION 1
-
 static void sb_prepare_for_write(struct dm_block_validator *v,
 				 struct dm_block *b,
 				 size_t sb_block_size)
@@ -300,14 +310,26 @@ struct era_metadata {
 	struct dm_transaction_manager *tm;
 
 	dm_block_t block_size;
-	unsigned nr_blocks;
+	uint32_t nr_blocks;
 
 	atomic64_t current_era;
-	struct bloom_filter *current_filter;
+
+	/*
+	 * We preallocate 2 bloom filters.  When an era rolls over we
+	 * switch between them. This means the allocation is done at
+	 * preresume time, rather than on the io path.
+	 */
+	struct bloom_filter blooms[2];
+	struct bloom_filter *current_bloom;
+
+	dm_block_t bloom_tree_root;
+	dm_block_t era_array_root;
 
 	struct dm_disk_bitset bitset_info;
 	struct dm_btree_info bloom_tree_info;
-	struct dm_array_info array_info;
+	struct dm_array_info era_array_info;
+
+	dm_block_t metadata_snap;
 };
 
 static int superblock_read_lock(struct era_metadata *md,
@@ -359,14 +381,32 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, bool *result)
 	return dm_bm_unlock(b);
 }
 
+/*----------------------------------------------------------------*/
+
+static void bf_pack(const struct bloom_metadata *core, struct bloom_disk *disk)
+{
+	disk->nr_blocks = cpu_to_le32(core->nr_blocks);
+	disk->nr_bits = cpu_to_le32(core->nr_bits);
+	disk->nr_set = cpu_to_le32(atomic64_read(&core->nr_set));
+	disk->root = cpu_to_le64(core->root);
+}
+
+static void bf_unpack(const struct bloom_disk *disk, struct bloom_metadata *core)
+{
+	core->nr_blocks = le32_to_cpu(disk->nr_blocks);
+	core->nr_bits = le32_to_cpu(disk->nr_bits);
+	atomic64_set(&core->nr_set, le32_to_cpu(disk->nr_set));
+	core->root = le64_to_cpu(disk->root);
+}
+
 static void bf_inc(void *context, const void *value)
 {
 	struct era_metadata *md = context;
-	struct bloom_description bd;
+	struct bloom_disk bd;
 	dm_block_t b;
 
 	memcpy(&bd, value, sizeof(bd));
-	b = le64_to_cpu(bd.bloom_root);
+	b = le64_to_cpu(bd.root);
 
 	dm_tm_inc(md->tm, b);
 }
@@ -374,112 +414,57 @@ static void bf_inc(void *context, const void *value)
 static void bf_dec(void *context, const void *value)
 {
 	struct era_metadata *md = context;
-	struct bloom_description bd;
+	struct bloom_disk bd;
 	dm_block_t b;
 
 	memcpy(&bd, value, sizeof(bd));
-	b = le64_to_cpu(bd.bloom_root);
+	b = le64_to_cpu(bd.root);
 
 	dm_btree_del(&md->bloom_tree_info, b);
 }
 
 static int bf_eq(void *context, const void *value1, const void *value2)
 {
-	return !memcmp(value1, value2, sizeof(struct bloom_description));
+	return !memcmp(value1, value2, sizeof(struct bloom_metadata));
 }
 
 /*----------------------------------------------------------------*/
+
+static void setup_bloom_tree_info(struct era_metadata *md)
+{
+	struct dm_btree_value_type *vt = &md->bloom_tree_info.value_type;
+	md->bloom_tree_info.tm = md->tm;
+	md->bloom_tree_info.levels = 1;
+	vt->context = md;
+	vt->size = sizeof(struct bloom_disk);
+	vt->inc = bf_inc;
+	vt->dec = bf_dec;
+	vt->equal = bf_eq;
+}
+
+static void setup_era_array_info(struct era_metadata *md)
+
+{
+	struct dm_btree_value_type vt;
+	vt.context = NULL;
+	vt.size = sizeof(__le64);
+	vt.inc = NULL;
+	vt.dec = NULL;
+	vt.equal = NULL;
+
+	dm_array_info_init(&md->era_array_info, md->tm, &vt);
+}
 
 static void setup_infos(struct era_metadata *md)
 {
 	dm_disk_bitset_init(md->tm, &md->bitset_info);
-
-	{
-		struct dm_btree_value_type *vt = &md->bloom_tree_info.value_type;
-		md->bloom_tree_info.tm = md->tm;
-		md->bloom_tree_info.levels = 1;
-		vt->context = md;
-		vt->size = sizeof(struct bloom_description);
-		vt->inc = bf_inc;
-		vt->dec = bf_dec;
-		vt->equal = bf_eq;
-	}
-
-	{
-		struct dm_btree_value_type vt;
-		vt.context = NULL;
-		vt.size = sizeof(__le64);
-		vt.inc = NULL;
-		vt.dec = NULL;
-		vt.equal = NULL;
-
-		dm_array_info_init(&md->array_info, md->tm, &vt);
-	}
+	setup_bloom_tree_info(md);
+	setup_era_array_info(md);
 }
 
 /*----------------------------------------------------------------*/
 
-static int write_initial_superblock(struct era_metadata *md)
-{
-	int r;
-	size_t metadata_len;
-	struct dm_block *sblock;
-	struct superblock_disk *disk;
-
-	r = superblock_lock_zero(md, &sblock);
-	if (r)
-		return r;
-
-	disk = dm_block_data(sblock);
-	disk->flags = cpu_to_le32(0ul);
-	memset(disk, 0, sizeof(disk->uuid));
-	disk->version = cpu_to_le32(MAX_ERA_VERSION);
-
-	r = dm_sm_root_size(md->sm, &metadata_len);
-	if (r < 0)
-		goto bad_locked;
-
-	r = dm_sm_copy_root(md->sm, &disk->metadata_space_map_root,
-			    metadata_len);
-	if (r < 0)
-		goto bad_locked;
-
-	disk->data_block_size = cpu_to_le32(md->block_size);
-	disk->metadata_block_size = cpu_to_le32(METADATA_BLOCK_SIZE);
-	disk->nr_blocks = cpu_to_le32(0);
-	disk->current_era = cpu_to_le32(atomic64_read(&md->current_era));
-	memset(&disk->current_bloom, 0, sizeof(disk->current_bloom));
-
-	{
-		dm_block_t root;
-		r = dm_btree_empty(&md->bloom_tree_info, &root);
-		if (r)
-			goto bad_locked;
-
-		disk->bloom_filters_root = cpu_to_le64(root);
-	}
-
-	{
-		dm_block_t root;
-		r = dm_array_empty(&md->array_info, &root);
-		if (r)
-			goto bad_locked;
-
-		disk->era_array_root = cpu_to_le64(root);
-	}
-
-	return dm_tm_commit(md->tm, sblock);
-
-bad_locked:
-	// FIXME: this means the superblock will still get written
-	dm_bm_unlock(sblock);
-	return r;
-}
-
-/*
- * Assumes block_size and the infos are set.
- */
-static int format_metadata(struct era_metadata *md)
+static int create_fresh_metadata(struct era_metadata *md)
 {
 	int r;
 
@@ -490,7 +475,97 @@ static int format_metadata(struct era_metadata *md)
 		return r;
 	}
 
-	return write_initial_superblock(md);
+	setup_infos(md);
+
+	r = dm_btree_empty(&md->bloom_tree_info, &md->bloom_tree_root);
+	if (r) {
+		DMERR("couldn't create new bloom tree");
+		return r;
+	}
+
+	r = dm_array_empty(&md->era_array_info, &md->era_array_root);
+	if (r) {
+		DMERR("couldn't create era array");
+		return r;
+	}
+
+	return 0;
+}
+
+/*
+ * Writes a superblock, including the static fields that don't get updated
+ * with every commit (possible optimisation here).  'md' should be fully
+ * constructed when this is called.
+ */
+static int prepare_superblock(struct era_metadata *md, struct superblock_disk *disk)
+{
+	int r;
+	size_t metadata_len;
+
+	disk->flags = cpu_to_le32(0ul);
+
+	// FIXME: can't keep blanking the uuid
+	memset(disk, 0, sizeof(disk->uuid));
+	disk->version = cpu_to_le32(MAX_ERA_VERSION);
+
+	r = dm_sm_root_size(md->sm, &metadata_len);
+	if (r < 0)
+		return r;
+
+	r = dm_sm_copy_root(md->sm, &disk->metadata_space_map_root,
+			    metadata_len);
+	if (r < 0)
+		return r;
+
+	disk->data_block_size = cpu_to_le32(md->block_size);
+	disk->metadata_block_size = cpu_to_le32(METADATA_BLOCK_SIZE);
+	disk->nr_blocks = cpu_to_le32(md->nr_blocks);
+	disk->current_era = cpu_to_le32(atomic64_read(&md->current_era));
+
+	bf_pack(&md->current_bloom->md, &disk->current_bloom);
+	disk->bloom_tree_root = cpu_to_le64(md->bloom_tree_root);
+	disk->era_array_root = cpu_to_le64(md->era_array_root);
+
+	return 0;
+}
+
+static int write_superblock(struct era_metadata *md)
+{
+	int r;
+	struct dm_block *sblock;
+	struct superblock_disk *disk;
+
+	r = superblock_lock_zero(md, &sblock);
+	if (r)
+		return r;
+
+	disk = dm_block_data(sblock);
+	r = prepare_superblock(md, disk);
+	if (r) {
+		DMERR("write_superblock: prepare-superblock failed");
+		dm_bm_unlock(sblock); /* FIXME: does this commit? */
+		return r;
+	}
+
+	return dm_tm_commit(md->tm, sblock);
+}
+
+/*
+ * Assumes block_size and the infos are set.
+ */
+static int format_metadata(struct era_metadata *md)
+{
+	int r;
+
+	r = create_fresh_metadata(md);
+	if (r)
+		return r;
+
+	r = write_superblock(md);
+	if (r)
+		return r;
+
+	return 0;
 }
 
 static int open_metadata(struct era_metadata *md)
@@ -514,6 +589,8 @@ static int open_metadata(struct era_metadata *md)
 		DMERR("dm_tm_open_with_sm failed");
 		goto bad;
 	}
+
+	setup_infos(md);
 
 	return dm_bm_unlock(sblock);
 
@@ -541,6 +618,7 @@ static int open_or_format_metadata(struct era_metadata *md,
 static int create_persistent_data_objects(struct era_metadata *md, bool may_format)
 {
 	int r;
+
 	md->bm = dm_block_manager_create(md->bdev, METADATA_BLOCK_SIZE,
 					 METADATA_CACHE_SIZE,
 					 MAX_CONCURRENT_LOCKS);
@@ -566,13 +644,10 @@ static void destroy_persistent_data_objects(struct era_metadata *md)
 /*
  * This waits until all era_map threads have picked up the new filter.
  */
-static struct bloom_filter *swap_filter(struct era_metadata *md, struct bloom_filter *new_filter)
+static void swap_filter(struct era_metadata *md, struct bloom_filter *new_filter)
 {
-	struct bloom_filter *old_filter = md->current_filter;
-	rcu_assign_pointer(md->current_filter, new_filter);
+	rcu_assign_pointer(md->current_bloom, new_filter);
 	synchronize_rcu();
-
-	return old_filter;
 }
 
 /*----------------------------------------------------------------
@@ -586,8 +661,11 @@ static struct era_metadata *metadata_open(struct block_device *bdev,
 	int r;
 	struct era_metadata *md = kzalloc(sizeof(*md), GFP_KERNEL);
 
+	if (!md)
+		return NULL;
+
+	md->bdev = bdev;
 	md->block_size = block_size;
-	setup_infos(md);
 
 	r = create_persistent_data_objects(md, may_format);
 	if (r) {
@@ -606,30 +684,30 @@ static void metadata_close(struct era_metadata *md)
 
 static int metadata_resize(struct era_metadata *md, void *arg)
 {
+	int r;
 	dm_block_t *new_size = arg;
-	struct bloom_filter *new_filter = filter_create(&md->bitset_info, *new_size);
 
-	if (!new_filter)
-		return -ENOMEM;
+	filter_free(&md->blooms[0]);
+	filter_free(&md->blooms[1]);
 
-	md->nr_blocks = *new_size;
-	filter_destroy(swap_filter(md, new_filter));
-	atomic64_inc(&md->current_era);
+	r = filter_alloc(&md->blooms[0], *new_size);
+	if (r) {
+		DMERR("metadata_resize: filter_alloc failed for bloom 0");
+		return r;
+	}
 
-	// FIXME: archive the old root, and record the new one, commit
-	// metadata, explain why it's safe to crash here.
+	r = filter_alloc(&md->blooms[1], *new_size);
+	if (r) {
+		DMERR("metadata_resize: filter_alloc failed for bloom 1");
+		return r;
+	}
 
 	return 0;
 }
 
-static int metadata_checkpoint(struct era_metadata *md)
-{
-	return -1;
-}
-
 static int metadata_mark(struct era_metadata *md, dm_block_t block)
 {
-	return filter_mark(&md->bitset_info, md->current_filter, block);
+	return filter_mark(&md->bitset_info, md->current_bloom, block);
 }
 
 static bool metadata_current_marked(struct era_metadata *md, dm_block_t block)
@@ -638,11 +716,44 @@ static bool metadata_current_marked(struct era_metadata *md, dm_block_t block)
 	struct bloom_filter *f;
 
 	rcu_read_lock();
-	f = rcu_dereference(md->current_filter);
+	f = rcu_dereference(md->current_bloom);
 	r = filter_marked(f, block);
 	rcu_read_unlock();
 
 	return r;
+}
+
+static int metadata_commit(struct era_metadata *md)
+{
+	int r;
+	struct dm_block *sblock;
+
+	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
+	if (r) {
+		DMERR("metadata_commit: bitset flush failed");
+		return r;
+	}
+
+	r = dm_tm_pre_commit(md->tm);
+	if (r) {
+		DMERR("metadata_commit: pre commit failed");
+		return r;
+	}
+
+	r = superblock_lock(md, &sblock);
+	if (r) {
+		DMERR("metadata_commit: superblock lock failed");
+		return r;
+	}
+
+	r = prepare_superblock(md, dm_block_data(sblock));
+	if (r) {
+		DMERR("metadata_commit: prepare_superblock failed");
+		dm_bm_unlock(sblock); /* FIXME: does this commit? */
+		return r;
+	}
+
+	return dm_tm_commit(md->tm, sblock);
 }
 
 static uint32_t metadata_current_era(struct era_metadata *md)
@@ -650,32 +761,79 @@ static uint32_t metadata_current_era(struct era_metadata *md)
 	return (uint32_t) atomic64_read(&md->current_era);
 }
 
-/*
- * This must never be called concurrently with itself.
- */
+static int metadata_era_archive(struct era_metadata *md)
+{
+	int r;
+	uint64_t keys[1];
+	struct bloom_disk value;
+
+	bf_pack(&md->current_bloom->md, &value);
+	md->current_bloom->md.root = INVALID_BLOOM_ROOT;
+
+	keys[0] = atomic64_read(&md->current_era);
+	__dm_bless_for_disk(&value);
+	r = dm_btree_insert(&md->bloom_tree_info, md->bloom_tree_root, keys, &value, &md->bloom_tree_root);
+	if (r) {
+		DMERR("metadata_era_archive: couldn't insert era into btree");
+		// FIXME: fail mode
+		return r;
+	}
+
+	return 0;
+}
+
+static struct bloom_filter *next_filter(struct era_metadata *md)
+{
+	return (md->current_bloom == &md->blooms[0]) ? &md->blooms[1] : &md->blooms[0];
+}
+
 static int metadata_new_era(struct era_metadata *md)
 {
-	struct bloom_filter *new_filter = filter_create(&md->bitset_info, md->nr_blocks);
+	int r;
+	struct bloom_filter *new_filter = next_filter(md);
 
-	if (!new_filter)
-		return -ENOMEM;
+	r = filter_init(&md->bitset_info, new_filter);
+	if (r) {
+		DMERR("metadata_new_era: filter_init failed");
+		return r;
+	}
 
-	filter_destroy(swap_filter(md, new_filter));
+	swap_filter(md, new_filter);
 	atomic64_inc(&md->current_era);
+
+	return 0;
 }
 
-static struct bloom_filter *oldest_bloom_filter(struct era_metadata *md)
+static int metadata_era_rollover(struct era_metadata *md)
 {
-	return NULL;
+	int r;
+
+	if (md->current_bloom->md.root != INVALID_BLOOM_ROOT) {
+		r = metadata_era_archive(md);
+		if (r) {
+			DMERR("metadata_era_rollover: metadata_archive_era failed");
+			// FIXME: fail mode?
+			return r;
+		}
+	}
+
+	r = metadata_new_era(md);
+	if (r) {
+		DMERR("metadata_era_rollover: new era failed");
+		// FIXME: fail mode
+		return r;
+	}
+
+	return 0;
 }
 
-/*
- * These methods are used to digest the bloom filters down into the era
- * array.
- */
-static int metadata_set_era_in_array(struct era_metadata *md, uint32_t era)
+static int metadata_checkpoint(struct era_metadata *md)
 {
-	return -1;
+	/*
+	 * For now we just rollover, but later I want to put a check in to
+	 * avoid this if the filter is still pretty fresh.
+	 */
+	return metadata_era_rollover(md);
 }
 
 /*
@@ -683,22 +841,115 @@ static int metadata_set_era_in_array(struct era_metadata *md, uint32_t era)
  */
 static int metadata_take_snap(struct era_metadata *md)
 {
-	return -1;
+	int r, inc;
+	struct dm_block *clone;
+
+	if (md->metadata_snap != SUPERBLOCK_LOCATION) {
+		DMERR("asked to take a metadata snapshot when one already exists");
+		return -EINVAL;
+	}
+
+	r = metadata_era_rollover(md);
+	if (r) {
+		DMERR("metadata_take_snap: era rollover failed");
+		return r;
+	}
+
+	r = metadata_commit(md);
+	if (r) {
+		DMERR("metadata_take_snap: pre commit failed");
+		return r;
+	}
+
+	r = dm_sm_inc_block(md->sm, SUPERBLOCK_LOCATION);
+	if (r) {
+		DMERR("metadata_take_snap: couldn't increment superblock");
+		return r;
+	}
+
+	r = dm_tm_shadow_block(md->tm, SUPERBLOCK_LOCATION, &sb_validator, &clone, &inc);
+	if (r) {
+		DMERR("metadata_take_snap: couldn't shadow superblock");
+		dm_sm_dec_block(md->sm, SUPERBLOCK_LOCATION);
+		return r;
+	}
+	BUG_ON(!inc);
+
+	r = dm_sm_inc_block(md->sm, md->bloom_tree_root);
+	if (r) {
+		DMERR("metadata_take_snap: couldn't inc bloom tree root");
+		dm_tm_unlock(md->tm, clone);
+		return r;
+	}
+
+	r = dm_sm_inc_block(md->sm, md->era_array_root);
+	if (r) {
+		DMERR("metadata_take_snap: couldn't inc era tree root");
+		dm_sm_dec_block(md->sm, md->bloom_tree_root);
+		dm_tm_unlock(md->tm, clone);
+		return r;
+	}
+
+	md->metadata_snap = dm_block_location(clone);
+
+	r = dm_tm_unlock(md->tm, clone);
+	if (r) {
+		DMERR("metadata_take_snap: couldn't unlock clone");
+		md->metadata_snap = SUPERBLOCK_LOCATION;
+		return r;
+	}
+
+	return 0;
 }
 
 static dm_block_t metadata_snap_root(struct era_metadata *md)
 {
-	return 0ull;
+	return md->metadata_snap;
 }
 
 static int metadata_drop_snap(struct era_metadata *md)
 {
-	return -1;
-}
+	int r;
+	dm_block_t location;
+	struct dm_block *clone;
+	struct superblock_disk *disk;
 
-static int metadata_commit(struct era_metadata *md)
-{
-	return -1;
+	if (md->metadata_snap == SUPERBLOCK_LOCATION) {
+		DMERR("metadata_drop_snap: no snap to drop");
+		return -EINVAL;
+	}
+
+	r = dm_tm_read_lock(md->tm, md->metadata_snap, &sb_validator, &clone);
+	if (r) {
+		DMERR("metadata_drop_snap: couldn't read lock superblock clone");
+		return r;
+	}
+
+	/*
+	 * Whatever happens now we'll commit with no record of the metadata
+	 * snap.
+	 */
+	md->metadata_snap = SUPERBLOCK_LOCATION;
+
+	disk = dm_block_data(clone);
+	r = dm_btree_del(&md->bloom_tree_info, le64_to_cpu(disk->bloom_tree_root));
+	if (r) {
+		DMERR("metadata_drop_snap: error deleting bloom tree clone");
+		dm_tm_unlock(md->tm, clone);
+		return r;
+	}
+
+	r = dm_array_del(&md->era_array_info, le64_to_cpu(disk->era_array_root));
+	if (r) {
+		DMERR("metadata_drop_snap: error deleting era array clone");
+		dm_tm_unlock(md->tm, clone);
+		return r;
+	}
+
+	location = dm_block_location(clone);
+	dm_tm_unlock(md->tm, clone);
+
+	return dm_sm_dec_block(md->sm, location);
 }
 
 /*----------------------------------------------------------------*/
@@ -742,7 +993,7 @@ struct rpc {
  *---------------------------------------------------------------*/
 static dm_block_t get_block(struct era *era, struct bio *bio)
 {
-	return bio->bi_sector >>= era->sectors_per_block_shift;
+	return bio->bi_sector >> era->sectors_per_block_shift;
 }
 
 static void remap_to_origin(struct era *era, struct bio *bio)
@@ -791,10 +1042,8 @@ static void process_deferred_bios(struct era *era)
 
 	if (commit_needed) {
 		r = metadata_commit(era->md);
-		if (r) {
-			// FIXME: we should fail all write io to unmarked blocks
+		if (r)
 			failed = true;
-		}
 	}
 
 	if (failed)
@@ -973,6 +1222,7 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return -EINVAL;
 	}
 	era->sectors_per_block_shift = __ffs(era->block_size);
+
 	r = dm_set_target_max_io_len(ti, era->block_size);
 	if (r) {
 		ti->error = "could not set max io len";
@@ -987,6 +1237,13 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return PTR_ERR(era->md);
 	}
 	era->md = md;
+
+	r = metadata_resize(era->md, &era->nr_blocks);
+	if (r){
+		ti->error = "couldn't resize metadata";
+		era_destroy(era);
+		return -ENOMEM;
+	}
 
 	era->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
 	if (!era->wq) {
@@ -1021,7 +1278,6 @@ static void era_dtr(struct dm_target *ti)
 
 static int era_map(struct dm_target *ti, struct bio *bio)
 {
-	int r;
 	struct era *era = ti->private;
 	dm_block_t block = get_block(era, bio);
 
@@ -1032,21 +1288,10 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 	 */
 	remap_to_origin(era, bio);
 
-	if (bio_data_dir(bio) == WRITE) {
-		if (!metadata_current_marked(era->md, block)) {
-			/*
-			 * Either the block needs marking, or the bloom filter has
-			 * been paged out.  We can't block on IO here, so we hand
-			 * over to the worker thread.
-			 */
-			defer_bio(era, bio);
-			return DM_MAPIO_SUBMITTED;
-		}
-
-		if (r) {
-			bio_io_error(bio);
-			return DM_MAPIO_REMAPPED;
-		}
+	if (bio_data_dir(bio) == WRITE &&
+	    !metadata_current_marked(era->md, block)) {
+		defer_bio(era, bio);
+		return DM_MAPIO_SUBMITTED;
 	}
 
 	return DM_MAPIO_REMAPPED;
@@ -1054,7 +1299,15 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 
 static void era_postsuspend(struct dm_target *ti)
 {
+	int r;
 	struct era *era = ti->private;
+
+	r = in_worker0(era, metadata_era_archive);
+	if (r) {
+		DMERR("era_postsuspend: couldn't archive current era");
+		// FIXME fail mode ?
+	}
+
 	stop_worker(era);
 }
 
@@ -1065,16 +1318,24 @@ static dm_block_t calc_nr_blocks(struct era *era)
 
 static int era_preresume(struct dm_target *ti)
 {
+	int r;
 	struct era *era = ti->private;
 	dm_block_t new_size = calc_nr_blocks(era);
 
 	if (era->nr_blocks != new_size) {
-		int r = in_worker1(era, metadata_resize, &new_size);
+		r = in_worker1(era, metadata_resize, &new_size);
 		if (r)
 			return r;
+
+		era->nr_blocks = new_size;
 	}
 
-	era->nr_blocks = new_size;
+	r = in_worker0(era, metadata_new_era);
+	if (r) {
+		DMERR("era_preresume: metadata_era_rollover failed");
+		return r;
+	}
+
 	return 0;
 }
 
@@ -1089,13 +1350,18 @@ static void era_status(struct dm_target *ti, status_type_t type,
 {
 	struct era *era = ti->private;
 	ssize_t sz = 0;
+	dm_block_t snap;
 	char buf[BDEVNAME_SIZE];
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("%u %llu",
-		       (unsigned) metadata_current_era(era->md),
-		       (unsigned long long) metadata_snap_root(era->md));
+		DMEMIT("%u", (unsigned) metadata_current_era(era->md));
+
+		snap = metadata_snap_root(era->md);
+		if (snap != SUPERBLOCK_LOCATION)
+			DMEMIT(" %llu", snap);
+		else
+			DMEMIT(" -");
 		break;
 
 	case STATUSTYPE_TABLE:
