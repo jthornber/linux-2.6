@@ -165,6 +165,48 @@ static bool filter_marked(struct bloom_filter *f, dm_block_t block)
 	return 0;
 }
 
+static int filter_marked_on_disk(struct dm_disk_bitset *info,
+				 struct bloom_metadata *m, dm_block_t block,
+				 bool *result)
+{
+	int r;
+	unsigned p;
+	uint32_t h1, h2;
+	uint32_t mask = m->nr_bits - 1;
+
+	h1 = hash1(block) & mask;
+
+	/*
+	 * The bitset was flushed when it was archived, so we know there'll
+	 * be no change to the root.
+	 */
+	r = dm_bitset_test_bit(info, m->root, h1, &m->root, result);
+	if (r) {
+		DMERR("filter_marked_on_disk: dm_bitset_test_bit failed");
+		return r;
+	}
+
+	if (!*result)
+		return 0;
+
+	h2 = hash2(block) & mask;
+	for (p = 1; p < 6; p++) {
+		h1 = (h1 + h2) & mask;
+		h2 = (h2 + p) & mask;
+
+		r = dm_bitset_test_bit(info, m->root, h1, &m->root, result);
+		if (r) {
+			DMERR("filter_marked_on_disk: dm_bitset_test_bit failed");
+			return r;
+		}
+
+		if (!*result)
+			return 0;
+	}
+
+	return 0;
+}
+
 static int filter_mark(struct dm_disk_bitset *info,
 		       struct bloom_filter *f, uint32_t block)
 {
@@ -952,6 +994,73 @@ static int metadata_drop_snap(struct era_metadata *md)
 	return dm_sm_dec_block(md->sm, location);
 }
 
+/*----------------------------------------------------------------
+ * Goes through the archived bloom filters one by one transcribing them to
+ * the era array.
+ *
+ * FIXME: This should be run in a background thread at low priority.
+ *--------------------------------------------------------------*/
+static int metadata_digest_once(struct era_metadata *md)
+{
+	int r;
+	bool marked;
+	uint64_t key;
+	unsigned nr, b;
+	struct bloom_disk *disk;
+	struct bloom_metadata bloom;
+	__le32 value;
+
+	r = dm_btree_find_lowest_key(&md->bloom_tree_info, md->bloom_tree_root, &key);
+	if (r)
+		return r;
+
+	r = dm_btree_lookup(&md->bloom_tree_info, md->bloom_tree_root, &key, &disk);
+	if (r) {
+		DMERR("metadata_digest_once: dm_btree_lookup failed");
+		return r;
+	}
+
+	bf_unpack(disk, &bloom);
+
+	value = cpu_to_le32(key);
+
+	nr = min(bloom.nr_blocks, md->nr_blocks);
+	for (b = 0; b < nr; b++) {
+		r = filter_marked_on_disk(&md->bitset_info, &bloom, b, &marked);
+		if (r) {
+			DMERR("metadata_digest_once: filter_marked_on_disk failed");
+			return r;
+		}
+
+		if (marked) {
+			__dm_bless_for_disk(&value);
+			r = dm_array_set_value(&md->era_array_info, md->era_array_root, b, &value, &md->era_array_root);
+			if (r) {
+				DMERR("metadata_digest_once: dm_array_set_value failed");
+				return r;
+			}
+		}
+	}
+
+	r = dm_btree_remove(&md->bloom_tree_info, md->bloom_tree_root, &key, &md->bloom_tree_root);
+	if (r) {
+		DMERR("metadata_digest_once: dm_btree_remove failed");
+		return r;
+	}
+
+	return 0;
+}
+
+static int metadata_digest(struct era_metadata *md)
+{
+	int r;
+
+	while (!(r = metadata_digest_once(md)))
+		;
+
+	return r == -ENODATA ? 0 : r;
+}
+
 /*----------------------------------------------------------------*/
 
 struct era {
@@ -1144,6 +1253,11 @@ static int in_worker1(struct era *era, int (*fn)(struct era_metadata *, void *),
  */
 static void stop_worker(struct era *era)
 {
+	/*
+	 * FIXME: we kick off an expensive, synchronous digest here.  It
+	 * should really run with low priority all the time.
+	 */
+	in_worker0(era, metadata_digest);
 	flush_workqueue(era->wq);
 }
 
