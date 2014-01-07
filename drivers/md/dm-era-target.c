@@ -98,7 +98,7 @@ static int filter_alloc(struct bloom_filter *f, dm_block_t nr_blocks)
 	f->mask = nr_bits - 1;
 	f->bits = vzalloc(bitset_size(nr_bits));
 	if (!f->bits) {
-		DMERR("filter_init: couldn't allocate in memory bitset");
+		DMERR("%s: couldn't allocate in memory bitset", __func__);
 		return -ENOMEM;
 	}
 
@@ -116,7 +116,7 @@ static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
 
 	r = setup_on_disk_bitset(info, f->md.nr_bits, &f->md.root);
 	if (r) {
-		DMERR("filter_init: setup_on_disk_bitset failed");
+		DMERR("%s: setup_on_disk_bitset failed", __func__);
 		return r;
 	}
 
@@ -182,7 +182,7 @@ static int filter_marked_on_disk(struct dm_disk_bitset *info,
 	 */
 	r = dm_bitset_test_bit(info, m->root, h1, &m->root, result);
 	if (r) {
-		DMERR("filter_marked_on_disk: dm_bitset_test_bit failed");
+		DMERR("%s: dm_bitset_test_bit failed", __func__);
 		return r;
 	}
 
@@ -196,7 +196,7 @@ static int filter_marked_on_disk(struct dm_disk_bitset *info,
 
 		r = dm_bitset_test_bit(info, m->root, h1, &m->root, result);
 		if (r) {
-			DMERR("filter_marked_on_disk: dm_bitset_test_bit failed");
+			DMERR("%s: dm_bitset_test_bit failed", __func__);
 			return r;
 		}
 
@@ -584,7 +584,7 @@ static int write_superblock(struct era_metadata *md)
 	disk = dm_block_data(sblock);
 	r = prepare_superblock(md, disk);
 	if (r) {
-		DMERR("write_superblock: prepare-superblock failed");
+		DMERR("%s: prepare_superblock failed", __func__);
 		dm_bm_unlock(sblock); /* FIXME: does this commit? */
 		return r;
 	}
@@ -734,13 +734,13 @@ static int metadata_resize(struct era_metadata *md, void *arg)
 
 	r = filter_alloc(&md->blooms[0], *new_size);
 	if (r) {
-		DMERR("metadata_resize: filter_alloc failed for bloom 0");
+		DMERR("%s: filter_alloc failed for bloom 0", __func__);
 		return r;
 	}
 
 	r = filter_alloc(&md->blooms[1], *new_size);
 	if (r) {
-		DMERR("metadata_resize: filter_alloc failed for bloom 1");
+		DMERR("%s: filter_alloc failed for bloom 1", __func__);
 		return r;
 	}
 
@@ -772,25 +772,25 @@ static int metadata_commit(struct era_metadata *md)
 
 	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
 	if (r) {
-		DMERR("metadata_commit: bitset flush failed");
+		DMERR("%s: bitset flush failed", __func__);
 		return r;
 	}
 
 	r = dm_tm_pre_commit(md->tm);
 	if (r) {
-		DMERR("metadata_commit: pre commit failed");
+		DMERR("%s: pre commit failed", __func__);
 		return r;
 	}
 
 	r = superblock_lock(md, &sblock);
 	if (r) {
-		DMERR("metadata_commit: superblock lock failed");
+		DMERR("%s: superblock lock failed", __func__);
 		return r;
 	}
 
 	r = prepare_superblock(md, dm_block_data(sblock));
 	if (r) {
-		DMERR("metadata_commit: prepare_superblock failed");
+		DMERR("%s: prepare_superblock failed", __func__);
 		dm_bm_unlock(sblock); /* FIXME: does this commit? */
 		return r;
 	}
@@ -816,7 +816,7 @@ static int metadata_era_archive(struct era_metadata *md)
 	__dm_bless_for_disk(&value);
 	r = dm_btree_insert(&md->bloom_tree_info, md->bloom_tree_root, keys, &value, &md->bloom_tree_root);
 	if (r) {
-		DMERR("metadata_era_archive: couldn't insert era into btree");
+		DMERR("%s: couldn't insert era into btree", __func__);
 		// FIXME: fail mode
 		return r;
 	}
@@ -836,7 +836,7 @@ static int metadata_new_era(struct era_metadata *md)
 
 	r = filter_init(&md->bitset_info, new_filter);
 	if (r) {
-		DMERR("metadata_new_era: filter_init failed");
+		DMERR("%s: filter_init failed", __func__);
 		return r;
 	}
 
@@ -853,7 +853,7 @@ static int metadata_era_rollover(struct era_metadata *md)
 	if (md->current_bloom->md.root != INVALID_BLOOM_ROOT) {
 		r = metadata_era_archive(md);
 		if (r) {
-			DMERR("metadata_era_rollover: metadata_archive_era failed");
+			DMERR("%s: metadata_archive_era failed", __func__);
 			// FIXME: fail mode?
 			return r;
 		}
@@ -861,7 +861,7 @@ static int metadata_era_rollover(struct era_metadata *md)
 
 	r = metadata_new_era(md);
 	if (r) {
-		DMERR("metadata_era_rollover: new era failed");
+		DMERR("%s: new era failed", __func__);
 		// FIXME: fail mode
 		return r;
 	}
@@ -893,25 +893,25 @@ static int metadata_take_snap(struct era_metadata *md)
 
 	r = metadata_era_rollover(md);
 	if (r) {
-		DMERR("metadata_take_snap: era rollover failed");
+		DMERR("%s: era rollover failed", __func__);
 		return r;
 	}
 
 	r = metadata_commit(md);
 	if (r) {
-		DMERR("metadata_take_snap: pre commit failed");
+		DMERR("%s: pre commit failed", __func__);
 		return r;
 	}
 
 	r = dm_sm_inc_block(md->sm, SUPERBLOCK_LOCATION);
 	if (r) {
-		DMERR("metadata_take_snap: couldn't increment superblock");
+		DMERR("%s: couldn't increment superblock", __func__);
 		return r;
 	}
 
 	r = dm_tm_shadow_block(md->tm, SUPERBLOCK_LOCATION, &sb_validator, &clone, &inc);
 	if (r) {
-		DMERR("metadata_take_snap: couldn't shadow superblock");
+		DMERR("%s: couldn't shadow superblock", __func__);
 		dm_sm_dec_block(md->sm, SUPERBLOCK_LOCATION);
 		return r;
 	}
@@ -919,14 +919,14 @@ static int metadata_take_snap(struct era_metadata *md)
 
 	r = dm_sm_inc_block(md->sm, md->bloom_tree_root);
 	if (r) {
-		DMERR("metadata_take_snap: couldn't inc bloom tree root");
+		DMERR("%s: couldn't inc bloom tree root", __func__);
 		dm_tm_unlock(md->tm, clone);
 		return r;
 	}
 
 	r = dm_sm_inc_block(md->sm, md->era_array_root);
 	if (r) {
-		DMERR("metadata_take_snap: couldn't inc era tree root");
+		DMERR("%s: couldn't inc era tree root", __func__);
 		dm_sm_dec_block(md->sm, md->bloom_tree_root);
 		dm_tm_unlock(md->tm, clone);
 		return r;
@@ -936,7 +936,7 @@ static int metadata_take_snap(struct era_metadata *md)
 
 	r = dm_tm_unlock(md->tm, clone);
 	if (r) {
-		DMERR("metadata_take_snap: couldn't unlock clone");
+		DMERR("%s: couldn't unlock clone", __func__);
 		md->metadata_snap = SUPERBLOCK_LOCATION;
 		return r;
 	}
@@ -957,13 +957,13 @@ static int metadata_drop_snap(struct era_metadata *md)
 	struct superblock_disk *disk;
 
 	if (md->metadata_snap == SUPERBLOCK_LOCATION) {
-		DMERR("metadata_drop_snap: no snap to drop");
+		DMERR("%s: no snap to drop", __func__);
 		return -EINVAL;
 	}
 
 	r = dm_tm_read_lock(md->tm, md->metadata_snap, &sb_validator, &clone);
 	if (r) {
-		DMERR("metadata_drop_snap: couldn't read lock superblock clone");
+		DMERR("%s: couldn't read lock superblock clone", __func__);
 		return r;
 	}
 
@@ -976,14 +976,14 @@ static int metadata_drop_snap(struct era_metadata *md)
 	disk = dm_block_data(clone);
 	r = dm_btree_del(&md->bloom_tree_info, le64_to_cpu(disk->bloom_tree_root));
 	if (r) {
-		DMERR("metadata_drop_snap: error deleting bloom tree clone");
+		DMERR("%s: error deleting bloom tree clone", __func__);
 		dm_tm_unlock(md->tm, clone);
 		return r;
 	}
 
 	r = dm_array_del(&md->era_array_info, le64_to_cpu(disk->era_array_root));
 	if (r) {
-		DMERR("metadata_drop_snap: error deleting era array clone");
+		DMERR("%s: error deleting era array clone", __func__);
 		dm_tm_unlock(md->tm, clone);
 		return r;
 	}
@@ -1016,7 +1016,7 @@ static int metadata_digest_once(struct era_metadata *md)
 
 	r = dm_btree_lookup(&md->bloom_tree_info, md->bloom_tree_root, &key, &disk);
 	if (r) {
-		DMERR("metadata_digest_once: dm_btree_lookup failed");
+		DMERR("%s: dm_btree_lookup failed", __func__);
 		return r;
 	}
 
@@ -1028,15 +1028,16 @@ static int metadata_digest_once(struct era_metadata *md)
 	for (b = 0; b < nr; b++) {
 		r = filter_marked_on_disk(&md->bitset_info, &bloom, b, &marked);
 		if (r) {
-			DMERR("metadata_digest_once: filter_marked_on_disk failed");
+			DMERR("%s: filter_marked_on_disk failed", __func__);
 			return r;
 		}
 
 		if (marked) {
 			__dm_bless_for_disk(&value);
-			r = dm_array_set_value(&md->era_array_info, md->era_array_root, b, &value, &md->era_array_root);
+			r = dm_array_set_value(&md->era_array_info, md->era_array_root,
+					       b, &value, &md->era_array_root);
 			if (r) {
-				DMERR("metadata_digest_once: dm_array_set_value failed");
+				DMERR("%s: dm_array_set_value failed", __func__);
 				return r;
 			}
 		}
@@ -1044,7 +1045,7 @@ static int metadata_digest_once(struct era_metadata *md)
 
 	r = dm_btree_remove(&md->bloom_tree_info, md->bloom_tree_root, &key, &md->bloom_tree_root);
 	if (r) {
-		DMERR("metadata_digest_once: dm_btree_remove failed");
+		DMERR("%s: dm_btree_remove failed", __func__);
 		return r;
 	}
 
@@ -1155,12 +1156,13 @@ static void process_deferred_bios(struct era *era)
 			failed = true;
 	}
 
-	if (failed)
+	if (failed) {
 		while ((bio = bio_list_pop(&marked_bios)))
 			bio_io_error(bio);
-	else
+	} else {
 		while ((bio = bio_list_pop(&marked_bios)))
 			generic_make_request(bio);
+	}
 }
 
 static void process_rpc_calls(struct era *era)
@@ -1348,7 +1350,7 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (IS_ERR(md)) {
 		ti->error = "Error reading metadata";
 		era_destroy(era);
-		return PTR_ERR(era->md);
+		return PTR_ERR(md);
 	}
 	era->md = md;
 
@@ -1418,7 +1420,7 @@ static void era_postsuspend(struct dm_target *ti)
 
 	r = in_worker0(era, metadata_era_archive);
 	if (r) {
-		DMERR("era_postsuspend: couldn't archive current era");
+		DMERR("%s: couldn't archive current era", __func__);
 		// FIXME fail mode ?
 	}
 
@@ -1446,7 +1448,7 @@ static int era_preresume(struct dm_target *ti)
 
 	r = in_worker0(era, metadata_new_era);
 	if (r) {
-		DMERR("era_preresume: metadata_era_rollover failed");
+		DMERR("%s: metadata_era_rollover failed", __func__);
 		return r;
 	}
 
@@ -1504,7 +1506,7 @@ static int era_message(struct dm_target *ti, unsigned argc, char **argv)
 	if (!strcasecmp(argv[0], "take_metadata_snap"))
 		return in_worker0(era, metadata_take_snap);
 
-	if (!strcasecmp(argv[0], "drop_metadata-snap"))
+	if (!strcasecmp(argv[0], "drop_metadata_snap"))
 		return in_worker0(era, metadata_drop_snap);
 
 	DMERR("unsupported message '%s'", argv[0]);
@@ -1523,9 +1525,8 @@ static int era_iterate_devices(struct dm_target *ti,
 	return fn(ti, era->origin_dev, 0, get_dev_size(era->origin_dev), data);
 }
 
-static int era_bvec_merge(struct dm_target *ti,
-			  struct bvec_merge_data *bvm,
-			  struct bio_vec *biovec, int max_size)
+static int era_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+		     struct bio_vec *biovec, int max_size)
 {
 	struct era *era = ti->private;
 	struct request_queue *q = bdev_get_queue(era->origin_dev->bdev);
@@ -1534,6 +1535,7 @@ static int era_bvec_merge(struct dm_target *ti,
 		return max_size;
 
 	bvm->bi_bdev = era->origin_dev->bdev;
+
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
@@ -1543,16 +1545,14 @@ static void era_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	uint64_t io_opt_sectors = limits->io_opt >> SECTOR_SHIFT;
 
 	/*
-	 * If the system-determined stacked limits are incompatible with
-	 * the cache's blocksize (io_opt is a factor) override them.
+	 * If the system-determined stacked limits are compatible with the
+	 * cache's blocksize (io_opt is a factor) do not override them.
 	 */
 	if (io_opt_sectors < era->block_size ||
 	    do_div(io_opt_sectors, era->block_size)) {
 		blk_limits_io_min(limits, 0);
 		blk_limits_io_opt(limits, era->block_size << SECTOR_SHIFT);
 	}
-
-	// FIXME: does dm core set some sensible default for the discard limits automatically?
 }
 
 /*----------------------------------------------------------------*/
@@ -1569,7 +1569,7 @@ static struct target_type era_target = {
 	.status = era_status,
 	.message = era_message,
 	.iterate_devices = era_iterate_devices,
-	.merge = era_bvec_merge,
+	.merge = era_merge,
 	.io_hints = era_io_hints
 };
 
@@ -1597,5 +1597,3 @@ module_exit(dm_era_exit);
 MODULE_DESCRIPTION(DM_NAME " era target");
 MODULE_AUTHOR("Joe Thornber <ejt@redhat.com>");
 MODULE_LICENSE("GPL");
-
-/*----------------------------------------------------------------*/
