@@ -709,6 +709,10 @@ static struct era_metadata *metadata_open(struct block_device *bdev,
 	md->bdev = bdev;
 	md->block_size = block_size;
 
+	md->blooms[0].md.root = INVALID_BLOOM_ROOT;
+	md->blooms[1].md.root = INVALID_BLOOM_ROOT;
+	md->current_bloom = &md->blooms[0];
+
 	r = create_persistent_data_objects(md, may_format);
 	if (r) {
 		kfree(md);
