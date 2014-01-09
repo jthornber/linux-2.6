@@ -544,6 +544,7 @@ static int prepare_superblock(struct era_metadata *md, struct superblock_disk *d
 	int r;
 	size_t metadata_len;
 
+	disk->magic = cpu_to_le64(SUPERBLOCK_MAGIC);
 	disk->flags = cpu_to_le32(0ul);
 
 	// FIXME: can't keep blanking the uuid
