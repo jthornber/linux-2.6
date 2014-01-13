@@ -29,6 +29,7 @@
 #define BLOOM_MAX_SHIFT 30
 
 struct bloom_metadata {
+	// FIXME: change nr blocks to 64bit
 	uint32_t nr_blocks;
 	uint32_t nr_bits;
 	atomic64_t nr_set;
@@ -239,12 +240,15 @@ static int filter_mark(struct dm_disk_bitset *info,
  * On disk metadata layout
  *--------------------------------------------------------------*/
 #define SPACE_MAP_ROOT_SIZE 128
+#define UUID_LEN 16
 
 struct bloom_disk {
 	__le32 nr_blocks;
 	__le32 nr_bits;
 	__le32 nr_set;
 	__le64 root;
+
+	// FIXME: we should store the hash fns and nr probes
 } __packed;
 
 struct superblock_disk {
@@ -252,7 +256,7 @@ struct superblock_disk {
 	__le32 flags;
 	__le64 blocknr;
 
-	__u8 uuid[16];
+	__u8 uuid[UUID_LEN];
 	__le64 magic;
 	__le32 version;
 
@@ -561,7 +565,7 @@ static int prepare_superblock(struct era_metadata *md, struct superblock_disk *d
 		return r;
 
 	disk->data_block_size = cpu_to_le32(md->block_size);
-	disk->metadata_block_size = cpu_to_le32(METADATA_BLOCK_SIZE);
+	disk->metadata_block_size = cpu_to_le32(METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk->nr_blocks = cpu_to_le32(md->nr_blocks);
 	disk->current_era = cpu_to_le32(atomic64_read(&md->current_era));
 
