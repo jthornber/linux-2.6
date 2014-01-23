@@ -23,7 +23,7 @@
 /*----------------------------------------------------------------
  * Bloom filter
  *--------------------------------------------------------------*/
-#define ERA_DIVIDER 100
+#define ERA_DIVIDER 20
 
 #define BLOOM_MIN_SHIFT 10
 #define BLOOM_MAX_SHIFT 30
@@ -109,6 +109,23 @@ static int filter_alloc(struct bloom_filter *f, dm_block_t nr_blocks)
 /*
  * Wipes the in-core bitset, and creates a new on disk bitset.
  */
+static void check_disk_all_zeroes(struct dm_disk_bitset *info,
+				  struct bloom_filter *f)
+{
+	int r;
+	bool v;
+	unsigned i;
+
+	for (i = 0; i < f->md.nr_bits; i++) {
+		r = dm_bitset_test_bit(info, f->md.root, i, &f->md.root, &v);
+		if (r)
+			BUG();
+
+		if (v)
+			pr_alert("bitset init failed, bit %u is set\n", i);
+	}
+}
+
 static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
 {
 	int r;
@@ -121,6 +138,8 @@ static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
 		DMERR("%s: setup_on_disk_bitset failed", __func__);
 		return r;
 	}
+
+	check_disk_all_zeroes(info, f);
 
 	return 0;
 }
@@ -164,7 +183,7 @@ static bool filter_marked(struct bloom_filter *f, dm_block_t block)
 			return false;
 	}
 
-	return 0;
+	return true;
 }
 
 static int filter_marked_on_disk(struct dm_disk_bitset *info,
@@ -209,6 +228,22 @@ static int filter_marked_on_disk(struct dm_disk_bitset *info,
 	return 0;
 }
 
+static int set_bloom_bit(struct dm_disk_bitset *info,
+			 struct bloom_filter *f, unsigned bit)
+{
+	int r;
+
+	if (!test_and_set_bit(bit, f->bits)) {
+		r = dm_bitset_set_bit(info, f->md.root, bit, &f->md.root);
+		if (r)
+			return r;
+
+		atomic64_inc(&f->md.nr_set);
+	}
+
+	return 0;
+}
+
 static int filter_mark(struct dm_disk_bitset *info,
 		       struct bloom_filter *f, uint32_t block)
 {
@@ -216,9 +251,8 @@ static int filter_mark(struct dm_disk_bitset *info,
 	unsigned p;
 	uint32_t h1, h2;
 
-	atomic64_inc(&f->md.nr_set);
-	h1 = hash1(block) &f->mask;
-	r = dm_bitset_set_bit(info, f->md.root, h1, &f->md.root);
+	h1 = hash1(block) & f->mask;
+	r = set_bloom_bit(info, f, h1);
 	if (r)
 		return r;
 
@@ -227,13 +261,18 @@ static int filter_mark(struct dm_disk_bitset *info,
 		h1 = (h1 + h2) & f->mask;
 		h2 = (h2 + p) & f->mask;
 
-		if (!test_and_set_bit(h1, f->bits)) {
-			r = dm_bitset_set_bit(info, f->md.root, h1, &f->md.root);
-			if (r)
-				return r;
+		r = set_bloom_bit(info, f, h1);
+		if (r)
+			return r;
+	}
 
-			atomic64_inc(&f->md.nr_set);
-		}
+	{
+		bool result;
+
+		BUG_ON(!filter_marked(f, block));
+		r = filter_marked_on_disk(info, &f->md, block, &result);
+		BUG_ON(r);
+		BUG_ON(!result);
 	}
 
 	return 0;
@@ -474,7 +513,7 @@ static void bf_dec(void *context, const void *value)
 	memcpy(&bd, value, sizeof(bd));
 	b = le64_to_cpu(bd.root);
 
-	dm_btree_del(&md->bloom_tree_info, b);
+	dm_bitset_del(&md->bitset_info, b);
 }
 
 static int bf_eq(void *context, const void *value1, const void *value2)
@@ -781,11 +820,39 @@ static uint32_t metadata_current_era(struct era_metadata *md)
 	return (uint32_t) atomic64_read(&md->current_era);
 }
 
+static void check_core_and_disk_bitsets_match(unsigned era,
+					      struct dm_disk_bitset *info,
+					      struct bloom_filter *f)
+{
+	int r;
+	bool v1, v2;
+	unsigned i;
+
+	for (i = 0; i < f->md.nr_bits; i++) {
+		v1 = test_bit(i, f->bits);
+		r = dm_bitset_test_bit(info, f->md.root, i, &f->md.root, &v2);
+		if (r)
+			BUG();
+
+		if (v1 != v2)
+			pr_alert("bits disagree in era %u, bit = %u, core = %d, disk = %d\n",
+				 era, i, v1, v2);
+	}
+}
+
 static int metadata_era_archive(struct era_metadata *md)
 {
 	int r;
 	uint64_t keys[1];
 	struct bloom_disk value;
+
+	check_core_and_disk_bitsets_match(atomic64_read(&md->current_era), &md->bitset_info, md->current_bloom);
+
+	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
+	if (r) {
+		DMERR("%s: dm_bitset_flush failed", __func__);
+		return r;
+	}
 
 	bf_pack(&md->current_bloom->md, &value);
 	md->current_bloom->md.root = INVALID_BLOOM_ROOT;
@@ -873,10 +940,12 @@ static int metadata_commit(struct era_metadata *md)
 	int r;
 	struct dm_block *sblock;
 
-	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
-	if (r) {
-		DMERR("%s: bitset flush failed", __func__);
-		return r;
+	if (md->current_bloom->md.root != SUPERBLOCK_LOCATION) {
+		r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
+		if (r) {
+			DMERR("%s: bitset flush failed", __func__);
+			return r;
+		}
 	}
 
 	r = dm_tm_pre_commit(md->tm);
@@ -1038,27 +1107,35 @@ static int metadata_digest_once(struct era_metadata *md)
 	bool marked;
 	uint64_t key;
 	unsigned nr, b;
-	struct bloom_disk *disk;
+	struct bloom_disk disk;
 	struct bloom_metadata bloom;
 	__le32 value;
+	struct dm_disk_bitset info;
+
+	/*
+	 * We initialise another bitset info to avoid any caching side
+	 * effects with the previous one.
+	 */
+	dm_disk_bitset_init(md->tm, &info);
 
 	r = dm_btree_find_lowest_key(&md->bloom_tree_info, md->bloom_tree_root, &key);
-	if (r)
+	if (r < 0)
 		return r;
 
 	r = dm_btree_lookup(&md->bloom_tree_info, md->bloom_tree_root, &key, &disk);
 	if (r) {
-		DMERR("%s: dm_btree_lookup failed", __func__);
+		if (r != -ENODATA)
+			DMERR("%s: dm_btree_lookup failed", __func__);
 		return r;
 	}
 
-	bf_unpack(disk, &bloom);
-
+	bf_unpack(&disk, &bloom);
+	pr_alert("digesting era %u\n", (unsigned) key);
 	value = cpu_to_le32(key);
 
 	nr = min(bloom.nr_blocks, md->nr_blocks);
 	for (b = 0; b < nr; b++) {
-		r = filter_marked_on_disk(&md->bitset_info, &bloom, b, &marked);
+		r = filter_marked_on_disk(&info, &bloom, b, &marked);
 		if (r) {
 			DMERR("%s: filter_marked_on_disk failed", __func__);
 			return r;
@@ -1088,9 +1165,10 @@ static int metadata_digest(struct era_metadata *md)
 {
 	int r;
 
+	pr_alert("starting digest process\n");
 	while (!(r = metadata_digest_once(md)))
 		;
-
+	pr_alert("finished digest\n");
 	return r == -ENODATA ? 0 : r;
 }
 

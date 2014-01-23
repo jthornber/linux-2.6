@@ -842,8 +842,6 @@ static int find_lowest_key(struct ro_spine *s, dm_block_t block,
 		i = le32_to_cpu(ro_node(s)->header.nr_entries);
 		if (!i)
 			return -ENODATA;
-		else
-			i--;
 
 		*result_key = le64_to_cpu(ro_node(s)->keys[0]);
 		if (next_block || flags & INTERNAL_NODE)

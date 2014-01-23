@@ -35,6 +35,7 @@ EXPORT_SYMBOL_GPL(dm_disk_bitset_init);
 
 int dm_bitset_empty(struct dm_disk_bitset *info, dm_block_t *root)
 {
+	BUG_ON(info->current_index_set);
 	return dm_array_empty(&info->array_info, root);
 }
 EXPORT_SYMBOL_GPL(dm_bitset_empty);
@@ -43,13 +44,16 @@ int dm_bitset_resize(struct dm_disk_bitset *info, dm_block_t root,
 		     uint32_t old_nr_entries, uint32_t new_nr_entries,
 		     bool default_value, dm_block_t *new_root)
 {
+	int r;
 	uint32_t old_blocks = dm_div_up(old_nr_entries, BITS_PER_ARRAY_ENTRY);
 	uint32_t new_blocks = dm_div_up(new_nr_entries, BITS_PER_ARRAY_ENTRY);
 	__le64 value = default_value ? cpu_to_le64(~0) : cpu_to_le64(0);
 
 	__dm_bless_for_disk(&value);
-	return dm_array_resize(&info->array_info, root, old_blocks, new_blocks,
-			       &value, new_root);
+	r = dm_array_resize(&info->array_info, root, old_blocks, new_blocks,
+			    &value, new_root);
+
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_bitset_resize);
 
