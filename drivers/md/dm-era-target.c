@@ -114,6 +114,7 @@ static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
 	int r;
 
 	memset(f->bits, 0, bitset_size(f->md.nr_bits));
+	atomic64_set(&f->md.nr_set, 0);
 
 	r = setup_on_disk_bitset(info, f->md.nr_bits, &f->md.root);
 	if (r) {
@@ -230,10 +231,17 @@ static int filter_mark(struct dm_disk_bitset *info,
 			r = dm_bitset_set_bit(info, f->md.root, h1, &f->md.root);
 			if (r)
 				return r;
+
+			atomic64_inc(&f->md.nr_set);
 		}
 	}
 
 	return 0;
+}
+
+static int filter_full(struct bloom_filter *f)
+{
+	return atomic64_read(&f->md.nr_set) > (f->md.nr_bits / 2);
 }
 
 /*----------------------------------------------------------------
@@ -493,7 +501,7 @@ static void setup_era_array_info(struct era_metadata *md)
 {
 	struct dm_btree_value_type vt;
 	vt.context = NULL;
-	vt.size = sizeof(__le64);
+	vt.size = sizeof(__le32);
 	vt.inc = NULL;
 	vt.dec = NULL;
 	vt.equal = NULL;
@@ -737,6 +745,7 @@ static int metadata_resize(struct era_metadata *md, void *arg)
 {
 	int r;
 	dm_block_t *new_size = arg;
+	__le32 value;
 
 	filter_free(&md->blooms[0]);
 	filter_free(&md->blooms[1]);
@@ -753,58 +762,18 @@ static int metadata_resize(struct era_metadata *md, void *arg)
 		return r;
 	}
 
+	value = cpu_to_le32(0u);
+	__dm_bless_for_disk(&value);
+	r = dm_array_resize(&md->era_array_info, md->era_array_root,
+			    md->nr_blocks, *new_size,
+			    &value, &md->era_array_root);
+	if (r) {
+		DMERR("%s: dm_array_resize failed", __func__);
+		return r;
+	}
+
+	md->nr_blocks = *new_size;
 	return 0;
-}
-
-static int metadata_mark(struct era_metadata *md, dm_block_t block)
-{
-	return filter_mark(&md->bitset_info, md->current_bloom, block);
-}
-
-static bool metadata_current_marked(struct era_metadata *md, dm_block_t block)
-{
-	bool r;
-	struct bloom_filter *f;
-
-	rcu_read_lock();
-	f = rcu_dereference(md->current_bloom);
-	r = filter_marked(f, block);
-	rcu_read_unlock();
-
-	return r;
-}
-
-static int metadata_commit(struct era_metadata *md)
-{
-	int r;
-	struct dm_block *sblock;
-
-	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
-	if (r) {
-		DMERR("%s: bitset flush failed", __func__);
-		return r;
-	}
-
-	r = dm_tm_pre_commit(md->tm);
-	if (r) {
-		DMERR("%s: pre commit failed", __func__);
-		return r;
-	}
-
-	r = superblock_lock(md, &sblock);
-	if (r) {
-		DMERR("%s: superblock lock failed", __func__);
-		return r;
-	}
-
-	r = prepare_superblock(md, dm_block_data(sblock));
-	if (r) {
-		DMERR("%s: prepare_superblock failed", __func__);
-		dm_bm_unlock(sblock); /* FIXME: does this commit? */
-		return r;
-	}
-
-	return dm_tm_commit(md->tm, sblock);
 }
 
 static uint32_t metadata_current_era(struct era_metadata *md)
@@ -876,6 +845,60 @@ static int metadata_era_rollover(struct era_metadata *md)
 	}
 
 	return 0;
+}
+
+static int metadata_mark(struct era_metadata *md, dm_block_t block)
+{
+	if (filter_full(md->current_bloom))
+		metadata_era_rollover(md);
+
+	return filter_mark(&md->bitset_info, md->current_bloom, block);
+}
+
+static bool metadata_current_marked(struct era_metadata *md, dm_block_t block)
+{
+	bool r;
+	struct bloom_filter *f;
+
+	rcu_read_lock();
+	f = rcu_dereference(md->current_bloom);
+	r = filter_marked(f, block);
+	rcu_read_unlock();
+
+	return r;
+}
+
+static int metadata_commit(struct era_metadata *md)
+{
+	int r;
+	struct dm_block *sblock;
+
+	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
+	if (r) {
+		DMERR("%s: bitset flush failed", __func__);
+		return r;
+	}
+
+	r = dm_tm_pre_commit(md->tm);
+	if (r) {
+		DMERR("%s: pre commit failed", __func__);
+		return r;
+	}
+
+	r = superblock_lock(md, &sblock);
+	if (r) {
+		DMERR("%s: superblock lock failed", __func__);
+		return r;
+	}
+
+	r = prepare_superblock(md, dm_block_data(sblock));
+	if (r) {
+		DMERR("%s: prepare_superblock failed", __func__);
+		dm_bm_unlock(sblock); /* FIXME: does this commit? */
+		return r;
+	}
+
+	return dm_tm_commit(md->tm, sblock);
 }
 
 static int metadata_checkpoint(struct era_metadata *md)
@@ -1303,6 +1326,11 @@ static void era_destroy(struct era *era)
 	kfree(era);
 }
 
+static dm_block_t calc_nr_blocks(struct era *era)
+{
+	return dm_sector_div_up(era->ti->len, era->block_size);
+}
+
 /*
  * <metadata dev> <data dev> <data block size (sectors)>
  */
@@ -1362,6 +1390,8 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		return PTR_ERR(md);
 	}
 	era->md = md;
+
+	era->nr_blocks = calc_nr_blocks(era);
 
 	r = metadata_resize(era->md, &era->nr_blocks);
 	if (r){
@@ -1434,11 +1464,6 @@ static void era_postsuspend(struct dm_target *ti)
 	}
 
 	stop_worker(era);
-}
-
-static dm_block_t calc_nr_blocks(struct era *era)
-{
-	return dm_sector_div_up(era->ti->len, era->block_size);
 }
 
 static int era_preresume(struct dm_target *ti)
