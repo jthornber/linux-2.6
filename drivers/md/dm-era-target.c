@@ -18,40 +18,33 @@
 #define SUPERBLOCK_CSUM_XOR 146538381
 #define MIN_ERA_VERSION 1
 #define MAX_ERA_VERSION 1
-#define INVALID_BLOOM_ROOT SUPERBLOCK_LOCATION
+#define INVALID_WRITESET_ROOT SUPERBLOCK_LOCATION
 
 /*----------------------------------------------------------------
- * Bloom filter
+ * Writeset
  *--------------------------------------------------------------*/
-#define BLOOM_MIN_SHIFT 10
-#define BLOOM_MAX_SHIFT 30
-
-struct bloom_metadata {
-	// FIXME: change nr blocks to 64bit
-	uint32_t nr_blocks;
+struct writeset_metadata {
 	uint32_t nr_bits;
-	atomic64_t nr_set;	/* FIXME: remove */
-
 	dm_block_t root;
 };
 
-struct bloom_filter {
-	struct bloom_metadata md;
+struct writeset {
+	struct writeset_metadata md;
 
-	unsigned mask;
+	/*
+	 * An in core copy of the bits to save constantly doing look ups on
+	 * disk.
+	 */
 	unsigned long *bits;
-
-	atomic_t inserts_remaining;
-	unsigned rollover_point;
 };
 
 /*
  * This does not free off the on disk bitset as this will normally be done
  * after digesting into the era array.
  */
-static void filter_free(struct bloom_filter *f)
+static void writeset_free(struct writeset *ws)
 {
-	vfree(f->bits);
+	vfree(ws->bits);
 }
 
 static int setup_on_disk_bitset(struct dm_disk_bitset *info,
@@ -66,47 +59,6 @@ static int setup_on_disk_bitset(struct dm_disk_bitset *info,
 	return dm_bitset_resize(info, *root, 0, nr_bits, false, root);
 }
 
-/*----------------------------------------------------------------
- * Bloom filter sizing
- ---------------------------------------------------------------*/
-static struct {
-	unsigned nr_bits_shift;
-	unsigned rollover_point;
-} params_table[] = {
-	{14, 1039},
-	{15, 2077},
-	{16, 4153},
-	{17, 8305},
-	{18, 16609},
-	{19, 33217},
-	{20, 66433},
-	{21, 132866},
-	{22, 265731},
-	{23, 531461},
-	{24, 1062922}
-};
-
-static unsigned find_best_params_index(unsigned nr_blocks)
-{
-	unsigned i;
-	unsigned table_size = sizeof(params_table) / sizeof(*params_table);
-
-	for (i = 0; i < (table_size - 1); i++)
-		if (params_table[i].rollover_point > nr_blocks)
-			break;
-
-	return i;
-}
-
-static void calc_bloom_filter_size(unsigned nr_blocks, unsigned *nr_bits, unsigned *rollover_point)
-{
-	unsigned i = find_best_params_index(nr_blocks / 128);
-	*nr_bits = 1 << params_table[i].nr_bits_shift;
-	*rollover_point = params_table[i].rollover_point;
-}
-
-/*----------------------------------------------------------------*/
-
 static size_t bitset_size(unsigned nr_bits)
 {
 	return sizeof(unsigned long) * dm_div_up(nr_bits, BITS_PER_LONG);
@@ -115,24 +67,12 @@ static size_t bitset_size(unsigned nr_bits)
 /*
  * Allocates memory for the in core bitset.
  */
-static int filter_alloc(struct bloom_filter *f, dm_block_t nr_blocks)
+static int writeset_alloc(struct writeset *ws, dm_block_t nr_blocks)
 {
-	unsigned nr_bits, rollover_point;
-
-	calc_bloom_filter_size(nr_blocks, &nr_bits, &rollover_point);
-	pr_alert("allocating bloom filter with %u bits, which will hold %u inserts\n",
-		 nr_bits, rollover_point);
-
-	f->md.nr_blocks = nr_blocks;
-	f->md.nr_bits = nr_bits;
-	f->md.root = INVALID_BLOOM_ROOT;
-	atomic64_set(&f->md.nr_set, 0); /* FIXME: I don't think we need this anymore */
-	f->rollover_point = rollover_point;
-	atomic_set(&f->inserts_remaining, rollover_point);
-
-	f->mask = nr_bits - 1;
-	f->bits = vzalloc(bitset_size(nr_bits));
-	if (!f->bits) {
+	ws->md.nr_bits = nr_blocks;
+	ws->md.root = INVALID_WRITESET_ROOT;
+	ws->bits = vzalloc(bitset_size(nr_blocks));
+	if (!ws->bits) {
 		DMERR("%s: couldn't allocate in memory bitset", __func__);
 		return -ENOMEM;
 	}
@@ -143,179 +83,57 @@ static int filter_alloc(struct bloom_filter *f, dm_block_t nr_blocks)
 /*
  * Wipes the in-core bitset, and creates a new on disk bitset.
  */
-static void check_disk_all_zeroes(struct dm_disk_bitset *info,
-				  struct bloom_filter *f)
-{
-	int r;
-	bool v;
-	unsigned i;
-
-	for (i = 0; i < f->md.nr_bits; i++) {
-		r = dm_bitset_test_bit(info, f->md.root, i, &f->md.root, &v);
-		if (r)
-			BUG();
-
-		if (v)
-			pr_alert("bitset init failed, bit %u is set\n", i);
-	}
-}
-
-static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
+static int writeset_init(struct dm_disk_bitset *info, struct writeset *ws)
 {
 	int r;
 
-	memset(f->bits, 0, bitset_size(f->md.nr_bits));
-	atomic64_set(&f->md.nr_set, 0);
-	atomic_set(&f->inserts_remaining, f->rollover_point);
+	memset(ws->bits, 0, bitset_size(ws->md.nr_bits));
 
-	r = setup_on_disk_bitset(info, f->md.nr_bits, &f->md.root);
+	r = setup_on_disk_bitset(info, ws->md.nr_bits, &ws->md.root);
 	if (r) {
 		DMERR("%s: setup_on_disk_bitset failed", __func__);
 		return r;
 	}
 
-	check_disk_all_zeroes(info, f);
-
 	return 0;
 }
 
-#define MULTIPLIER 0x9e37fffffffc0001UL
-#define BIT_SHIFT 18
-
-static uint32_t hash1(dm_block_t b)
+static bool writeset_marked(struct writeset *ws, dm_block_t block)
 {
-	return (b * MULTIPLIER) >> BIT_SHIFT;
+	return test_bit(block, ws->bits);
 }
 
-static uint32_t hash2(dm_block_t b)
+static int writeset_marked_on_disk(struct dm_disk_bitset *info,
+				   struct writeset_metadata *m, dm_block_t block,
+				   bool *result)
 {
-	uint32_t n = b;
-
-	n = n ^ (n >> 16);
-	n = n * 0x85ebca6bu;
-	n = n ^ (n >> 13);
-	n = n * 0xc2b2ae35u;
-	n = n ^ (n >> 16);
-
-	return n;
-}
-
-static bool filter_marked(struct bloom_filter *f, dm_block_t block)
-{
-	unsigned p;
-	uint32_t h1, h2;
-
-	h1 = hash1(block) & f->mask;
-	if (!test_bit(h1, f->bits))
-		return false;
-
-	h2 = hash2(block) & f->mask;
-	for (p = 1; p < 6; p++) {
-		h1 = (h1 + h2) & f->mask;
-		h2 = (h2 + p) & f->mask;
-
-		if (!test_bit(h1, f->bits))
-			return false;
-	}
-
-	return true;
-}
-
-static int filter_marked_on_disk(struct dm_disk_bitset *info,
-				 struct bloom_metadata *m, dm_block_t block,
-				 bool *result)
-{
-	int r;
-	unsigned p;
-	uint32_t h1, h2;
-	uint32_t mask = m->nr_bits - 1;
-
-	h1 = hash1(block) & mask;
-
 	/*
 	 * The bitset was flushed when it was archived, so we know there'll
 	 * be no change to the root.
 	 */
-	r = dm_bitset_test_bit(info, m->root, h1, &m->root, result);
+	int r = dm_bitset_test_bit(info, m->root, block, &m->root, result);
 	if (r) {
 		DMERR("%s: dm_bitset_test_bit failed", __func__);
 		return r;
 	}
 
-	if (!*result)
-		return 0;
+	return r;
+}
 
-	h2 = hash2(block) & mask;
-	for (p = 1; p < 6; p++) {
-		h1 = (h1 + h2) & mask;
-		h2 = (h2 + p) & mask;
+static int writeset_mark(struct dm_disk_bitset *info,
+			 struct writeset *ws, uint32_t block)
+{
+	int r;
 
-		r = dm_bitset_test_bit(info, m->root, h1, &m->root, result);
+	if (!test_and_set_bit(block, ws->bits)) {
+		r = dm_bitset_set_bit(info, ws->md.root, block, &ws->md.root);
 		if (r) {
-			DMERR("%s: dm_bitset_test_bit failed", __func__);
+			// FIXME: fail mode
 			return r;
 		}
-
-		if (!*result)
-			return 0;
 	}
 
 	return 0;
-}
-
-static int set_bloom_bit(struct dm_disk_bitset *info,
-			 struct bloom_filter *f, unsigned bit)
-{
-	int r;
-
-	if (!test_and_set_bit(bit, f->bits)) {
-		r = dm_bitset_set_bit(info, f->md.root, bit, &f->md.root);
-		if (r)
-			return r;
-
-		atomic64_inc(&f->md.nr_set);
-	}
-
-	return 0;
-}
-
-static int filter_mark(struct dm_disk_bitset *info,
-		       struct bloom_filter *f, uint32_t block)
-{
-	int r;
-	unsigned p;
-	uint32_t h1, h2;
-
-	h1 = hash1(block) & f->mask;
-	r = set_bloom_bit(info, f, h1);
-	if (r)
-		return r;
-
-	h2 = hash2(block) & f->mask;
-	for (p = 1; p < 6; p++) {
-		h1 = (h1 + h2) & f->mask;
-		h2 = (h2 + p) & f->mask;
-
-		r = set_bloom_bit(info, f, h1);
-		if (r)
-			return r;
-	}
-
-	{
-		bool result;
-
-		BUG_ON(!filter_marked(f, block));
-		r = filter_marked_on_disk(info, &f->md, block, &result);
-		BUG_ON(r);
-		BUG_ON(!result);
-	}
-
-	return 0;
-}
-
-static int filter_full(struct bloom_filter *f)
-{
-	return atomic_dec_and_test(&f->inserts_remaining);
 }
 
 /*----------------------------------------------------------------
@@ -324,13 +142,9 @@ static int filter_full(struct bloom_filter *f)
 #define SPACE_MAP_ROOT_SIZE 128
 #define UUID_LEN 16
 
-struct bloom_disk {
-	__le32 nr_blocks;
+struct writeset_disk {
 	__le32 nr_bits;
-	__le32 nr_set;
 	__le64 root;
-
-	// FIXME: we should store the hash fns and nr probes
 } __packed;
 
 struct superblock_disk {
@@ -349,12 +163,12 @@ struct superblock_disk {
 	__le32 nr_blocks;
 
 	__le32 current_era;
-	struct bloom_disk current_bloom;
+	struct writeset_disk current_writeset;
 
 	/*
 	 * Only these two fields are valid within the metadata snapshot.
 	 */
-	__le64 bloom_tree_root;
+	__le64 writeset_tree_root;
 	__le64 era_array_root;
 } __packed;
 
@@ -443,18 +257,18 @@ struct era_metadata {
 	atomic64_t current_era;
 
 	/*
-	 * We preallocate 2 bloom filters.  When an era rolls over we
+	 * We preallocate 2 writesets.  When an era rolls over we
 	 * switch between them. This means the allocation is done at
 	 * preresume time, rather than on the io path.
 	 */
-	struct bloom_filter blooms[2];
-	struct bloom_filter *current_bloom;
+	struct writeset writesets[2];
+	struct writeset *current_writeset;
 
-	dm_block_t bloom_tree_root;
+	dm_block_t writeset_tree_root;
 	dm_block_t era_array_root;
 
 	struct dm_disk_bitset bitset_info;
-	struct dm_btree_info bloom_tree_info;
+	struct dm_btree_info writeset_tree_info;
 	struct dm_array_info era_array_info;
 
 	dm_block_t metadata_snap;
@@ -511,63 +325,59 @@ static int superblock_all_zeroes(struct dm_block_manager *bm, bool *result)
 
 /*----------------------------------------------------------------*/
 
-static void bf_pack(const struct bloom_metadata *core, struct bloom_disk *disk)
+static void ws_pack(const struct writeset_metadata *core, struct writeset_disk *disk)
 {
-	disk->nr_blocks = cpu_to_le32(core->nr_blocks);
 	disk->nr_bits = cpu_to_le32(core->nr_bits);
-	disk->nr_set = cpu_to_le32(atomic64_read(&core->nr_set));
 	disk->root = cpu_to_le64(core->root);
 }
 
-static void bf_unpack(const struct bloom_disk *disk, struct bloom_metadata *core)
+static void ws_unpack(const struct writeset_disk *disk, struct writeset_metadata *core)
 {
-	core->nr_blocks = le32_to_cpu(disk->nr_blocks);
 	core->nr_bits = le32_to_cpu(disk->nr_bits);
-	atomic64_set(&core->nr_set, le32_to_cpu(disk->nr_set));
 	core->root = le64_to_cpu(disk->root);
 }
 
-static void bf_inc(void *context, const void *value)
+static void ws_inc(void *context, const void *value)
 {
 	struct era_metadata *md = context;
-	struct bloom_disk bd;
+	struct writeset_disk ws_d;
 	dm_block_t b;
 
-	memcpy(&bd, value, sizeof(bd));
-	b = le64_to_cpu(bd.root);
+	memcpy(&ws_d, value, sizeof(ws_d));
+	b = le64_to_cpu(ws_d.root);
 
 	dm_tm_inc(md->tm, b);
 }
 
-static void bf_dec(void *context, const void *value)
+static void ws_dec(void *context, const void *value)
 {
 	struct era_metadata *md = context;
-	struct bloom_disk bd;
+	struct writeset_disk ws_d;
 	dm_block_t b;
 
-	memcpy(&bd, value, sizeof(bd));
-	b = le64_to_cpu(bd.root);
+	memcpy(&ws_d, value, sizeof(ws_d));
+	b = le64_to_cpu(ws_d.root);
 
 	dm_bitset_del(&md->bitset_info, b);
 }
 
-static int bf_eq(void *context, const void *value1, const void *value2)
+static int ws_eq(void *context, const void *value1, const void *value2)
 {
-	return !memcmp(value1, value2, sizeof(struct bloom_metadata));
+	return !memcmp(value1, value2, sizeof(struct writeset_metadata));
 }
 
 /*----------------------------------------------------------------*/
 
-static void setup_bloom_tree_info(struct era_metadata *md)
+static void setup_writeset_tree_info(struct era_metadata *md)
 {
-	struct dm_btree_value_type *vt = &md->bloom_tree_info.value_type;
-	md->bloom_tree_info.tm = md->tm;
-	md->bloom_tree_info.levels = 1;
+	struct dm_btree_value_type *vt = &md->writeset_tree_info.value_type;
+	md->writeset_tree_info.tm = md->tm;
+	md->writeset_tree_info.levels = 1;
 	vt->context = md;
-	vt->size = sizeof(struct bloom_disk);
-	vt->inc = bf_inc;
-	vt->dec = bf_dec;
-	vt->equal = bf_eq;
+	vt->size = sizeof(struct writeset_disk);
+	vt->inc = ws_inc;
+	vt->dec = ws_dec;
+	vt->equal = ws_eq;
 }
 
 static void setup_era_array_info(struct era_metadata *md)
@@ -586,7 +396,7 @@ static void setup_era_array_info(struct era_metadata *md)
 static void setup_infos(struct era_metadata *md)
 {
 	dm_disk_bitset_init(md->tm, &md->bitset_info);
-	setup_bloom_tree_info(md);
+	setup_writeset_tree_info(md);
 	setup_era_array_info(md);
 }
 
@@ -605,9 +415,9 @@ static int create_fresh_metadata(struct era_metadata *md)
 
 	setup_infos(md);
 
-	r = dm_btree_empty(&md->bloom_tree_info, &md->bloom_tree_root);
+	r = dm_btree_empty(&md->writeset_tree_info, &md->writeset_tree_root);
 	if (r) {
-		DMERR("couldn't create new bloom tree");
+		DMERR("couldn't create new writeset tree");
 		return r;
 	}
 
@@ -651,8 +461,8 @@ static int prepare_superblock(struct era_metadata *md, struct superblock_disk *d
 	disk->nr_blocks = cpu_to_le32(md->nr_blocks);
 	disk->current_era = cpu_to_le32(atomic64_read(&md->current_era));
 
-	bf_pack(&md->current_bloom->md, &disk->current_bloom);
-	disk->bloom_tree_root = cpu_to_le64(md->bloom_tree_root);
+	ws_pack(&md->current_writeset->md, &disk->current_writeset);
+	disk->writeset_tree_root = cpu_to_le64(md->writeset_tree_root);
 	disk->era_array_root = cpu_to_le64(md->era_array_root);
 
 	return 0;
@@ -773,9 +583,9 @@ static void destroy_persistent_data_objects(struct era_metadata *md)
 /*
  * This waits until all era_map threads have picked up the new filter.
  */
-static void swap_filter(struct era_metadata *md, struct bloom_filter *new_filter)
+static void swap_writeset(struct era_metadata *md, struct writeset *new_writeset)
 {
-	rcu_assign_pointer(md->current_bloom, new_filter);
+	rcu_assign_pointer(md->current_writeset, new_writeset);
 	synchronize_rcu();
 }
 
@@ -796,9 +606,9 @@ static struct era_metadata *metadata_open(struct block_device *bdev,
 	md->bdev = bdev;
 	md->block_size = block_size;
 
-	md->blooms[0].md.root = INVALID_BLOOM_ROOT;
-	md->blooms[1].md.root = INVALID_BLOOM_ROOT;
-	md->current_bloom = &md->blooms[0];
+	md->writesets[0].md.root = INVALID_WRITESET_ROOT;
+	md->writesets[1].md.root = INVALID_WRITESET_ROOT;
+	md->current_writeset = &md->writesets[0];
 
 	r = create_persistent_data_objects(md, may_format);
 	if (r) {
@@ -821,18 +631,18 @@ static int metadata_resize(struct era_metadata *md, void *arg)
 	dm_block_t *new_size = arg;
 	__le32 value;
 
-	filter_free(&md->blooms[0]);
-	filter_free(&md->blooms[1]);
+	writeset_free(&md->writesets[0]);
+	writeset_free(&md->writesets[1]);
 
-	r = filter_alloc(&md->blooms[0], *new_size);
+	r = writeset_alloc(&md->writesets[0], *new_size);
 	if (r) {
-		DMERR("%s: filter_alloc failed for bloom 0", __func__);
+		DMERR("%s: writeset_alloc failed for writeset 0", __func__);
 		return r;
 	}
 
-	r = filter_alloc(&md->blooms[1], *new_size);
+	r = writeset_alloc(&md->writesets[1], *new_size);
 	if (r) {
-		DMERR("%s: filter_alloc failed for bloom 1", __func__);
+		DMERR("%s: writeset_alloc failed for writeset 1", __func__);
 		return r;
 	}
 
@@ -855,48 +665,26 @@ static uint32_t metadata_current_era(struct era_metadata *md)
 	return (uint32_t) atomic64_read(&md->current_era);
 }
 
-static void check_core_and_disk_bitsets_match(unsigned era,
-					      struct dm_disk_bitset *info,
-					      struct bloom_filter *f)
-{
-	int r;
-	bool v1, v2;
-	unsigned i;
-
-	for (i = 0; i < f->md.nr_bits; i++) {
-		v1 = test_bit(i, f->bits);
-		r = dm_bitset_test_bit(info, f->md.root, i, &f->md.root, &v2);
-		if (r)
-			BUG();
-
-		if (v1 != v2)
-			pr_alert("bits disagree in era %u, bit = %u, core = %d, disk = %d\n",
-				 era, i, v1, v2);
-	}
-}
-
 static int metadata_era_archive(struct era_metadata *md)
 {
 	int r;
 	uint64_t keys[1];
-	struct bloom_disk value;
+	struct writeset_disk value;
 
-	check_core_and_disk_bitsets_match(atomic64_read(&md->current_era), &md->bitset_info, md->current_bloom);
-
-	r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
+	r = dm_bitset_flush(&md->bitset_info, md->current_writeset->md.root, &md->current_writeset->md.root);
 	if (r) {
 		DMERR("%s: dm_bitset_flush failed", __func__);
 		return r;
 	}
 
-	bf_pack(&md->current_bloom->md, &value);
-	md->current_bloom->md.root = INVALID_BLOOM_ROOT;
+	ws_pack(&md->current_writeset->md, &value);
+	md->current_writeset->md.root = INVALID_WRITESET_ROOT;
 
 	keys[0] = atomic64_read(&md->current_era);
 	__dm_bless_for_disk(&value);
-	r = dm_btree_insert(&md->bloom_tree_info, md->bloom_tree_root, keys, &value, &md->bloom_tree_root);
+	r = dm_btree_insert(&md->writeset_tree_info, md->writeset_tree_root, keys, &value, &md->writeset_tree_root);
 	if (r) {
-		DMERR("%s: couldn't insert era into btree", __func__);
+		DMERR("%s: couldn't insert writeset into btree", __func__);
 		// FIXME: fail mode
 		return r;
 	}
@@ -904,23 +692,23 @@ static int metadata_era_archive(struct era_metadata *md)
 	return 0;
 }
 
-static struct bloom_filter *next_filter(struct era_metadata *md)
+static struct writeset *next_writeset(struct era_metadata *md)
 {
-	return (md->current_bloom == &md->blooms[0]) ? &md->blooms[1] : &md->blooms[0];
+	return (md->current_writeset == &md->writesets[0]) ? &md->writesets[1] : &md->writesets[0];
 }
 
 static int metadata_new_era(struct era_metadata *md)
 {
 	int r;
-	struct bloom_filter *new_filter = next_filter(md);
+	struct writeset *new_writeset = next_writeset(md);
 
-	r = filter_init(&md->bitset_info, new_filter);
+	r = writeset_init(&md->bitset_info, new_writeset);
 	if (r) {
-		DMERR("%s: filter_init failed", __func__);
+		DMERR("%s: writeset_init failed", __func__);
 		return r;
 	}
 
-	swap_filter(md, new_filter);
+	swap_writeset(md, new_writeset);
 	atomic64_inc(&md->current_era);
 
 	return 0;
@@ -930,7 +718,7 @@ static int metadata_era_rollover(struct era_metadata *md)
 {
 	int r;
 
-	if (md->current_bloom->md.root != INVALID_BLOOM_ROOT) {
+	if (md->current_writeset->md.root != INVALID_WRITESET_ROOT) {
 		r = metadata_era_archive(md);
 		if (r) {
 			DMERR("%s: metadata_archive_era failed", __func__);
@@ -951,20 +739,17 @@ static int metadata_era_rollover(struct era_metadata *md)
 
 static int metadata_mark(struct era_metadata *md, dm_block_t block)
 {
-	if (filter_full(md->current_bloom))
-		metadata_era_rollover(md);
-
-	return filter_mark(&md->bitset_info, md->current_bloom, block);
+	return writeset_mark(&md->bitset_info, md->current_writeset, block);
 }
 
 static bool metadata_current_marked(struct era_metadata *md, dm_block_t block)
 {
 	bool r;
-	struct bloom_filter *f;
+	struct writeset *ws;
 
 	rcu_read_lock();
-	f = rcu_dereference(md->current_bloom);
-	r = filter_marked(f, block);
+	ws = rcu_dereference(md->current_writeset);
+	r = writeset_marked(ws, block);
 	rcu_read_unlock();
 
 	return r;
@@ -975,8 +760,8 @@ static int metadata_commit(struct era_metadata *md)
 	int r;
 	struct dm_block *sblock;
 
-	if (md->current_bloom->md.root != SUPERBLOCK_LOCATION) {
-		r = dm_bitset_flush(&md->bitset_info, md->current_bloom->md.root, &md->current_bloom->md.root);
+	if (md->current_writeset->md.root != SUPERBLOCK_LOCATION) {
+		r = dm_bitset_flush(&md->bitset_info, md->current_writeset->md.root, &md->current_writeset->md.root);
 		if (r) {
 			DMERR("%s: bitset flush failed", __func__);
 			return r;
@@ -1053,9 +838,9 @@ static int metadata_take_snap(struct era_metadata *md)
 	}
 	BUG_ON(!inc);
 
-	r = dm_sm_inc_block(md->sm, md->bloom_tree_root);
+	r = dm_sm_inc_block(md->sm, md->writeset_tree_root);
 	if (r) {
-		DMERR("%s: couldn't inc bloom tree root", __func__);
+		DMERR("%s: couldn't inc writeset tree root", __func__);
 		dm_tm_unlock(md->tm, clone);
 		return r;
 	}
@@ -1063,7 +848,7 @@ static int metadata_take_snap(struct era_metadata *md)
 	r = dm_sm_inc_block(md->sm, md->era_array_root);
 	if (r) {
 		DMERR("%s: couldn't inc era tree root", __func__);
-		dm_sm_dec_block(md->sm, md->bloom_tree_root);
+		dm_sm_dec_block(md->sm, md->writeset_tree_root);
 		dm_tm_unlock(md->tm, clone);
 		return r;
 	}
@@ -1110,9 +895,9 @@ static int metadata_drop_snap(struct era_metadata *md)
 	md->metadata_snap = SUPERBLOCK_LOCATION;
 
 	disk = dm_block_data(clone);
-	r = dm_btree_del(&md->bloom_tree_info, le64_to_cpu(disk->bloom_tree_root));
+	r = dm_btree_del(&md->writeset_tree_info, le64_to_cpu(disk->writeset_tree_root));
 	if (r) {
-		DMERR("%s: error deleting bloom tree clone", __func__);
+		DMERR("%s: error deleting writeset tree clone", __func__);
 		dm_tm_unlock(md->tm, clone);
 		return r;
 	}
@@ -1131,7 +916,7 @@ static int metadata_drop_snap(struct era_metadata *md)
 }
 
 /*----------------------------------------------------------------
- * Goes through the archived bloom filters one by one transcribing them to
+ * Goes through the archived writesets one by one transcribing them to
  * the era array.
  *
  * FIXME: This should be run in a background thread at low priority.
@@ -1142,8 +927,8 @@ static int metadata_digest_once(struct era_metadata *md)
 	bool marked;
 	uint64_t key;
 	unsigned nr, b;
-	struct bloom_disk disk;
-	struct bloom_metadata bloom;
+	struct writeset_disk disk;
+	struct writeset_metadata writeset;
 	__le32 value;
 	struct dm_disk_bitset info;
 
@@ -1153,26 +938,26 @@ static int metadata_digest_once(struct era_metadata *md)
 	 */
 	dm_disk_bitset_init(md->tm, &info);
 
-	r = dm_btree_find_lowest_key(&md->bloom_tree_info, md->bloom_tree_root, &key);
+	r = dm_btree_find_lowest_key(&md->writeset_tree_info, md->writeset_tree_root, &key);
 	if (r < 0)
 		return r;
 
-	r = dm_btree_lookup(&md->bloom_tree_info, md->bloom_tree_root, &key, &disk);
+	r = dm_btree_lookup(&md->writeset_tree_info, md->writeset_tree_root, &key, &disk);
 	if (r) {
 		if (r != -ENODATA)
 			DMERR("%s: dm_btree_lookup failed", __func__);
 		return r;
 	}
 
-	bf_unpack(&disk, &bloom);
+	ws_unpack(&disk, &writeset);
 	pr_alert("digesting era %u\n", (unsigned) key);
 	value = cpu_to_le32(key);
 
-	nr = min(bloom.nr_blocks, md->nr_blocks);
+	nr = min(writeset.nr_bits, md->nr_blocks);
 	for (b = 0; b < nr; b++) {
-		r = filter_marked_on_disk(&info, &bloom, b, &marked);
+		r = writeset_marked_on_disk(&info, &writeset, b, &marked);
 		if (r) {
-			DMERR("%s: filter_marked_on_disk failed", __func__);
+			DMERR("%s: writeset_marked_on_disk failed", __func__);
 			return r;
 		}
 
@@ -1187,7 +972,7 @@ static int metadata_digest_once(struct era_metadata *md)
 		}
 	}
 
-	r = dm_btree_remove(&md->bloom_tree_info, md->bloom_tree_root, &key, &md->bloom_tree_root);
+	r = dm_btree_remove(&md->writeset_tree_info, md->writeset_tree_root, &key, &md->writeset_tree_root);
 	if (r) {
 		DMERR("%s: dm_btree_remove failed", __func__);
 		return r;
