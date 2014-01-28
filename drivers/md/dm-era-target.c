@@ -23,8 +23,6 @@
 /*----------------------------------------------------------------
  * Bloom filter
  *--------------------------------------------------------------*/
-#define ERA_DIVIDER 20
-
 #define BLOOM_MIN_SHIFT 10
 #define BLOOM_MAX_SHIFT 30
 
@@ -32,7 +30,7 @@ struct bloom_metadata {
 	// FIXME: change nr blocks to 64bit
 	uint32_t nr_blocks;
 	uint32_t nr_bits;
-	atomic64_t nr_set;
+	atomic64_t nr_set;	/* FIXME: remove */
 
 	dm_block_t root;
 };
@@ -42,6 +40,9 @@ struct bloom_filter {
 
 	unsigned mask;
 	unsigned long *bits;
+
+	atomic_t inserts_remaining;
+	unsigned rollover_point;
 };
 
 /*
@@ -65,16 +66,46 @@ static int setup_on_disk_bitset(struct dm_disk_bitset *info,
 	return dm_bitset_resize(info, *root, 0, nr_bits, false, root);
 }
 
-static unsigned calc_bloom_filter_size(unsigned nr_changes)
+/*----------------------------------------------------------------
+ * Bloom filter sizing
+ ---------------------------------------------------------------*/
+static struct {
+	unsigned nr_bits_shift;
+	unsigned rollover_point;
+} params_table[] = {
+	{14, 1039},
+	{15, 2077},
+	{16, 4153},
+	{17, 8305},
+	{18, 16609},
+	{19, 33217},
+	{20, 66433},
+	{21, 132866},
+	{22, 265731},
+	{23, 531461},
+	{24, 1062922}
+};
+
+static unsigned find_best_params_index(unsigned nr_blocks)
 {
-	unsigned shift = BLOOM_MIN_SHIFT;
-	unsigned target = nr_changes * 16;
+	unsigned i;
+	unsigned table_size = sizeof(params_table) / sizeof(*params_table);
 
-	while ((shift < BLOOM_MAX_SHIFT) && ((1u << shift) < target))
-		shift++;
+	for (i = 0; i < (table_size - 1); i++)
+		if (params_table[i].rollover_point > nr_blocks)
+			break;
 
-	return 1 << shift;
+	return i;
 }
+
+static void calc_bloom_filter_size(unsigned nr_blocks, unsigned *nr_bits, unsigned *rollover_point)
+{
+	unsigned i = find_best_params_index(nr_blocks / 128);
+	*nr_bits = 1 << params_table[i].nr_bits_shift;
+	*rollover_point = params_table[i].rollover_point;
+}
+
+/*----------------------------------------------------------------*/
 
 static size_t bitset_size(unsigned nr_bits)
 {
@@ -86,15 +117,18 @@ static size_t bitset_size(unsigned nr_bits)
  */
 static int filter_alloc(struct bloom_filter *f, dm_block_t nr_blocks)
 {
-	unsigned nr_bits;
+	unsigned nr_bits, rollover_point;
 
-	nr_bits = nr_blocks;
-	do_div(nr_bits, ERA_DIVIDER);
-	nr_bits = calc_bloom_filter_size((unsigned) nr_bits);
+	calc_bloom_filter_size(nr_blocks, &nr_bits, &rollover_point);
+	pr_alert("allocating bloom filter with %u bits, which will hold %u inserts\n",
+		 nr_bits, rollover_point);
+
 	f->md.nr_blocks = nr_blocks;
 	f->md.nr_bits = nr_bits;
 	f->md.root = INVALID_BLOOM_ROOT;
-	atomic64_set(&f->md.nr_set, 0);
+	atomic64_set(&f->md.nr_set, 0); /* FIXME: I don't think we need this anymore */
+	f->rollover_point = rollover_point;
+	atomic_set(&f->inserts_remaining, rollover_point);
 
 	f->mask = nr_bits - 1;
 	f->bits = vzalloc(bitset_size(nr_bits));
@@ -132,6 +166,7 @@ static int filter_init(struct dm_disk_bitset *info, struct bloom_filter *f)
 
 	memset(f->bits, 0, bitset_size(f->md.nr_bits));
 	atomic64_set(&f->md.nr_set, 0);
+	atomic_set(&f->inserts_remaining, f->rollover_point);
 
 	r = setup_on_disk_bitset(info, f->md.nr_bits, &f->md.root);
 	if (r) {
@@ -280,7 +315,7 @@ static int filter_mark(struct dm_disk_bitset *info,
 
 static int filter_full(struct bloom_filter *f)
 {
-	return atomic64_read(&f->md.nr_set) > (f->md.nr_bits / 2);
+	return atomic_dec_and_test(&f->inserts_remaining);
 }
 
 /*----------------------------------------------------------------
