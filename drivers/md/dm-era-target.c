@@ -120,8 +120,11 @@ static int writeset_marked_on_disk(struct dm_disk_bitset *info,
 	return r;
 }
 
-static int writeset_mark(struct dm_disk_bitset *info,
-			 struct writeset *ws, uint32_t block)
+/*
+ * Returns < 0 on error, 0 if the bit wasn't previously set, 1 if it was.
+ */
+static int writeset_test_and_set(struct dm_disk_bitset *info,
+				 struct writeset *ws, uint32_t block)
 {
 	int r;
 
@@ -131,9 +134,11 @@ static int writeset_mark(struct dm_disk_bitset *info,
 			// FIXME: fail mode
 			return r;
 		}
+
+		return 0;
 	}
 
-	return 0;
+	return 1;
 }
 
 /*----------------------------------------------------------------
@@ -737,11 +742,6 @@ static int metadata_era_rollover(struct era_metadata *md)
 	return 0;
 }
 
-static int metadata_mark(struct era_metadata *md, dm_block_t block)
-{
-	return writeset_mark(&md->bitset_info, md->current_writeset, block);
-}
-
 static bool metadata_current_marked(struct era_metadata *md, dm_block_t block)
 {
 	bool r;
@@ -1067,17 +1067,19 @@ static void process_deferred_bios(struct era *era)
 	spin_unlock_irqrestore(&era->deferred_lock, flags);
 
 	while ((bio = bio_list_pop(&deferred_bios))) {
-		r = metadata_mark(era->md, get_block(era, bio));
-		if (r) {
+		r = writeset_test_and_set(&era->md->bitset_info, era->md->current_writeset,
+					  get_block(era, bio));
+		if (r < 0) {
 			/*
 			 * This is bad news, we need to rollback.
 			 */
 			// FIXME: finish
 			failed = true;
-		}
+
+		} else if (r == 0)
+			commit_needed = true;
 
 		bio_list_add(&marked_bios, bio);
-		commit_needed = true;
 	}
 
 	if (commit_needed) {
@@ -1086,13 +1088,12 @@ static void process_deferred_bios(struct era *era)
 			failed = true;
 	}
 
-	if (failed) {
+	if (failed)
 		while ((bio = bio_list_pop(&marked_bios)))
 			bio_io_error(bio);
-	} else {
+	else
 		while ((bio = bio_list_pop(&marked_bios)))
 			generic_make_request(bio);
-	}
 }
 
 static void process_rpc_calls(struct era *era)
