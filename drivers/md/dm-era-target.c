@@ -107,6 +107,8 @@ static int writeset_marked_on_disk(struct dm_disk_bitset *info,
 				   struct writeset_metadata *m, dm_block_t block,
 				   bool *result)
 {
+	dm_block_t old = m->root;
+
 	/*
 	 * The bitset was flushed when it was archived, so we know there'll
 	 * be no change to the root.
@@ -116,6 +118,8 @@ static int writeset_marked_on_disk(struct dm_disk_bitset *info,
 		DMERR("%s: dm_bitset_test_bit failed", __func__);
 		return r;
 	}
+
+	BUG_ON(m->root != old);
 
 	return r;
 }
@@ -277,6 +281,11 @@ struct era_metadata {
 	struct dm_array_info era_array_info;
 
 	dm_block_t metadata_snap;
+
+	/*
+	 * A flag that is set whenever a writeset has been archived.
+	 */
+	atomic_t archived_writesets;
 };
 
 static int superblock_read_lock(struct era_metadata *md,
@@ -595,6 +604,125 @@ static void swap_writeset(struct era_metadata *md, struct writeset *new_writeset
 }
 
 /*----------------------------------------------------------------
+ * Writesets get 'digested' into the main era array.
+ *
+ * We're using a coroutine here so the worker thread can do the digestion,
+ * thus avoiding synchronisation of the metadata.  Digesting a whole
+ * writeset in one go would cause too much latency.
+ *--------------------------------------------------------------*/
+struct digest {
+	uint32_t era;
+	unsigned nr_bits, current_bit;
+	struct writeset_metadata writeset;
+	__le32 value;
+	struct dm_disk_bitset info;
+
+	int (*step)(struct era_metadata *, struct digest *);
+};
+
+static int metadata_digest_lookup_writeset(struct era_metadata *md, struct digest *d);
+
+static int metadata_digest_remove_writeset(struct era_metadata *md, struct digest *d)
+{
+	int r;
+	uint64_t key = d->era;
+
+	r = dm_btree_remove(&md->writeset_tree_info, md->writeset_tree_root,
+			    &key, &md->writeset_tree_root);
+	if (r) {
+		DMERR("%s: dm_btree_remove failed", __func__);
+		return r;
+	}
+
+	d->step = metadata_digest_lookup_writeset;
+	return 0;
+}
+
+#define INSERTS_PER_STEP 100
+
+static int metadata_digest_transcribe_writeset(struct era_metadata *md, struct digest *d)
+{
+	int r;
+	bool marked;
+	unsigned b, e = min(d->current_bit + INSERTS_PER_STEP, d->nr_bits);
+
+	for (b = d->current_bit; b < e; b++) {
+		r = writeset_marked_on_disk(&d->info, &d->writeset, b, &marked);
+		if (r) {
+			DMERR("%s: writeset_marked_on_disk failed", __func__);
+			return r;
+		}
+
+		if (marked) {
+			__dm_bless_for_disk(&d->value);
+			r = dm_array_set_value(&md->era_array_info, md->era_array_root,
+					       b, &d->value, &md->era_array_root);
+			if (r) {
+				DMERR("%s: dm_array_set_value failed", __func__);
+				return r;
+			}
+		}
+	}
+
+	if (b == d->nr_bits)
+		d->step = metadata_digest_remove_writeset;
+	else
+		d->current_bit = b;
+
+	return 0;
+}
+
+static int metadata_digest_lookup_writeset(struct era_metadata *md, struct digest *d)
+{
+	int r;
+	uint64_t key;
+	struct writeset_disk disk;
+
+	r = dm_btree_find_lowest_key(&md->writeset_tree_info, md->writeset_tree_root, &key);
+	if (r < 0)
+		return r;
+
+	d->era = key;
+
+	r = dm_btree_lookup(&md->writeset_tree_info, md->writeset_tree_root, &key, &disk);
+	if (r) {
+		if (r == -ENODATA) {
+			d->step = NULL;
+			return 0;
+		}
+
+		DMERR("%s: dm_btree_lookup failed", __func__);
+		return r;
+	}
+
+	ws_unpack(&disk, &d->writeset);
+	d->value = cpu_to_le32(key);
+
+	d->nr_bits = min(d->writeset.nr_bits, md->nr_blocks);
+	d->current_bit = 0;
+	d->step = metadata_digest_transcribe_writeset;
+
+	return 0;
+}
+
+static int metadata_digest_start(struct era_metadata *md, struct digest *d)
+{
+	if (d->step)
+		return 0;
+
+	memset(d, 0, sizeof(*d));
+
+	/*
+	 * We initialise another bitset info to avoid any caching side
+	 * effects with the previous one.
+	 */
+	dm_disk_bitset_init(md->tm, &d->info);
+	d->step = metadata_digest_lookup_writeset;
+
+	return 0;
+}
+
+/*----------------------------------------------------------------
  * High level metadata interface.  Target methods should use these, and not
  * the lower level ones.
  *--------------------------------------------------------------*/
@@ -693,6 +821,8 @@ static int metadata_era_archive(struct era_metadata *md)
 		// FIXME: fail mode
 		return r;
 	}
+
+	atomic_set(&md->archived_writesets, 1);
 
 	return 0;
 }
@@ -915,83 +1045,6 @@ static int metadata_drop_snap(struct era_metadata *md)
 	return dm_sm_dec_block(md->sm, location);
 }
 
-/*----------------------------------------------------------------
- * Goes through the archived writesets one by one transcribing them to
- * the era array.
- *
- * FIXME: This should be run in a background thread at low priority.
- *--------------------------------------------------------------*/
-static int metadata_digest_once(struct era_metadata *md)
-{
-	int r;
-	bool marked;
-	uint64_t key;
-	unsigned nr, b;
-	struct writeset_disk disk;
-	struct writeset_metadata writeset;
-	__le32 value;
-	struct dm_disk_bitset info;
-
-	/*
-	 * We initialise another bitset info to avoid any caching side
-	 * effects with the previous one.
-	 */
-	dm_disk_bitset_init(md->tm, &info);
-
-	r = dm_btree_find_lowest_key(&md->writeset_tree_info, md->writeset_tree_root, &key);
-	if (r < 0)
-		return r;
-
-	r = dm_btree_lookup(&md->writeset_tree_info, md->writeset_tree_root, &key, &disk);
-	if (r) {
-		if (r != -ENODATA)
-			DMERR("%s: dm_btree_lookup failed", __func__);
-		return r;
-	}
-
-	ws_unpack(&disk, &writeset);
-	pr_alert("digesting era %u\n", (unsigned) key);
-	value = cpu_to_le32(key);
-
-	nr = min(writeset.nr_bits, md->nr_blocks);
-	for (b = 0; b < nr; b++) {
-		r = writeset_marked_on_disk(&info, &writeset, b, &marked);
-		if (r) {
-			DMERR("%s: writeset_marked_on_disk failed", __func__);
-			return r;
-		}
-
-		if (marked) {
-			__dm_bless_for_disk(&value);
-			r = dm_array_set_value(&md->era_array_info, md->era_array_root,
-					       b, &value, &md->era_array_root);
-			if (r) {
-				DMERR("%s: dm_array_set_value failed", __func__);
-				return r;
-			}
-		}
-	}
-
-	r = dm_btree_remove(&md->writeset_tree_info, md->writeset_tree_root, &key, &md->writeset_tree_root);
-	if (r) {
-		DMERR("%s: dm_btree_remove failed", __func__);
-		return r;
-	}
-
-	return 0;
-}
-
-static int metadata_digest(struct era_metadata *md)
-{
-	int r;
-
-	pr_alert("starting digest process\n");
-	while (!(r = metadata_digest_once(md)))
-		;
-	pr_alert("finished digest\n");
-	return r == -ENODATA ? 0 : r;
-}
-
 /*----------------------------------------------------------------*/
 
 struct era {
@@ -1014,6 +1067,9 @@ struct era {
 
 	spinlock_t rpc_lock;
 	struct list_head rpc_calls;
+
+	struct digest digest;
+	atomic_t suspended;
 };
 
 struct rpc {
@@ -1046,7 +1102,24 @@ static void remap_to_origin(struct era *era, struct bio *bio)
  *--------------------------------------------------------------*/
 static void wake_worker(struct era *era)
 {
-	queue_work(era->wq, &era->worker);
+	if (!atomic_read(&era->suspended))
+		queue_work(era->wq, &era->worker);
+}
+
+static void process_old_eras(struct era *era)
+{
+	int r;
+
+	if (!era->digest.step)
+		return;
+
+	r = era->digest.step(era->md, &era->digest);
+	if (r < 0) {
+		DMERR("%s: digest step failed, stopping digestion", __func__);
+		era->digest.step = NULL;
+
+	} else if (era->digest.step)
+		wake_worker(era);
 }
 
 static void process_deferred_bios(struct era *era)
@@ -1126,9 +1199,20 @@ static void process_rpc_calls(struct era *era)
 	}
 }
 
+static void kick_off_digest(struct era *era)
+{
+	if (atomic_read(&era->md->archived_writesets)) {
+		atomic_set(&era->md->archived_writesets, 0);
+		metadata_digest_start(era->md, &era->digest);
+	}
+}
+
 static void do_work(struct work_struct *ws)
 {
 	struct era *era = container_of(ws, struct era, worker);
+
+	kick_off_digest(era);
+	process_old_eras(era);
 	process_deferred_bios(era);
 	process_rpc_calls(era);
 }
@@ -1180,17 +1264,14 @@ static int in_worker1(struct era *era, int (*fn)(struct era_metadata *, void *),
 	return perform_rpc(era, &rpc);
 }
 
-/*
- * This assumes no more wake-worker calls are going to be made (a safe
- * assumption if we're in post suspend).
- */
+static void start_worker(struct era *era)
+{
+	atomic_set(&era->suspended, 0);
+}
+
 static void stop_worker(struct era *era)
 {
-	/*
-	 * FIXME: we kick off an expensive, synchronous digest here.  It
-	 * should really run with low priority all the time.
-	 */
-	in_worker0(era, metadata_digest);
+	atomic_set(&era->suspended, 1);
 	flush_workqueue(era->wq);
 }
 
@@ -1378,6 +1459,8 @@ static int era_preresume(struct dm_target *ti)
 
 		era->nr_blocks = new_size;
 	}
+
+	start_worker(era);
 
 	r = in_worker0(era, metadata_new_era);
 	if (r) {
