@@ -179,6 +179,8 @@ struct superblock_disk {
 	 */
 	__le64 writeset_tree_root;
 	__le64 era_array_root;
+
+	__le64 metadata_snap;
 } __packed;
 
 /*----------------------------------------------------------------
@@ -478,6 +480,7 @@ static int prepare_superblock(struct era_metadata *md, struct superblock_disk *d
 	ws_pack(&md->current_writeset->md, &disk->current_writeset);
 	disk->writeset_tree_root = cpu_to_le64(md->writeset_tree_root);
 	disk->era_array_root = cpu_to_le64(md->era_array_root);
+	disk->metadata_snap = cpu_to_le64(md->metadata_snap);
 
 	return 0;
 }
