@@ -1480,20 +1480,41 @@ static int era_preresume(struct dm_target *ti)
 /*
  * Status format:
  *
- * <current era> <metadata snap root|->
+ * <used metadata sectors>/<total metadata sectors>
+ * <current era> <held metadata root|->
  * FIXME: need to show metadata free space
  */
 static void era_status(struct dm_target *ti, status_type_t type,
 		       unsigned status_flags, char *result, unsigned maxlen)
 {
+	int r;
 	struct era *era = ti->private;
 	ssize_t sz = 0;
 	dm_block_t snap;
+	dm_block_t nr_md_free, nr_md_total;
 	char buf[BDEVNAME_SIZE];
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		DMEMIT("%u", (unsigned) metadata_current_era(era->md));
+		/*
+		 * FIXME: do we need to protect this?
+		 */
+		r = dm_sm_get_nr_free(era->md->sm, &nr_md_free);
+		if (r) {
+			DMERR("dm_sm_get_nr_free returned %d", r);
+			goto err;
+		}
+
+		r = dm_sm_get_nr_blocks(era->md->sm, &nr_md_total);
+		if (r) {
+			DMERR("dm_pool_get_metadata_dev_size returned %d", r);
+			goto err;
+		}
+
+		DMEMIT("%llu/%llu %u",
+		       (unsigned long long) (nr_md_total - nr_md_free),
+		       (unsigned long long) nr_md_total,
+		       (unsigned) metadata_current_era(era->md));
 
 		snap = metadata_snap_root(era->md);
 		if (snap != SUPERBLOCK_LOCATION)
@@ -1511,6 +1532,9 @@ static void era_status(struct dm_target *ti, status_type_t type,
 	}
 
 	return;
+
+err:
+	DMEMIT("Error");
 }
 
 static int era_message(struct dm_target *ti, unsigned argc, char **argv)
