@@ -545,6 +545,9 @@ static int open_metadata(struct era_metadata *md)
 
 	setup_infos(md);
 
+	md->writeset_tree_root = le64_to_cpu(disk->writeset_tree_root);
+	md->era_array_root = le64_to_cpu(disk->era_array_root);
+
 	return dm_bm_unlock(sblock);
 
 bad:
