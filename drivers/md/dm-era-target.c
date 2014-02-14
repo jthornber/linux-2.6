@@ -460,7 +460,7 @@ static int prepare_superblock(struct era_metadata *md, struct superblock_disk *d
 	disk->flags = cpu_to_le32(0ul);
 
 	// FIXME: can't keep blanking the uuid
-	memset(disk, 0, sizeof(disk->uuid));
+	memset(disk->uuid, 0, sizeof(disk->uuid));
 	disk->version = cpu_to_le32(MAX_ERA_VERSION);
 
 	r = dm_sm_root_size(md->sm, &metadata_len);
@@ -548,8 +548,14 @@ static int open_metadata(struct era_metadata *md)
 
 	setup_infos(md);
 
+	md->block_size = le32_to_cpu(disk->data_block_size);
+	md->nr_blocks = le32_to_cpu(disk->nr_blocks);
+	atomic64_set(&md->current_era, le32_to_cpu(disk->current_era));
+
 	md->writeset_tree_root = le64_to_cpu(disk->writeset_tree_root);
 	md->era_array_root = le64_to_cpu(disk->era_array_root);
+	md->metadata_snap = le64_to_cpu(disk->metadata_snap);
+	atomic_set(&md->archived_writesets, 1);
 
 	return dm_bm_unlock(sblock);
 
