@@ -737,8 +737,10 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 	    !should_promote(mq, e, discarded_oblock, data_dir)) {
 		requeue_and_update_tick(mq, e);
 		result->op = POLICY_MISS;
+
 	} else if (!can_migrate)
 		r = -EWOULDBLOCK;
+
 	else {
 		requeue_and_update_tick(mq, e);
 		r = pre_cache_to_cache(mq, e, result);

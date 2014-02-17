@@ -66,13 +66,13 @@ static void free_bitset(unsigned long *bits)
  * work before calling its endio function.  We do this by temporarily
  * changing the endio fn.
  */
-struct hook_info {
+struct dm_hook_info {
 	bio_end_io_t *bi_end_io;
 	void *bi_private;
 };
 
-static void hook_bio(struct hook_info *h, struct bio *bio,
-		     bio_end_io_t *bi_end_io, void *bi_private)
+static void dm_hook_bio(struct dm_hook_info *h, struct bio *bio,
+			bio_end_io_t *bi_end_io, void *bi_private)
 {
 	h->bi_end_io = bio->bi_end_io;
 	h->bi_private = bio->bi_private;
@@ -81,7 +81,7 @@ static void hook_bio(struct hook_info *h, struct bio *bio,
 	bio->bi_private = bi_private;
 }
 
-static void unhook_bio(struct hook_info *h, struct bio *bio)
+static void dm_unhook_bio(struct dm_hook_info *h, struct bio *bio)
 {
 	bio->bi_end_io = h->bi_end_io;
 	bio->bi_private = h->bi_private;
@@ -291,7 +291,7 @@ struct per_bio_data {
 	 */
 	struct cache *cache;
 	dm_cblock_t cblock;
-	struct hook_info hook_info;
+	struct dm_hook_info hook_info;
 	struct dm_bio_details bio_details;
 };
 
@@ -765,7 +765,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 static void writethrough_endio(struct bio *bio, int err)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio, PB_DATA_SIZE_WT);
-	unhook_bio(&pb->hook_info, bio);
+	dm_unhook_bio(&pb->hook_info, bio);
 
 	if (err) {
 		bio_endio(bio, err);
@@ -796,7 +796,7 @@ static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
 
 	pb->cache = cache;
 	pb->cblock = cblock;
-	hook_bio(&pb->hook_info, bio, writethrough_endio, NULL);
+	dm_hook_bio(&pb->hook_info, bio, writethrough_endio, NULL);
 	dm_bio_record(&pb->bio_details, bio);
 
 	remap_to_origin_clear_discard(pb->cache, bio, oblock);
@@ -1013,7 +1013,7 @@ static void overwrite_endio(struct bio *bio, int err)
 
 	spin_lock_irqsave(&cache->lock, flags);
 	list_add_tail(&mg->list, &cache->completed_migrations);
-	unhook_bio(&pb->hook_info, bio);
+	dm_unhook_bio(&pb->hook_info, bio);
 	mg->requeue_holder = false;
 	spin_unlock_irqrestore(&cache->lock, flags);
 
@@ -1025,15 +1025,15 @@ static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(mg->cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
+	dm_hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
 	remap_to_cache_dirty(mg->cache, bio, mg->new_oblock, mg->cblock);
 	generic_make_request(bio);
 }
 
 static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 {
-	return is_write_io(bio) &&
-	       (bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
+	return (bio_data_dir(bio) == WRITE) &&
+		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
 }
 
 static void avoid_copy(struct dm_cache_migration *mg)
@@ -1363,14 +1363,13 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 			 * invalidating any cache blocks that are written
 			 * to.
 			 */
-
-			if (is_write_io(bio)) {
+			if (bio_data_dir(bio) == WRITE) {
 				atomic_inc(&cache->stats.demotion);
 				invalidate(cache, structs, block, lookup_result.cblock, new_ocell);
 				release_cell = false;
 
 			} else {
-				// FIXME: factor out issue_origin()
+				/* FIXME: factor out issue_origin() */
 				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				remap_to_origin_clear_discard(cache, bio, block);
 				issue(cache, bio);
@@ -1378,7 +1377,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		} else {
 			inc_hit_counter(cache, bio);
 
-			if (is_write_io(bio) &&
+			if (bio_data_dir(bio) == WRITE &&
 			    writethrough_mode(&cache->features) &&
 			    !is_dirty(cache, lookup_result.cblock)) {
 				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
@@ -2516,7 +2515,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		if (passthrough_mode(&cache->features)) {
-			if (is_write_io(bio)) {
+			if (bio_data_dir(bio) == WRITE) {
 				/*
 				 * We need to invalidate this block, so
 				 * defer for the worker thread.
@@ -2535,8 +2534,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		} else {
 			inc_hit_counter(cache, bio);
 
-			if (is_write_io(bio) &&
-			    writethrough_mode(&cache->features) &&
+			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
 			    !is_dirty(cache, lookup_result.cblock))
 				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
 
