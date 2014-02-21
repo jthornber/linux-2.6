@@ -169,6 +169,7 @@ struct pool {
 	struct dm_bio_prison *prison;
 	struct dm_kcopyd_client *copier;
 
+	struct semaphore queue_work_lock;
 	struct workqueue_struct *wq;
 	struct work_struct worker;
 	struct delayed_work waker;
@@ -235,7 +236,26 @@ struct thin_c {
  */
 static void wake_worker(struct pool *pool)
 {
-	queue_work(pool->wq, &pool->worker);
+	if (down_trylock(&pool->queue_work_lock)) {
+		queue_work(pool->wq, &pool->worker);
+		up(&pool->queue_work_lock);
+	}
+}
+
+static void resume_worker(struct pool *pool)
+{
+	up(&pool->queue_work_lock);
+
+	/*
+	 * Just in case there were any missed wakes from thin devices.
+	 */
+	wake_worker(pool);
+}
+
+static void suspend_worker(struct pool *pool)
+{
+	down(&pool->queue_work_lock);
+	drain_workqueue(pool->wq);
 }
 
 /*----------------------------------------------------------------*/
@@ -1768,6 +1788,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	 * Create singlethreaded workqueue that will service all devices
 	 * that use this metadata.
 	 */
+	sema_init(&pool->queue_work_lock, 0);
 	pool->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
 	if (!pool->wq) {
 		*error = "Error creating pool's workqueue";
@@ -2305,6 +2326,7 @@ static void pool_resume(struct dm_target *ti)
 	__requeue_bios(pool);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
+	resume_worker(pool);
 	do_waker(&pool->waker.work);
 }
 
@@ -2313,8 +2335,8 @@ static void pool_postsuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
+	suspend_worker(pool);
 	cancel_delayed_work(&pool->waker);
-	flush_workqueue(pool->wq);
 	(void) commit(pool);
 }
 
