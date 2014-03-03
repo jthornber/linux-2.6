@@ -1305,10 +1305,16 @@ static void process_bio_fail(struct thin_c *tc, struct bio *bio)
  * FIXME: should we also commit due to size of transaction, measured in
  * metadata blocks?
  */
-static int need_commit_due_to_time(struct pool *pool)
+static bool need_commit_due_to_time_(struct pool *pool)
 {
 	return jiffies < pool->last_commit_jiffies ||
 	       jiffies > pool->last_commit_jiffies + COMMIT_PERIOD;
+}
+
+static bool need_commit_due_to_time(struct pool *pool)
+{
+	return need_commit_due_to_time_(pool) &&
+		dm_pool_changed_this_transaction(pool->pmd);
 }
 
 static void process_deferred_bios(struct pool *pool)
