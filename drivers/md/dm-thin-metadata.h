@@ -18,7 +18,7 @@
  * We have one block of index, which can hold 255 index entries.  Each
  * index entry contains allocation info about 16k metadata blocks.
  */
-#define THIN_METADATA_MAX_SECTORS (255 * (1 << 14) * (THIN_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
+#define THIN_METADATA_MAX_SECTORS (255 * ((1 << 14) - 64) * (THIN_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
 /*
  * A metadata device larger than 16GB triggers a warning.
