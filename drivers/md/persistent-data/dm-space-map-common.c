@@ -500,8 +500,10 @@ int sm_ll_inc(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
 
 static int dec_ref_count(void *context, uint32_t old, uint32_t *new)
 {
-	if (!old)
+	if (!old) {
+		DMERR_LIMIT("unable to decrement a reference count below 0");
 		return -EINVAL;
+	}
 
 	*new = old - 1;
 	return 0;

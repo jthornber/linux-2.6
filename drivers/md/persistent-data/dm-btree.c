@@ -770,8 +770,8 @@ EXPORT_SYMBOL_GPL(dm_btree_insert_notify);
 
 /*----------------------------------------------------------------*/
 
-static int find_highest_key(struct ro_spine *s, dm_block_t block,
-			    uint64_t *result_key, dm_block_t *next_block)
+static int find_key(struct ro_spine *s, dm_block_t block, bool find_highest,
+		    uint64_t *result_key, dm_block_t *next_block)
 {
 	int i, r;
 	uint32_t flags;
@@ -788,7 +788,11 @@ static int find_highest_key(struct ro_spine *s, dm_block_t block,
 		else
 			i--;
 
-		*result_key = le64_to_cpu(ro_node(s)->keys[i]);
+		if (find_highest)
+			*result_key = le64_to_cpu(ro_node(s)->keys[i]);
+		else
+			*result_key = le64_to_cpu(ro_node(s)->keys[0]);
+
 		if (next_block || flags & INTERNAL_NODE)
 			block = value64(ro_node(s), i);
 
@@ -797,88 +801,45 @@ static int find_highest_key(struct ro_spine *s, dm_block_t block,
 	if (next_block)
 		*next_block = block;
 	return 0;
+}
+
+static int dm_btree_find_key(struct dm_btree_info *info, dm_block_t root,
+			     bool find_highest, uint64_t *result_keys)
+{
+	int r = 0, count = 0, level;
+	struct ro_spine spine;
+
+	init_ro_spine(&spine, info);
+	for (level = 0; level < info->levels; level++) {
+		r = find_key(&spine, root, find_highest, result_keys + level,
+			     level == info->levels - 1 ? NULL : &root);
+		if (r == -ENODATA) {
+			r = 0;
+			break;
+
+		} else if (r)
+			break;
+
+		count++;
+	}
+	exit_ro_spine(&spine);
+
+	return r ? r : count;
 }
 
 int dm_btree_find_highest_key(struct dm_btree_info *info, dm_block_t root,
 			      uint64_t *result_keys)
 {
-	int r = 0, count = 0, level;
-	struct ro_spine spine;
-
-	init_ro_spine(&spine, info);
-	for (level = 0; level < info->levels; level++) {
-		r = find_highest_key(&spine, root, result_keys + level,
-				     level == info->levels - 1 ? NULL : &root);
-		if (r == -ENODATA) {
-			r = 0;
-			break;
-
-		} else if (r)
-			break;
-
-		count++;
-	}
-	exit_ro_spine(&spine);
-
-	return r ? r : count;
+	return dm_btree_find_key(info, root, true, result_keys);
 }
 EXPORT_SYMBOL_GPL(dm_btree_find_highest_key);
-
-/*----------------------------------------------------------------*/
-
-// FIXME: factor out common code with find_highest_key
-static int find_lowest_key(struct ro_spine *s, dm_block_t block,
-			   uint64_t *result_key, dm_block_t *next_block)
-{
-	int i, r;
-	uint32_t flags;
-
-	do {
-		r = ro_step(s, block);
-		if (r < 0)
-			return r;
-
-		flags = le32_to_cpu(ro_node(s)->header.flags);
-		i = le32_to_cpu(ro_node(s)->header.nr_entries);
-		if (!i)
-			return -ENODATA;
-
-		*result_key = le64_to_cpu(ro_node(s)->keys[0]);
-		if (next_block || flags & INTERNAL_NODE)
-			block = value64(ro_node(s), i);
-
-	} while (flags & INTERNAL_NODE);
-
-	if (next_block)
-		*next_block = block;
-	return 0;
-}
 
 int dm_btree_find_lowest_key(struct dm_btree_info *info, dm_block_t root,
 			     uint64_t *result_keys)
 {
-	int r = 0, count = 0, level;
-	struct ro_spine spine;
-
-	init_ro_spine(&spine, info);
-	for (level = 0; level < info->levels; level++) {
-		r = find_lowest_key(&spine, root, result_keys + level,
-				    level == info->levels - 1 ? NULL : &root);
-		if (r == -ENODATA) {
-			r = 0;
-			break;
-
-		} else if (r)
-			break;
-
-		count++;
-	}
-	exit_ro_spine(&spine);
-
-	return r ? r : count;
+	return dm_btree_find_key(info, root, false, result_keys);
 }
 EXPORT_SYMBOL_GPL(dm_btree_find_lowest_key);
-
 
 /*----------------------------------------------------------------*/
 

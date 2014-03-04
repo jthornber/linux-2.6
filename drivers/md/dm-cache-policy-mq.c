@@ -72,7 +72,7 @@ static enum io_pattern iot_pattern(struct io_tracker *t)
 
 static void iot_update_stats(struct io_tracker *t, struct bio *bio)
 {
-	if (bio->bi_sector == from_oblock(t->last_end_oblock) + 1)
+	if (bio->bi_iter.bi_sector == from_oblock(t->last_end_oblock) + 1)
 		t->nr_seq_samples++;
 	else {
 		/*
@@ -87,7 +87,7 @@ static void iot_update_stats(struct io_tracker *t, struct bio *bio)
 		t->nr_rand_samples++;
 	}
 
-	t->last_end_oblock = to_oblock(bio->bi_sector + bio_sectors(bio) - 1);
+	t->last_end_oblock = to_oblock(bio_end_sector(bio) - 1);
 }
 
 static void iot_check_for_pattern_switch(struct io_tracker *t)
@@ -737,8 +737,10 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 	    !should_promote(mq, e, discarded_oblock, data_dir)) {
 		requeue_and_update_tick(mq, e);
 		result->op = POLICY_MISS;
+
 	} else if (!can_migrate)
 		r = -EWOULDBLOCK;
+
 	else {
 		requeue_and_update_tick(mq, e);
 		r = pre_cache_to_cache(mq, e, result);
@@ -1274,7 +1276,8 @@ static struct dm_cache_policy_type default_policy_type = {
 	.version = {1, 2, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
-	.create = mq_create
+	.create = mq_create,
+	.real = &mq_policy_type
 };
 
 static int __init mq_init(void)

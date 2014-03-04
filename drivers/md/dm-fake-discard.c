@@ -184,7 +184,7 @@ static int discard_map(struct dm_target *ti, struct bio *bio)
 			bio_endio(bio, -ENOTSUPP);
 	} else {
 		bio->bi_bdev = fd->dev->bdev;
-		bio->bi_sector = dm_target_offset(ti, bio->bi_sector) + fd->offset;
+		bio->bi_iter.bi_sector = dm_target_offset(ti, bio->bi_iter.bi_sector) + fd->offset;
 	}
 
 	return DM_MAPIO_REMAPPED;

@@ -19,7 +19,6 @@
 #include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/i2c-mux.h>
-#include <linux/init.h>
 #include <linux/module.h>
 #include <linux/of_gpio.h>
 #include <linux/platform_device.h>
@@ -238,7 +237,7 @@ static struct platform_driver i2c_arbitrator_driver = {
 	.driver	= {
 		.owner	= THIS_MODULE,
 		.name	= "i2c-arb-gpio-challenge",
-		.of_match_table = of_match_ptr(i2c_arbitrator_of_match),
+		.of_match_table = i2c_arbitrator_of_match,
 	},
 };
 
