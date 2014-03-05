@@ -1526,6 +1526,7 @@ static enum pool_mode get_pool_mode(struct pool *pool)
 
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 {
+	struct pool_c *pt = pool->ti->private;
 	bool needs_check = dm_pool_metadata_needs_check(pool->pmd);
 	enum pool_mode old_mode = pool->pf.mode;
 
@@ -1612,6 +1613,12 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 	}
 
 	pool->pf.mode = new_mode;
+
+	/*
+	 * The pool mode may have changed, sync it so bind_control_target()
+	 * doesn't cause an unexpected mode transition on resume.
+	 */
+	pt->adjusted_pf.mode = new_mode;
 }
 
 static void abort_transaction(struct pool *pool)
@@ -2558,13 +2565,6 @@ static void pool_postsuspend(struct dm_target *ti)
 	cancel_delayed_work(&pool->no_space_timeout);
 	flush_workqueue(pool->wq);
 	(void) commit(pool);
-
-	/*
-	 * The pool mode may have changed, sync it so bind_control_target()
-	 * doesn't cause an unexpected mode transition on resume.
-	 */
-	// FIXME: can we do this in set_pool_mode
-	pt->adjusted_pf.mode = get_pool_mode(pool);
 }
 
 static int check_arg_count(unsigned argc, unsigned args_required)
