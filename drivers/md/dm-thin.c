@@ -954,7 +954,8 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 	dm_block_t free_blocks;
 	struct pool *pool = tc->pool;
 
-	BUG_ON(get_pool_mode(pool) != PM_WRITE);
+	if (WARN_ON(get_pool_mode(pool) != PM_WRITE))
+		return -EINVAL;
 
 	r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
 	if (r) {
@@ -970,10 +971,8 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		 * more space.
 		 */
 		r = commit(pool);
-		if (r) {
-			metadata_operation_failed(pool, "commit", r);
+		if (r)
 			return r;
-		}
 
 		r = dm_pool_get_free_block_count(pool->pmd, &free_blocks);
 		if (r) {
@@ -1391,8 +1390,10 @@ static void process_deferred_bios(struct pool *pool)
 		struct dm_thin_endio_hook *h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
 		struct thin_c *tc = h->tc;
 
-		if (tc->requeue_mode)
+		if (tc->requeue_mode) {
 			bio_endio(bio, DM_ENDIO_REQUEUE);
+			continue;
+		}
 
 		/*
 		 * If we've got no free new_mapping structs, and processing
@@ -1688,10 +1689,12 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	struct dm_bio_prison_cell *cell_result;
 	struct dm_cell_key key;
 
-	if (tc->requeue_mode)
-		bio_endio(bio, DM_ENDIO_REQUEUE);
-
 	thin_hook_bio(tc, bio);
+
+	if (tc->requeue_mode) {
+		bio_endio(bio, DM_ENDIO_REQUEUE);
+		return DM_MAPIO_SUBMITTED;
+	}
 
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
 		bio_io_error(bio);
