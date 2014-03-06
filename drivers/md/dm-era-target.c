@@ -1488,7 +1488,6 @@ static int era_preresume(struct dm_target *ti)
  *
  * <used metadata sectors>/<total metadata sectors>
  * <current era> <held metadata root|->
- * FIXME: need to show metadata free space
  */
 static void era_status(struct dm_target *ti, status_type_t type,
 		       unsigned status_flags, char *result, unsigned maxlen)
