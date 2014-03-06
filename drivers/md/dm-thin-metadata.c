@@ -1762,9 +1762,9 @@ int dm_pool_metadata_set_needs_check(struct dm_pool_metadata *pmd)
 	struct dm_block *sblock;
 	struct thin_disk_superblock *disk_super;
 
-	pmd->flags |= THIN_METADATA_NEEDS_CHECK_FLAG;
-
 	down_write(&pmd->root_lock);
+
+	pmd->flags |= THIN_METADATA_NEEDS_CHECK_FLAG;
 
 	r = superblock_lock(pmd, &sblock);
 	if (r) {
@@ -1774,6 +1774,7 @@ int dm_pool_metadata_set_needs_check(struct dm_pool_metadata *pmd)
 
 	disk_super = dm_block_data(sblock);
 	disk_super->flags = cpu_to_le32(pmd->flags);
+	dm_bm_unlock(sblock);
 
 out:
 	up_write(&pmd->root_lock);
