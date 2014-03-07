@@ -1101,7 +1101,7 @@ struct rpc {
  *---------------------------------------------------------------*/
 static dm_block_t get_block(struct era *era, struct bio *bio)
 {
-	return bio->bi_sector >> era->sectors_per_block_shift;
+	return bio->bi_iter.bi_sector >> era->sectors_per_block_shift;
 }
 
 static void remap_to_origin(struct era *era, struct bio *bio)
