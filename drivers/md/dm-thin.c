@@ -946,6 +946,7 @@ static void check_low_water_mark(struct pool *pool, dm_block_t free_blocks)
 	}
 }
 
+static void abort_transaction(struct pool *pool);
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode);
 
 static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
@@ -1474,47 +1475,105 @@ static void do_no_space_timeout(struct work_struct *ws)
 
 /*----------------------------------------------------------------*/
 
-struct noflush_work {
+struct pool_work {
 	struct work_struct worker;
-	struct thin_c *tc;
-
 	atomic_t complete;
 	wait_queue_head_t wait;
 };
 
-static void complete_noflush_work(struct noflush_work *w)
+static struct pool_work *to_pool_work(struct work_struct *ws)
 {
-	atomic_set(&w->complete, 1);
-	wake_up(&w->wait);
+	return container_of(ws, struct pool_work, worker);
+}
+
+static void pool_work_complete(struct pool_work *pw)
+{
+	atomic_set(&pw->complete, 1);
+	wake_up(&pw->wait);
+}
+
+static void pool_work_wait(struct pool_work *pw, struct pool *pool,
+			   void (*fn)(struct work_struct *))
+{
+	INIT_WORK(&pw->worker, fn);
+	atomic_set(&pw->complete, 0);
+	init_waitqueue_head(&pw->wait);
+
+	queue_work(pool->wq, &pw->worker);
+	wait_event(pw->wait, atomic_read(&pw->complete));
+}
+
+/*----------------------------------------------------------------*/
+
+struct noflush_work {
+	struct pool_work pw;
+	struct thin_c *tc;
+};
+
+static struct noflush_work *to_noflush(struct work_struct *ws)
+{
+	return container_of(to_pool_work(ws), struct noflush_work, pw);
 }
 
 static void do_noflush_start(struct work_struct *ws)
 {
-	struct noflush_work *w = container_of(ws, struct noflush_work, worker);
+	struct noflush_work *w = to_noflush(ws);
 	w->tc->requeue_mode = true;
 	requeue_io(w->tc);
-	complete_noflush_work(w);
+	pool_work_complete(&w->pw);
 }
 
 static void do_noflush_stop(struct work_struct *ws)
 {
-	struct noflush_work *w = container_of(ws, struct noflush_work, worker);
+	struct noflush_work *w = to_noflush(ws);
 	w->tc->requeue_mode = false;
-	complete_noflush_work(w);
+	pool_work_complete(&w->pw);
 }
 
 static void noflush_work(struct thin_c *tc, void (*fn)(struct work_struct *))
 {
 	struct noflush_work w;
 
-	INIT_WORK(&w.worker, fn);
 	w.tc = tc;
-	atomic_set(&w.complete, 0);
-	init_waitqueue_head(&w.wait);
+	pool_work_wait(&w.pw, tc->pool, fn);
+}
 
-	queue_work(tc->pool->wq, &w.worker);
+/*----------------------------------------------------------------*/
 
-	wait_event(w.wait, atomic_read(&w.complete));
+struct set_mode_work {
+	struct pool_work pw;
+	struct pool *pool;
+	enum pool_mode mode;
+	bool abort;
+};
+
+static struct set_mode_work *to_set_mode_work(struct work_struct *ws)
+{
+	return container_of(to_pool_work(ws), struct set_mode_work, pw);
+}
+
+static void do_set_mode_work(struct work_struct *ws)
+{
+	struct set_mode_work *w = to_set_mode_work(ws);
+
+	DMWARN("pool mode being forced via external message");
+
+	if (w->abort)
+		abort_transaction(w->pool);
+
+	set_pool_mode(w->pool, w->mode);
+	pool_work_complete(&w->pw);
+}
+
+static void set_mode_work(struct pool *pool, enum pool_mode mode, bool abort)
+{
+	struct set_mode_work w;
+
+	w.pool = pool;
+	w.mode = mode;
+	w.abort = abort;
+
+	pool_work_wait(&w.pw, pool, do_set_mode_work);
 }
 
 /*----------------------------------------------------------------*/
@@ -2722,6 +2781,50 @@ static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct
 	return r;
 }
 
+static int process_set_mode_mesg(unsigned argc, char **argv, struct pool *pool)
+{
+	int r;
+	bool abort;
+	enum pool_mode mode;
+
+	r = check_arg_count(argc, 3);
+	if (r)
+		return r;
+
+	if (!strcasecmp(argv[1], "write"))
+		mode = PM_WRITE;
+
+	else if (!strcasecmp(argv[1], "out-of-data-space"))
+		mode = PM_OUT_OF_DATA_SPACE;
+
+	else if (!strcasecmp(argv[1], "read-only"))
+		mode = PM_READ_ONLY;
+
+	else if (!strcasecmp(argv[1], "fail"))
+		mode = PM_FAIL;
+
+	else {
+		DMWARN("set_mode message specified an unkown mode '%s'\n",
+		       argv[1]);
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[2], "abort"))
+		abort = true;
+
+	else if (!strcmp(argv[2], "no-abort"))
+		abort = false;
+
+	else {
+		DMWARN("set_mode message specified an unknown abort flag '%s'\n",
+		       argv[2]);
+		return -EINVAL;
+	}
+
+	set_mode_work(pool, mode, abort);
+	return 0;
+}
+
 /*
  * Messages supported:
  *   create_thin	<dev_id>
@@ -2731,6 +2834,7 @@ static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct
  *   set_transaction_id <current_trans_id> <new_trans_id>
  *   reserve_metadata_snap
  *   release_metadata_snap
+ *   set_mode <write|out-of-data-space|read-only|fail> <abort|no-abort>
  */
 static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -2755,6 +2859,10 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 
 	else if (!strcasecmp(argv[0], "release_metadata_snap"))
 		r = process_release_metadata_snap_mesg(argc, argv, pool);
+
+	else if (!strcasecmp(argv[0], "set_mode"))
+		/* we skip the commit for this one */
+		return process_set_mode_mesg(argc, argv, pool);
 
 	else
 		DMWARN("Unrecognised thin pool target message received: %s", argv[0]);
