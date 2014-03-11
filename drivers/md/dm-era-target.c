@@ -19,6 +19,7 @@
 #define MIN_ERA_VERSION 1
 #define MAX_ERA_VERSION 1
 #define INVALID_WRITESET_ROOT SUPERBLOCK_LOCATION
+#define MIN_BLOCK_SIZE 8
 
 /*----------------------------------------------------------------
  * Writeset
@@ -1324,6 +1325,14 @@ static dm_block_t calc_nr_blocks(struct era *era)
 	return dm_sector_div_up(era->ti->len, era->block_size);
 }
 
+static bool valid_block_size(dm_block_t block_size)
+{
+	bool greater_than_zero = block_size > 0;
+	bool multiple_of_min_block_size = (block_size & (MIN_BLOCK_SIZE - 1)) == 0;
+
+	return greater_than_zero && multiple_of_min_block_size;
+}
+
 /*
  * <metadata dev> <data dev> <data block size (sectors)>
  */
@@ -1364,6 +1373,12 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = sscanf(argv[2], "%u%c", &era->block_size, &dummy);
 	if (r != 1) {
 		ti->error = "Error parsing block size";
+		era_destroy(era);
+		return -EINVAL;
+	}
+
+	if (!valid_block_size(era->block_size)) {
+		ti->error = "Invalid block size";
 		era_destroy(era);
 		return -EINVAL;
 	}
