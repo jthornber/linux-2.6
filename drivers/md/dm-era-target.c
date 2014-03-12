@@ -288,7 +288,7 @@ struct era_metadata {
 	/*
 	 * A flag that is set whenever a writeset has been archived.
 	 */
-	atomic_t archived_writesets;
+	bool archived_writesets;
 };
 
 static int superblock_read_lock(struct era_metadata *md,
@@ -556,7 +556,7 @@ static int open_metadata(struct era_metadata *md)
 	md->writeset_tree_root = le64_to_cpu(disk->writeset_tree_root);
 	md->era_array_root = le64_to_cpu(disk->era_array_root);
 	md->metadata_snap = le64_to_cpu(disk->metadata_snap);
-	atomic_set(&md->archived_writesets, 1);
+	md->archived_writesets = true;
 
 	return dm_bm_unlock(sblock);
 
@@ -835,7 +835,7 @@ static int metadata_era_archive(struct era_metadata *md)
 		return r;
 	}
 
-	atomic_set(&md->archived_writesets, 1);
+	md->archived_writesets = true;
 
 	return 0;
 }
@@ -1211,8 +1211,8 @@ static void process_rpc_calls(struct era *era)
 
 static void kick_off_digest(struct era *era)
 {
-	if (atomic_read(&era->md->archived_writesets)) {
-		atomic_set(&era->md->archived_writesets, 0);
+	if (era->md->archived_writesets) {
+		era->md->archived_writesets = false;
 		metadata_digest_start(era->md, &era->digest);
 	}
 }
