@@ -1093,8 +1093,7 @@ struct rpc {
 	void *arg;
 	int result;
 
-	wait_queue_head_t wait;
-	atomic_t complete;
+	struct completion complete;
 };
 
 /*----------------------------------------------------------------
@@ -1206,10 +1205,8 @@ static void process_rpc_calls(struct era *era)
 				rpc->result = r;
 	}
 
-	list_for_each_entry_safe (rpc, tmp, &calls, list) {
-		atomic_set(&rpc->complete, 1);
-		wake_up(&rpc->wait);
-	}
+	list_for_each_entry_safe (rpc, tmp, &calls, list)
+		complete(&rpc->complete);
 }
 
 static void kick_off_digest(struct era *era)
@@ -1245,15 +1242,14 @@ static void defer_bio(struct era *era, struct bio *bio)
 static int perform_rpc(struct era *era, struct rpc *rpc)
 {
 	rpc->result = 0;
-	init_waitqueue_head(&rpc->wait);
-	atomic_set(&rpc->complete, 0);
+	init_completion(&rpc->complete);
 
 	spin_lock(&era->rpc_lock);
 	list_add(&rpc->list, &era->rpc_calls);
 	spin_unlock(&era->rpc_lock);
 
 	wake_worker(era);
-	wait_event(rpc->wait, atomic_read(&rpc->complete));
+	wait_for_completion(&rpc->complete);
 
 	return rpc->result;
 }
