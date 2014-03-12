@@ -780,11 +780,26 @@ static void metadata_close(struct era_metadata *md)
 	kfree(md);
 }
 
+static bool valid_nr_blocks(dm_block_t n)
+{
+	/*
+	 * dm_bitset restricts us to 2^32.  test_bit & co. restrict us
+	 * further to 2^31 - 1
+	 */
+	return n < (1ull << 31);
+}
+
 static int metadata_resize(struct era_metadata *md, void *arg)
 {
 	int r;
 	dm_block_t *new_size = arg;
 	__le32 value;
+
+	if (!valid_nr_blocks(*new_size)) {
+		DMERR("Invalid number of origin blocks %llu",
+		      (unsigned long long) *new_size);
+		return -EINVAL;
+	}
 
 	writeset_free(&md->writesets[0]);
 	writeset_free(&md->writesets[1]);
