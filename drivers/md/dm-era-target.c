@@ -1184,7 +1184,6 @@ static void process_old_eras(struct era *era)
 static void process_deferred_bios(struct era *era)
 {
 	int r;
-	unsigned long flags;
 	struct bio_list deferred_bios, marked_bios;
 	struct bio *bio;
 	bool commit_needed = false;
@@ -1193,10 +1192,10 @@ static void process_deferred_bios(struct era *era)
 	bio_list_init(&deferred_bios);
 	bio_list_init(&marked_bios);
 
-	spin_lock_irqsave(&era->deferred_lock, flags);
+	spin_lock(&era->deferred_lock);
 	bio_list_merge(&deferred_bios, &era->deferred_bios);
 	bio_list_init(&era->deferred_bios);
-	spin_unlock_irqrestore(&era->deferred_lock, flags);
+	spin_unlock(&era->deferred_lock);
 
 	while ((bio = bio_list_pop(&deferred_bios))) {
 		r = writeset_test_and_set(&era->md->bitset_info, era->md->current_writeset,
