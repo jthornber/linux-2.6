@@ -435,16 +435,22 @@ static int create_fresh_metadata(struct era_metadata *md)
 	r = dm_btree_empty(&md->writeset_tree_info, &md->writeset_tree_root);
 	if (r) {
 		DMERR("couldn't create new writeset tree");
-		return r;
+		goto bad;
 	}
 
 	r = dm_array_empty(&md->era_array_info, &md->era_array_root);
 	if (r) {
 		DMERR("couldn't create era array");
-		return r;
+		goto bad;
 	}
 
 	return 0;
+
+bad:
+	dm_sm_destroy(md->sm);
+	dm_tm_destroy(md->tm);
+
+	return r;
 }
 
 /*
@@ -519,8 +525,11 @@ static int format_metadata(struct era_metadata *md)
 		return r;
 
 	r = write_superblock(md);
-	if (r)
+	if (r) {
+		dm_sm_destroy(md->sm);
+		dm_tm_destroy(md->tm);
 		return r;
+	}
 
 	return 0;
 }
