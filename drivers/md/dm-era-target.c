@@ -266,7 +266,7 @@ struct era_metadata {
 	dm_block_t block_size;
 	uint32_t nr_blocks;
 
-	atomic64_t current_era;
+	uint32_t current_era;
 
 	/*
 	 * We preallocate 2 writesets.  When an era rolls over we
@@ -482,7 +482,7 @@ static int prepare_superblock(struct era_metadata *md, struct superblock_disk *d
 	disk->data_block_size = cpu_to_le32(md->block_size);
 	disk->metadata_block_size = cpu_to_le32(METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk->nr_blocks = cpu_to_le32(md->nr_blocks);
-	disk->current_era = cpu_to_le32(atomic64_read(&md->current_era));
+	disk->current_era = cpu_to_le32(md->current_era);
 
 	ws_pack(&md->current_writeset->md, &disk->current_writeset);
 	disk->writeset_tree_root = cpu_to_le64(md->writeset_tree_root);
@@ -560,7 +560,7 @@ static int open_metadata(struct era_metadata *md)
 
 	md->block_size = le32_to_cpu(disk->data_block_size);
 	md->nr_blocks = le32_to_cpu(disk->nr_blocks);
-	atomic64_set(&md->current_era, le32_to_cpu(disk->current_era));
+	md->current_era = le32_to_cpu(disk->current_era);
 
 	md->writeset_tree_root = le64_to_cpu(disk->writeset_tree_root);
 	md->era_array_root = le64_to_cpu(disk->era_array_root);
@@ -845,7 +845,7 @@ static int metadata_era_archive(struct era_metadata *md)
 	ws_pack(&md->current_writeset->md, &value);
 	md->current_writeset->md.root = INVALID_WRITESET_ROOT;
 
-	keys[0] = atomic64_read(&md->current_era);
+	keys[0] = md->current_era;
 	__dm_bless_for_disk(&value);
 	r = dm_btree_insert(&md->writeset_tree_info, md->writeset_tree_root, keys, &value, &md->writeset_tree_root);
 	if (r) {
@@ -876,7 +876,7 @@ static int metadata_new_era(struct era_metadata *md)
 	}
 
 	swap_writeset(md, new_writeset);
-	atomic64_inc(&md->current_era);
+	md->current_era++;
 
 	return 0;
 }
@@ -1100,7 +1100,7 @@ static int metadata_get_stats(struct era_metadata *md, void *ptr)
 	s->used = nr_total - nr_free;
 	s->total = nr_total;
 	s->snap = md->metadata_snap;
-	s->era = (uint32_t) atomic64_read(&md->current_era);
+	s->era = md->current_era;
 
 	return 0;
 }
