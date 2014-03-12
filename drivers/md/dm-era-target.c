@@ -830,11 +830,6 @@ static int metadata_resize(struct era_metadata *md, void *arg)
 	return 0;
 }
 
-static uint32_t metadata_current_era(struct era_metadata *md)
-{
-	return (uint32_t) atomic64_read(&md->current_era);
-}
-
 static int metadata_era_archive(struct era_metadata *md)
 {
 	int r;
@@ -1032,11 +1027,6 @@ static int metadata_take_snap(struct era_metadata *md)
 	return 0;
 }
 
-static dm_block_t metadata_snap_root(struct era_metadata *md)
-{
-	return md->metadata_snap;
-}
-
 static int metadata_drop_snap(struct era_metadata *md)
 {
 	int r;
@@ -1080,6 +1070,39 @@ static int metadata_drop_snap(struct era_metadata *md)
 	dm_tm_unlock(md->tm, clone);
 
 	return dm_sm_dec_block(md->sm, location);
+}
+
+struct metadata_stats {
+	dm_block_t used;
+	dm_block_t total;
+	dm_block_t snap;
+	uint32_t era;
+};
+
+static int metadata_get_stats(struct era_metadata *md, void *ptr)
+{
+	int r;
+	struct metadata_stats *s = ptr;
+	dm_block_t nr_free, nr_total;
+
+	r = dm_sm_get_nr_free(md->sm, &nr_free);
+	if (r) {
+		DMERR("dm_sm_get_nr_free returned %d", r);
+		return r;
+	}
+
+	r = dm_sm_get_nr_blocks(md->sm, &nr_total);
+	if (r) {
+		DMERR("dm_pool_get_metadata_dev_size returned %d", r);
+		return r;
+	}
+
+	s->used = nr_total - nr_free;
+	s->total = nr_total;
+	s->snap = md->metadata_snap;
+	s->era = (uint32_t) atomic64_read(&md->current_era);
+
+	return 0;
 }
 
 /*----------------------------------------------------------------*/
@@ -1531,35 +1554,22 @@ static void era_status(struct dm_target *ti, status_type_t type,
 	int r;
 	struct era *era = ti->private;
 	ssize_t sz = 0;
-	dm_block_t snap;
-	dm_block_t nr_md_free, nr_md_total;
+	struct metadata_stats stats;
 	char buf[BDEVNAME_SIZE];
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		/*
-		 * FIXME: do we need to protect this?
-		 */
-		r = dm_sm_get_nr_free(era->md->sm, &nr_md_free);
-		if (r) {
-			DMERR("dm_sm_get_nr_free returned %d", r);
+		r = in_worker1(era, metadata_get_stats, &stats);
+		if (r)
 			goto err;
-		}
-
-		r = dm_sm_get_nr_blocks(era->md->sm, &nr_md_total);
-		if (r) {
-			DMERR("dm_pool_get_metadata_dev_size returned %d", r);
-			goto err;
-		}
 
 		DMEMIT("%llu/%llu %u",
-		       (unsigned long long) (nr_md_total - nr_md_free),
-		       (unsigned long long) nr_md_total,
-		       (unsigned) metadata_current_era(era->md));
+		       (unsigned long long) stats.used,
+		       (unsigned long long) stats.total,
+		       (unsigned) stats.era);
 
-		snap = metadata_snap_root(era->md);
-		if (snap != SUPERBLOCK_LOCATION)
-			DMEMIT(" %llu", snap);
+		if (stats.snap != SUPERBLOCK_LOCATION)
+			DMEMIT(" %llu", stats.snap);
 		else
 			DMEMIT(" -");
 		break;
