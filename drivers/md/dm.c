@@ -1150,6 +1150,20 @@ void dm_accept_partial_bio(struct bio *bio, unsigned n_sectors)
 }
 EXPORT_SYMBOL_GPL(dm_accept_partial_bio);
 
+/*
+ * The target driver can only call this function from its map routine.  The
+ * target driver requests that DM send more duplicates of the current bio.
+ * The value of the dm_target_io's 'num_bios' pointer is incremented to add
+ * @num_duplicates to the outer control loops in the bio mapping callers
+ * (e.g. __send_duplicate_bios and __clone_and_map_data_bio).
+ */
+void dm_ask_for_duplicate_bios(struct bio *bio, unsigned num_duplicates)
+{
+	struct dm_target_io *tio = container_of(bio, struct dm_target_io, clone);
+	(*tio->num_bios) += num_duplicates;
+}
+EXPORT_SYMBOL_GPL(dm_ask_for_duplicate_bios);
+
 static void __map_bio(struct dm_target_io *tio)
 {
 	int r;
@@ -1240,12 +1254,14 @@ static struct dm_target_io *alloc_tio(struct clone_info *ci,
 
 static void __clone_and_map_simple_bio(struct clone_info *ci,
 				       struct dm_target *ti,
-				       unsigned target_bio_nr, unsigned *len)
+				       unsigned target_bio_nr, unsigned *len,
+				       unsigned *num_bios)
 {
 	struct dm_target_io *tio = alloc_tio(ci, ti, ci->bio->bi_max_vecs, target_bio_nr);
 	struct bio *clone = &tio->clone;
 
 	tio->len_ptr = len;
+	tio->num_bios = num_bios;
 
 	/*
 	 * Discard requests require the bio's inline iovecs be initialized.
@@ -1265,7 +1281,7 @@ static void __send_duplicate_bios(struct clone_info *ci, struct dm_target *ti,
 	unsigned target_bio_nr;
 
 	for (target_bio_nr = 0; target_bio_nr < num_bios; target_bio_nr++)
-		__clone_and_map_simple_bio(ci, ti, target_bio_nr, len);
+		__clone_and_map_simple_bio(ci, ti, target_bio_nr, len, &num_bios);
 }
 
 static int __send_empty_flush(struct clone_info *ci)
@@ -1291,6 +1307,7 @@ static void __clone_and_map_data_bio(struct clone_info *ci, struct dm_target *ti
 	for (target_bio_nr = 0; target_bio_nr < num_target_bios; target_bio_nr++) {
 		tio = alloc_tio(ci, ti, 0, target_bio_nr);
 		tio->len_ptr = len;
+		tio->num_bios = &num_target_bios;
 		clone_bio(tio, bio, sector, *len);
 		__map_bio(tio);
 	}
