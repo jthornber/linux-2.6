@@ -1475,8 +1475,7 @@ static void do_no_space_timeout(struct work_struct *ws)
 
 struct pool_work {
 	struct work_struct worker;
-	atomic_t complete;
-	wait_queue_head_t wait;
+	struct completion complete;
 };
 
 static struct pool_work *to_pool_work(struct work_struct *ws)
@@ -1486,19 +1485,16 @@ static struct pool_work *to_pool_work(struct work_struct *ws)
 
 static void pool_work_complete(struct pool_work *pw)
 {
-	atomic_set(&pw->complete, 1);
-	wake_up(&pw->wait);
+	complete(&pw->complete);
 }
 
 static void pool_work_wait(struct pool_work *pw, struct pool *pool,
 			   void (*fn)(struct work_struct *))
 {
 	INIT_WORK(&pw->worker, fn);
-	atomic_set(&pw->complete, 0);
-	init_waitqueue_head(&pw->wait);
-
+	init_completion(&pw->complete);
 	queue_work(pool->wq, &pw->worker);
-	wait_event(pw->wait, atomic_read(&pw->complete));
+	wait_for_completion(&pw->complete);
 }
 
 /*----------------------------------------------------------------*/
