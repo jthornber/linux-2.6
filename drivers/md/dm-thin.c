@@ -134,10 +134,10 @@ struct dm_thin_new_mapping;
  * The pool runs in 4 modes.  Ordered in degraded order for comparisons.
  */
 enum pool_mode {
-	PM_WRITE,			/* metadata may be changed */
-	PM_OUT_OF_DATA_SPACE,		/* metadata may be changed, though data may not be allocated */
-	PM_READ_ONLY,			/* metadata may not be changed */
-	PM_FAIL,			/* all I/O fails */
+	PM_WRITE,		/* metadata may be changed */
+	PM_OUT_OF_DATA_SPACE,	/* metadata may be changed, though data may not be allocated */
+	PM_READ_ONLY,		/* metadata may not be changed */
+	PM_FAIL,		/* all I/O fails */
 };
 
 struct pool_features {
@@ -228,7 +228,7 @@ struct thin_c {
 
 	struct pool *pool;
 	struct dm_thin_device *td;
-	bool requeue_mode;
+	bool requeue_mode:1;
 };
 
 /*----------------------------------------------------------------*/
@@ -946,7 +946,6 @@ static void check_low_water_mark(struct pool *pool, dm_block_t free_blocks)
 	}
 }
 
-static void abort_transaction(struct pool *pool);
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode);
 
 static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
@@ -1012,7 +1011,6 @@ static void retry_on_resume(struct bio *bio)
 	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
-// FIXME: check this
 static bool should_error_unserviceable_bio(struct pool *pool)
 {
 	enum pool_mode m = get_pool_mode(pool);
@@ -1020,7 +1018,7 @@ static bool should_error_unserviceable_bio(struct pool *pool)
 	switch (m) {
 	case PM_WRITE:
 		/* Shouldn't get here */
-		DMERR("bio unserviceable, yet in PM_WRITE mode");
+		DMERR_LIMIT("bio unserviceable, yet pool is in PM_WRITE mode");
 		return true;
 
 	case PM_OUT_OF_DATA_SPACE:
@@ -1029,12 +1027,11 @@ static bool should_error_unserviceable_bio(struct pool *pool)
 	case PM_READ_ONLY:
 	case PM_FAIL:
 		return true;
+	default:
+		/* Shouldn't get here */
+		DMERR_LIMIT("bio unserviceable, yet pool has an unknown mode");
+		return true;
 	}
-
-	/*
-	 * Shouldn't get here.
-	 */
-	BUG();
 }
 
 static void handle_unserviceable_bio(struct pool *pool, struct bio *bio)
@@ -1425,7 +1422,8 @@ static void process_deferred_bios(struct pool *pool)
 	bio_list_init(&pool->deferred_flush_bios);
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	if (bio_list_empty(&bios) && !need_commit_due_to_time(pool))
+	if (bio_list_empty(&bios) &&
+	    !(dm_pool_changed_this_transaction(pool->pmd) && need_commit_due_to_time(pool)))
 		return;
 
 	if (commit(pool)) {
@@ -1540,6 +1538,8 @@ static void noflush_work(struct thin_c *tc, void (*fn)(struct work_struct *))
 
 /*----------------------------------------------------------------*/
 
+static void abort_transaction(struct pool *pool);
+
 struct set_mode_work {
 	struct pool_work pw;
 	struct pool *pool;
@@ -1583,11 +1583,38 @@ static enum pool_mode get_pool_mode(struct pool *pool)
 	return pool->pf.mode;
 }
 
+static void notify_of_pool_mode_change(struct pool *pool, const char *new_mode)
+{
+	dm_table_event(pool->ti->table);
+	DMINFO("%s: switching pool to %s mode",
+	       dm_device_name(pool->pool_md), new_mode);
+}
+
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 {
 	struct pool_c *pt = pool->ti->private;
 	bool needs_check = dm_pool_metadata_needs_check(pool->pmd);
-	enum pool_mode old_mode = pool->pf.mode;
+	enum pool_mode old_mode = get_pool_mode(pool);
+
+	/*
+	 * Never allow the pool to transition to PM_WRITE mode if user
+	 * intervention is required to verify metadata and data consistency.
+	 */
+	if (new_mode == PM_WRITE && needs_check) {
+		DMERR("%s: unable to switch pool to write mode until repaired.",
+		      dm_device_name(pool->pool_md));
+		if (old_mode != new_mode)
+			new_mode = old_mode;
+		else
+			new_mode = PM_READ_ONLY;
+	}
+	/*
+	 * If we were in PM_FAIL mode, rollback of metadata failed.  We're
+	 * not going to recover without a thin_repair.	So we never let the
+	 * pool move out of the old mode.
+	 */
+	if (old_mode == PM_FAIL)
+		new_mode = old_mode;
 
 	/*
 	 * Never allow the pool to transition to PM_WRITE mode if user
@@ -1601,11 +1628,8 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 
 	switch (new_mode) {
 	case PM_FAIL:
-		if (old_mode != new_mode) {
-			dm_table_event(pool->ti->table);
-			DMERR("%s: switching pool to failure mode",
-			      dm_device_name(pool->pool_md));
-		}
+		if (old_mode != new_mode)
+			notify_of_pool_mode_change(pool, "failure");
 
 		dm_pool_metadata_read_only(pool->pmd);
 		pool->process_bio = process_bio_fail;
@@ -1617,12 +1641,8 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		break;
 
 	case PM_READ_ONLY:
-		if (old_mode != new_mode) {
-			dm_table_event(pool->ti->table);
-			DMERR("%s: switching pool to read-only mode",
-			      dm_device_name(pool->pool_md));
-		}
-
+		if (old_mode != new_mode)
+			notify_of_pool_mode_change(pool, "read-only");
 		dm_pool_metadata_read_only(pool->pmd);
 		pool->process_bio = process_bio_read_only;
 		pool->process_discard = process_bio_success;
@@ -1641,28 +1661,17 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		 * alarming rate.  Adjust your low water mark if you're
 		 * frequently seeing this mode.
 		 */
-		if (old_mode != new_mode) {
-			dm_table_event(pool->ti->table);
-			DMERR("%s: switching pool to out-of-data-space mode",
-			      dm_device_name(pool->pool_md));
-		}
-
+		if (old_mode != new_mode)
+			notify_of_pool_mode_change(pool, "out-of-data-space");
 		pool->process_bio = process_bio_read_only;
 		pool->process_discard = process_discard;
 		pool->process_prepared_mapping = process_prepared_mapping;
 		pool->process_prepared_discard = process_prepared_discard_passdown;
-
-		if (!pool->pf.error_if_no_space)
-			queue_delayed_work(pool->wq, &pool->no_space_timeout, NO_SPACE_TIMEOUT);
 		break;
 
 	case PM_WRITE:
-		if (old_mode != new_mode) {
-			dm_table_event(pool->ti->table);
-			DMINFO("%s: switching pool to write mode",
-			       dm_device_name(pool->pool_md));
-		}
-
+		if (old_mode != new_mode)
+			notify_of_pool_mode_change(pool, "write");
 		dm_pool_metadata_read_write(pool->pmd);
 		pool->process_bio = process_bio;
 		pool->process_discard = process_discard;
@@ -1682,21 +1691,16 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 
 static void abort_transaction(struct pool *pool)
 {
-	int r;
 	const char *dev_name = dm_device_name(pool->pool_md);
 
-	DMERR("%s: aborting current transaction",
-	      dm_device_name(pool->pool_md));
-	r = dm_pool_abort_metadata(pool->pmd);
-	if (r) {
-		DMERR("%s: aborting transaction failed", dev_name);
+	DMERR_LIMIT("%s: aborting current metadata transaction", dev_name);
+	if (dm_pool_abort_metadata(pool->pmd)) {
+		DMERR("%s: failed to abort metadata transaction", dev_name);
 		set_pool_mode(pool, PM_FAIL);
 	}
 
-	r = dm_pool_metadata_set_needs_check(pool->pmd);
-	if (r) {
-		DMERR("%s: setting 'needs_check' flag in metadata failed",
-		      dev_name);
+	if (dm_pool_metadata_set_needs_check(pool->pmd)) {
+		DMERR("%s: failed to set 'needs_check' flag in metadata", dev_name);
 		set_pool_mode(pool, PM_FAIL);
 	}
 }
@@ -1925,7 +1929,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	/*
 	 * We want to make sure that a pool in PM_FAIL mode is never upgraded.
 	 */
-	enum pool_mode old_mode = pool->pf.mode;
+	enum pool_mode old_mode = get_pool_mode(pool);
 	enum pool_mode new_mode = pt->adjusted_pf.mode;
 
 	/*
@@ -1939,15 +1943,7 @@ static int bind_control_target(struct pool *pool, struct dm_target *ti)
 	pool->pf = pt->adjusted_pf;
 	pool->low_water_blocks = pt->low_water_blocks;
 
-	/*
-	 * If we were in PM_FAIL mode, rollback of metadata failed.  We're
-	 * not going to recover without a thin_repair.  So we never let the
-	 * pool move out of the old mode.  Similarly, if in PM_READ_ONLY mode
-	 * and the pool doesn't have free space we must not switch modes here;
-	 * pool_preresume() will transition to PM_WRITE mode if a resize succeeds.
-	 */
-	if (!dm_pool_metadata_needs_check(pool->pmd))
-		set_pool_mode(pool, new_mode);
+	set_pool_mode(pool, new_mode);
 
 	return 0;
 }
@@ -2266,7 +2262,7 @@ static dm_block_t get_metadata_dev_size_in_blocks(struct block_device *bdev)
 {
 	sector_t metadata_dev_size = get_metadata_dev_size(bdev);
 
-	sector_div(metadata_dev_size, THIN_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
+	sector_div(metadata_dev_size, THIN_METADATA_BLOCK_SIZE);
 
 	return metadata_dev_size;
 }
@@ -2344,7 +2340,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		ti->error = "Error opening metadata block device";
 		goto out_unlock;
 	}
-
 	warn_if_metadata_device_too_big(metadata_dev->bdev);
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &data_dev);
@@ -2491,11 +2486,10 @@ static int maybe_resize_data_dev(struct dm_target *ti, bool *need_commit)
 		return -EINVAL;
 
 	} else if (data_size > sb_data_size) {
-		// FIXME: how do we get this far?
 		if (dm_pool_metadata_needs_check(pool->pmd)) {
 			DMERR("%s: unable to grow the data device until repaired.",
 			      dm_device_name(pool->pool_md));
-			return -EINVAL;;
+			return 0;
 		}
 
 		if (sb_data_size)
@@ -2539,11 +2533,10 @@ static int maybe_resize_metadata_dev(struct dm_target *ti, bool *need_commit)
 		return -EINVAL;
 
 	} else if (metadata_dev_size > sb_metadata_dev_size) {
-		// FIXME: then how did we get here?
 		if (dm_pool_metadata_needs_check(pool->pmd)) {
 			DMERR("%s: unable to grow the metadata device until repaired.",
 			      dm_device_name(pool->pool_md));
-			return -EINVAL;;
+			return 0;
 		}
 
 		warn_if_metadata_device_too_big(pool->md_dev);
@@ -2985,7 +2978,6 @@ static void pool_status(struct dm_target *ti, status_type_t type,
 
 		if (pool->pf.mode == PM_OUT_OF_DATA_SPACE)
 			DMEMIT("out_of_data_space ");
-
 		else if (pool->pf.mode == PM_READ_ONLY)
 			DMEMIT("ro ");
 		else
