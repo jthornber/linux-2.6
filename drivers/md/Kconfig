@@ -296,6 +296,13 @@ config DM_ERA
          over time.  Useful for maintaining cache coherency when using
          vendor snapshots.
 
+config DM_WRITEBOOST
+       tristate "Writeboost target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM
+       default n
+       ---help---
+         Cache target optimised for streaming writes.
+
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM

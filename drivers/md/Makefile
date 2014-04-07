@@ -16,6 +16,8 @@ dm-cache-mq-y   += dm-cache-policy-mq.o
 dm-era-y	+= dm-era-target.o
 dm-cache-cleaner-y += dm-cache-policy-cleaner.o
 dm-era-y	+= dm-era-target.o
+dm-writeboost-y += dm-writeboost-target.o dm-writeboost-metadata.o \
+		   dm-writeboost-daemon.o
 md-mod-y	+= md.o bitmap.o
 raid456-y	+= raid5.o
 
@@ -57,6 +59,7 @@ obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
 obj-$(CONFIG_DM_CACHE_CLEANER)	+= dm-cache-cleaner.o
 obj-$(CONFIG_DM_ERA)		+= dm-era.o
+obj-$(CONFIG_DM_WRITEBOOST)	+= dm-writeboost.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o
