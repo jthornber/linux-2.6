@@ -137,7 +137,7 @@ static u32 calc_nr_segments(struct dm_dev *dev, struct wb_device *wb)
 /*
  * get the relative index in a segment of the mb_idx-th metablock
  */
-u32 mb_idx_inseg(struct wb_device *wb, u32 mb_idx)
+u8 mb_idx_inseg(struct wb_device *wb, u32 mb_idx)
 {
 	u32 tmp32;
 	div_u64_rem(mb_idx, wb->nr_caches_inseg, &tmp32);
@@ -895,8 +895,8 @@ static void free_plog_dev(struct wb_device *wb)
 /*
  * initialize core devices
  * - cache device (SSD)
- * - persistent log device (SSD or PRAM)
  * - RAM buffers (DRAM)
+ * - persistent log device (SSD or PRAM)
  */
 static int init_devices(struct wb_device *wb)
 {
@@ -933,7 +933,7 @@ static void free_devices(struct wb_device *wb)
 
 /*----------------------------------------------------------------*/
 
-static int read_plog_t1(void *buf, struct wb_device *wb, u32 idx)
+static int read_plog_seg_t1(void *buf, struct wb_device *wb, u32 idx)
 {
 	int r = 0;
 
@@ -957,16 +957,16 @@ static int read_plog_t1(void *buf, struct wb_device *wb, u32 idx)
 }
 
 /*
- * Read the idx'th plog on the persistent device and
+ * Read the idx'th plog seg on the persistent device and
  * store it into a buffer.
  */
-static int read_plog(void *buf, struct wb_device *wb, u32 idx)
+static int read_plog_seg(void *buf, struct wb_device *wb, u32 idx)
 {
 	int r = 0;
 
 	switch (wb->type) {
 	case 1:
-		r = read_plog_t1(buf, wb, idx);
+		r = read_plog_seg_t1(buf, wb, idx);
 		break;
 	default:
 		BUG();
@@ -989,7 +989,7 @@ static int find_min_id_plog(struct wb_device *wb, u64 *id, u32 *idx)
 	*id = 0; *idx = 0;
 	for (i = 0; i < wb->nr_plog_segs; i++) {
 		struct plog_meta_device meta;
-		read_plog(plog_buf, wb, i);
+		read_plog_seg(plog_buf, wb, i);
 		memcpy(&meta, plog_buf, 512);
 
 		id_cpu = le64_to_cpu(meta.id);
@@ -1036,7 +1036,7 @@ static int flush_rambuf(struct wb_device *wb,
 }
 
 /*
- * Flush a plog (stored in a buffer) to the cache device.
+ * flush a plog (stored in a buffer) to the cache device.
  */
 static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
 {
@@ -1064,12 +1064,12 @@ static int flush_plogs(struct wb_device *wb)
 	u64 next_id;
 	u32 i, orig_idx;
 	struct plog_meta_device meta;
-	void *plog_buf;
+	void *plog_seg_buf;
 
 	if (!wb->type)
 		return 0;
 
-	plog_buf = kmalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	plog_seg_buf = kmalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
 	if (r)
 		return -ENOMEM;
 
@@ -1096,12 +1096,12 @@ static int flush_plogs(struct wb_device *wb)
 
 		div_u64_rem(orig_idx + i, wb->nr_plog_segs, &j);
 
-		read_plog(plog_buf, wb, j);
+		read_plog_seg(plog_seg_buf, wb, j);
 		/*
 		 * the id of the head log is the log_id
 		 * that is identical within this plog.
 		 */
-		memcpy(&meta, plog_buf, 512);
+		memcpy(&meta, plog_seg_buf, 512);
 		log_id = le64_to_cpu(meta.id);
 
 		if (log_id != next_id)
@@ -1110,13 +1110,13 @@ static int flush_plogs(struct wb_device *wb)
 		/*
 		 * now at least one log is valid in this plog.
 		 */
-		flush_plog(wb, plog_buf, log_id);
+		flush_plog(wb, plog_seg_buf, log_id);
 		next_id++;
 	}
 	wbdebug();
 
 bad:
-	kfree(plog_buf);
+	kfree(plog_seg_buf);
 	return r;
 }
 
@@ -1208,7 +1208,7 @@ void prepare_segment_header_device(void *rambuffer,
 		struct metablock *mb = src->mb_array + i;
 		struct metablock_device *mbdev = dest->mbarr + i;
 
-		mbdev->sector = cpu_to_le64(mb->sector);
+		mbdev->sector = cpu_to_le64((u64)mb->sector);
 		mbdev->dirty_bits = mb->dirty_bits;
 	}
 
@@ -1345,7 +1345,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 	u32 i, start_idx = segment_id_to_idx(wb, *max_id + 1);
 	*max_id = 0;
 	for (i = start_idx; i < (start_idx + wb->nr_segments); i++) {
-		u32 checksum1, checksum2, k;
+		u32 actual, expected, k;
 		div_u64_rem(i, wb->nr_segments, &k);
 		seg = segment_at(wb, k);
 
@@ -1363,13 +1363,13 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 		if (!le64_to_cpu(header->id))
 			continue;
 
-		checksum1 = le32_to_cpu(header->checksum);
-		checksum2 = calc_checksum(rambuf, header->length);
+		actual = calc_checksum(rambuf, header->length);
+		expected = le32_to_cpu(header->checksum);
 		wbdebug("id:%u, len:%u", header->id, header->length);
-		if (checksum1 != checksum2) {
+		if (actual != expected) {
 			WBWARN("checksum incorrect id:%llu checksum: %u != %u",
 			       (long long unsigned int) le64_to_cpu(header->id),
-			       checksum1, checksum2);
+			       actual, expected);
 			continue;
 		}
 
@@ -1626,11 +1626,7 @@ static int init_migrate_daemon(struct wb_device *wb)
 	atomic_set(&wb->migrate_fail_count, 0);
 	atomic_set(&wb->migrate_io_count, 0);
 
-	/*
-	 * default number of batched migration is 1MB / segment size.
-	 * an ordinary HDD can afford at least 1MB/sec.
-	 */
-	nr_batch = 1 << (11 - wb->segment_size_order);
+	nr_batch = 1 << (15 - wb->segment_size_order); /* 16MB */
 	wb->nr_max_batched_migration = nr_batch;
 	if (try_alloc_migrate_ios(wb, nr_batch))
 		return -ENOMEM;
@@ -1697,7 +1693,7 @@ bad_flush_job_pool:
 
 static void init_barrier_deadline_work(struct wb_device *wb)
 {
-	wb->barrier_deadline_ms = 3;
+	wb->barrier_deadline_ms = 10;
 	setup_timer(&wb->barrier_deadline_timer,
 		    barrier_deadline_proc, (unsigned long) wb);
 	bio_list_init(&wb->barrier_ios);
@@ -1712,7 +1708,7 @@ static int init_migrate_modulator(struct wb_device *wb)
 	 * storage should keep its load no more than 70%.
 	 */
 	wb->migrate_threshold = 70;
-	wb->enable_migration_modulator = true;
+	wb->enable_migration_modulator = false;
 	CREATE_DAEMON(modulator);
 	return r;
 
@@ -1723,7 +1719,7 @@ bad_modulator_daemon:
 static int init_recorder_daemon(struct wb_device *wb)
 {
 	int r = 0;
-	wb->update_record_interval = 60;
+	wb->update_record_interval = 0;
 	CREATE_DAEMON(recorder);
 	return r;
 
@@ -1734,7 +1730,7 @@ bad_recorder_daemon:
 static int init_sync_daemon(struct wb_device *wb)
 {
 	int r = 0;
-	wb->sync_interval = 60;
+	wb->sync_interval = 0;
 	CREATE_DAEMON(sync);
 	return r;
 
