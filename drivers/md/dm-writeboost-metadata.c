@@ -544,10 +544,9 @@ static int format_all_segment_headers(struct wb_device *wb)
 			break;
 		}
 	}
-	kfree(buf);
 
 	if (r)
-		return r;
+		goto bad;
 
 	/*
 	 * wait for all the writes complete.
@@ -557,9 +556,11 @@ static int format_all_segment_headers(struct wb_device *wb)
 
 	if (context.err) {
 		WBERR("I/O failed at last");
-		return -EIO;
+		r = -EIO;
 	}
 
+bad:
+	kfree(buf);
 	return r;
 }
 
