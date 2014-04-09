@@ -620,6 +620,12 @@ static void increase_dirtiness(struct wb_device *wb, struct segment_header *seg,
 		inc_nr_dirty_caches(wb);
 }
 
+/*
+ * drop the dirtiness of the on-memory metablock to 0.
+ * this only means the data of the metablock will never be migrated and
+ * omitting this only results in double migration which is only a matter
+ * of performance.
+ */
 void cleanup_mb_if_dirty(struct wb_device *wb, struct segment_header *seg,
 			 struct metablock *mb)
 {
@@ -662,105 +668,105 @@ u8 read_mb_dirtiness(struct wb_device *wb, struct segment_header *seg,
 
 /*----------------------------------------------------------------*/
 
+struct migrate_mb_context {
+	struct wb_device *wb;
+	atomic_t count;
+	int err;
+};
+
+static void migrate_mb_complete(int read_err, unsigned long write_err, void *__context)
+{
+	struct migrate_mb_context *context = __context;
+
+	if (read_err || write_err)
+		context->err = 1;
+
+	if (atomic_dec_and_test(&context->count))
+		wake_up_active_wq(&context->wb->migrate_mb_wait_queue);
+}
+
 /*
- * migrate the caches in a metablock on the SSD (after flushed).
- * the caches on the SSD are considered to be persistent so we need to
- * write them back with WRITE_FUA flag.
+ * migrate caches in cache device (SSD) to the backnig device (HDD).
+ * we don't need to make the data migrated persistent because this segment will be
+ * reused only after migrate daemon migrates this segment.
  */
 static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
 		       struct metablock *mb, u8 dirty_bits, bool thread)
 {
 	int r = 0;
 
+	struct migrate_mb_context context;
+	context.wb = wb;
+	context.err = 0;
+
 	if (!dirty_bits)
 		return;
 
 	if (dirty_bits == 255) {
-		void *buf = mempool_alloc(buf_8_pool, GFP_NOIO);
-		struct dm_io_request io_req_r, io_req_w;
-		struct dm_io_region region_r, region_w;
+		struct dm_io_region src, dest;
 
-		io_req_r = (struct dm_io_request) {
-			.client = wb_io_client,
-			.bi_rw = READ,
-			.notify.fn = NULL,
-			.mem.type = DM_IO_KMEM,
-			.mem.ptr.addr = buf,
-		};
-		region_r = (struct dm_io_region) {
+		atomic_set(&context.count, 1);
+
+		src = (struct dm_io_region) {
 			.bdev = wb->cache_dev->bdev,
 			.sector = calc_mb_start_sector(wb, seg, mb->idx),
 			.count = (1 << 3),
 		};
-		IO(dm_safe_io(&io_req_r, 1, &region_r, NULL, thread));
-
-		io_req_w = (struct dm_io_request) {
-			.client = wb_io_client,
-			.bi_rw = WRITE_FUA,
-			.notify.fn = NULL,
-			.mem.type = DM_IO_KMEM,
-			.mem.ptr.addr = buf,
-		};
-		region_w = (struct dm_io_region) {
+		dest = (struct dm_io_region) {
 			.bdev = wb->backing_dev->bdev,
 			.sector = mb->sector,
 			.count = (1 << 3),
 		};
-		IO(dm_safe_io(&io_req_w, 1, &region_w, NULL, thread));
-
-		mempool_free(buf, buf_8_pool);
+		r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, migrate_mb_complete, &context);
+		if (r) {
+			atomic_dec(&context.count);
+			context.err = 1;
+		}
 	} else {
-		void *buf = mempool_alloc(buf_1_pool, GFP_NOIO);
 		u8 i;
-		for (i = 0; i < 8; i++) {
-			struct dm_io_request io_req_r, io_req_w;
-			struct dm_io_region region_r, region_w;
 
-			bool bit_on = dirty_bits & (1 << i);
-			if (!bit_on)
+		u8 count = 0;
+		for (i = 0; i < 8; i++)
+			if (dirty_bits & (1 << i))
+				count++;
+
+		atomic_set(&context.count, count);
+
+		for (i = 0; i < 8; i++) {
+			struct dm_io_region src, dest;
+
+			if (!(dirty_bits & (1 << i)))
 				continue;
 
-			io_req_r = (struct dm_io_request) {
-				.client = wb_io_client,
-				.bi_rw = READ,
-				.notify.fn = NULL,
-				.mem.type = DM_IO_KMEM,
-				.mem.ptr.addr = buf,
-			};
-			region_r = (struct dm_io_region) {
+			src = (struct dm_io_region) {
 				.bdev = wb->cache_dev->bdev,
 				.sector = calc_mb_start_sector(wb, seg, mb->idx) + i,
 				.count = 1,
 			};
-			IO(dm_safe_io(&io_req_r, 1, &region_r, NULL, thread));
-
-			io_req_w = (struct dm_io_request) {
-				.client = wb_io_client,
-				.bi_rw = WRITE_FUA,
-				.notify.fn = NULL,
-				.mem.type = DM_IO_KMEM,
-				.mem.ptr.addr = buf,
-			};
-			region_w = (struct dm_io_region) {
+			dest = (struct dm_io_region) {
 				.bdev = wb->backing_dev->bdev,
 				.sector = mb->sector + i,
 				.count = 1,
 			};
-			IO(dm_safe_io(&io_req_w, 1, &region_w, NULL, thread));
+			r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, migrate_mb_complete, &context);
+			if (r) {
+				atomic_dec(&context.count);
+				context.err = 1;
+			}
 		}
-		mempool_free(buf, buf_1_pool);
 	}
+
+	wait_event(wb->migrate_mb_wait_queue, !atomic_read(&context.count));
+
+	if (context.err)
+		set_bit(WB_DEAD, &wb->flags);
 }
 
 /*
- * migrate the caches on the RAM buffer.
+ * migrate the caches on the RAM buffer to backing device.
  * calling this function is really rare so the code is not optimal.
- *
- * since the caches are of either one of these two status
- * - not flushed and thus not persistent (volatile buffer)
- * - acked to barrier request before but it is also on the
- *   non-volatile buffer (non-volatile buffer)
- * there is no reason to write them back with FUA flag.
+ * there is no need to write them back with FUA flag
+ * because the caches are not flushed yet and thus not persistent.
  */
 static void migrate_buffered_mb(struct wb_device *wb,
 				struct metablock *mb, u8 dirty_bits)
@@ -781,8 +787,7 @@ static void migrate_buffered_mb(struct wb_device *wb,
 		if (!bit_on)
 			continue;
 
-		src = wb->current_rambuf->data +
-		      ((offset + i) << SECTOR_SHIFT);
+		src = wb->current_rambuf->data + ((offset + i) << SECTOR_SHIFT);
 		memcpy(buf, src, 1 << SECTOR_SHIFT);
 
 		io_req = (struct dm_io_request) {
@@ -792,14 +797,11 @@ static void migrate_buffered_mb(struct wb_device *wb,
 			.mem.type = DM_IO_KMEM,
 			.mem.ptr.addr = buf,
 		};
-
-		dest = mb->sector + i;
 		region = (struct dm_io_region) {
 			.bdev = wb->backing_dev->bdev,
-			.sector = dest,
+			.sector = mb->sector + i,
 			.count = 1,
 		};
-
 		IO(dm_safe_io(&io_req, 1, &region, NULL, true));
 	}
 	mempool_free(buf, buf_1_pool);
@@ -1414,6 +1416,9 @@ static int consume_tunable_argv(struct wb_device *wb, struct dm_arg_set *as)
 	return do_consume_tunable_argv(wb, as, argc);
 }
 
+DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(wb_copy_throttle,
+		"A percentage of time allocated for one-shot migration");
+
 static int init_core_struct(struct dm_target *ti)
 {
 	int r = 0;
@@ -1439,6 +1444,13 @@ static int init_core_struct(struct dm_target *ti)
 	ti->private = wb;
 	wb->ti = ti;
 
+	init_waitqueue_head(&wb->migrate_mb_wait_queue);
+	wb->copier = dm_kcopyd_client_create(&dm_kcopyd_throttle);
+	if (IS_ERR(wb->copier)) {
+		r = PTR_ERR(wb->copier);
+		goto bad_kcopyd_client;
+	}
+
 	mutex_init(&wb->io_lock);
 	init_waitqueue_head(&wb->inflight_ios_wq);
 	spin_lock_init(&wb->lock);
@@ -1447,6 +1459,16 @@ static int init_core_struct(struct dm_target *ti)
 	wb->should_emit_tunables = false;
 
 	return r;
+
+bad_kcopyd_client:
+	kfree(wb);
+	return r;
+}
+
+static void free_core_struct(struct wb_device *wb)
+{
+	dm_kcopyd_client_destroy(wb->copier);
+	kfree(wb);
 }
 
 /*
@@ -1534,7 +1556,7 @@ static void writeboost_dtr(struct dm_target *ti)
 	dm_put_device(ti, wb->cache_dev);
 	dm_put_device(ti, wb->backing_dev);
 
-	kfree(wb);
+	free_core_struct(wb);
 
 	ti->private = NULL;
 }

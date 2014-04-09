@@ -22,6 +22,7 @@
 #include <linux/crc32c.h>
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
+#include <linux/dm-kcopyd.h>
 
 /*----------------------------------------------------------------*/
 
@@ -349,6 +350,15 @@ struct wb_device {
 
 	u32 nr_rambuf_pool; /* const */
 	struct rambuffer *rambuf_pool;
+
+	/*---------------------------------------------*/
+
+	/**********************
+	 * One-shot Migration
+	 **********************/
+
+	wait_queue_head_t migrate_mb_wait_queue;
+	struct dm_kcopyd_client *copier;
 
 	/*---------------------------------------------*/
 
