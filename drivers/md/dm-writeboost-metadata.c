@@ -1746,35 +1746,43 @@ int resume_cache(struct wb_device *wb)
 	r = init_devices(wb);
 	if (r)
 		goto bad_devices;
+
 	r = init_metadata(wb);
 	if (r)
 		goto bad_metadata;
+
 	r = init_migrate_daemon(wb);
 	if (r) {
 		WBERR("failed to init migrate daemon");
 		goto bad_migrate_daemon;
 	}
+
 	r = recover_cache(wb);
 	if (r) {
 		WBERR("failed to recover cache metadata");
 		goto bad_recover;
 	}
+
 	r = init_flusher(wb);
 	if (r) {
 		WBERR("failed to init wbflusher");
 		goto bad_flusher;
 	}
+
 	init_barrier_deadline_work(wb);
+
 	r = init_migrate_modulator(wb);
 	if (r) {
 		WBERR("failed to init migrate modulator");
 		goto bad_migrate_modulator;
 	}
+
 	r = init_recorder_daemon(wb);
 	if (r) {
 		WBERR("failed to init superblock recorder");
 		goto bad_recorder_daemon;
 	}
+
 	r = init_sync_daemon(wb);
 	if (r) {
 		WBERR("failed to init sync daemon");
