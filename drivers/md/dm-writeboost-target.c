@@ -756,10 +756,7 @@ static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
  * migrate the caches on the RAM buffer.
  * calling this function is really rare so the code is not optimal.
  *
- * since the caches are of either one of these two status
- * - not flushed and thus not persistent (volatile buffer)
- * - acked to barrier request before but it is also on the
- *   non-volatile buffer (non-volatile buffer)
+ * since the caches are not flushed and thus not persistent
  * there is no reason to write them back with FUA flag.
  */
 static void migrate_buffered_mb(struct wb_device *wb,
@@ -781,8 +778,7 @@ static void migrate_buffered_mb(struct wb_device *wb,
 		if (!bit_on)
 			continue;
 
-		src = wb->current_rambuf->data +
-		      ((offset + i) << SECTOR_SHIFT);
+		src = wb->current_rambuf->data + ((offset + i) << SECTOR_SHIFT);
 		memcpy(buf, src, 1 << SECTOR_SHIFT);
 
 		io_req = (struct dm_io_request) {
@@ -792,14 +788,11 @@ static void migrate_buffered_mb(struct wb_device *wb,
 			.mem.type = DM_IO_KMEM,
 			.mem.ptr.addr = buf,
 		};
-
-		dest = mb->sector + i;
 		region = (struct dm_io_region) {
 			.bdev = wb->backing_dev->bdev,
-			.sector = dest,
+			.sector = mb->sector + i,
 			.count = 1,
 		};
-
 		IO(dm_safe_io(&io_req, 1, &region, NULL, true));
 	}
 	mempool_free(buf, buf_1_pool);
