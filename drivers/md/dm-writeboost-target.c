@@ -620,6 +620,12 @@ static void increase_dirtiness(struct wb_device *wb, struct segment_header *seg,
 		inc_nr_dirty_caches(wb);
 }
 
+/*
+ * drop the dirtiness of the on-memory metablock to 0.
+ * this only means the data of the metablock will never be migrated and
+ * omitting this only results in double migration which is only a matter
+ * of performance.
+ */
 void cleanup_mb_if_dirty(struct wb_device *wb, struct segment_header *seg,
 			 struct metablock *mb)
 {
@@ -680,9 +686,9 @@ static void migrate_mb_complete(int read_err, unsigned long write_err, void *__c
 }
 
 /*
- * migrate the caches in a metablock on the SSD (after flushed).
- * the caches on the SSD are considered to be persistent so we need to
- * make them persistent after migrated.
+ * migrate caches in cache device (SSD) to the backnig device (HDD).
+ * we don't need to make the data migrated persistent because this segment will be
+ * reused only after migrate daemon migrates this segment.
  */
 static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
 		       struct metablock *mb, u8 dirty_bits, bool thread)
@@ -752,18 +758,15 @@ static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
 
 	wait_event(wb->migrate_mb_wait_queue, !atomic_read(&context.count));
 
-	submit_flush_request(wb, wb->backing_dev, true);
-
 	if (context.err)
 		set_bit(WB_DEAD, &wb->flags);
 }
 
 /*
- * migrate the caches on the RAM buffer.
+ * migrate the caches on the RAM buffer to backing device.
  * calling this function is really rare so the code is not optimal.
- *
- * since the caches are not flushed and thus not persistent
- * there is no reason to write them back with FUA flag.
+ * there is no need to write them back with FUA flag
+ * because the caches are not flushed yet and thus not persistent.
  */
 static void migrate_buffered_mb(struct wb_device *wb,
 				struct metablock *mb, u8 dirty_bits)
