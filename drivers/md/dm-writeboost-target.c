@@ -26,8 +26,7 @@ static void safe_io_proc(struct work_struct *work)
 {
 	struct safe_io *io = container_of(work, struct safe_io, work);
 	io->err_bits = 0;
-	io->err = dm_io(io->io_req, io->num_regions, io->regions,
-			&io->err_bits);
+	io->err = dm_io(io->io_req, io->num_regions, io->regions, &io->err_bits);
 }
 
 int dm_safe_io_internal(struct wb_device *wb, struct dm_io_request *io_req,
@@ -44,9 +43,9 @@ int dm_safe_io_internal(struct wb_device *wb, struct dm_io_request *io_req,
 		};
 
 		INIT_WORK_ONSTACK(&io.work, safe_io_proc);
-
 		queue_work(safe_io_wq, &io.work);
 		flush_work(&io.work);
+		destroy_work_on_stack(&io.work); /* pair with INIT_WORK_ONSTACK */
 
 		err = io.err;
 		if (err_bits)
@@ -1542,7 +1541,8 @@ bad_optional_argv:
 	dm_put_device(ti, wb->cache_dev);
 	dm_put_device(ti, wb->backing_dev);
 bad_essential_argv:
-	kfree(wb);
+	free_core_struct(wb);
+	ti->private = NULL;
 
 	return r;
 }
@@ -1557,7 +1557,6 @@ static void writeboost_dtr(struct dm_target *ti)
 	dm_put_device(ti, wb->backing_dev);
 
 	free_core_struct(wb);
-
 	ti->private = NULL;
 }
 
@@ -1605,9 +1604,8 @@ static int writeboost_message(struct dm_target *ti, unsigned argc, char **argv)
  * since Writeboost is just a cache target and the cache block size is fixed
  * to 4KB. there is no reason to count the cache device in device iteration.
  */
-static int
-writeboost_iterate_devices(struct dm_target *ti,
-			   iterate_devices_callout_fn fn, void *data)
+static int writeboost_iterate_devices(struct dm_target *ti,
+				      iterate_devices_callout_fn fn, void *data)
 {
 	struct wb_device *wb = ti->private;
 	struct dm_dev *backing = wb->backing_dev;
@@ -1616,8 +1614,7 @@ writeboost_iterate_devices(struct dm_target *ti,
 	return fn(ti, backing, start, len, data);
 }
 
-static void
-writeboost_io_hints(struct dm_target *ti, struct queue_limits *limits)
+static void writeboost_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	blk_limits_io_opt(limits, 4096);
 }
