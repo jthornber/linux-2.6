@@ -13,6 +13,19 @@
 
 /*----------------------------------------------------------------*/
 
+void do_check_buffer_alignment(void *buf, const char *name, const char *caller)
+{
+	unsigned long addr = (unsigned long) buf;
+
+	/* debug */
+	DMINFO("%s in %s 512-aligned(%d), 4K-aligned(%d)", name, caller, IS_ALIGNED(addr, 512), IS_ALIGNED(addr, 4096));
+
+	if (!IS_ALIGNED(addr, 1 << SECTOR_SHIFT)) {
+		DMCRIT("@%s in %s is not sector-aligned. I/O buffer must be sector-aligned.", name, caller);
+		BUG();
+	}
+}
+
 struct safe_io {
 	struct work_struct work;
 	int err;
@@ -773,22 +786,23 @@ static void migrate_buffered_mb(struct wb_device *wb,
 	int r = 0;
 
 	sector_t offset = ((mb_idx_inseg(wb, mb->idx) + 1) << 3);
-	void *buf = mempool_alloc(buf_1_pool, GFP_NOIO);
+	void *buf = mempool_alloc(wb->buf_1_pool, GFP_NOIO);
 
 	u8 i;
 	for (i = 0; i < 8; i++) {
 		struct dm_io_request io_req;
 		struct dm_io_region region;
+
 		void *src;
 		sector_t dest;
 
-		bool bit_on = dirty_bits & (1 << i);
-		if (!bit_on)
+		if (!(dirty_bits & (1 << i)))
 			continue;
 
 		src = wb->current_rambuf->data + ((offset + i) << SECTOR_SHIFT);
-		memcpy(buf, src, 1 << SECTOR_SHIFT);
+		dest = mb->sector + i;
 
+		memcpy(buf, src, 1 << SECTOR_SHIFT);
 		io_req = (struct dm_io_request) {
 			.client = wb_io_client,
 			.bi_rw = WRITE,
@@ -798,12 +812,12 @@ static void migrate_buffered_mb(struct wb_device *wb,
 		};
 		region = (struct dm_io_region) {
 			.bdev = wb->backing_dev->bdev,
-			.sector = mb->sector + i,
+			.sector = dest,
 			.count = 1,
 		};
 		IO(dm_safe_io(&io_req, 1, &region, NULL, true));
 	}
-	mempool_free(buf, buf_1_pool);
+	mempool_free(buf, wb->buf_1_pool);
 }
 
 void invalidate_previous_cache(struct wb_device *wb, struct segment_header *seg,
@@ -1450,6 +1464,30 @@ static int init_core_struct(struct dm_target *ti)
 		goto bad_kcopyd_client;
 	}
 
+	wb->buf_1_cachep = kmem_cache_create("dmwb_buf_1",
+			1 << 9, 1 << SECTOR_SHIFT, SLAB_RED_ZONE, NULL);
+	if (!wb->buf_1_cachep) {
+		r = -ENOMEM;
+		goto bad_buf_1_cachep;
+	}
+	wb->buf_1_pool = mempool_create_slab_pool(16, wb->buf_1_cachep);
+	if (!wb->buf_1_pool) {
+		r = -ENOMEM;
+		goto bad_buf_1_pool;
+	}
+
+	wb->buf_8_cachep = kmem_cache_create("dmwb_buf_8",
+			1 << 12, 1 << 12, SLAB_RED_ZONE, NULL);
+	if (!wb->buf_8_cachep) {
+		r = -ENOMEM;
+		goto bad_buf_8_cachep;
+	}
+	wb->buf_8_pool = mempool_create_slab_pool(16, wb->buf_8_cachep);
+	if (!wb->buf_8_pool) {
+		r = -ENOMEM;
+		goto bad_buf_8_pool;
+	}
+
 	mutex_init(&wb->io_lock);
 	init_waitqueue_head(&wb->inflight_ios_wq);
 	spin_lock_init(&wb->lock);
@@ -1459,6 +1497,14 @@ static int init_core_struct(struct dm_target *ti)
 
 	return r;
 
+bad_buf_8_pool:
+	kmem_cache_destroy(wb->buf_8_cachep);
+bad_buf_8_cachep:
+	mempool_destroy(wb->buf_1_pool);
+bad_buf_1_pool:
+	kmem_cache_destroy(wb->buf_1_cachep);
+bad_buf_1_cachep:
+	dm_kcopyd_client_destroy(wb->copier);
 bad_kcopyd_client:
 	kfree(wb);
 	return r;
@@ -1466,6 +1512,10 @@ bad_kcopyd_client:
 
 static void free_core_struct(struct wb_device *wb)
 {
+	mempool_destroy(wb->buf_8_pool);
+	kmem_cache_destroy(wb->buf_8_cachep);
+	mempool_destroy(wb->buf_1_pool);
+	kmem_cache_destroy(wb->buf_1_cachep);
 	dm_kcopyd_client_destroy(wb->copier);
 	kfree(wb);
 }
@@ -1711,8 +1761,6 @@ static struct target_type writeboost_target = {
 	.iterate_devices = writeboost_iterate_devices,
 };
 
-mempool_t *buf_1_pool;
-mempool_t *buf_8_pool;
 struct workqueue_struct *safe_io_wq;
 struct dm_io_client *wb_io_client;
 static int __init writeboost_module_init(void)
@@ -1723,20 +1771,6 @@ static int __init writeboost_module_init(void)
 	if (r < 0) {
 		WBERR("failed to register target");
 		return r;
-	}
-
-	buf_1_pool = mempool_create_kmalloc_pool(16, 1 << SECTOR_SHIFT);
-	if (!buf_1_pool) {
-		r = -ENOMEM;
-		WBERR("failed to allocate 1 sector pool");
-		goto bad_buf_1_pool;
-	}
-
-	buf_8_pool = mempool_create_kmalloc_pool(16, 8 << SECTOR_SHIFT);
-	if (!buf_8_pool) {
-		r = -ENOMEM;
-		WBERR("failed to allocate 8 sector pool");
-		goto bad_buf_8_pool;
 	}
 
 	/*
@@ -1763,10 +1797,6 @@ static int __init writeboost_module_init(void)
 bad_io_client:
 	destroy_workqueue(safe_io_wq);
 bad_wq:
-	mempool_destroy(buf_8_pool);
-bad_buf_8_pool:
-	mempool_destroy(buf_1_pool);
-bad_buf_1_pool:
 	dm_unregister_target(&writeboost_target);
 	return r;
 }
@@ -1775,8 +1805,6 @@ static void __exit writeboost_module_exit(void)
 {
 	dm_io_client_destroy(wb_io_client);
 	destroy_workqueue(safe_io_wq);
-	mempool_destroy(buf_8_pool);
-	mempool_destroy(buf_1_pool);
 	dm_unregister_target(&writeboost_target);
 }
 
