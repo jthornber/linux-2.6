@@ -455,7 +455,7 @@ static int format_superblock_header(struct wb_device *wb)
 
 bad_io:
 	kfree(buf);
-	return 0;
+	return r;
 }
 
 struct format_segmd_context {
