@@ -350,9 +350,10 @@ static int read_superblock_header(struct superblock_header_device *sup,
 	struct dm_io_request io_req_sup;
 	struct dm_io_region region_sup;
 
-	void *buf = kmalloc(1 << SECTOR_SHIFT, GFP_KERNEL);
+	void *buf = mempool_alloc(wb->buf_1_pool, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
+	check_buffer_alignment(buf);
 
 	io_req_sup = (struct dm_io_request) {
 		.client = wb_io_client,
@@ -375,7 +376,7 @@ static int read_superblock_header(struct superblock_header_device *sup,
 	memcpy(sup, buf, sizeof(*sup));
 
 bad_io:
-	kfree(buf);
+	mempool_free(buf, wb->buf_1_pool);
 	return r;
 }
 
@@ -514,9 +515,10 @@ static int format_all_segment_headers(struct wb_device *wb)
 
 	struct format_segmd_context context;
 
-	void *buf = kzalloc(1 << 12, GFP_KERNEL);
+	void *buf = mempool_alloc(wb->buf_8_pool, GFP_KERNEL | __GFP_ZERO);
 	if (!buf)
 		return -ENOMEM;
+	check_buffer_alignment(buf);
 
 	atomic64_set(&context.count, nr_segments);
 	context.err = 0;
@@ -560,7 +562,7 @@ static int format_all_segment_headers(struct wb_device *wb)
 	}
 
 bad:
-	kfree(buf);
+	mempool_free(buf, wb->buf_8_pool);
 	return r;
 }
 
@@ -1130,11 +1132,12 @@ static int read_superblock_record(struct superblock_record_device *record,
 	struct dm_io_request io_req;
 	struct dm_io_region region;
 
-	void *buf = kmalloc(1 << SECTOR_SHIFT, GFP_KERNEL);
+	void *buf = mempool_alloc(wb->buf_1_pool, GFP_KERNEL);
 	if (!buf) {
 		WBERR();
 		return -ENOMEM;
 	}
+	check_buffer_alignment(buf);
 
 	io_req = (struct dm_io_request) {
 		.client = wb_io_client,
@@ -1157,7 +1160,7 @@ static int read_superblock_record(struct superblock_record_device *record,
 	memcpy(record, buf, sizeof(*record));
 
 bad_io:
-	kfree(buf);
+	mempool_free(buf, wb->buf_1_pool);
 	return r;
 }
 
@@ -1301,24 +1304,28 @@ static int find_max_id(struct wb_device *wb, u64 *max_id)
 {
 	int r = 0;
 
-	void *rambuf = kmalloc(8 << SECTOR_SHIFT, GFP_KERNEL);
+	void *buf = mempool_alloc(wb->buf_8_pool, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	check_buffer_alignment(buf);
+
 	u32 k;
 
 	*max_id = 0;
 	for (k = 0; k < wb->nr_segments; k++) {
 		struct segment_header *seg = segment_at(wb, k);
 		struct segment_header_device *header;
-		r = read_segment_header(rambuf, wb, seg);
+		r = read_segment_header(buf, wb, seg);
 		if (r) {
-			kfree(rambuf);
+			kfree(buf);
 			return r;
 		}
 
-		header = rambuf;
+		header = buf;
 		if (le64_to_cpu(header->id) > *max_id)
 			*max_id = le64_to_cpu(header->id);
 	}
-	kfree(rambuf);
+	mempool_free(buf, wb->buf_8_pool);
 	return r;
 }
 
