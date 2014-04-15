@@ -1067,7 +1067,7 @@ static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
 	struct segment_header *seg;
 	void *rambuf;
 
-	rambuf = kzalloc(1 << (wb->segment_size_order + SECTOR_SHIFT), GFP_KERNEL);
+	rambuf = kmem_cache_alloc(wb->rambuf_cachep, GFP_KERNEL | __GFP_ZERO);
 	if (r)
 		return -ENOMEM;
 	rebuild_rambuf(rambuf, plog_buf, log_id);
@@ -1077,7 +1077,7 @@ static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
 	if (r)
 		WBERR("failed to flush a plog");
 
-	kfree(rambuf);
+	kmem_cache_free(wb->rambuf_cachep, rambuf);
 	return r;
 }
 
