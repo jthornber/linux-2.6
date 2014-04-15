@@ -307,6 +307,11 @@ struct wb_device {
 	u8 segment_size_order; /* const */
 	u8 nr_caches_inseg; /* const */
 
+	struct kmem_cache *buf_1_cachep;
+	mempool_t *buf_1_pool; /* 1 sector buffer pool */
+	struct kmem_cache *buf_8_cachep;
+	mempool_t *buf_8_pool; /* 8 sector buffer pool */
+
 	/*---------------------------------------------*/
 
 	/******************
@@ -516,10 +521,12 @@ void rebuild_rambuf(void *rambuf, void *plog_buf, u64 log_id);
 
 /*----------------------------------------------------------------*/
 
-extern mempool_t *buf_1_pool; /* 1 sector buffer pool */
-extern mempool_t *buf_8_pool; /* 8 sector buffer pool */
 extern struct workqueue_struct *safe_io_wq;
 extern struct dm_io_client *wb_io_client;
+
+#define check_buffer_alignment(buf) \
+	do_check_buffer_alignment(buf, #buf, __func__)
+void do_check_buffer_alignment(void *, const char *, const char *);
 
 /*
  * wrapper of dm_io function.
