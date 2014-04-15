@@ -430,7 +430,7 @@ static int format_superblock_header(struct wb_device *wb)
 		.segment_size_order = wb->segment_size_order,
 	};
 
-	void *buf = kzalloc(1 << SECTOR_SHIFT, GFP_KERNEL);
+	void *buf = mempool_alloc(wb->buf_1_pool, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -455,7 +455,7 @@ static int format_superblock_header(struct wb_device *wb)
 	}
 
 bad_io:
-	kfree(buf);
+	mempool_free(buf, wb->buf_1_pool);
 	return r;
 }
 
