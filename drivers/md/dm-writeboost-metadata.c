@@ -480,16 +480,18 @@ static int zeroing_full_superblock(struct wb_device *wb)
 	struct dm_io_request io_req_sup;
 	struct dm_io_region region_sup;
 
-	void *buf = kzalloc(1 << 20, GFP_KERNEL);
+	void *buf = vmalloc(1 << 20);
 	if (!buf)
 		return -ENOMEM;
+	check_buffer_alignment(buf);
+	memset(buf, 0, 1 << 20);
 
 	io_req_sup = (struct dm_io_request) {
 		.client = wb_io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
-		.mem.type = DM_IO_KMEM,
-		.mem.ptr.addr = buf,
+		.mem.type = DM_IO_VMA,
+		.mem.ptr.vma = buf,
 	};
 	region_sup = (struct dm_io_region) {
 		.bdev = dev->bdev,
@@ -503,7 +505,7 @@ static int zeroing_full_superblock(struct wb_device *wb)
 	}
 
 bad_io:
-	kfree(buf);
+	vfree(buf);
 	return r;
 }
 
