@@ -478,7 +478,9 @@ struct wb_device {
 	atomic_t nr_inflight_plog_writes; /* number of async plog writes not acked yet */
 
 	mempool_t *write_job_pool;
+	struct kmem_cache *plog_buf_cachep;
 	mempool_t *plog_buf_pool;
+	struct kmem_cache *plog_seg_buf_cachep;
 
 	sector_t plog_seg_size; /* const. the size of a plog in sector */
 	sector_t alloc_plog_head; /* next relative sector to allocate */

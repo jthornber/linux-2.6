@@ -723,18 +723,20 @@ static int do_clear_plog_dev_t1(struct wb_device *wb, u32 idx)
 	struct dm_io_request io_req;
 	struct dm_io_region region;
 
-	void *buf = kzalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	void *buf = vmalloc(wb->plog_seg_size << SECTOR_SHIFT);
 	if (!buf) {
 		WBERR("failed to allocate buffer");
 		return -ENOMEM;
 	}
+	check_buffer_alignment(buf);
+	memset(buf, 0, wb->plog_seg_size << SECTOR_SHIFT);
 
 	io_req = (struct dm_io_request) {
 		.client = wb_io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
-		.mem.type = DM_IO_KMEM,
-		.mem.ptr.addr = buf,
+		.mem.type = DM_IO_VMA,
+		.mem.ptr.vma = buf,
 	};
 
 	region = (struct dm_io_region) {
@@ -747,7 +749,7 @@ static int do_clear_plog_dev_t1(struct wb_device *wb, u32 idx)
 	if (r)
 		WBERR("I/O failed");
 
-	kfree(buf);
+	vfree(buf);
 	return r;
 }
 
@@ -871,11 +873,31 @@ static int alloc_plog_dev(struct wb_device *wb, bool clear)
 	atomic_set(&wb->nr_inflight_plog_writes, 0);
 
 	wb->plog_seg_size = (1 + 8) * wb->nr_caches_inseg;
-	wb->plog_buf_pool = mempool_create_kmalloc_pool(16, ((1 + 8) << SECTOR_SHIFT));
+
+	wb->plog_buf_cachep = kmem_cache_create("dmwb_plog_buf",
+			(1 + 8) << SECTOR_SHIFT,
+			1 << SECTOR_SHIFT,
+			SLAB_RED_ZONE, NULL);
+	if (!wb->plog_buf_cachep) {
+		r = -ENOMEM;
+		WBERR("failed to alloc plog buf cachep");
+		goto bad_plog_buf_cachep;
+	}
+	wb->plog_buf_pool = mempool_create_slab_pool(16, wb->plog_buf_cachep);
 	if (!wb->plog_buf_pool) {
 		r = -ENOMEM;
 		WBERR("failed to alloc plog buf pool");
 		goto bad_plog_buf_pool;
+	}
+
+	wb->plog_seg_buf_cachep = kmem_cache_create("dmwb_plog_seg_buf",
+			wb->plog_seg_size << SECTOR_SHIFT,
+			1 << SECTOR_SHIFT,
+			SLAB_RED_ZONE, NULL);
+	if (!wb->plog_seg_buf_cachep) {
+		r = -ENOMEM;
+		WBERR("failed to alloc plog seg buf cachep");
+		goto bad_plog_seg_buf_cachep;
 	}
 
 	r = do_alloc_plog_dev(wb);
@@ -897,8 +919,12 @@ static int alloc_plog_dev(struct wb_device *wb, bool clear)
 bad_clear_plog_dev:
 	do_free_plog_dev(wb);
 bad_alloc_plog_dev:
+	kmem_cache_destroy(wb->plog_seg_buf_cachep);
+bad_plog_seg_buf_cachep:
 	mempool_destroy(wb->plog_buf_pool);
 bad_plog_buf_pool:
+	kmem_cache_destroy(wb->plog_buf_cachep);
+bad_plog_buf_cachep:
 	mempool_destroy(wb->write_job_pool);
 bad_write_job_pool:
 	return r;
@@ -908,7 +934,9 @@ static void free_plog_dev(struct wb_device *wb)
 {
 	if (wb->type) {
 		do_free_plog_dev(wb);
+		kmem_cache_destroy(wb->plog_seg_buf_cachep);
 		mempool_destroy(wb->plog_buf_pool);
+		kmem_cache_destroy(wb->plog_buf_cachep);
 	}
 	mempool_destroy(wb->write_job_pool);
 }
@@ -1005,15 +1033,15 @@ static int find_min_id_plog(struct wb_device *wb, u64 *id, u32 *idx)
 	u32 i;
 	u64 min_id = SZ_MAX, id_cpu;
 
-	void *plog_buf = kmalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	void *plog_seg_buf = kmem_cache_alloc(wb->plog_seg_buf_cachep, GFP_KERNEL);
 	if (r)
 		return -ENOMEM;
 
 	*id = 0; *idx = 0;
 	for (i = 0; i < wb->nr_plog_segs; i++) {
 		struct plog_meta_device meta;
-		read_plog_seg(plog_buf, wb, i);
-		memcpy(&meta, plog_buf, 512);
+		read_plog_seg(plog_seg_buf, wb, i);
+		memcpy(&meta, plog_seg_buf, 512);
 
 		id_cpu = le64_to_cpu(meta.id);
 
@@ -1026,7 +1054,7 @@ static int find_min_id_plog(struct wb_device *wb, u64 *id, u32 *idx)
 		}
 	}
 
-	kfree(plog_buf);
+	kmem_cache_free(wb->plog_seg_buf_cachep, plog_seg_buf);
 	return r;
 }
 
@@ -1061,7 +1089,7 @@ static int flush_rambuf(struct wb_device *wb,
 /*
  * flush a plog (stored in a buffer) to the cache device.
  */
-static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
+static int flush_plog(struct wb_device *wb, void *plog_seg_buf, u64 log_id)
 {
 	int r = 0;
 	struct segment_header *seg;
@@ -1070,7 +1098,7 @@ static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
 	rambuf = kmem_cache_alloc(wb->rambuf_cachep, GFP_KERNEL | __GFP_ZERO);
 	if (r)
 		return -ENOMEM;
-	rebuild_rambuf(rambuf, plog_buf, log_id);
+	rebuild_rambuf(rambuf, plog_seg_buf, log_id);
 
 	seg = get_segment_header_by_id(wb, log_id);
 	r = flush_rambuf(wb, seg, rambuf);
@@ -1092,7 +1120,7 @@ static int flush_plogs(struct wb_device *wb)
 	if (!wb->type)
 		return 0;
 
-	plog_seg_buf = kmalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	plog_seg_buf = kmem_cache_alloc(wb->plog_seg_buf_cachep, GFP_KERNEL);
 	if (r)
 		return -ENOMEM;
 
@@ -1139,7 +1167,7 @@ static int flush_plogs(struct wb_device *wb)
 	wbdebug();
 
 bad:
-	kfree(plog_seg_buf);
+	kmem_cache_free(wb->plog_seg_buf_cachep, plog_seg_buf);
 	return r;
 }
 
@@ -1366,8 +1394,9 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 	struct segment_header *seg;
 	struct segment_header_device *header;
 
-	void *rambuf = kmalloc(1 << (wb->segment_size_order + SECTOR_SHIFT),
-			       GFP_KERNEL);
+	void *rambuf = kmem_cache_alloc(wb->rambuf_cachep, GFP_KERNEL);
+	if (!rambuf)
+		return -ENOMEM;
 
 	u32 i, start_idx = segment_id_to_idx(wb, *max_id + 1);
 	*max_id = 0;
@@ -1378,7 +1407,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 
 		r = read_whole_segment(rambuf, wb, seg);
 		if (r) {
-			kfree(rambuf);
+			kmem_cache_free(wb->rambuf_cachep, rambuf);
 			return r;
 		}
 
@@ -1406,7 +1435,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 		apply_segment_header_device(wb, seg, header);
 		*max_id = le64_to_cpu(header->id);
 	}
-	kfree(rambuf);
+	kmem_cache_free(wb->rambuf_cachep, rambuf);
 	return r;
 }
 
