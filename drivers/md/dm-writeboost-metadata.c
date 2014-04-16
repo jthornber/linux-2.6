@@ -871,7 +871,17 @@ static int alloc_plog_dev(struct wb_device *wb, bool clear)
 	atomic_set(&wb->nr_inflight_plog_writes, 0);
 
 	wb->plog_seg_size = (1 + 8) * wb->nr_caches_inseg;
-	wb->plog_buf_pool = mempool_create_kmalloc_pool(16, ((1 + 8) << SECTOR_SHIFT));
+
+	wb->plog_buf_cachep = kmem_cache_create("dmwb_plog_buf",
+			(1 + 8) << SECTOR_SHIFT,
+			1 << SECTOR_SHIFT,
+			SLAB_RED_ZONE, NULL);
+	if (!wb->plog_buf_cachep) {
+		r = -ENOMEM;
+		WBERR("failed to alloc plog buf cachep");
+		goto bad_plog_buf_cachep;
+	}
+	wb->plog_buf_pool = mempool_create_slab_pool(16, wb->plog_buf_cachep);
 	if (!wb->plog_buf_pool) {
 		r = -ENOMEM;
 		WBERR("failed to alloc plog buf pool");
@@ -899,6 +909,8 @@ bad_clear_plog_dev:
 bad_alloc_plog_dev:
 	mempool_destroy(wb->plog_buf_pool);
 bad_plog_buf_pool:
+	kmem_cache_destroy(wb->plog_buf_cachep);
+bad_plog_buf_cachep:
 	mempool_destroy(wb->write_job_pool);
 bad_write_job_pool:
 	return r;
@@ -909,6 +921,7 @@ static void free_plog_dev(struct wb_device *wb)
 	if (wb->type) {
 		do_free_plog_dev(wb);
 		mempool_destroy(wb->plog_buf_pool);
+		kmem_cache_destroy(wb->plog_buf_cachep);
 	}
 	mempool_destroy(wb->write_job_pool);
 }
