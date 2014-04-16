@@ -890,6 +890,16 @@ static int alloc_plog_dev(struct wb_device *wb, bool clear)
 		goto bad_plog_buf_pool;
 	}
 
+	wb->plog_seg_buf_cachep = kmem_cache_create("dmwb_plog_seg_buf",
+			wb->plog_seg_size << SECTOR_SHIFT,
+			1 << SECTOR_SHIFT,
+			SLAB_RED_ZONE, NULL);
+	if (!wb->plog_seg_buf_cachep) {
+		r = -ENOMEM;
+		WBERR("failed to alloc plog seg buf cachep");
+		goto bad_plog_seg_buf_cachep;
+	}
+
 	r = do_alloc_plog_dev(wb);
 	if (r) {
 		WBERR("failed to alloc plog");
@@ -909,6 +919,8 @@ static int alloc_plog_dev(struct wb_device *wb, bool clear)
 bad_clear_plog_dev:
 	do_free_plog_dev(wb);
 bad_alloc_plog_dev:
+	kmem_cache_destroy(wb->plog_seg_buf_cachep);
+bad_plog_seg_buf_cachep:
 	mempool_destroy(wb->plog_buf_pool);
 bad_plog_buf_pool:
 	kmem_cache_destroy(wb->plog_buf_cachep);
@@ -922,6 +934,7 @@ static void free_plog_dev(struct wb_device *wb)
 {
 	if (wb->type) {
 		do_free_plog_dev(wb);
+		kmem_cache_destroy(wb->plog_seg_buf_cachep);
 		mempool_destroy(wb->plog_buf_pool);
 		kmem_cache_destroy(wb->plog_buf_cachep);
 	}
@@ -1020,15 +1033,15 @@ static int find_min_id_plog(struct wb_device *wb, u64 *id, u32 *idx)
 	u32 i;
 	u64 min_id = SZ_MAX, id_cpu;
 
-	void *plog_buf = kmalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	void *plog_seg_buf = kmem_cache_alloc(wb->plog_seg_buf_cachep, GFP_KERNEL);
 	if (r)
 		return -ENOMEM;
 
 	*id = 0; *idx = 0;
 	for (i = 0; i < wb->nr_plog_segs; i++) {
 		struct plog_meta_device meta;
-		read_plog_seg(plog_buf, wb, i);
-		memcpy(&meta, plog_buf, 512);
+		read_plog_seg(plog_seg_buf, wb, i);
+		memcpy(&meta, plog_seg_buf, 512);
 
 		id_cpu = le64_to_cpu(meta.id);
 
@@ -1041,7 +1054,7 @@ static int find_min_id_plog(struct wb_device *wb, u64 *id, u32 *idx)
 		}
 	}
 
-	kfree(plog_buf);
+	kmem_cache_free(wb->plog_seg_buf_cachep, plog_seg_buf);
 	return r;
 }
 
@@ -1107,7 +1120,7 @@ static int flush_plogs(struct wb_device *wb)
 	if (!wb->type)
 		return 0;
 
-	plog_seg_buf = kmalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	plog_seg_buf = kmem_cache_alloc(wb->plog_seg_buf_cachep, GFP_KERNEL);
 	if (r)
 		return -ENOMEM;
 
@@ -1154,7 +1167,7 @@ static int flush_plogs(struct wb_device *wb)
 	wbdebug();
 
 bad:
-	kfree(plog_seg_buf);
+	kmem_cache_free(wb->plog_seg_buf_cachep, plog_seg_buf);
 	return r;
 }
 
