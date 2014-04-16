@@ -354,6 +354,7 @@ struct wb_device {
 	 *****************/
 
 	u32 nr_rambuf_pool; /* const */
+	struct kmem_cache *rambuf_cachep;
 	struct rambuffer *rambuf_pool;
 
 	/*---------------------------------------------*/
