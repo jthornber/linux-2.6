@@ -723,18 +723,20 @@ static int do_clear_plog_dev_t1(struct wb_device *wb, u32 idx)
 	struct dm_io_request io_req;
 	struct dm_io_region region;
 
-	void *buf = kzalloc(wb->plog_seg_size << SECTOR_SHIFT, GFP_KERNEL);
+	void *buf = vmalloc(wb->plog_seg_size << SECTOR_SHIFT);
 	if (!buf) {
 		WBERR("failed to allocate buffer");
 		return -ENOMEM;
 	}
+	check_buffer_alignment(buf);
+	memset(buf, 0, wb->plog_seg_size << SECTOR_SHIFT);
 
 	io_req = (struct dm_io_request) {
 		.client = wb_io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
-		.mem.type = DM_IO_KMEM,
-		.mem.ptr.addr = buf,
+		.mem.type = DM_IO_VMA,
+		.mem.ptr.vma = buf,
 	};
 
 	region = (struct dm_io_region) {
@@ -747,7 +749,7 @@ static int do_clear_plog_dev_t1(struct wb_device *wb, u32 idx)
 	if (r)
 		WBERR("I/O failed");
 
-	kfree(buf);
+	vfree(buf);
 	return r;
 }
 
