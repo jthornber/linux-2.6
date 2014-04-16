@@ -1381,8 +1381,9 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 	struct segment_header *seg;
 	struct segment_header_device *header;
 
-	void *rambuf = kmalloc(1 << (wb->segment_size_order + SECTOR_SHIFT),
-			       GFP_KERNEL);
+	void *rambuf = kmem_cache_alloc(wb->rambuf_cachep, GFP_KERNEL);
+	if (!rambuf)
+		return -ENOMEM;
 
 	u32 i, start_idx = segment_id_to_idx(wb, *max_id + 1);
 	*max_id = 0;
@@ -1393,7 +1394,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 
 		r = read_whole_segment(rambuf, wb, seg);
 		if (r) {
-			kfree(rambuf);
+			kmem_cache_free(wb->rambuf_cachep, rambuf);
 			return r;
 		}
 
@@ -1421,7 +1422,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 		apply_segment_header_device(wb, seg, header);
 		*max_id = le64_to_cpu(header->id);
 	}
-	kfree(rambuf);
+	kmem_cache_free(wb->rambuf_cachep, rambuf);
 	return r;
 }
 
