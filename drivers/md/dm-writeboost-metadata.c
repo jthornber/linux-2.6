@@ -1076,7 +1076,7 @@ static int flush_rambuf(struct wb_device *wb,
 /*
  * flush a plog (stored in a buffer) to the cache device.
  */
-static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
+static int flush_plog(struct wb_device *wb, void *plog_seg_buf, u64 log_id)
 {
 	int r = 0;
 	struct segment_header *seg;
@@ -1085,7 +1085,7 @@ static int flush_plog(struct wb_device *wb, void *plog_buf, u64 log_id)
 	rambuf = kmem_cache_alloc(wb->rambuf_cachep, GFP_KERNEL | __GFP_ZERO);
 	if (r)
 		return -ENOMEM;
-	rebuild_rambuf(rambuf, plog_buf, log_id);
+	rebuild_rambuf(rambuf, plog_seg_buf, log_id);
 
 	seg = get_segment_header_by_id(wb, log_id);
 	r = flush_rambuf(wb, seg, rambuf);
