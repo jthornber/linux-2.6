@@ -234,7 +234,7 @@ struct plog_meta_device {
 	__le32 checksum; /* checksum of the data */
 	__u8 idx; /* idx in the segment */
 	__u8 len; /* length in sector */
-	__u8 padding[512 - 8 - 8 - 4 - 1 - 1];
+	__u8 padding[512 - (8 + 8 + 4 + 1 + 1)];
 } __packed;
 
 /*----------------------------------------------------------------*/
