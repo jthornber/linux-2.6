@@ -1393,12 +1393,13 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 	int r = 0;
 	struct segment_header *seg;
 	struct segment_header_device *header;
+	u32 i, start_idx;
 
 	void *rambuf = kmem_cache_alloc(wb->rambuf_cachep, GFP_KERNEL);
 	if (!rambuf)
 		return -ENOMEM;
 
-	u32 i, start_idx = segment_id_to_idx(wb, *max_id + 1);
+	start_idx = segment_id_to_idx(wb, *max_id + 1);
 	*max_id = 0;
 	for (i = start_idx; i < (start_idx + wb->nr_segments); i++) {
 		u32 actual, expected, k;
