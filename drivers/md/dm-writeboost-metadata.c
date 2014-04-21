@@ -1722,6 +1722,7 @@ static int init_migrate_daemon(struct wb_device *wb)
 
 	wb->allow_migrate = false;
 	wb->urge_migrate = false;
+	wb->force_drop = false;
 	CREATE_DAEMON(migrate);
 
 	return r;
