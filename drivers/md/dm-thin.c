@@ -1737,18 +1737,6 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 	enum pool_mode old_mode = get_pool_mode(pool);
 
 	/*
-	 * Never allow the pool to transition to PM_WRITE mode if user
-	 * intervention is required to verify metadata and data consistency.
-	 */
-	if (new_mode == PM_WRITE && needs_check) {
-		DMERR("%s: unable to switch pool to write mode until repaired.",
-		      dm_device_name(pool->pool_md));
-		if (old_mode != new_mode)
-			new_mode = old_mode;
-		else
-			new_mode = PM_READ_ONLY;
-	}
-	/*
 	 * If we were in PM_FAIL mode, rollback of metadata failed.  We're
 	 * not going to recover without a thin_repair.	So we never let the
 	 * pool move out of the old mode.
