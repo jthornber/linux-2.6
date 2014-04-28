@@ -1635,7 +1635,7 @@ static void pool_work_complete(struct pool_work *pw)
 static void pool_work_wait(struct pool_work *pw, struct pool *pool,
 			   void (*fn)(struct work_struct *))
 {
-	INIT_WORK(&pw->worker, fn);
+	INIT_WORK_ONSTACK(&pw->worker, fn);
 	init_completion(&pw->complete);
 	queue_work(pool->wq, &pw->worker);
 	wait_for_completion(&pw->complete);
