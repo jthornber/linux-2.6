@@ -432,8 +432,8 @@ static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
 
 /*
  * The caller hands in a preallocated cell, and a free function for it.
- * The cell will be freed if there's an error, or if it wasn't used because
- * a cell with that key already exists.
+ * The cell will be freed if it wasn't used because a cell with that
+ * key already exists.
  */
 typedef void (*cell_free_fn)(void *context, struct dm_bio_prison_cell *cell);
 
@@ -2373,11 +2373,8 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	r = bio_detain(cache, block, bio, cell,
 		       (cell_free_fn) free_prison_cell,
 		       cache, &cell);
-	if (r) {
-		if (r < 0)
-			defer_bio(cache, bio);
+	if (r)
 		goto out_submit_with_conditional_duplicate;
-	}
 
 	discarded_block = is_discarded_oblock(cache, block);
 
