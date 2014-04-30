@@ -1250,11 +1250,21 @@ static void issue_cache_bio(struct cache *cache, struct bio *bio,
 	issue(cache, bio);
 }
 
-static bool is_writethrough_io(struct cache *cache, struct bio *bio,
-			       dm_cblock_t *cblock)
+/*
+ * Like is_writethrough_io() except it doesn't know if the block is in the
+ * cache so can't check if it's dirty or not.
+ */
+static bool maybe_writethrough_io(struct cache *cache, struct bio *bio)
 {
-	return bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
-		(!cblock || !is_dirty(cache, *cblock));
+	return bio_data_dir(bio) == WRITE &&
+		writethrough_mode(&cache->features);
+}
+
+static bool is_writethrough_io(struct cache *cache, struct bio *bio,
+			       dm_cblock_t cblock)
+{
+	return maybe_writethrough_io(cache, bio) &&
+		!is_dirty(cache, cblock);
 }
 
 static void process_bio(struct cache *cache, struct prealloc *structs,
@@ -1312,7 +1322,7 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		} else {
 			inc_hit_counter(cache, bio);
 
-			if (is_writethrough_io(cache, bio, &lookup_result.cblock)) {
+			if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
 				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				pb->req_nr == 0 ?
 					remap_to_cache(cache, bio, lookup_result.cblock) :
@@ -2339,6 +2349,13 @@ out:
 	return r;
 }
 
+static void maybe_request_writethrough_duplicate(struct cache *cache, struct bio *bio,
+						 struct per_bio_data *pb)
+{
+	if (pb->req_nr == 0 && maybe_writethrough_io(cache, bio))
+		dm_ask_for_duplicate_bios(bio, 1);
+}
+
 static int cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache *cache = ti->private;
@@ -2373,14 +2390,17 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	cell = alloc_prison_cell(cache);
 	if (!cell) {
 		defer_bio(cache, bio);
-		goto out_submit_with_conditional_duplicate;
+		maybe_request_writethrough_duplicate(cache, bio, pb);
+		return DM_MAPIO_SUBMITTED;
 	}
 
 	r = bio_detain(cache, block, bio, cell,
 		       (cell_free_fn) free_prison_cell,
 		       cache, &cell);
-	if (r)
-		goto out_submit_with_conditional_duplicate;
+	if (r) {
+		maybe_request_writethrough_duplicate(cache, bio, pb);
+		return DM_MAPIO_SUBMITTED;
+	}
 
 	discarded_block = is_discarded_oblock(cache, block);
 
@@ -2389,16 +2409,14 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	if (r == -EWOULDBLOCK) {
 		// FIXME: we should check to see if there's any spare migration bandwidth here
 		cell_defer(cache, cell, true);
-		goto out_submit_with_conditional_duplicate;
+		maybe_request_writethrough_duplicate(cache, bio, pb);
+		return DM_MAPIO_SUBMITTED;
 
 	} else if (r) {
 		DMERR_LIMIT("Unexpected return from cache replacement policy: %d", r);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
-
-	if (pb->req_nr == 0 && is_writethrough_io(cache, bio, &lookup_result.cblock))
-		dm_ask_for_duplicate_bios(bio, 1);
 
 	r = DM_MAPIO_REMAPPED;
 	switch (lookup_result.op) {
@@ -2423,7 +2441,10 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		} else {
 			inc_hit_counter(cache, bio);
 
-			if (is_writethrough_io(cache, bio, &lookup_result.cblock)) {
+			if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
+				if (pb->req_nr == 0)
+					dm_ask_for_duplicate_bios(bio, 1);
+
 				/* No need to mark anything dirty in write through mode */
 				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				pb->req_nr == 0 ?
@@ -2462,11 +2483,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	}
 
 	return r;
-
-out_submit_with_conditional_duplicate:
-	if (pb->req_nr == 0 && is_writethrough_io(cache, bio, NULL))
-		dm_ask_for_duplicate_bios(bio, 1);
-	return DM_MAPIO_SUBMITTED;
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
