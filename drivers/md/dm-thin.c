@@ -1471,10 +1471,6 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 		return;
 	}
 
-	/*
-	 * FIXME: allow sorting to be enabled/disabled via ctr and/or
-	 * message (and auto-disable if data device is non-rotational?)
-	 */
 	__sort_thin_deferred_bios(tc);
 
 	bio_list_merge(&bios, &tc->deferred_bio_list);
@@ -3234,7 +3230,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 11, 0},
+	.version = {1, 12, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -3576,7 +3572,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 11, 0},
+	.version = {1, 12, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,

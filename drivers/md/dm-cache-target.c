@@ -216,7 +216,6 @@ struct cache {
 	spinlock_t lock;
 	struct bio_list deferred_bios;
 	struct bio_list deferred_flush_bios;
-	struct bio_list deferred_writethrough_bios;
 	struct list_head quiesced_migrations;
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
@@ -289,15 +288,6 @@ struct per_bio_data {
 	unsigned req_nr:2;
 	struct dm_deferred_entry *all_io_entry;
 	struct dm_hook_info hook_info;
-
-	/*
-	 * writethrough fields.  These MUST remain at the end of this
-	 * structure and the 'cache' member must be the first as it
-	 * is used to determine the offset of the writethrough fields.
-	 */
-	struct cache *cache;
-	dm_cblock_t cblock;
-	struct dm_bio_details bio_details;
 };
 
 struct dm_cache_migration {
@@ -442,8 +432,8 @@ static void build_key(dm_oblock_t oblock, struct dm_cell_key *key)
 
 /*
  * The caller hands in a preallocated cell, and a free function for it.
- * The cell will be freed if there's an error, or if it wasn't used because
- * a cell with that key already exists.
+ * The cell will be freed if it wasn't used because a cell with that
+ * key already exists.
  */
 typedef void (*cell_free_fn)(void *context, struct dm_bio_prison_cell *cell);
 
@@ -598,12 +588,6 @@ static void save_stats(struct cache *cache)
  * Per bio data
  *--------------------------------------------------------------*/
 
-/*
- * If using writeback, leave out struct per_bio_data's writethrough fields.
- */
-#define PB_DATA_SIZE_WB (offsetof(struct per_bio_data, cache))
-#define PB_DATA_SIZE_WT (sizeof(struct per_bio_data))
-
 static bool writethrough_mode(struct cache_features *f)
 {
 	return f->io_mode == CM_IO_WRITETHROUGH;
@@ -621,7 +605,7 @@ static bool passthrough_mode(struct cache_features *f)
 
 static size_t get_per_bio_data_size(struct cache *cache)
 {
-	return writethrough_mode(&cache->features) ? PB_DATA_SIZE_WT : PB_DATA_SIZE_WB;
+	return sizeof(struct per_bio_data);
 }
 
 static struct per_bio_data *get_per_bio_data(struct bio *bio, size_t data_size)
@@ -741,57 +725,6 @@ static void issue(struct cache *cache, struct bio *bio)
 	cache->commit_requested = true;
 	bio_list_add(&cache->deferred_flush_bios, bio);
 	spin_unlock_irqrestore(&cache->lock, flags);
-}
-
-static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_add(&cache->deferred_writethrough_bios, bio);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
-}
-
-static void writethrough_endio(struct bio *bio, int err)
-{
-	struct per_bio_data *pb = get_per_bio_data(bio, PB_DATA_SIZE_WT);
-	dm_unhook_bio(&pb->hook_info, bio);
-
-	if (err) {
-		bio_endio(bio, err);
-		return;
-	}
-
-	dm_bio_restore(&pb->bio_details, bio);
-	remap_to_cache(pb->cache, bio, pb->cblock);
-
-	/*
-	 * We can't issue this bio directly, since we're in interrupt
-	 * context.  So it gets put on a bio list for processing by the
-	 * worker thread.
-	 */
-	defer_writethrough_bio(pb->cache, bio);
-}
-
-/*
- * When running in writethrough mode we need to send writes to clean blocks
- * to both the cache and origin devices.  In future we'd like to clone the
- * bio and send them in parallel, but for now we're doing them in
- * series as this is easier.
- */
-static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
-				       dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	struct per_bio_data *pb = get_per_bio_data(bio, PB_DATA_SIZE_WT);
-
-	pb->cache = cache;
-	pb->cblock = cblock;
-	dm_hook_bio(&pb->hook_info, bio, writethrough_endio, NULL);
-	dm_bio_record(&pb->bio_details, bio);
-
-	remap_to_origin_clear_discard(pb->cache, bio, oblock);
 }
 
 /*----------------------------------------------------------------
@@ -1317,6 +1250,13 @@ static void issue_cache_bio(struct cache *cache, struct bio *bio,
 	issue(cache, bio);
 }
 
+static bool is_writethrough_io(struct cache *cache, struct bio *bio,
+			       dm_cblock_t *cblock)
+{
+	return bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
+		(!cblock || !is_dirty(cache, *cblock));
+}
+
 static void process_bio(struct cache *cache, struct prealloc *structs,
 			struct bio *bio)
 {
@@ -1372,11 +1312,11 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		} else {
 			inc_hit_counter(cache, bio);
 
-			if (bio_data_dir(bio) == WRITE &&
-			    writethrough_mode(&cache->features) &&
-			    !is_dirty(cache, lookup_result.cblock)) {
+			if (is_writethrough_io(cache, bio, &lookup_result.cblock)) {
 				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
+				pb->req_nr == 0 ?
+					remap_to_cache(cache, bio, lookup_result.cblock) :
+					remap_to_origin_clear_discard(cache, bio, block);
 				issue(cache, bio);
 			} else
 				issue_cache_bio(cache, bio, pb, block, lookup_result.cblock);
@@ -1387,8 +1327,17 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	case POLICY_MISS:
 		inc_miss_counter(cache, bio);
 		pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-		remap_to_origin_clear_discard(cache, bio, block);
-		issue(cache, bio);
+
+		if (pb->req_nr != 0) {
+			/*
+			 * This is a duplicate writethrough io that is no
+			 * longer needed because the block has been demoted.
+			 */
+			bio_endio(bio, 0);
+		} else {
+			remap_to_origin_clear_discard(cache, bio, block);
+			issue(cache, bio);
+		}
 		break;
 
 	case POLICY_NEW:
@@ -1509,23 +1458,6 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 
 	while ((bio = bio_list_pop(&bios)))
 		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
-}
-
-static void process_deferred_writethrough_bios(struct cache *cache)
-{
-	unsigned long flags;
-	struct bio_list bios;
-	struct bio *bio;
-
-	bio_list_init(&bios);
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_merge(&bios, &cache->deferred_writethrough_bios);
-	bio_list_init(&cache->deferred_writethrough_bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	while ((bio = bio_list_pop(&bios)))
-		generic_make_request(bio);
 }
 
 static void writeback_some_dirty_blocks(struct cache *cache)
@@ -1676,7 +1608,6 @@ static int more_work(struct cache *cache)
 	else
 		return !bio_list_empty(&cache->deferred_bios) ||
 			!bio_list_empty(&cache->deferred_flush_bios) ||
-			!bio_list_empty(&cache->deferred_writethrough_bios) ||
 			!list_empty(&cache->quiesced_migrations) ||
 			!list_empty(&cache->completed_migrations) ||
 			!list_empty(&cache->need_commit_migrations) ||
@@ -1690,7 +1621,6 @@ static void do_worker(struct work_struct *ws)
 	do {
 		if (!is_quiescing(cache)) {
 			writeback_some_dirty_blocks(cache);
-			process_deferred_writethrough_bios(cache);
 			process_deferred_bios(cache);
 			process_invalidation_requests(cache);
 		}
@@ -2260,7 +2190,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
-	bio_list_init(&cache->deferred_writethrough_bios);
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	INIT_LIST_HEAD(&cache->completed_migrations);
 	INIT_LIST_HEAD(&cache->need_commit_migrations);
@@ -2444,18 +2373,14 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	cell = alloc_prison_cell(cache);
 	if (!cell) {
 		defer_bio(cache, bio);
-		return DM_MAPIO_SUBMITTED;
+		goto out_submit_with_conditional_duplicate;
 	}
 
 	r = bio_detain(cache, block, bio, cell,
 		       (cell_free_fn) free_prison_cell,
 		       cache, &cell);
-	if (r) {
-		if (r < 0)
-			defer_bio(cache, bio);
-
-		return DM_MAPIO_SUBMITTED;
-	}
+	if (r)
+		goto out_submit_with_conditional_duplicate;
 
 	discarded_block = is_discarded_oblock(cache, block);
 
@@ -2464,13 +2389,16 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	if (r == -EWOULDBLOCK) {
 		// FIXME: we should check to see if there's any spare migration bandwidth here
 		cell_defer(cache, cell, true);
-		return DM_MAPIO_SUBMITTED;
+		goto out_submit_with_conditional_duplicate;
 
 	} else if (r) {
 		DMERR_LIMIT("Unexpected return from cache replacement policy: %d", r);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
+
+	if (pb->req_nr == 0 && is_writethrough_io(cache, bio, &lookup_result.cblock))
+		dm_ask_for_duplicate_bios(bio, 1);
 
 	r = DM_MAPIO_REMAPPED;
 	switch (lookup_result.op) {
@@ -2495,11 +2423,13 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		} else {
 			inc_hit_counter(cache, bio);
 
-			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
-			    !is_dirty(cache, lookup_result.cblock))
-				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
-
-			else
+			if (is_writethrough_io(cache, bio, &lookup_result.cblock)) {
+				/* No need to mark anything dirty in write through mode */
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+				pb->req_nr == 0 ?
+					remap_to_cache(cache, bio, lookup_result.cblock) :
+					remap_to_origin_clear_discard(cache, bio, block);
+			} else
 				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
 
 			cell_defer(cache, cell, false);
@@ -2532,6 +2462,11 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	}
 
 	return r;
+
+out_submit_with_conditional_duplicate:
+	if (pb->req_nr == 0 && is_writethrough_io(cache, bio, NULL))
+		dm_ask_for_duplicate_bios(bio, 1);
+	return DM_MAPIO_SUBMITTED;
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
@@ -3077,7 +3012,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type cache_target = {
 	.name = "cache",
-	.version = {1, 3, 0},
+	.version = {1, 5, 0},
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,

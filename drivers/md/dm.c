@@ -1112,6 +1112,60 @@ int dm_set_target_max_io_len(struct dm_target *ti, sector_t len)
 }
 EXPORT_SYMBOL_GPL(dm_set_target_max_io_len);
 
+/*
+ * A target may call dm_accept_partial_bio only from the map routine.  It is
+ * allowed for all bio types except REQ_FLUSH.
+ *
+ * dm_accept_partial_bio informs the dm that the target only wants to process
+ * additional n_sectors sectors of the bio and the rest of the data should be
+ * sent in a next bio.
+ *
+ * A diagram that explains the arithmetics:
+ * +--------------------+---------------+-------+
+ * |         1          |       2       |   3   |
+ * +--------------------+---------------+-------+
+ *
+ * <-------------- *tio->len_ptr --------------->
+ *                      <------- bi_size ------->
+ *                      <-- n_sectors -->
+ *
+ * Region 1 was already iterated over with bio_advance or similar function.
+ *	(it may be empty if the target doesn't use bio_advance)
+ * Region 2 is the remaining bio size that the target wants to process.
+ *	(it may be empty if region 1 is non-empty, although there is no reason
+ *	 to make it empty)
+ * The target requires that region 3 is to be sent in the next bio.
+ *
+ * If the target wants to receive multiple copies of the bio (via num_*bios, etc),
+ * the partially processed part (the sum of regions 1+2) must be the same for all
+ * copies of the bio.
+ */
+void dm_accept_partial_bio(struct bio *bio, unsigned n_sectors)
+{
+	struct dm_target_io *tio = container_of(bio, struct dm_target_io, clone);
+	unsigned bi_size = bio->bi_iter.bi_size >> SECTOR_SHIFT;
+	BUG_ON(bio->bi_rw & REQ_FLUSH);
+	BUG_ON(bi_size > *tio->len_ptr);
+	BUG_ON(n_sectors > bi_size);
+	*tio->len_ptr -= bi_size - n_sectors;
+	bio->bi_iter.bi_size = n_sectors << SECTOR_SHIFT;
+}
+EXPORT_SYMBOL_GPL(dm_accept_partial_bio);
+
+/*
+ * The target driver can only call this function from its map routine.  The
+ * target driver requests that DM send more duplicates of the current bio.
+ * The value of the dm_target_io's 'num_bios' pointer is incremented to add
+ * @num_duplicates to the outer control loops in the bio mapping callers
+ * (e.g. __send_duplicate_bios and __clone_and_map_data_bio).
+ */
+void dm_ask_for_duplicate_bios(struct bio *bio, unsigned num_duplicates)
+{
+	struct dm_target_io *tio = container_of(bio, struct dm_target_io, clone);
+	(*tio->num_bios) += num_duplicates;
+}
+EXPORT_SYMBOL_GPL(dm_ask_for_duplicate_bios);
+
 static void __map_bio(struct dm_target_io *tio)
 {
 	int r;
@@ -1154,10 +1208,10 @@ struct clone_info {
 	struct bio *bio;
 	struct dm_io *io;
 	sector_t sector;
-	sector_t sector_count;
+	unsigned sector_count;
 };
 
-static void bio_setup_sector(struct bio *bio, sector_t sector, sector_t len)
+static void bio_setup_sector(struct bio *bio, sector_t sector, unsigned len)
 {
 	bio->bi_iter.bi_sector = sector;
 	bio->bi_iter.bi_size = to_bytes(len);
@@ -1202,10 +1256,14 @@ static struct dm_target_io *alloc_tio(struct clone_info *ci,
 
 static void __clone_and_map_simple_bio(struct clone_info *ci,
 				       struct dm_target *ti,
-				       unsigned target_bio_nr, sector_t len)
+				       unsigned target_bio_nr, unsigned *len,
+				       unsigned *num_bios)
 {
 	struct dm_target_io *tio = alloc_tio(ci, ti, ci->bio->bi_max_vecs, target_bio_nr);
 	struct bio *clone = &tio->clone;
+
+	tio->len_ptr = len;
+	tio->num_bios = num_bios;
 
 	/*
 	 * Discard requests require the bio's inline iovecs be initialized.
@@ -1214,18 +1272,18 @@ static void __clone_and_map_simple_bio(struct clone_info *ci,
 	 */
 	 __bio_clone_fast(clone, ci->bio);
 	if (len)
-		bio_setup_sector(clone, ci->sector, len);
+		bio_setup_sector(clone, ci->sector, *len);
 
 	__map_bio(tio);
 }
 
 static void __send_duplicate_bios(struct clone_info *ci, struct dm_target *ti,
-				  unsigned num_bios, sector_t len)
+				  unsigned num_bios, unsigned *len)
 {
 	unsigned target_bio_nr;
 
 	for (target_bio_nr = 0; target_bio_nr < num_bios; target_bio_nr++)
-		__clone_and_map_simple_bio(ci, ti, target_bio_nr, len);
+		__clone_and_map_simple_bio(ci, ti, target_bio_nr, len, &num_bios);
 }
 
 static int __send_empty_flush(struct clone_info *ci)
@@ -1235,28 +1293,24 @@ static int __send_empty_flush(struct clone_info *ci)
 
 	BUG_ON(bio_has_data(ci->bio));
 	while ((ti = dm_table_get_target(ci->map, target_nr++)))
-		__send_duplicate_bios(ci, ti, ti->num_flush_bios, 0);
+		__send_duplicate_bios(ci, ti, ti->num_flush_bios, NULL);
 
 	return 0;
 }
 
 static void __clone_and_map_data_bio(struct clone_info *ci, struct dm_target *ti,
-				     sector_t sector, unsigned len)
+				     sector_t sector, unsigned *len)
 {
 	struct bio *bio = ci->bio;
 	struct dm_target_io *tio;
 	unsigned target_bio_nr;
 	unsigned num_target_bios = 1;
 
-	/*
-	 * Does the target want to receive duplicate copies of the bio?
-	 */
-	if (bio_data_dir(bio) == WRITE && ti->num_write_bios)
-		num_target_bios = ti->num_write_bios(ti, bio);
-
 	for (target_bio_nr = 0; target_bio_nr < num_target_bios; target_bio_nr++) {
 		tio = alloc_tio(ci, ti, 0, target_bio_nr);
-		clone_bio(tio, bio, sector, len);
+		tio->len_ptr = len;
+		tio->num_bios = &num_target_bios;
+		clone_bio(tio, bio, sector, *len);
 		__map_bio(tio);
 	}
 }
@@ -1285,7 +1339,7 @@ static int __send_changing_extent_only(struct clone_info *ci,
 				       is_split_required_fn is_split_required)
 {
 	struct dm_target *ti;
-	sector_t len;
+	unsigned len;
 	unsigned num_bios;
 
 	do {
@@ -1304,11 +1358,11 @@ static int __send_changing_extent_only(struct clone_info *ci,
 			return -EOPNOTSUPP;
 
 		if (is_split_required && !is_split_required(ti))
-			len = min(ci->sector_count, max_io_len_target_boundary(ci->sector, ti));
+			len = min((sector_t)ci->sector_count, max_io_len_target_boundary(ci->sector, ti));
 		else
-			len = min(ci->sector_count, max_io_len(ci->sector, ti));
+			len = min((sector_t)ci->sector_count, max_io_len(ci->sector, ti));
 
-		__send_duplicate_bios(ci, ti, num_bios, len);
+		__send_duplicate_bios(ci, ti, num_bios, &len);
 
 		ci->sector += len;
 	} while (ci->sector_count -= len);
@@ -1347,7 +1401,7 @@ static int __split_and_process_non_flush(struct clone_info *ci)
 
 	len = min_t(sector_t, max_io_len(ci->sector, ti), ci->sector_count);
 
-	__clone_and_map_data_bio(ci, ti, ci->sector, len);
+	__clone_and_map_data_bio(ci, ti, ci->sector, &len);
 
 	ci->sector += len;
 	ci->sector_count -= len;
