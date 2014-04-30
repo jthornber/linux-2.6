@@ -2418,6 +2418,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 
 			if (is_writethrough_io(cache, bio, &lookup_result.cblock)) {
 				/* No need to mark anything dirty in write through mode */
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				pb->req_nr == 0 ?
 					remap_to_cache(cache, bio, lookup_result.cblock) :
 					remap_to_origin_clear_discard(cache, bio, block);
