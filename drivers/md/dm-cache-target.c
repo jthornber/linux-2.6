@@ -1321,9 +1321,9 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 			}
 		} else {
 			inc_hit_counter(cache, bio);
+			pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 			if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				pb->req_nr == 0 ?
 					remap_to_cache(cache, bio, lookup_result.cblock) :
 					remap_to_origin_clear_discard(cache, bio, block);
@@ -2431,8 +2431,8 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 				r = DM_MAPIO_SUBMITTED;
 
 			} else {
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				inc_miss_counter(cache, bio);
+				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				remap_to_origin_clear_discard(cache, bio, block);
 
 				cell_defer(cache, cell, false);
@@ -2440,13 +2440,13 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 
 		} else {
 			inc_hit_counter(cache, bio);
+			pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 			if (is_writethrough_io(cache, bio, lookup_result.cblock)) {
 				if (pb->req_nr == 0)
 					dm_ask_for_duplicate_bios(bio, 1);
 
 				/* No need to mark anything dirty in write through mode */
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				pb->req_nr == 0 ?
 					remap_to_cache(cache, bio, lookup_result.cblock) :
 					remap_to_origin_clear_discard(cache, bio, block);
