@@ -31,11 +31,11 @@
 /*----------------------------------------------------------------*/
 
 #define WBERR(f, args...) \
-	DMERR("err@%s() " f, __func__, ## args)
+	DMERR("%s: " f, __func__, ## args)
 #define WBWARN(f, args...) \
-	DMWARN("warn@%s() " f, __func__, ## args)
+	DMWARN("%s: " f, __func__, ## args)
 #define WBINFO(f, args...) \
-	DMINFO("info@%s() " f, __func__, ## args)
+	DMINFO("%s: " f, __func__, ## args)
 
 /*----------------------------------------------------------------*/
 

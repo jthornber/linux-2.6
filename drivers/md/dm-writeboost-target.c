@@ -1253,7 +1253,7 @@ static int consume_essential_argv(struct wb_device *wb, struct dm_arg_set *as)
 	struct dm_target *ti = wb->ti;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "invalid buffer type"},
+		{0, 1, "Invalid type"},
 	};
 	unsigned tmp;
 
@@ -1267,14 +1267,14 @@ static int consume_essential_argv(struct wb_device *wb, struct dm_arg_set *as)
 	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
 			  &wb->backing_dev);
 	if (r) {
-		WBERR("failed to get backing dev");
+		WBERR("Failed to get backing_dev");
 		return r;
 	}
 
 	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
 			  &wb->cache_dev);
 	if (r) {
-		WBERR("failed to get cache dev");
+		WBERR("Failed to get cache_dev");
 		goto bad_get_cache;
 	}
 
@@ -1309,9 +1309,9 @@ static int consume_optional_argv(struct wb_device *wb, struct dm_arg_set *as)
 	struct dm_target *ti = wb->ti;
 
 	static struct dm_arg _args[] = {
-		{0, 4, "invalid optional argc"},
-		{4, 10, "invalid segment_size_order"},
-		{1, UINT_MAX, "invalid nr_rambuf_pool"},
+		{0, 4, "Invalid optional argc"},
+		{4, 10, "Invalid segment_size_order"},
+		{1, UINT_MAX, "Invalid nr_rambuf_pool"},
 	};
 	unsigned tmp, argc = 0;
 
@@ -1335,7 +1335,7 @@ static int consume_optional_argv(struct wb_device *wb, struct dm_arg_set *as)
 		if (!r) {
 			argc--;
 		} else {
-			ti->error = "invalid optional key";
+			ti->error = "Invalid optional key";
 			break;
 		}
 	}
@@ -1350,13 +1350,13 @@ static int do_consume_tunable_argv(struct wb_device *wb,
 	struct dm_target *ti = wb->ti;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "invalid allow_migrate"},
-		{0, 1, "invalid enable_migration_modulator"},
-		{1, 1000, "invalid barrier_deadline_ms"},
-		{1, 1000, "invalid nr_max_batched_migration"},
-		{0, 100, "invalid migrate_threshold"},
-		{0, 3600, "invalid update_record_interval"},
-		{0, 3600, "invalid sync_interval"},
+		{0, 1, "Invalid allow_migrate"},
+		{0, 1, "Invalid enable_migration_modulator"},
+		{1, 1000, "Invalid barrier_deadline_ms"},
+		{1, 1000, "Invalid nr_max_batched_migration"},
+		{0, 100, "Invalid migrate_threshold"},
+		{0, 3600, "Invalid update_record_interval"},
+		{0, 3600, "Invalid sync_interval"},
 	};
 	unsigned tmp;
 
@@ -1377,7 +1377,7 @@ static int do_consume_tunable_argv(struct wb_device *wb,
 		if (!r) {
 			argc--;
 		} else {
-			ti->error = "invalid tunable key";
+			ti->error = "Invalid tunable key";
 			break;
 		}
 	}
@@ -1391,7 +1391,7 @@ static int consume_tunable_argv(struct wb_device *wb, struct dm_arg_set *as)
 	struct dm_target *ti = wb->ti;
 
 	static struct dm_arg _args[] = {
-		{0, 14, "invalid tunable argc"},
+		{0, 14, "Invalid tunable argc"},
 	};
 	unsigned argc = 0;
 
@@ -1421,7 +1421,7 @@ static int init_core_struct(struct dm_target *ti)
 
 	r = dm_set_target_max_io_len(ti, 1 << 3);
 	if (r) {
-		WBERR("failed to set max_io_len");
+		WBERR("Failed to set max_io_len");
 		return r;
 	}
 
@@ -1433,7 +1433,7 @@ static int init_core_struct(struct dm_target *ti)
 
 	wb = kzalloc(sizeof(*wb), GFP_KERNEL);
 	if (!wb) {
-		WBERR("failed to allocate wb");
+		WBERR("Failed to allocate wb");
 		return -ENOMEM;
 	}
 	ti->private = wb;
@@ -1524,14 +1524,14 @@ static int writeboost_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	r = init_core_struct(ti);
 	if (r) {
-		ti->error = "failed to init core";
+		ti->error = "init_core_struct failed";
 		return r;
 	}
 	wb = ti->private;
 
 	r = consume_essential_argv(wb, &as);
 	if (r) {
-		ti->error = "failed to consume essential argv";
+		ti->error = "consume_essential_argv failed";
 		goto bad_essential_argv;
 	}
 
@@ -1545,19 +1545,19 @@ static int writeboost_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	r = consume_optional_argv(wb, &as);
 	if (r) {
-		ti->error = "failed to consume optional argv";
+		ti->error = "consume_optional_argv failed";
 		goto bad_optional_argv;
 	}
 
 	r = resume_cache(wb);
 	if (r) {
-		ti->error = "failed to resume cache";
+		ti->error = "resume_cache failed";
 		goto bad_resume_cache;
 	}
 
 	r = consume_tunable_argv(wb, &as);
 	if (r) {
-		ti->error = "failed to consume tunable argv";
+		ti->error = "consume_tunable_argv failed";
 		goto bad_tunable_argv;
 	}
 
@@ -1751,7 +1751,7 @@ static int __init writeboost_module_init(void)
 
 	r = dm_register_target(&writeboost_target);
 	if (r < 0) {
-		WBERR("failed to register target");
+		WBERR("Failed to register target");
 		return r;
 	}
 
@@ -1760,16 +1760,16 @@ static int __init writeboost_module_init(void)
 	 * More than one I/Os are submitted during a period
 	 * so the number of max_active workers are set to 0.
 	 */
-	safe_io_wq = alloc_workqueue("wbsafeiowq", WQ_MEM_RECLAIM, 0);
+	safe_io_wq = alloc_workqueue("dmwbiowq", WQ_MEM_RECLAIM, 0);
 	if (!safe_io_wq) {
-		WBERR("failed to allocate safe_io_wq");
+		WBERR("Failed to allocate safe_io_wq");
 		r = -ENOMEM;
 		goto bad_wq;
 	}
 
 	wb_io_client = dm_io_client_create();
 	if (IS_ERR(wb_io_client)) {
-		WBERR("failed to allocate wb_io_client");
+		WBERR("Failed to allocate wb_io_client");
 		r = PTR_ERR(wb_io_client);
 		goto bad_io_client;
 	}
