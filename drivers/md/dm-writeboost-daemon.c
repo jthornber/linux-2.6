@@ -52,16 +52,15 @@ static void process_deferred_barriers(struct wb_device *wb, struct flush_job *jo
 {
 	int r = 0;
 	bool has_barrier = !bio_list_empty(&job->barrier_ios);
-	wbdebug("has_barrier:%d", has_barrier);
 
 	/*
-	 * make all the data until now persistent.
+	 * Make all the data until now persistent.
 	 */
 	if (has_barrier)
 		IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
 
 	/*
-	 * ack the chained barrier requests.
+	 * Ack the chained barrier requests.
 	 */
 	if (has_barrier) {
 		struct bio *bio;
@@ -101,29 +100,26 @@ void flush_proc(struct work_struct *work)
 	};
 
 	/*
-	 * the actual write requests to the cache device are not serialized.
-	 * they may perform in parallel.
+	 * The actual write requests to the cache device are not serialized.
+	 * They may perform in parallel.
 	 */
 	IO(dm_safe_io(&io_req, 1, &region, NULL, false));
 
 	/*
-	 * deferred ACK for barrier requests
-	 * to serialize barrier ACK in logging we wait for the previous
+	 * Deferred ACK for barrier requests
+	 * To serialize barrier ACK in logging we wait for the previous
 	 * segment to be persistently written (if needed).
 	 */
-	wbdebug("WAIT BEFORE:%u", seg->id);
 	wait_for_flushing(wb, SUB_ID(seg->id, 1));
-	wbdebug("WAIT AFTER:%u", seg->id);
 
 	process_deferred_barriers(wb, job);
 
 	/*
-	 * we can count up the last_flushed_segment_id only after segment
+	 * We can count up the last_flushed_segment_id only after segment
 	 * is written persistently. counting up the id is serialized.
 	 */
 	atomic64_inc(&wb->last_flushed_segment_id);
 	wake_up(&wb->flush_wait_queue);
-	wbdebug("WAKE UP:%u", seg->id);
 
 	mempool_free(job, wb->flush_job_pool);
 }
@@ -210,9 +206,9 @@ static void submit_migrate_ios(struct wb_device *wb)
 }
 
 /*
- * compare two migrate IOs
- * if the two have the same sector then compare them with the IDs.
- * we process the older ID first and then overwrites with the older.
+ * Compare two migrate IOs
+ * If the two have the same sector then compare them with the IDs.
+ * We process the older ID first and then overwrites with the older.
  *
  * (10, 3) < (11, 1)
  * (10, 3) < (10, 4)
@@ -245,8 +241,8 @@ static void inc_migrate_io_count(u8 dirty_bits, size_t *migrate_io_count)
 }
 
 /*
- * add mio to rb-tree for sorted migration.
- * all migrate IOs are sorted in ascending order.
+ * Add mio to rb-tree for sorted migration.
+ * All migrate IOs are sorted in ascending order.
  */
 static void add_migrate_io(struct wb_device *wb, struct migrate_io *mio)
 {
@@ -268,7 +264,7 @@ static void add_migrate_io(struct wb_device *wb, struct migrate_io *mio)
 }
 
 /*
- * read the data to migrate IOs and add them into the rb-tree to sort.
+ * Read the data to migrate IOs and add them into the rb-tree to sort.
  */
 static void prepare_migrate_ios(struct wb_device *wb, struct segment_migrate *segmig,
 				size_t *migrate_io_count)
@@ -287,7 +283,7 @@ static void prepare_migrate_ios(struct wb_device *wb, struct segment_migrate *se
 	};
 	struct dm_io_region region_r = {
 		.bdev = wb->cache_dev->bdev,
-		.sector = seg->start_sector + (1 << 3), /* header excluded */
+		.sector = seg->start_sector + (1 << 3), /* Header excluded */
 		.count = seg->length << 3,
 	};
 	IO(dm_safe_io(&io_req_r, 1, &region_r, NULL, false));
@@ -339,7 +335,7 @@ static void transport_emigrates(struct wb_device *wb)
 		set_bit(WB_DEAD, &wb->flags);
 
 	/*
-	 * we clean up the metablocks because there is no reason
+	 * We clean up the metablocks because there is no reason
 	 * to leave the them dirty.
 	 */
 	for (k = 0; k < wb->num_emigrates; k++) {
@@ -348,18 +344,18 @@ static void transport_emigrates(struct wb_device *wb)
 	}
 
 	/*
-	 * we must write back a segments if it was written persistently.
-	 * nevertheless, we betray the upper layer.
-	 * remembering which segment is persistent is too expensive
+	 * We must write back a segments if it was written persistently.
+	 * Nevertheless, we betray the upper layer.
+	 * Remembering which segment is persistent is too expensive
 	 * and furthermore meaningless.
-	 * so we consider all segments are persistent and write them back
+	 * So we consider all segments are persistent and write them back
 	 * persistently.
 	 */
 	IO(blkdev_issue_flush(wb->backing_dev->bdev, GFP_NOIO, NULL));
 }
 
 /*
- * calculate the number of segments to migrate.
+ * Calculate the number of segments to migrate.
  */
 static u32 calc_nr_mig(struct wb_device *wb)
 {
@@ -399,7 +395,7 @@ static void do_migrate_proc(struct wb_device *wb)
 	}
 
 	/*
-	 * store segments into emigrates
+	 * Store segments into emigrates
 	 */
 	for (k = 0; k < nr_mig; k++) {
 		struct segment_migrate *segmig = *(wb->emigrates + k);
@@ -411,7 +407,6 @@ static void do_migrate_proc(struct wb_device *wb)
 
 	atomic64_add(nr_mig, &wb->last_migrated_segment_id);
 	wake_up(&wb->migrate_wait_queue);
-	wbdebug("done migrate last id:%u", atomic64_read(&wb->last_migrated_segment_id));
 }
 
 int migrate_proc(void *data)
@@ -423,8 +418,8 @@ int migrate_proc(void *data)
 }
 
 /*
- * wait for a segment to be migrated.
- * after migrated the metablocks in the segment are clean.
+ * Wait for a segment to be migrated.
+ * After migrated the metablocks in the segment are clean.
  */
 void wait_for_migration(struct wb_device *wb, u64 id)
 {
@@ -538,8 +533,6 @@ int sync_proc(void *data)
 			schedule_timeout_interruptible(msecs_to_jiffies(1000));
 			continue;
 		}
-
-		wbdebug();
 
 		flush_current_buffer(wb);
 		IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
