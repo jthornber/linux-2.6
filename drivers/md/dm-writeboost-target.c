@@ -229,9 +229,8 @@ static void submit_flush_request(struct wb_device *wb, struct dm_dev *dev, bool 
 
 static void wait_plog_writes_complete(struct wb_device *wb)
 {
-	wbdebug("START refcount:%u", atomic_read(&wb->nr_inflight_plog_writes));
 	wait_event(wb->plog_wait_queue,
-		!atomic_read(&wb->nr_inflight_plog_writes));
+		   !atomic_read(&wb->nr_inflight_plog_writes));
 }
 
 /*
@@ -259,7 +258,6 @@ static void barrier_plog_writes(struct wb_device *wb)
 	default:
 		BUG();
 	}
-	wbdebug("END");
 }
 
 /*
@@ -321,7 +319,6 @@ void rebuild_rambuf(void *rambuffer, void *plog_seg_buf, u64 log_id)
 
 		/* Update header data */
 		seg->id = meta.id;
-		wbdebug("id:%u", le64_to_cpu(meta.id));
 		if ((meta.idx + 1) > seg->length)
 			seg->length = meta.idx + 1;
 
@@ -342,7 +339,6 @@ void rebuild_rambuf(void *rambuffer, void *plog_seg_buf, u64 log_id)
 
 	/* Checksum */
 	seg->checksum = cpu_to_le32(calc_checksum(rambuffer, seg->length));
-	wbdebug("id:%u, len:%u, cksum:%u", seg->id, seg->length, calc_checksum(rambuffer, seg->length));
 }
 
 /*
@@ -461,7 +457,6 @@ void acquire_new_seg(struct wb_device *wb, u64 id)
 	wb->current_seg = new_seg;
 
 	acquire_new_rambuffer(wb, id);
-	wbdebug("acquired new rambuf & start to acquire new plog");
 	acquire_new_plog_seg(wb, id);
 }
 
@@ -509,10 +504,8 @@ static void queue_flush_job(struct wb_device *wb)
 
 static void queue_current_buffer(struct wb_device *wb)
 {
-	wbdebug("START");
 	queue_flush_job(wb);
 	prepare_new_seg(wb);
-	wbdebug("END");
 }
 
 /*
@@ -540,8 +533,6 @@ void flush_current_buffer(struct wb_device *wb)
 {
 	struct segment_header *old_seg;
 
-	wbdebug("START");
-
 	mutex_lock(&wb->io_lock);
 	old_seg = wb->current_seg;
 
@@ -551,8 +542,6 @@ void flush_current_buffer(struct wb_device *wb)
 	mutex_unlock(&wb->io_lock);
 
 	wait_for_flushing(wb, old_seg->id);
-
-	wbdebug("END");
 }
 
 /*----------------------------------------------------------------*/
@@ -931,7 +920,6 @@ static void might_queue_current_buffer(struct wb_device *wb, struct bio *bio)
  */
 static int process_discard_bio(struct wb_device *wb, struct bio *bio)
 {
-	wbdebug("DISCARD");
 	bio_remap(bio, wb->backing_dev, bio->bi_iter.bi_sector);
 	return DM_MAPIO_REMAPPED;
 }
@@ -996,7 +984,6 @@ static void cache_lookup(struct wb_device *wb, struct bio *bio,
 		res->on_buffer = is_on_buffer(wb, res->found_mb->idx);
 
 	inc_stat(wb, io_write(bio), res->found, res->on_buffer, io_fullsize(bio));
-	wbdebug("rw:%d, found:%d, on_buffer:%d, fullsize:%d", io_write(bio), res->found, res->on_buffer, io_fullsize(bio));
 }
 
 /*

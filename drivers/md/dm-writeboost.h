@@ -30,21 +30,6 @@
 
 /*----------------------------------------------------------------*/
 
-/*
- * powerful printk macros
- */
-
-/*
- * only for debugging.
- * don't include this macro in the production code.
- */
-#ifdef WBDEBUG
-#define wbdebug(f, args...) \
-	DMINFO("debug@%s() L.%d " f, __func__, __LINE__, ## args)
-#else
-#define wbdebug(f, args...)
-#endif
-
 #define WBERR(f, args...) \
 	DMERR("err@%s() " f, __func__, ## args)
 #define WBWARN(f, args...) \

@@ -1075,10 +1075,8 @@ static int flush_rambuf(struct wb_device *wb,
 	};
 
 	struct segment_header_device *hd = rambuf;
-	wbdebug("id:%u", cpu_to_le64(hd->id));
 
 	region.count = (hd->length + 1) << 3;
-	wbdebug("sector:%u, count:%u", region.sector, region.count);
 
 	r = dm_safe_io(&io_req, 1, &region, NULL, false);
 	if (r)
@@ -1129,7 +1127,6 @@ static int flush_plogs(struct wb_device *wb)
 		WBERR("failed to find the min id on the plog device");
 		goto bad;
 	}
-	wbdebug();
 
 	/*
 	 * If there is no valid plog on the plog device we quit.
@@ -1139,7 +1136,6 @@ static int flush_plogs(struct wb_device *wb)
 		WBINFO("couldn't find any valid plog");
 		goto bad;
 	}
-	wbdebug();
 
 	for (i = 0; i < wb->nr_plog_segs; i++) {
 		u32 j;
@@ -1164,7 +1160,6 @@ static int flush_plogs(struct wb_device *wb)
 		flush_plog(wb, plog_seg_buf, log_id);
 		next_id++;
 	}
-	wbdebug();
 
 bad:
 	kmem_cache_free(wb->plog_seg_buf_cachep, plog_seg_buf);
@@ -1253,7 +1248,6 @@ void prepare_segment_header_device(void *rambuffer,
 	struct segment_header_device *dest = rambuffer;
 	u32 i;
 
-	wbdebug("%u ?= %u", src->length, wb->cursor - src->start_idx);
 	BUG_ON((src->length) != (wb->cursor - src->start_idx));
 
 	for (i = 0; i < src->length; i++) {
@@ -1414,15 +1408,11 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 
 		header = rambuf;
 
-		if (le64_to_cpu(header->id))
-			wbdebug("id:%u", le64_to_cpu(header->id));
-
 		if (!le64_to_cpu(header->id))
 			continue;
 
 		actual = calc_checksum(rambuf, header->length);
 		expected = le32_to_cpu(header->checksum);
-		wbdebug("id:%u, len:%u", header->id, header->length);
 		if (actual != expected) {
 			WBWARN("checksum incorrect id:%llu checksum: %u != %u",
 			       (long long unsigned int) le64_to_cpu(header->id),
@@ -1493,7 +1483,6 @@ static int replay_log_on_cache(struct wb_device *wb)
 		WBERR("failed to find max id");
 		return r;
 	}
-	wbdebug("max_id:%u", max_id);
 
 	r = apply_valid_segments(wb, &max_id);
 	if (r) {
@@ -1501,7 +1490,6 @@ static int replay_log_on_cache(struct wb_device *wb)
 		return r;
 	}
 
-	wbdebug("max_id:%u", max_id);
 	/*
 	 * Setup last_flushed_segment_id
 	 */
@@ -1545,7 +1533,6 @@ static int recover_cache(struct wb_device *wb)
 		WBERR("failed to replay log");
 		return r;
 	}
-	wbdebug();
 
 	prepare_first_seg(wb);
 	return 0;
