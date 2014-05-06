@@ -17,9 +17,6 @@ void do_check_buffer_alignment(void *buf, const char *name, const char *caller)
 {
 	unsigned long addr = (unsigned long) buf;
 
-	/* debug */
-	DMINFO("%s in %s 512-aligned(%d), 4K-aligned(%d)", name, caller, IS_ALIGNED(addr, 512), IS_ALIGNED(addr, 4096));
-
 	if (!IS_ALIGNED(addr, 1 << SECTOR_SHIFT)) {
 		DMCRIT("@%s in %s is not sector-aligned. I/O buffer must be sector-aligned.", name, caller);
 		BUG();
