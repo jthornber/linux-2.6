@@ -87,7 +87,7 @@ void flush_proc(struct work_struct *work)
 	struct segment_header *seg = job->seg;
 
 	struct dm_io_request io_req = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -150,7 +150,7 @@ static void submit_migrate_io(struct wb_device *wb, struct migrate_io *mio)
 
 	if (mio->memorized_dirtiness == 255) {
 		struct dm_io_request io_req_w = {
-			.client = wb_io_client,
+			.client = wb->io_client,
 			.bi_rw = WRITE,
 			.notify.fn = migrate_endio,
 			.notify.context = wb,
@@ -174,7 +174,7 @@ static void submit_migrate_io(struct wb_device *wb, struct migrate_io *mio)
 				continue;
 
 			io_req_w = (struct dm_io_request) {
-				.client = wb_io_client,
+				.client = wb->io_client,
 				.bi_rw = WRITE,
 				.notify.fn = migrate_endio,
 				.notify.context = wb,
@@ -275,7 +275,7 @@ static void prepare_migrate_ios(struct wb_device *wb, struct segment_migrate *se
 	struct segment_header *seg = segmig->seg;
 
 	struct dm_io_request io_req_r = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = READ,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -479,7 +479,7 @@ static void update_superblock_record(struct wb_device *wb)
 	memcpy(buf, &o, sizeof(o));
 
 	io_req = (struct dm_io_request) {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,

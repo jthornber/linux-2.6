@@ -356,7 +356,7 @@ static int read_superblock_header(struct superblock_header_device *sup,
 	check_buffer_alignment(buf);
 
 	io_req_sup = (struct dm_io_request) {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = READ,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -437,7 +437,7 @@ static int format_superblock_header(struct wb_device *wb)
 	memcpy(buf, &sup, sizeof(sup));
 
 	io_req_sup = (struct dm_io_request) {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -487,7 +487,7 @@ static int zeroing_full_superblock(struct wb_device *wb)
 	memset(buf, 0, 1 << 20);
 
 	io_req_sup = (struct dm_io_request) {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_VMA,
@@ -530,7 +530,7 @@ static int format_all_segment_headers(struct wb_device *wb)
 	 */
 	for (i = 0; i < nr_segments; i++) {
 		struct dm_io_request io_req_seg = {
-			.client = wb_io_client,
+			.client = wb->io_client,
 			.bi_rw = WRITE,
 			.notify.fn = format_segmd_endio,
 			.notify.context = &context,
@@ -732,7 +732,7 @@ static int do_clear_plog_dev_t1(struct wb_device *wb, u32 idx)
 	memset(buf, 0, wb->plog_seg_size << SECTOR_SHIFT);
 
 	io_req = (struct dm_io_request) {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE_FUA,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_VMA,
@@ -989,7 +989,7 @@ static int read_plog_seg_t1(void *buf, struct wb_device *wb, u32 idx)
 	int r = 0;
 
 	struct dm_io_request io_req = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = READ,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -1063,7 +1063,7 @@ static int flush_rambuf(struct wb_device *wb,
 {
 	int r = 0;
 	struct dm_io_request io_req = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -1183,7 +1183,7 @@ static int read_superblock_record(struct superblock_record_device *record,
 	check_buffer_alignment(buf);
 
 	io_req = (struct dm_io_request) {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = READ,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -1214,7 +1214,7 @@ static int read_whole_segment(void *buf, struct wb_device *wb,
 			      struct segment_header *seg)
 {
 	struct dm_io_request io_req = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = READ,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
@@ -1324,7 +1324,7 @@ static int read_segment_header(void *buf, struct wb_device *wb,
 			       struct segment_header *seg)
 {
 	struct dm_io_request io_req = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = READ,
 		.notify.fn = NULL,
 		.mem.type = DM_IO_KMEM,
