@@ -321,6 +321,7 @@ struct wb_device {
 	mempool_t *buf_1_pool; /* 1 sector buffer pool */
 	struct kmem_cache *buf_8_cachep;
 	mempool_t *buf_8_pool; /* 8 sector buffer pool */
+	struct workqueue_struct *io_wq;
 
 	/*---------------------------------------------*/
 
@@ -531,7 +532,6 @@ void rebuild_rambuf(void *rambuf, void *plog_buf, u64 log_id);
 
 /*----------------------------------------------------------------*/
 
-extern struct workqueue_struct *safe_io_wq;
 extern struct dm_io_client *wb_io_client;
 
 #define check_buffer_alignment(buf) \

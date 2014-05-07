@@ -53,7 +53,7 @@ int dm_safe_io_internal(struct wb_device *wb, struct dm_io_request *io_req,
 		};
 
 		INIT_WORK_ONSTACK(&io.work, safe_io_proc);
-		queue_work(safe_io_wq, &io.work);
+		queue_work(wb->io_wq, &io.work);
 		flush_work(&io.work);
 		destroy_work_on_stack(&io.work); /* Pair with INIT_WORK_ONSTACK */
 
@@ -1470,6 +1470,18 @@ static int init_core_struct(struct dm_target *ti)
 		goto bad_buf_8_pool;
 	}
 
+	/*
+	 * Workqueue for generic I/O
+	 * More than one I/Os are submitted during a period
+	 * so the number of max_active workers are set to 0.
+	 */
+	wb->io_wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM, 0);
+	if (!wb->io_wq) {
+		WBERR("Failed to allocate io_wq");
+		r = -ENOMEM;
+		goto bad_io_wq;
+	}
+
 	mutex_init(&wb->io_lock);
 	init_waitqueue_head(&wb->inflight_ios_wq);
 	spin_lock_init(&wb->lock);
@@ -1479,6 +1491,8 @@ static int init_core_struct(struct dm_target *ti)
 
 	return r;
 
+bad_io_wq:
+	mempool_destroy(wb->buf_8_pool);
 bad_buf_8_pool:
 	kmem_cache_destroy(wb->buf_8_cachep);
 bad_buf_8_cachep:
@@ -1494,6 +1508,7 @@ bad_kcopyd_client:
 
 static void free_core_struct(struct wb_device *wb)
 {
+	destroy_workqueue(wb->io_wq);
 	mempool_destroy(wb->buf_8_pool);
 	kmem_cache_destroy(wb->buf_8_cachep);
 	mempool_destroy(wb->buf_1_pool);
@@ -1743,7 +1758,6 @@ static struct target_type writeboost_target = {
 	.iterate_devices = writeboost_iterate_devices,
 };
 
-struct workqueue_struct *safe_io_wq;
 struct dm_io_client *wb_io_client;
 static int __init writeboost_module_init(void)
 {
@@ -1753,18 +1767,6 @@ static int __init writeboost_module_init(void)
 	if (r < 0) {
 		WBERR("Failed to register target");
 		return r;
-	}
-
-	/*
-	 * Workqueue for generic I/O
-	 * More than one I/Os are submitted during a period
-	 * so the number of max_active workers are set to 0.
-	 */
-	safe_io_wq = alloc_workqueue("dmwbiowq", WQ_MEM_RECLAIM, 0);
-	if (!safe_io_wq) {
-		WBERR("Failed to allocate safe_io_wq");
-		r = -ENOMEM;
-		goto bad_wq;
 	}
 
 	wb_io_client = dm_io_client_create();
@@ -1777,8 +1779,6 @@ static int __init writeboost_module_init(void)
 	return r;
 
 bad_io_client:
-	destroy_workqueue(safe_io_wq);
-bad_wq:
 	dm_unregister_target(&writeboost_target);
 	return r;
 }
@@ -1786,7 +1786,6 @@ bad_wq:
 static void __exit writeboost_module_exit(void)
 {
 	dm_io_client_destroy(wb_io_client);
-	destroy_workqueue(safe_io_wq);
 	dm_unregister_target(&writeboost_target);
 }
 
