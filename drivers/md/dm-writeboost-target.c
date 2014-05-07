@@ -159,7 +159,7 @@ static void do_append_plog_t1(struct wb_device *wb, struct bio *bio,
 			      struct write_job *job)
 {
 	struct dm_io_request io_req = {
-		.client = wb_io_client,
+		.client = wb->io_client,
 		.bi_rw = WRITE,
 		.notify.fn = plog_write_endio,
 		.notify.context = job,
@@ -214,7 +214,7 @@ static void submit_flush_request(struct wb_device *wb, struct dm_dev *dev, bool 
 		.bi_rw = WRITE_FLUSH,
 		.mem.type = DM_IO_KMEM,
 		.mem.ptr.addr = NULL,
-		.client = wb_io_client,
+		.client = wb->io_client,
 	};
 	struct dm_io_region io_region = {
 		.bdev = dev->bdev,
@@ -790,7 +790,7 @@ static void migrate_buffered_mb(struct wb_device *wb,
 
 		memcpy(buf, src, 1 << SECTOR_SHIFT);
 		io_req = (struct dm_io_request) {
-			.client = wb_io_client,
+			.client = wb->io_client,
 			.bi_rw = WRITE,
 			.notify.fn = NULL,
 			.mem.type = DM_IO_KMEM,
@@ -1482,6 +1482,13 @@ static int init_core_struct(struct dm_target *ti)
 		goto bad_io_wq;
 	}
 
+	wb->io_client = dm_io_client_create();
+	if (IS_ERR(wb->io_client)) {
+		WBERR("Failed to allocate io_client");
+		r = PTR_ERR(wb->io_client);
+		goto bad_io_client;
+	}
+
 	mutex_init(&wb->io_lock);
 	init_waitqueue_head(&wb->inflight_ios_wq);
 	spin_lock_init(&wb->lock);
@@ -1491,6 +1498,8 @@ static int init_core_struct(struct dm_target *ti)
 
 	return r;
 
+bad_io_client:
+	destroy_workqueue(wb->io_wq);
 bad_io_wq:
 	mempool_destroy(wb->buf_8_pool);
 bad_buf_8_pool:
@@ -1508,6 +1517,7 @@ bad_kcopyd_client:
 
 static void free_core_struct(struct wb_device *wb)
 {
+	dm_io_client_destroy(wb->io_client);
 	destroy_workqueue(wb->io_wq);
 	mempool_destroy(wb->buf_8_pool);
 	kmem_cache_destroy(wb->buf_8_cachep);
@@ -1758,7 +1768,6 @@ static struct target_type writeboost_target = {
 	.iterate_devices = writeboost_iterate_devices,
 };
 
-struct dm_io_client *wb_io_client;
 static int __init writeboost_module_init(void)
 {
 	int r = 0;
@@ -1769,23 +1778,11 @@ static int __init writeboost_module_init(void)
 		return r;
 	}
 
-	wb_io_client = dm_io_client_create();
-	if (IS_ERR(wb_io_client)) {
-		WBERR("Failed to allocate wb_io_client");
-		r = PTR_ERR(wb_io_client);
-		goto bad_io_client;
-	}
-
-	return r;
-
-bad_io_client:
-	dm_unregister_target(&writeboost_target);
 	return r;
 }
 
 static void __exit writeboost_module_exit(void)
 {
-	dm_io_client_destroy(wb_io_client);
 	dm_unregister_target(&writeboost_target);
 }
 
