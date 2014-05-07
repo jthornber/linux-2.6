@@ -722,12 +722,27 @@ static int bio_triggers_commit(struct cache *cache, struct bio *bio)
 	return bio->bi_rw & (REQ_FLUSH | REQ_FUA);
 }
 
+static void inc_ds(struct cache *cache, struct bio *bio)
+{
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	BUG_ON(pb->all_io_entry);
+	pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
+}
+
+static void inc_and_make_request(struct cache *cache, struct bio *bio)
+{
+	inc_ds(cache, bio);
+	generic_make_request(bio);
+}
+
 static void issue(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 
 	if (!bio_triggers_commit(cache, bio)) {
-		generic_make_request(bio);
+		inc_and_make_request(cache, bio);
 		return;
 	}
 
@@ -1100,7 +1115,7 @@ static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 
 	dm_hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
 	remap_to_cache_dirty(mg->cache, bio, mg->new_oblock, mg->cblock);
-	generic_make_request(bio);
+	inc_and_make_request(mg->cache, bio);
 }
 
 static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
@@ -1200,8 +1215,7 @@ static void check_for_quiesced_migrations(struct cache *cache,
 		return;
 
 	INIT_LIST_HEAD(&work);
-	if (pb->all_io_entry)
-		dm_deferred_entry_dec(pb->all_io_entry, &work);
+	dm_deferred_entry_dec(pb->all_io_entry, &work);
 
 	if (!list_empty(&work))
 		queue_quiesced_migrations(cache, &work);
@@ -1390,7 +1404,6 @@ static void issue_cache_bio(struct cache *cache, struct bio *bio,
 			    struct per_bio_data *pb,
 			    dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 	remap_to_cache_dirty(cache, bio, oblock, cblock);
 	issue(cache, bio);
 }
@@ -1443,7 +1456,6 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 			} else {
 				/* FIXME: factor out issue_origin() */
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				remap_to_origin_clear_discard(cache, bio, block);
 				issue(cache, bio);
 			}
@@ -1453,7 +1465,6 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 			if (bio_data_dir(bio) == WRITE &&
 			    writethrough_mode(&cache->features) &&
 			    !is_dirty(cache, lookup_result.cblock)) {
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
 				issue(cache, bio);
 			} else
@@ -1464,7 +1475,6 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 	case POLICY_MISS:
 		inc_miss_counter(cache, bio);
-		pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 		remap_to_origin_clear_discard(cache, bio, block);
 		issue(cache, bio);
 		break;
@@ -1588,7 +1598,7 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	while ((bio = bio_list_pop(&bios)))
-		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
+		submit_bios ? inc_and_make_request(cache, bio) : bio_io_error(bio);
 }
 
 static void process_deferred_writethrough_bios(struct cache *cache)
@@ -1782,11 +1792,13 @@ static void do_worker(struct work_struct *ws)
 
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
+			process_migrations(cache, &cache->need_commit_migrations, migration_failure);
 
 			/*
 			 * FIXME: rollback metadata or just go into a
 			 * failure mode and error everything
 			 */
+
 		} else {
 			process_deferred_flush_bios(cache, true);
 			process_migrations(cache, &cache->need_commit_migrations,
@@ -2492,10 +2504,8 @@ out:
 	return r;
 }
 
-static int cache_map(struct dm_target *ti, struct bio *bio)
+static int cache_map_(struct cache *cache, struct bio *bio)
 {
-	struct cache *cache = ti->private;
-
 	int r;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	size_t pb_data_size = get_per_bio_data_size(cache);
@@ -2567,10 +2577,8 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 				r = DM_MAPIO_SUBMITTED;
 
 			} else {
-				pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 				inc_miss_counter(cache, bio);
 				remap_to_origin_clear_discard(cache, bio, block);
-
 				cell_defer(cache, cell, false);
 			}
 
@@ -2590,8 +2598,6 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 
 	case POLICY_MISS:
 		inc_miss_counter(cache, bio);
-		pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
-
 		if (pb->req_nr != 0) {
 			/*
 			 * This is a duplicate writethrough io that is no
@@ -2599,7 +2605,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 			 */
 			bio_endio(bio, 0);
 			cell_defer(cache, cell, false);
-			return DM_MAPIO_SUBMITTED;
+			r = DM_MAPIO_SUBMITTED;
 		} else {
 			remap_to_origin_clear_discard(cache, bio, block);
 			cell_defer(cache, cell, false);
@@ -2612,6 +2618,18 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 		bio_io_error(bio);
 		r = DM_MAPIO_SUBMITTED;
 	}
+
+	return r;
+}
+
+static int cache_map(struct dm_target *ti, struct bio *bio)
+{
+	int r;
+	struct cache *cache = ti->private;
+
+	r = cache_map_(cache, bio);
+	if (r == DM_MAPIO_REMAPPED)
+		inc_ds(cache, bio);
 
 	return r;
 }
