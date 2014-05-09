@@ -1382,7 +1382,7 @@ static bool need_commit_due_to_time_(struct pool *pool)
 static bool need_commit_due_to_time(struct pool *pool)
 {
 	return need_commit_due_to_time_(pool) &&
-		dm_pool_changed_this_transaction(pool->pmd);
+               dm_pool_changed_this_transaction(pool->pmd);
 }
 
 #define thin_pbd(node) rb_entry((node), struct dm_thin_endio_hook, rb_node)
@@ -1471,10 +1471,6 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 		return;
 	}
 
-	/*
-	 * FIXME: allow sorting to be enabled/disabled via ctr and/or
-	 * message (and auto-disable if data device is non-rotational?)
-	 */
 	__sort_thin_deferred_bios(tc);
 
 	bio_list_merge(&bios, &tc->deferred_bio_list);
@@ -1807,6 +1803,9 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		pool->process_discard = process_discard;
 		pool->process_prepared_mapping = process_prepared_mapping;
 		pool->process_prepared_discard = process_prepared_discard_passdown;
+
+		if (!pool->pf.error_if_no_space)
+			queue_delayed_work(pool->wq, &pool->no_space_timeout, NO_SPACE_TIMEOUT);
 		break;
 
 	case PM_WRITE:
@@ -3234,7 +3233,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 11, 0},
+	.version = {1, 12, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -3576,7 +3575,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 11, 0},
+	.version = {1, 12, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,

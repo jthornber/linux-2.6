@@ -2502,6 +2502,7 @@ static int cache_map_(struct cache *cache, struct bio *bio)
 
 		} else {
 			inc_hit_counter(cache, bio);
+			pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 
 			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
 			    !is_dirty(cache, lookup_result.cblock))
@@ -3095,7 +3096,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type cache_target = {
 	.name = "cache",
-	.version = {1, 3, 0},
+	.version = {1, 4, 0},
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,

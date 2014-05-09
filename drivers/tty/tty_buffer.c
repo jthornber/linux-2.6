@@ -255,11 +255,16 @@ static int __tty_buffer_request_room(struct tty_port *port, size_t size,
 	if (change || left < size) {
 		/* This is the slow path - looking for new buffers to use */
 		if ((n = tty_buffer_alloc(port, size)) != NULL) {
+			unsigned long iflags;
+
 			n->flags = flags;
 			buf->tail = n;
+
+			spin_lock_irqsave(&buf->flush_lock, iflags);
 			b->commit = b->used;
-			smp_mb();
 			b->next = n;
+			spin_unlock_irqrestore(&buf->flush_lock, iflags);
+
 		} else if (change)
 			size = 0;
 		else
@@ -351,14 +356,11 @@ EXPORT_SYMBOL(tty_insert_flip_string_flags);
  *	Takes any pending buffers and transfers their ownership to the
  *	ldisc side of the queue. It then schedules those characters for
  *	processing by the line discipline.
- *	Note that this function can only be used when the low_latency flag
- *	is unset. Otherwise the workqueue won't be flushed.
  */
 
 void tty_schedule_flip(struct tty_port *port)
 {
 	struct tty_bufhead *buf = &port->buf;
-	WARN_ON(port->low_latency);
 
 	buf->tail->commit = buf->tail->used;
 	schedule_work(&buf->work);
@@ -446,6 +448,7 @@ static void flush_to_ldisc(struct work_struct *work)
 	mutex_lock(&buf->lock);
 
 	while (1) {
+		unsigned long flags;
 		struct tty_buffer *head = buf->head;
 		int count;
 
@@ -453,14 +456,19 @@ static void flush_to_ldisc(struct work_struct *work)
 		if (atomic_read(&buf->priority))
 			break;
 
+		spin_lock_irqsave(&buf->flush_lock, flags);
 		count = head->commit - head->read;
 		if (!count) {
-			if (head->next == NULL)
+			if (head->next == NULL) {
+				spin_unlock_irqrestore(&buf->flush_lock, flags);
 				break;
+			}
 			buf->head = head->next;
+			spin_unlock_irqrestore(&buf->flush_lock, flags);
 			tty_buffer_free(port, head);
 			continue;
 		}
+		spin_unlock_irqrestore(&buf->flush_lock, flags);
 
 		count = receive_buf(tty, head, count);
 		if (!count)
@@ -482,17 +490,15 @@ static void flush_to_ldisc(struct work_struct *work)
  */
 void tty_flush_to_ldisc(struct tty_struct *tty)
 {
-	if (!tty->port->low_latency)
-		flush_work(&tty->port->buf.work);
+	flush_work(&tty->port->buf.work);
 }
 
 /**
  *	tty_flip_buffer_push	-	terminal
  *	@port: tty port to push
  *
- *	Queue a push of the terminal flip buffers to the line discipline. This
- *	function must not be called from IRQ context if port->low_latency is
- *	set.
+ *	Queue a push of the terminal flip buffers to the line discipline.
+ *	Can be called from IRQ/atomic context.
  *
  *	In the event of the queue being busy for flipping the work will be
  *	held off and retried later.
@@ -500,14 +506,7 @@ void tty_flush_to_ldisc(struct tty_struct *tty)
 
 void tty_flip_buffer_push(struct tty_port *port)
 {
-	struct tty_bufhead *buf = &port->buf;
-
-	buf->tail->commit = buf->tail->used;
-
-	if (port->low_latency)
-		flush_to_ldisc(&buf->work);
-	else
-		schedule_work(&buf->work);
+	tty_schedule_flip(port);
 }
 EXPORT_SYMBOL(tty_flip_buffer_push);
 
@@ -524,6 +523,7 @@ void tty_buffer_init(struct tty_port *port)
 	struct tty_bufhead *buf = &port->buf;
 
 	mutex_init(&buf->lock);
+	spin_lock_init(&buf->flush_lock);
 	tty_buffer_reset(&buf->sentinel, 0);
 	buf->head = &buf->sentinel;
 	buf->tail = &buf->sentinel;
