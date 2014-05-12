@@ -1245,13 +1245,12 @@ static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 	return 0;
 }
 
-static int save_hint(void *context, dm_cblock_t cblock,
-		     dm_oblock_t oblock, uint32_t hint)
+static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock, uint32_t hint)
 {
 	struct dm_cache_metadata *cmd = context;
-
-	int r;
 	__le32 value = cpu_to_le32(hint);
+	int r;
+
 	__dm_bless_for_disk(&value);
 
 	r = dm_array_set_value(&cmd->hint_info, cmd->hint_root,
@@ -1266,8 +1265,10 @@ static int write_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 	int r;
 
 	r = begin_hints(cmd, policy);
-	if (r)
+	if (r) {
+		DMERR("begin_hints failed");
 		return r;
+	}
 
 	return policy_walk_mappings(policy, save_hint, cmd);
 }

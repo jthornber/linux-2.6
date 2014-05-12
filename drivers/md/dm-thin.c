@@ -234,6 +234,13 @@ struct thin_c {
 	struct bio_list deferred_bio_list;
 	struct bio_list retry_on_resume_list;
 	struct rb_root sort_bio_list; /* sorted list of deferred bios */
+
+	/*
+	 * Ensures the thin is not destroyed until the worker has finished
+	 * iterating the active_thins list.
+	 */
+	atomic_t refcount;
+	struct completion can_destroy;
 };
 
 /*----------------------------------------------------------------*/
@@ -930,7 +937,7 @@ static int commit(struct pool *pool)
 {
 	int r;
 
-	if (get_pool_mode(pool) != PM_WRITE)
+	if (get_pool_mode(pool) >= PM_READ_ONLY)
 		return -EINVAL;
 
 	r = dm_pool_commit_metadata(pool->pmd);
@@ -1375,7 +1382,7 @@ static bool need_commit_due_to_time_(struct pool *pool)
 static bool need_commit_due_to_time(struct pool *pool)
 {
 	return need_commit_due_to_time_(pool) &&
-		dm_pool_changed_this_transaction(pool->pmd);
+               dm_pool_changed_this_transaction(pool->pmd);
 }
 
 #define thin_pbd(node) rb_entry((node), struct dm_thin_endio_hook, rb_node)
@@ -1464,10 +1471,6 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 		return;
 	}
 
-	/*
-	 * FIXME: allow sorting to be enabled/disabled via ctr and/or
-	 * message (and auto-disable if data device is non-rotational?)
-	 */
 	__sort_thin_deferred_bios(tc);
 
 	bio_list_merge(&bios, &tc->deferred_bio_list);
@@ -1498,6 +1501,45 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 	blk_finish_plug(&plug);
 }
 
+static void thin_get(struct thin_c *tc);
+static void thin_put(struct thin_c *tc);
+
+/*
+ * We can't hold rcu_read_lock() around code that can block.  So we
+ * find a thin with the rcu lock held; bump a refcount; then drop
+ * the lock.
+ */
+static struct thin_c *get_first_thin(struct pool *pool)
+{
+	struct thin_c *tc = NULL;
+
+	rcu_read_lock();
+	if (!list_empty(&pool->active_thins)) {
+		tc = list_entry_rcu(pool->active_thins.next, struct thin_c, list);
+		thin_get(tc);
+	}
+	rcu_read_unlock();
+
+	return tc;
+}
+
+static struct thin_c *get_next_thin(struct pool *pool, struct thin_c *tc)
+{
+	struct thin_c *old_tc = tc;
+
+	rcu_read_lock();
+	list_for_each_entry_continue_rcu(tc, &pool->active_thins, list) {
+		thin_get(tc);
+		thin_put(old_tc);
+		rcu_read_unlock();
+		return tc;
+	}
+	thin_put(old_tc);
+	rcu_read_unlock();
+
+	return NULL;
+}
+
 static void process_deferred_bios(struct pool *pool)
 {
 	unsigned long flags;
@@ -1505,10 +1547,11 @@ static void process_deferred_bios(struct pool *pool)
 	struct bio_list bios;
 	struct thin_c *tc;
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(tc, &pool->active_thins, list)
+	tc = get_first_thin(pool);
+	while (tc) {
 		process_thin_deferred_bios(tc);
-	rcu_read_unlock();
+		tc = get_next_thin(pool, tc);
+	}
 
 	/*
 	 * If there are any deferred flush bios, we must commit
@@ -1588,7 +1631,7 @@ static void pool_work_complete(struct pool_work *pw)
 static void pool_work_wait(struct pool_work *pw, struct pool *pool,
 			   void (*fn)(struct work_struct *))
 {
-	INIT_WORK(&pw->worker, fn);
+	INIT_WORK_ONSTACK(&pw->worker, fn);
 	init_completion(&pw->complete);
 	queue_work(pool->wq, &pw->worker);
 	wait_for_completion(&pw->complete);
@@ -1760,6 +1803,9 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		pool->process_discard = process_discard;
 		pool->process_prepared_mapping = process_prepared_mapping;
 		pool->process_prepared_discard = process_prepared_discard_passdown;
+
+		if (!pool->pf.error_if_no_space)
+			queue_delayed_work(pool->wq, &pool->no_space_timeout, NO_SPACE_TIMEOUT);
 		break;
 
 	case PM_WRITE:
@@ -3187,7 +3233,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 11, 0},
+	.version = {1, 12, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -3205,10 +3251,24 @@ static struct target_type pool_target = {
 /*----------------------------------------------------------------
  * Thin target methods
  *--------------------------------------------------------------*/
+static void thin_get(struct thin_c *tc)
+{
+	atomic_inc(&tc->refcount);
+}
+
+static void thin_put(struct thin_c *tc)
+{
+	if (atomic_dec_and_test(&tc->refcount))
+		complete(&tc->can_destroy);
+}
+
 static void thin_dtr(struct dm_target *ti)
 {
 	struct thin_c *tc = ti->private;
 	unsigned long flags;
+
+	thin_put(tc);
+	wait_for_completion(&tc->can_destroy);
 
 	spin_lock_irqsave(&tc->pool->lock, flags);
 	list_del_rcu(&tc->list);
@@ -3245,6 +3305,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct thin_c *tc;
 	struct dm_dev *pool_dev, *origin_dev;
 	struct mapped_device *pool_md;
+	unsigned long flags;
 
 	mutex_lock(&dm_thin_pool_table.mutex);
 
@@ -3335,9 +3396,12 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	mutex_unlock(&dm_thin_pool_table.mutex);
 
-	spin_lock(&tc->pool->lock);
+	atomic_set(&tc->refcount, 1);
+	init_completion(&tc->can_destroy);
+
+	spin_lock_irqsave(&tc->pool->lock, flags);
 	list_add_tail_rcu(&tc->list, &tc->pool->active_thins);
-	spin_unlock(&tc->pool->lock);
+	spin_unlock_irqrestore(&tc->pool->lock, flags);
 	/*
 	 * This synchronize_rcu() call is needed here otherwise we risk a
 	 * wake_worker() call finding no bios to process (because the newly
@@ -3511,7 +3575,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 11, 0},
+	.version = {1, 12, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
