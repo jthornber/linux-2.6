@@ -264,10 +264,10 @@ struct segment_migrate {
 /*----------------------------------------------------------------*/
 
 enum STATFLAG {
-	STAT_WRITE = 0, /* Write or read */
-	STAT_HIT, /* Hit or miss */
-	STAT_ON_BUFFER, /* Found on buffer or on the cache device */
-	STAT_FULLSIZE, /* Bio is fullsize or partial */
+	STAT_WRITE = 3, /* Write or read */
+	STAT_HIT = 2, /* Hit or miss */
+	STAT_ON_BUFFER = 1, /* Found on buffer or on the cache device */
+	STAT_FULLSIZE = 0, /* Bio is fullsize or partial */
 };
 #define STATLEN (1 << 4)
 
