@@ -1322,8 +1322,7 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 
 static bool spare_migration_bandwidth(struct cache *cache)
 {
-	sector_t current_volume = (atomic_read(&cache->nr_migrations) + 1) *
-		cache->sectors_per_block;
+	sector_t current_volume = atomic_read(&cache->nr_migrations) * cache->sectors_per_block;
 	return current_volume < cache->migration_threshold;
 }
 
