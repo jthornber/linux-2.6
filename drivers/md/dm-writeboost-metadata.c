@@ -472,41 +472,43 @@ static void format_segmd_endio(unsigned long error, void *__context)
 	atomic64_dec(&context->count);
 }
 
+struct zeroing_context {
+	int error;
+	struct completion complete;
+};
+
+static void zeroing_complete(int read_err, unsigned long write_err, void *context)
+{
+	struct zeroing_context *zc = context;
+	if (read_err || write_err)
+		zc->error = -EIO;
+	complete(&zc->complete);
+}
+
+/*
+ * Synchronously zeros out a region on a device.
+ */
+static int do_zeroing_region(struct wb_device *wb, struct dm_io_region *region)
+{
+	int r;
+	struct zeroing_context zc;
+	zc.error = 0;
+	init_completion(&zc.complete);
+	r = dm_kcopyd_zero(wb->copier, 1, region, 0, zeroing_complete, &zc);
+	if (r)
+		return r;
+	wait_for_completion(&zc.complete);
+	return zc.error;
+}
+
 static int zeroing_full_superblock(struct wb_device *wb)
 {
-	int r = 0;
-	struct dm_dev *dev = wb->cache_dev;
-
-	struct dm_io_request io_req_sup;
-	struct dm_io_region region_sup;
-
-	void *buf = vmalloc(1 << 20);
-	if (!buf)
-		return -ENOMEM;
-	check_buffer_alignment(buf);
-	memset(buf, 0, 1 << 20);
-
-	io_req_sup = (struct dm_io_request) {
-		.client = wb->io_client,
-		.bi_rw = WRITE_FUA,
-		.notify.fn = NULL,
-		.mem.type = DM_IO_VMA,
-		.mem.ptr.vma = buf,
-	};
-	region_sup = (struct dm_io_region) {
-		.bdev = dev->bdev,
+	struct dm_io_region region = {
+		.bdev = wb->cache_dev->bdev,
 		.sector = 0,
-		.count = (1 << 11),
+		.count = 1 << 11,
 	};
-	r = dm_safe_io(&io_req_sup, 1, &region_sup, NULL, false);
-	if (r) {
-		WBERR("I/O failed");
-		goto bad_io;
-	}
-
-bad_io:
-	vfree(buf);
-	return r;
+	return do_zeroing_region(wb, &region);
 }
 
 static int format_all_segment_headers(struct wb_device *wb)
@@ -719,38 +721,12 @@ static void free_rambuf_pool(struct wb_device *wb)
 
 static int do_clear_plog_dev_t1(struct wb_device *wb, u32 idx)
 {
-	int r = 0;
-	struct dm_io_request io_req;
-	struct dm_io_region region;
-
-	void *buf = vmalloc(wb->plog_seg_size << SECTOR_SHIFT);
-	if (!buf) {
-		WBERR("Failed to allocate buf");
-		return -ENOMEM;
-	}
-	check_buffer_alignment(buf);
-	memset(buf, 0, wb->plog_seg_size << SECTOR_SHIFT);
-
-	io_req = (struct dm_io_request) {
-		.client = wb->io_client,
-		.bi_rw = WRITE_FUA,
-		.notify.fn = NULL,
-		.mem.type = DM_IO_VMA,
-		.mem.ptr.vma = buf,
-	};
-
-	region = (struct dm_io_region) {
+	struct dm_io_region region = {
 		.bdev = wb->plog_dev_t1->bdev,
 		.sector = wb->plog_seg_size * idx,
 		.count = wb->plog_seg_size,
 	};
-
-	r = dm_safe_io(&io_req, 1, &region, NULL, false);
-	if (r)
-		WBERR("I/O failed");
-
-	vfree(buf);
-	return r;
+	return do_zeroing_region(wb, &region);
 }
 
 static int do_clear_plog_dev(struct wb_device *wb, u32 idx)
