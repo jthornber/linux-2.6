@@ -201,6 +201,17 @@ static struct list_head *queue_pop(struct queue *q)
 	return NULL;
 }
 
+static struct list_head *queue_peek(struct queue *q)
+{
+	unsigned level;
+
+	for (level = 0; level < NR_QUEUE_LEVELS; level++)
+		if (!list_empty(q->qs + level))
+			return q->qs[level].next;
+
+	return NULL;
+}
+
 static struct list_head *list_pop(struct list_head *lh)
 {
 	struct list_head *r = lh->next;
@@ -393,6 +404,7 @@ struct mq_policy {
 	unsigned discard_promote_adjustment;
 	unsigned read_promote_adjustment;
 	unsigned write_promote_adjustment;
+	dm_cblock_t write_pool_blocks;
 
 	/*
 	 * The hash table allows us to quickly find an entry by origin
@@ -516,6 +528,16 @@ static struct entry *pop(struct mq_policy *mq, struct queue *q)
 	hash_remove(e);
 
 	return e;
+}
+
+static struct entry *peek(struct mq_policy *mq, struct queue *q)
+{
+	struct list_head *h = queue_peek(q);
+
+	if (!h)
+		return NULL;
+
+	return container_of(h, struct entry, list);
 }
 
 /*
@@ -963,11 +985,10 @@ static void mq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 	mutex_unlock(&mq->lock);
 }
 
-static int mq_load_mapping(struct dm_cache_policy *p,
+static int __mq_load_mapping(struct mq_policy *mq,
 			   dm_oblock_t oblock, dm_cblock_t cblock,
 			   uint32_t hint, bool hint_valid)
 {
-	struct mq_policy *mq = to_mq_policy(p);
 	struct entry *e;
 
 	e = alloc_particular_entry(&mq->cache_pool, cblock);
@@ -978,6 +999,20 @@ static int mq_load_mapping(struct dm_cache_policy *p,
 	push(mq, e);
 
 	return 0;
+}
+
+static int mq_load_mapping(struct dm_cache_policy *p,
+			   dm_oblock_t oblock, dm_cblock_t cblock,
+			   uint32_t hint, bool hint_valid)
+{
+	int r;
+	struct mq_policy *mq = to_mq_policy(p);
+
+	mutex_lock(&mq->lock);
+	r = __mq_load_mapping(mq, oblock, cblock, hint, hint_valid);
+	mutex_unlock(&mq->lock);
+
+	return r;
 }
 
 static int mq_save_hints(struct mq_policy *mq, struct queue *q,
@@ -1060,30 +1095,69 @@ static int mq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
 	return r;
 }
 
-static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
-			      dm_cblock_t *cblock)
+static int __mq_writeback(struct mq_policy *mq, dm_oblock_t *oblock,
+			  dm_cblock_t *cblock, bool *demote, struct locker *l)
 {
-	struct entry *e = pop(mq, &mq->cache_dirty);
+	int r;
+	struct entry *e = peek(mq, &mq->cache_dirty);
 
 	if (!e)
 		return -ENODATA;
 
+	r = l->fn(l->context, e->oblock);
+	if (r)
+		return r;
+
 	*oblock = e->oblock;
 	*cblock = infer_cblock(&mq->cache_pool, e);
 	e->dirty = false;
+	del(mq, e);
 	push(mq, e);
 
+	*demote = false;
 	return 0;
 }
 
+static int __mq_demote(struct mq_policy *mq, dm_oblock_t *oblock,
+		       dm_cblock_t *cblock, bool *demote, struct locker *l)
+{
+	int r;
+	struct entry *e = pop(mq, &mq->cache_clean);
+
+	if (!e)
+		return __mq_writeback(mq, oblock, cblock, demote, l);
+
+	r = l->fn(l->context, e->oblock);
+	if (r) {
+		push(mq, e);
+		return r;
+	}
+
+	*oblock = e->oblock;
+	*cblock = infer_cblock(&mq->cache_pool, e);
+	free_entry(&mq->cache_pool, e);
+
+	*demote = true;
+	return 0;
+}
+
+static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
+			       dm_cblock_t *cblock, bool *demote, struct locker *l)
+{
+	if (mq->cache_pool.nr_allocated >= (from_cblock(mq->cache_size) - from_cblock(mq->write_pool_blocks)))
+		return __mq_demote(mq, oblock, cblock, demote, l);
+
+	return __mq_writeback(mq, oblock, cblock, demote, l);
+}
+
 static int mq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
-			     dm_cblock_t *cblock)
+			     dm_cblock_t *cblock, bool *demote, struct locker *l)
 {
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	r = __mq_writeback_work(mq, oblock, cblock);
+	r = __mq_writeback_work(mq, oblock, cblock, demote, l);
 	mutex_unlock(&mq->lock);
 
 	return r;
@@ -1158,6 +1232,9 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 	else if (!strcasecmp(key, "write_promote_adjustment"))
 		mq->write_promote_adjustment = tmp;
 
+	else if (!strcasecmp(key, "write_pool_blocks"))
+		mq->write_pool_blocks = to_cblock(tmp);
+
 	else
 		return -EINVAL;
 
@@ -1169,16 +1246,18 @@ static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsign
 	ssize_t sz = 0;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	DMEMIT("10 random_threshold %u "
+	DMEMIT("12 random_threshold %u "
 	       "sequential_threshold %u "
 	       "discard_promote_adjustment %u "
 	       "read_promote_adjustment %u "
-	       "write_promote_adjustment %u",
+	       "write_promote_adjustment %u "
+	       "write_pool_blocks %u",
 	       mq->tracker.thresholds[PATTERN_RANDOM],
 	       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
 	       mq->discard_promote_adjustment,
 	       mq->read_promote_adjustment,
-	       mq->write_promote_adjustment);
+	       mq->write_promote_adjustment,
+	       (unsigned) from_cblock(mq->write_pool_blocks));
 
 	return 0;
 }
@@ -1234,6 +1313,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->discard_promote_adjustment = DEFAULT_DISCARD_PROMOTE_ADJUSTMENT;
 	mq->read_promote_adjustment = DEFAULT_READ_PROMOTE_ADJUSTMENT;
 	mq->write_promote_adjustment = DEFAULT_WRITE_PROMOTE_ADJUSTMENT;
+	mq->write_pool_blocks = 0;
 	mutex_init(&mq->lock);
 	spin_lock_init(&mq->tick_lock);
 

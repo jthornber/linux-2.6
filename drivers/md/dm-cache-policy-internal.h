@@ -54,9 +54,11 @@ static inline int policy_walk_mappings(struct dm_cache_policy *p,
 
 static inline int policy_writeback_work(struct dm_cache_policy *p,
 					dm_oblock_t *oblock,
-					dm_cblock_t *cblock)
+					dm_cblock_t *cblock,
+					bool *demote,
+					struct locker *l)
 {
-	return p->writeback_work ? p->writeback_work(p, oblock, cblock) : -ENOENT;
+	return p->writeback_work ? p->writeback_work(p, oblock, cblock, demote, l) : -ENOENT;
 }
 
 static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)

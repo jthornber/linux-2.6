@@ -358,17 +358,25 @@ static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
 
 static int wb_writeback_work(struct dm_cache_policy *pe,
 			     dm_oblock_t *oblock,
-			     dm_cblock_t *cblock)
+			     dm_cblock_t *cblock,
+			     bool *demote,
+			     struct locker *l)
 {
 	int r = -ENOENT;
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 	unsigned long flags;
 
+	*demote = false;
 	spin_lock_irqsave(&p->lock, flags);
 
 	e = get_next_dirty_entry(p);
 	if (e) {
+		r = l->fn(l->context, e->oblock);
+		if (r) {
+			/* FIXME: finish */
+		}
+
 		*oblock = e->oblock;
 		*cblock = e->cblock;
 		r = 0;

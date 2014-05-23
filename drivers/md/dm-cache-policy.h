@@ -81,6 +81,11 @@ struct policy_result {
 typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
 			      dm_oblock_t oblock, uint32_t hint);
 
+struct locker {
+	int (*fn)(void *context, dm_oblock_t oblock);
+	void *context;
+};
+
 /*
  * The cache policy object.  Just a bunch of methods.  It is envisaged that
  * this structure will be embedded in a bigger, policy specific structure
@@ -173,7 +178,8 @@ struct dm_cache_policy {
 	 *
 	 * -ENODATA: no dirty blocks available
 	 */
-	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock);
+	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock,
+			      bool *demote, struct locker *l);
 
 	/*
 	 * How full is the cache?
