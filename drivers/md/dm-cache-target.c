@@ -874,6 +874,9 @@ static void migration_failure(struct dm_cache_migration *mg)
 	cleanup_migration(mg);
 }
 
+static void issue_copy(struct dm_cache_migration *mg);
+static void migration_success_post_commit(struct dm_cache_migration *mg);
+
 static void migration_success_pre_commit(struct dm_cache_migration *mg)
 {
 	unsigned long flags;
@@ -882,8 +885,8 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 	/* FIXME: what if mg->err? */
 
 	if (mg->writeback) {
-		cell_defer(cache, mg->old_ocell, false);
 		clear_dirty(cache, mg->old_oblock, mg->cblock);
+		cell_defer(cache, mg->old_ocell, false);
 		cleanup_migration(mg);
 		return;
 
@@ -895,26 +898,36 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 			if (mg->promote)
 				cell_defer(cache, mg->new_ocell, true);
 			cleanup_migration(mg);
-			return;
+
+		} else {
+			spin_lock_irqsave(&cache->lock, flags);
+			list_add_tail(&mg->list, &cache->need_commit_migrations);
+			cache->commit_requested = true;
+			spin_unlock_irqrestore(&cache->lock, flags);
 		}
 	} else {
+		/* FIXME: the bio can be let run in parallel with the insert */
 		if (dm_cache_insert_mapping(cache->cmd, mg->cblock, mg->new_oblock)) {
 			DMWARN_LIMIT("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(cache->policy, mg->new_oblock);
 			cleanup_migration(mg);
-			return;
 		}
-	}
 
-	spin_lock_irqsave(&cache->lock, flags);
-	list_add_tail(&mg->list, &cache->need_commit_migrations);
-	cache->commit_requested = true;
-	spin_unlock_irqrestore(&cache->lock, flags);
+		/*
+		 * We don't have to commit here this since we know there was
+		 * no previous block in that cache entry (the demotion
+		 * would have removed it).  We can rely on REQ_FLUSH doing
+		 * the commit.  If there's a crash the mapping will just disappear.
+		 * FIXME: set cache->commit_requested ?
+		 * FIXME: periodic commit?
+		 * FIXME: is there a commit as part of the suspend op?
+		 */
+		migration_success_post_commit(mg);
+	}
 }
 
 static void migration_success_post_commit(struct dm_cache_migration *mg)
 {
-	unsigned long flags;
 	struct cache *cache = mg->cache;
 
 	if (mg->writeback) {
@@ -927,9 +940,11 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 		if (mg->promote) {
 			mg->demote = false;
 
-			spin_lock_irqsave(&cache->lock, flags);
-			list_add_tail(&mg->list, &cache->quiesced_migrations);
-			spin_unlock_irqrestore(&cache->lock, flags);
+			/*
+			 * We don't need to quiesce again, since both cells
+			 * were held for the last quiesce
+			 */
+			issue_copy(mg);
 
 		} else {
 			if (mg->invalidate)
