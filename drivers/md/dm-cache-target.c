@@ -1749,6 +1749,11 @@ static void do_worker(struct work_struct *ws)
 
 	do {
 		if (!is_quiescing(cache)) {
+			/*
+			 * This gives priority of the migration bandwidth
+			 * to the writeback work.  Experiments suggest this
+			 * is better than putting at the end.
+			 */
 			writeback_some_dirty_blocks(cache);
 			process_deferred_writethrough_bios(cache);
 			process_deferred_bios(cache);
