@@ -263,7 +263,6 @@ struct cache {
 	struct dm_cache_policy *policy;
 	unsigned policy_nr_args;
 
-	bool need_tick_bio:1;
 	bool sized:1;
 	bool invalidate:1;
 	bool commit_requested:1;
@@ -285,7 +284,6 @@ struct cache {
 };
 
 struct per_bio_data {
-	bool tick:1;
 	unsigned req_nr:2;
 	struct dm_deferred_entry *all_io_entry;
 	struct dm_hook_info hook_info;
@@ -635,7 +633,6 @@ static struct per_bio_data *init_per_bio_data(struct bio *bio, size_t data_size)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio, data_size);
 
-	pb->tick = false;
 	pb->req_nr = dm_bio_get_target_bio_nr(bio);
 	pb->all_io_entry = NULL;
 
@@ -667,21 +664,6 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 			(bi_sector & (cache->sectors_per_block - 1));
 }
 
-static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
-{
-	unsigned long flags;
-	size_t pb_data_size = get_per_bio_data_size(cache);
-	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
-
-	spin_lock_irqsave(&cache->lock, flags);
-	if (cache->need_tick_bio &&
-	    !(bio->bi_rw & (REQ_FUA | REQ_FLUSH | REQ_DISCARD))) {
-		pb->tick = true;
-		cache->need_tick_bio = false;
-	}
-	spin_unlock_irqrestore(&cache->lock, flags);
-}
-
 static bool is_write_io(struct bio *bio)
 {
 	return bio_data_dir(bio) == WRITE;
@@ -690,7 +672,6 @@ static bool is_write_io(struct bio *bio)
 static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
 				  dm_oblock_t oblock)
 {
-	check_if_tick_bio_needed(cache, bio);
 	remap_to_origin(cache, bio);
 	if (bio_data_dir(bio) == WRITE)
 		clear_discard(cache, oblock);
@@ -699,7 +680,6 @@ static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
 static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 				 dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	check_if_tick_bio_needed(cache, bio);
 	remap_to_cache(cache, bio, cblock);
 	if (is_write_io(bio)) {
 		set_dirty(cache, oblock, cblock);
@@ -2392,7 +2372,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->next_migration = NULL;
 
-	cache->need_tick_bio = true;
 	cache->sized = false;
 	cache->invalidate = false;
 	cache->commit_requested = false;
@@ -2614,14 +2593,6 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	if (pb->tick) {
-		policy_tick(cache->policy);
-
-		spin_lock_irqsave(&cache->lock, flags);
-		cache->need_tick_bio = true;
-		spin_unlock_irqrestore(&cache->lock, flags);
-	}
-
 	check_for_quiesced_migrations(cache, pb);
 
 	return 0;
@@ -2834,7 +2805,6 @@ static void cache_resume(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
 
-	cache->need_tick_bio = true;
 	do_waker(&cache->waker.work);
 }
 
