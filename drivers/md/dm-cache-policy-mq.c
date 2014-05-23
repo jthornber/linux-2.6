@@ -1122,19 +1122,18 @@ static int __mq_demote(struct mq_policy *mq, dm_oblock_t *oblock,
 		       dm_cblock_t *cblock, bool *demote, struct locker *l)
 {
 	int r;
-	struct entry *e = pop(mq, &mq->cache_clean);
+	struct entry *e = peek(mq, &mq->cache_clean);
 
 	if (!e)
 		return __mq_writeback(mq, oblock, cblock, demote, l);
 
 	r = l->fn(l->context, e->oblock);
-	if (r) {
-		push(mq, e);
+	if (r)
 		return r;
-	}
 
 	*oblock = e->oblock;
 	*cblock = infer_cblock(&mq->cache_pool, e);
+	del(mq, e);
 	free_entry(&mq->cache_pool, e);
 
 	*demote = true;
