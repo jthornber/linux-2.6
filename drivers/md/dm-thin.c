@@ -225,6 +225,7 @@ struct thin_c {
 	struct list_head list;
 	struct dm_dev *pool_dev;
 	struct dm_dev *origin_dev;
+	sector_t origin_size;
 	dm_thin_id dev_id;
 
 	struct pool *pool;
@@ -3493,6 +3494,16 @@ static void thin_postsuspend(struct dm_target *ti)
 	noflush_work(tc, do_noflush_stop);
 }
 
+static int thin_preresume(struct dm_target *ti)
+{
+	struct thin_c *tc = ti->private;
+
+	if (tc->origin_dev)
+		tc->origin_size = get_dev_size(tc->origin_dev->bdev);
+
+	return 0;
+}
+
 /*
  * <nr mapped sectors> <highest mapped sector>
  */
@@ -3581,6 +3592,7 @@ static struct target_type thin_target = {
 	.dtr = thin_dtr,
 	.map = thin_map,
 	.end_io = thin_endio,
+	.preresume = thin_preresume,
 	.presuspend = thin_presuspend,
 	.postsuspend = thin_postsuspend,
 	.status = thin_status,
