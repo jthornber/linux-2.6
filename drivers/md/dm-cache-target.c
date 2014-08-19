@@ -501,7 +501,7 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 {
 	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		policy_clear_dirty(cache->policy, oblock);
-		if (atomic_dec_return(&cache->nr_dirty) == 0)
+		if (atomic_dec_and_test(&cache->nr_dirty))
 			dm_table_event(cache->ti->table);
 	}
 }
