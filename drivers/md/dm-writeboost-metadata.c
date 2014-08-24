@@ -702,7 +702,6 @@ bad_alloc_data:
 	kmem_cache_destroy(wb->rambuf_cachep);
 bad_cachep:
 	kfree(wb->rambuf_pool);
-	BUG();
 	return r;
 }
 
