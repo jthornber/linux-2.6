@@ -30,15 +30,6 @@
 
 /*----------------------------------------------------------------*/
 
-#define WBERR(f, args...) \
-	DMERR("%s: " f, __func__, ## args)
-#define WBWARN(f, args...) \
-	DMWARN("%s: " f, __func__, ## args)
-#define WBINFO(f, args...) \
-	DMINFO("%s: " f, __func__, ## args)
-
-/*----------------------------------------------------------------*/
-
 /*
  * The detail of the disk format (SSD)
  * -----------------------------------
@@ -595,9 +586,9 @@ sector_t dm_devsize(struct dm_dev *);
 			r = 0; \
 		} else if (r == -EIO) { \
 			set_bit(WB_DEAD, &wb->flags); \
-			WBERR("device is marked as dead"); \
+			DMERR("device is marked as dead"); \
 		} else if (r == -ENOMEM) { \
-			WBERR("I/O failed by ENOMEM"); \
+			DMERR("I/O failed by ENOMEM"); \
 			schedule_timeout_interruptible(msecs_to_jiffies(1000));\
 		} else if (r) { \
 			r = 0;\

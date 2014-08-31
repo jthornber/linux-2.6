@@ -78,7 +78,7 @@ int dm_safe_io_internal(struct wb_device *wb, struct dm_io_request *io_req,
 			eb = *err_bits;
 
 		format_dev_t(buf, dev);
-		WBERR("%s() I/O error(%d), bits(%lu), dev(%s), sector(%llu), rw(%d)",
+		DMERR("%s() I/O error(%d), bits(%lu), dev(%s), sector(%llu), rw(%d)",
 		      caller, err, eb,
 		      buf, (unsigned long long) regions->sector, io_req->bi_rw);
 	}
@@ -440,7 +440,7 @@ void acquire_new_seg(struct wb_device *wb, u64 id)
 
 	wait_for_migration(wb, SUB_ID(id, wb->nr_segments));
 	if (count_dirty_caches_remained(new_seg)) {
-		WBERR("%u dirty caches remained. id:%llu",
+		DMERR("%u dirty caches remained. id:%llu",
 		      count_dirty_caches_remained(new_seg), id);
 		BUG();
 	}
@@ -1259,7 +1259,7 @@ static int consume_essential_argv(struct wb_device *wb, struct dm_arg_set *as)
 
 	r = dm_read_arg(_args, as, &tmp, &ti->error);
 	if (r) {
-		WBERR("%s", ti->error);
+		DMERR("%s", ti->error);
 		return r;
 	}
 	wb->type = tmp;
@@ -1267,14 +1267,14 @@ static int consume_essential_argv(struct wb_device *wb, struct dm_arg_set *as)
 	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
 			  &wb->backing_dev);
 	if (r) {
-		WBERR("Failed to get backing_dev");
+		DMERR("Failed to get backing_dev");
 		return r;
 	}
 
 	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
 			  &wb->cache_dev);
 	if (r) {
-		WBERR("Failed to get cache_dev");
+		DMERR("Failed to get cache_dev");
 		goto bad_get_cache;
 	}
 
@@ -1297,7 +1297,7 @@ bad_get_cache:
 			break; \
 		r = dm_read_arg(_args + (nr), as, &tmp, &ti->error); \
 		if (r) { \
-			WBERR("%s", ti->error); \
+			DMERR("%s", ti->error); \
 			break; \
 		} \
 		wb->name = tmp; \
@@ -1318,7 +1318,7 @@ static int consume_optional_argv(struct wb_device *wb, struct dm_arg_set *as)
 	if (as->argc) {
 		r = dm_read_arg_group(_args, as, &argc, &ti->error);
 		if (r) {
-			WBERR("%s", ti->error);
+			DMERR("%s", ti->error);
 			return r;
 		}
 	}
@@ -1398,7 +1398,7 @@ static int consume_tunable_argv(struct wb_device *wb, struct dm_arg_set *as)
 	if (as->argc) {
 		r = dm_read_arg_group(_args, as, &argc, &ti->error);
 		if (r) {
-			WBERR("%s", ti->error);
+			DMERR("%s", ti->error);
 			return r;
 		}
 		/*
@@ -1421,7 +1421,7 @@ static int init_core_struct(struct dm_target *ti)
 
 	r = dm_set_target_max_io_len(ti, 1 << 3);
 	if (r) {
-		WBERR("Failed to set max_io_len");
+		DMERR("Failed to set max_io_len");
 		return r;
 	}
 
@@ -1433,7 +1433,7 @@ static int init_core_struct(struct dm_target *ti)
 
 	wb = kzalloc(sizeof(*wb), GFP_KERNEL);
 	if (!wb) {
-		WBERR("Failed to allocate wb");
+		DMERR("Failed to allocate wb");
 		return -ENOMEM;
 	}
 	ti->private = wb;
@@ -1477,14 +1477,14 @@ static int init_core_struct(struct dm_target *ti)
 	 */
 	wb->io_wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM, 0);
 	if (!wb->io_wq) {
-		WBERR("Failed to allocate io_wq");
+		DMERR("Failed to allocate io_wq");
 		r = -ENOMEM;
 		goto bad_io_wq;
 	}
 
 	wb->io_client = dm_io_client_create();
 	if (IS_ERR(wb->io_client)) {
-		WBERR("Failed to allocate io_client");
+		DMERR("Failed to allocate io_client");
 		r = PTR_ERR(wb->io_client);
 		goto bad_io_client;
 	}
@@ -1774,7 +1774,7 @@ static int __init writeboost_module_init(void)
 
 	r = dm_register_target(&writeboost_target);
 	if (r < 0) {
-		WBERR("Failed to register target");
+		DMERR("Failed to register target");
 		return r;
 	}
 
