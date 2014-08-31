@@ -20,8 +20,8 @@ void flush_barrier_ios(struct work_struct *);
 
 /*----------------------------------------------------------------*/
 
-int migrate_proc(void *);
-void wait_for_migration(struct wb_device *, u64 id);
+int writeback_proc(void *);
+void wait_for_writeback(struct wb_device *, u64 id);
 
 /*----------------------------------------------------------------*/
 
