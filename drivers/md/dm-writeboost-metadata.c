@@ -961,8 +961,6 @@ static void free_devices(struct wb_device *wb)
 
 static int read_plog_seg_t1(void *buf, struct wb_device *wb, u32 idx)
 {
-	int r = 0;
-
 	struct dm_io_request io_req = {
 		.client = wb->io_client,
 		.bi_rw = READ,
@@ -1032,7 +1030,6 @@ static int find_min_id_plog(struct wb_device *wb, u64 *id, u32 *idx)
 static int flush_rambuf(struct wb_device *wb,
 			struct segment_header *seg, void *rambuf)
 {
-	int r = 0;
 	struct dm_io_request io_req = {
 		.client = wb->io_client,
 		.bi_rw = WRITE,
@@ -1395,7 +1392,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 	return r;
 }
 
-static int infer_last_migrated_id(struct wb_device *wb)
+static int infer_last_writeback_id(struct wb_device *wb)
 {
 	int r = 0;
 
@@ -1405,18 +1402,18 @@ static int infer_last_migrated_id(struct wb_device *wb)
 	if (r)
 		return r;
 
-	atomic64_set(&wb->last_migrated_segment_id,
+	atomic64_set(&wb->last_writeback_segment_id,
 		atomic64_read(&wb->last_flushed_segment_id) > wb->nr_segments ?
 		atomic64_read(&wb->last_flushed_segment_id) - wb->nr_segments : 0);
 
 	/*
-	 * If last_migrated_id is recorded on the super block
-	 * We can eliminate unnecessary migration for the segments that
-	 * were migrated before.
+	 * If last_writeback_id is recorded on the super block
+	 * We can eliminate unnecessary writeback for the segments that
+	 * were written back before.
 	 */
-	record_id = le64_to_cpu(record.last_migrated_segment_id);
-	if (record_id > atomic64_read(&wb->last_migrated_segment_id))
-		atomic64_set(&wb->last_migrated_segment_id, record_id);
+	record_id = le64_to_cpu(record.last_writeback_segment_id);
+	if (record_id > atomic64_read(&wb->last_writeback_segment_id))
+		atomic64_set(&wb->last_writeback_segment_id, record_id);
 
 	return r;
 }
@@ -1461,9 +1458,9 @@ static int replay_log_on_cache(struct wb_device *wb)
 	atomic64_set(&wb->last_flushed_segment_id, max_id);
 
 	/*
-	 * Setup last_migrated_segment_id
+	 * Setup last_writeback_segment_id
 	 */
-	infer_last_migrated_id(wb);
+	infer_last_writeback_id(wb);
 
 	return r;
 }
@@ -1505,99 +1502,99 @@ static int recover_cache(struct wb_device *wb)
 
 /*----------------------------------------------------------------*/
 
-static struct segment_migrate *alloc_segment_migrate(struct wb_device *wb)
+static struct writeback_segment *alloc_writeback_segment(struct wb_device *wb)
 {
 	u8 i;
 
-	struct segment_migrate *segmig = kmalloc(sizeof(*segmig), GFP_NOIO);
-	if (!segmig)
-		goto bad_segmig;
+	struct writeback_segment *writeback_seg = kmalloc(sizeof(*writeback_seg), GFP_NOIO);
+	if (!writeback_seg)
+		goto bad_writeback_seg;
 
-	segmig->ios = kmalloc(wb->nr_caches_inseg * sizeof(struct migrate_io), GFP_NOIO);
-	if (!segmig->ios)
+	writeback_seg->ios = kmalloc(wb->nr_caches_inseg * sizeof(struct writeback_io), GFP_NOIO);
+	if (!writeback_seg->ios)
 		goto bad_ios;
 
-	segmig->buf = kmem_cache_alloc(wb->rambuf_cachep, GFP_NOIO);
-	if (!segmig->buf)
+	writeback_seg->buf = kmem_cache_alloc(wb->rambuf_cachep, GFP_NOIO);
+	if (!writeback_seg->buf)
 		goto bad_buf;
 
 	for (i = 0; i < wb->nr_caches_inseg; i++) {
-		struct migrate_io *mio = segmig->ios + i;
-		mio->data = segmig->buf + (i << 12);
+		struct writeback_io *writeback_io = writeback_seg->ios + i;
+		writeback_io->data = writeback_seg->buf + (i << 12);
 	}
 
-	return segmig;
+	return writeback_seg;
 
 bad_buf:
-	kfree(segmig->ios);
+	kfree(writeback_seg->ios);
 bad_ios:
-	kfree(segmig);
-bad_segmig:
+	kfree(writeback_seg);
+bad_writeback_seg:
 	return NULL;
 }
 
-static void free_segment_migrate(struct wb_device *wb, struct segment_migrate *segmig)
+static void free_writeback_segment(struct wb_device *wb, struct writeback_segment *writeback_seg)
 {
-	kmem_cache_free(wb->rambuf_cachep, segmig->buf);
-	kfree(segmig->ios);
-	kfree(segmig);
+	kmem_cache_free(wb->rambuf_cachep, writeback_seg->buf);
+	kfree(writeback_seg->ios);
+	kfree(writeback_seg);
 }
 
 /*
- * Try to allocate new migration buffer by the @nr_batch size.
+ * Try to allocate new writeback buffer by the @nr_batch size.
  * On success, it frees the old buffer.
  *
  * Bad user may set # of batches that can hardly allocate.
  * This function is robust in that case.
  */
-static void free_migrate_ios(struct wb_device *wb)
+static void free_writeback_ios(struct wb_device *wb)
 {
 	size_t i;
-	for (i = 0; i < wb->nr_cur_batched_migration; i++)
-		free_segment_migrate(wb, *(wb->emigrates + i));
-	kfree(wb->emigrates);
+	for (i = 0; i < wb->nr_cur_batched_writeback; i++)
+		free_writeback_segment(wb, *(wb->writeback_segs + i));
+	kfree(wb->writeback_segs);
 }
 
 /*
- * Request to allocate data structures to migrate @nr_batch segments.
+ * Request to allocate data structures to write back @nr_batch segments.
  * Previous structures are preserved in case of failure.
  */
-int try_alloc_migrate_ios(struct wb_device *wb, size_t nr_batch)
+int try_alloc_writeback_ios(struct wb_device *wb, size_t nr_batch)
 {
 	int r = 0;
 	size_t i;
 
-	struct segment_migrate **emigrates = kzalloc(
-			nr_batch * sizeof(struct segment_migrate *), GFP_KERNEL);
-	if (!emigrates)
+	struct writeback_segment **writeback_segs = kzalloc(
+			nr_batch * sizeof(struct writeback_segment *), GFP_KERNEL);
+	if (!writeback_segs)
 		return -ENOMEM;
 
 	for (i = 0; i < nr_batch; i++) {
-		struct segment_migrate **segmig = emigrates + i;
-		*segmig = alloc_segment_migrate(wb);
-		if (!segmig) {
+		struct writeback_segment **writeback_seg = writeback_segs + i;
+		*writeback_seg = alloc_writeback_segment(wb);
+		if (!writeback_seg) {
 			int j;
 			for (j = 0; j < i; j++)
-				free_segment_migrate(wb, *(emigrates + j));
-			kfree(emigrates);
+				free_writeback_segment(wb, *(writeback_segs + j));
+			kfree(writeback_segs);
 
-			DMERR("Failed to allocate emigrates");
+			DMERR("Failed to allocate writeback_segs");
 			return -ENOMEM;
 		}
 	}
 
 	/*
 	 * Free old buffers if exists.
-	 * wb->emigrates is firstly NULL under constructor .ctr.
+	 * wb->writeback_segs is firstly NULL under constructor .ctr.
 	 */
-	if (wb->emigrates)
-		free_migrate_ios(wb);
+	if (wb->writeback_segs)
+		free_writeback_ios(wb);
 
 	/*
 	 * Swap by new values
 	 */
-	wb->emigrates = emigrates;
-	wb->nr_cur_batched_migration = nr_batch;
+	wb->writeback_segs = writeback_segs;
+	wb->nr_cur_batched_writeback = nr_batch;
 
 	return r;
 }
@@ -1655,32 +1652,32 @@ static void free_metadata(struct wb_device *wb)
 	free_segment_header_array(wb);
 }
 
-static int init_migrate_daemon(struct wb_device *wb)
+static int init_writeback_daemon(struct wb_device *wb)
 {
 	int r = 0;
 	size_t nr_batch;
 
-	atomic_set(&wb->migrate_fail_count, 0);
-	atomic_set(&wb->migrate_io_count, 0);
+	atomic_set(&wb->writeback_fail_count, 0);
+	atomic_set(&wb->writeback_io_count, 0);
 
 	nr_batch = 1 << (15 - wb->segment_size_order); /* 16MB */
-	wb->nr_max_batched_migration = nr_batch;
-	if (try_alloc_migrate_ios(wb, nr_batch))
+	wb->nr_max_batched_writeback = nr_batch;
+	if (try_alloc_writeback_ios(wb, nr_batch))
 		return -ENOMEM;
 
-	init_waitqueue_head(&wb->migrate_wait_queue);
+	init_waitqueue_head(&wb->writeback_wait_queue);
 	init_waitqueue_head(&wb->wait_drop_caches);
-	init_waitqueue_head(&wb->migrate_io_wait_queue);
+	init_waitqueue_head(&wb->writeback_io_wait_queue);
 
-	wb->allow_migrate = false;
-	wb->urge_migrate = false;
+	wb->allow_writeback = false;
+	wb->urge_writeback = false;
 	wb->force_drop = false;
-	CREATE_DAEMON(migrate);
+	CREATE_DAEMON(writeback);
 
 	return r;
 
-bad_migrate_daemon:
-	free_migrate_ios(wb);
+bad_writeback_daemon:
+	free_writeback_ios(wb);
 	return r;
 }
 
@@ -1738,15 +1735,15 @@ static void init_barrier_deadline_work(struct wb_device *wb)
 	INIT_WORK(&wb->barrier_deadline_work, flush_barrier_ios);
 }
 
-static int init_migrate_modulator(struct wb_device *wb)
+static int init_writeback_modulator(struct wb_device *wb)
 {
 	int r = 0;
 	/*
 	 * EMC's textbook on storage system teaches us
 	 * storage should keep its load no more than 70%.
 	 */
-	wb->migrate_threshold = 70;
-	wb->enable_migration_modulator = false;
+	wb->writeback_threshold = 70;
+	wb->enable_writeback_modulator = false;
 	CREATE_DAEMON(modulator);
 	return r;
 
@@ -1788,10 +1785,10 @@ int resume_cache(struct wb_device *wb)
 	if (r)
 		goto bad_metadata;
 
-	r = init_migrate_daemon(wb);
+	r = init_writeback_daemon(wb);
 	if (r) {
-		DMERR("init_migrate_daemon failed");
-		goto bad_migrate_daemon;
+		DMERR("init_writeback_daemon failed");
+		goto bad_writeback_daemon;
 	}
 
 	r = recover_cache(wb);
@@ -1808,10 +1805,10 @@ int resume_cache(struct wb_device *wb)
 
 	init_barrier_deadline_work(wb);
 
-	r = init_migrate_modulator(wb);
+	r = init_writeback_modulator(wb);
 	if (r) {
-		DMERR("init_migrate_modulator failed");
-		goto bad_migrate_modulator;
+		DMERR("init_writeback_modulator failed");
+		goto bad_writeback_modulator;
 	}
 
 	r = init_recorder_daemon(wb);
@@ -1832,16 +1829,16 @@ bad_sync_daemon:
 	kthread_stop(wb->recorder_daemon);
 bad_recorder_daemon:
 	kthread_stop(wb->modulator_daemon);
-bad_migrate_modulator:
+bad_writeback_modulator:
 	cancel_work_sync(&wb->barrier_deadline_work);
 
 	mempool_destroy(wb->flush_job_pool);
 	destroy_workqueue(wb->flusher_wq);
 bad_flusher:
 bad_recover:
-	kthread_stop(wb->migrate_daemon);
-	free_migrate_ios(wb);
-bad_migrate_daemon:
+	kthread_stop(wb->writeback_daemon);
+	free_writeback_ios(wb);
+bad_writeback_daemon:
 	free_metadata(wb);
 bad_metadata:
 	free_devices(wb);
@@ -1864,8 +1861,8 @@ void free_cache(struct wb_device *wb)
 	mempool_destroy(wb->flush_job_pool);
 	destroy_workqueue(wb->flusher_wq);
 
-	kthread_stop(wb->migrate_daemon);
-	free_migrate_ios(wb);
+	kthread_stop(wb->writeback_daemon);
+	free_writeback_ios(wb);
 
 	free_metadata(wb);
 

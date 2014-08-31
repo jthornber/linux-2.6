@@ -68,7 +68,7 @@ struct superblock_header_device {
  * Record the current cache status if required.
  */
 struct superblock_record_device {
-	__le64 last_migrated_segment_id;
+	__le64 last_writeback_segment_id;
 } __packed;
 
 /*----------------------------------------------------------------*/
@@ -125,7 +125,7 @@ struct segment_header {
 	u64 id; /* Must be initialized to 0 */
 
 	/*
-	 * The number of metablocks in a segment to flush and then migrate.
+	 * The number of metablocks in a segment to flush and then write back.
 	 */
 	u8 length;
 
@@ -217,22 +217,22 @@ struct plog_meta_device {
 /*----------------------------------------------------------------*/
 
 /*
- * Batched and Sorted migration
+ * Batched and Sorted Writeback
  * ----------------------------
  *
- * Migrate daemon writes back segments on the cache device effectively.
- * "Batched" means it migrates number of segments at the same time
+ * Writeback daemon writes back segments on the cache device effectively.
+ * "Batched" means it writes back number of segments at the same time
  * in asynchronous manner.
- * "Sorted" means these migrate IOs are sorted in ascending order of
- * LBA in the backing device. Rb-tree is used to sort the migrate IOs.
+ * "Sorted" means these writeback IOs are sorted in ascending order of
+ * LBA in the backing device. Rb-tree is used to sort the writeback IOs.
  *
  * Reading from the cache device is sequential thus also effective.
  */
 
 /*
- * Migration of a cache line
+ * Writeback of a cache line
  */
-struct migrate_io {
+struct writeback_io {
 	struct rb_node rb_node;
 
 	sector_t sector; /* Key */
@@ -241,14 +241,14 @@ struct migrate_io {
 	void *data;
 	u8 memorized_dirtiness;
 };
-#define migrate_io_from_node(node) rb_entry((node), struct migrate_io, rb_node)
+#define writeback_io_from_node(node) rb_entry((node), struct writeback_io, rb_node)
 
 /*
- * Migration of a segment
+ * Writeback of a segment
  */
-struct segment_migrate {
-	struct segment_header *seg; /* Segment to migrate */
-	struct migrate_io *ios;
+struct writeback_segment {
+	struct segment_header *seg; /* Segment to write back */
+	struct writeback_io *ios;
 	void *buf; /* Sequentially read */
 };
 
@@ -363,10 +363,10 @@ struct wb_device {
 	/*---------------------------------------------*/
 
 	/********************
-	 * One-shot Migration
+	 * One-shot Writeback
 	 ********************/
 
-	wait_queue_head_t migrate_mb_wait_queue;
+	wait_queue_head_t writeback_mb_wait_queue;
 	struct dm_kcopyd_client *copier;
 
 	/*---------------------------------------------*/
@@ -400,53 +400,53 @@ struct wb_device {
 
 	/*---------------------------------------------*/
 
-	/****************
-	 * Migrate Daemon
-	 ****************/
+	/******************
+	 * Writeback Daemon
+	 ******************/
 
-	struct task_struct *migrate_daemon;
-	int allow_migrate;
-	int urge_migrate; /* Start migration immediately */
-	int force_drop; /* Don't stop migration */
-	atomic64_t last_migrated_segment_id;
+	struct task_struct *writeback_daemon;
+	int allow_writeback;
+	int urge_writeback; /* Start writeback immediately */
+	int force_drop; /* Don't stop writeback */
+	atomic64_t last_writeback_segment_id;
 
 	/*
-	 * Wait for a specified segment to be migrated
+	 * Wait for a specified segment to be written back
 	 * Non-interruptible
-	 * cf. wait_for_migration()
+	 * cf. wait_for_writeback()
 	 */
-	wait_queue_head_t migrate_wait_queue;
+	wait_queue_head_t writeback_wait_queue;
 
 	/*
-	 * Wait for migrating all the dirty caches (or dropping caches)
+	 * Wait for writing back all the dirty caches (or dropping caches)
 	 * Interruptible
 	 */
 	wait_queue_head_t wait_drop_caches;
 
 	/*
-	 * Wait for a backgraound migration complete
+	 * Wait for a backgraound writeback complete
 	 */
-	wait_queue_head_t migrate_io_wait_queue;
-	atomic_t migrate_io_count;
-	atomic_t migrate_fail_count;
+	wait_queue_head_t writeback_io_wait_queue;
+	atomic_t writeback_io_count;
+	atomic_t writeback_fail_count;
 
-	u32 nr_cur_batched_migration;
-	u32 nr_max_batched_migration; /* Tunable */
+	u32 nr_cur_batched_writeback;
+	u32 nr_max_batched_writeback; /* Tunable */
 
-	struct rb_root migrate_tree;
+	struct rb_root writeback_tree;
 
-	u32 num_emigrates; /* Number of emigrates */
-	struct segment_migrate **emigrates;
+	u32 num_writeback_segs; /* Number of segments to write back */
+	struct writeback_segment **writeback_segs;
 
 	/*---------------------------------------------*/
 
 	/*********************
-	 * Migration Modulator
+	 * Writeback Modulator
 	 *********************/
 
 	struct task_struct *modulator_daemon;
-	int enable_migration_modulator; /* Tunable */
-	u8 migrate_threshold; /* Tunable */
+	int enable_writeback_modulator; /* Tunable */
+	u8 writeback_threshold; /* Tunable */
 
 	/*---------------------------------------------*/
 
