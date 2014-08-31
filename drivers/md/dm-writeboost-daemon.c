@@ -12,32 +12,19 @@
 
 /*----------------------------------------------------------------*/
 
-static void update_barrier_deadline(struct wb_device *wb)
-{
-	mod_timer(&wb->barrier_deadline_timer,
-		  jiffies + msecs_to_jiffies(ACCESS_ONCE(wb->barrier_deadline_ms)));
-}
-
 void queue_barrier_io(struct wb_device *wb, struct bio *bio)
 {
 	mutex_lock(&wb->io_lock);
 	bio_list_add(&wb->barrier_ios, bio);
 	mutex_unlock(&wb->io_lock);
 
-	if (!timer_pending(&wb->barrier_deadline_timer))
-		update_barrier_deadline(wb);
-}
-
-void barrier_deadline_proc(unsigned long data)
-{
-	struct wb_device *wb = (struct wb_device *) data;
-	schedule_work(&wb->barrier_deadline_work);
+	schedule_work(&wb->flush_barrier_work);
 }
 
 void flush_barrier_ios(struct work_struct *work)
 {
 	struct wb_device *wb = container_of(
-		work, struct wb_device, barrier_deadline_work);
+		work, struct wb_device, flush_barrier_work);
 
 	if (bio_list_empty(&wb->barrier_ios))
 		return;
@@ -72,9 +59,6 @@ static void process_deferred_barriers(struct wb_device *wb, struct flush_job *jo
 			);
 		}
 	}
-
-	if (has_barrier)
-		update_barrier_deadline(wb);
 }
 
 void flush_proc(struct work_struct *work)
