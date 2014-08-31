@@ -1351,7 +1351,6 @@ static int do_consume_tunable_argv(struct wb_device *wb,
 	static struct dm_arg _args[] = {
 		{0, 1, "Invalid allow_writeback"},
 		{0, 1, "Invalid enable_writeback_modulator"},
-		{1, 1000, "Invalid barrier_deadline_ms"},
 		{1, 1000, "Invalid nr_max_batched_writeback"},
 		{0, 100, "Invalid writeback_threshold"},
 		{0, 3600, "Invalid update_record_interval"},
@@ -1367,11 +1366,10 @@ static int do_consume_tunable_argv(struct wb_device *wb,
 
 		consume_kv(allow_writeback, 0);
 		consume_kv(enable_writeback_modulator, 1);
-		consume_kv(barrier_deadline_ms, 2);
-		consume_kv(nr_max_batched_writeback, 3);
-		consume_kv(writeback_threshold, 4);
-		consume_kv(update_record_interval, 5);
-		consume_kv(sync_interval, 6);
+		consume_kv(nr_max_batched_writeback, 2);
+		consume_kv(writeback_threshold, 3);
+		consume_kv(update_record_interval, 4);
+		consume_kv(sync_interval, 5);
 
 		if (!r) {
 			argc--;
@@ -1679,9 +1677,7 @@ static void emit_tunables(struct wb_device *wb, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 
-	DMEMIT(" %d", 14);
-	DMEMIT(" barrier_deadline_ms %lu",
-	       wb->barrier_deadline_ms);
+	DMEMIT(" %d", 12);
 	DMEMIT(" allow_writeback %d",
 	       wb->allow_writeback ? 1 : 0);
 	DMEMIT(" enable_writeback_modulator %d",

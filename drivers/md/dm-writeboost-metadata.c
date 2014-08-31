@@ -1726,13 +1726,10 @@ bad_flush_job_pool:
 	return r;
 }
 
-static void init_barrier_deadline_work(struct wb_device *wb)
+static void init_flush_barrier_work(struct wb_device *wb)
 {
-	wb->barrier_deadline_ms = 10;
-	setup_timer(&wb->barrier_deadline_timer,
-		    barrier_deadline_proc, (unsigned long) wb);
 	bio_list_init(&wb->barrier_ios);
-	INIT_WORK(&wb->barrier_deadline_work, flush_barrier_ios);
+	INIT_WORK(&wb->flush_barrier_work, flush_barrier_ios);
 }
 
 static int init_writeback_modulator(struct wb_device *wb)
@@ -1803,7 +1800,7 @@ int resume_cache(struct wb_device *wb)
 		goto bad_flusher;
 	}
 
-	init_barrier_deadline_work(wb);
+	init_flush_barrier_work(wb);
 
 	r = init_writeback_modulator(wb);
 	if (r) {
@@ -1830,7 +1827,7 @@ bad_sync_daemon:
 bad_recorder_daemon:
 	kthread_stop(wb->modulator_daemon);
 bad_writeback_modulator:
-	cancel_work_sync(&wb->barrier_deadline_work);
+	cancel_work_sync(&wb->flush_barrier_work);
 
 	mempool_destroy(wb->flush_job_pool);
 	destroy_workqueue(wb->flusher_wq);
@@ -1856,7 +1853,7 @@ void free_cache(struct wb_device *wb)
 	kthread_stop(wb->recorder_daemon);
 	kthread_stop(wb->modulator_daemon);
 
-	cancel_work_sync(&wb->barrier_deadline_work);
+	cancel_work_sync(&wb->flush_barrier_work);
 
 	mempool_destroy(wb->flush_job_pool);
 	destroy_workqueue(wb->flusher_wq);

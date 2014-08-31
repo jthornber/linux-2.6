@@ -393,10 +393,8 @@ struct wb_device {
 	 * Barrier deadline worker
 	 *************************/
 
-	struct work_struct barrier_deadline_work;
-	struct timer_list barrier_deadline_timer;
+	struct work_struct flush_barrier_work;
 	struct bio_list barrier_ios; /* List of barrier requests */
-	unsigned long barrier_deadline_ms; /* Tunable */
 
 	/*---------------------------------------------*/
 

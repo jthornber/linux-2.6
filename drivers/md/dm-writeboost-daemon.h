@@ -15,7 +15,6 @@ void wait_for_flushing(struct wb_device *, u64 id);
 /*----------------------------------------------------------------*/
 
 void queue_barrier_io(struct wb_device *, struct bio *);
-void barrier_deadline_proc(unsigned long data);
 void flush_barrier_ios(struct work_struct *);
 
 /*----------------------------------------------------------------*/
