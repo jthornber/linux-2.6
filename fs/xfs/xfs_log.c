@@ -616,11 +616,13 @@ xfs_log_mount(
 	int		error = 0;
 	int		min_logfsbs;
 
-	if (!(mp->m_flags & XFS_MOUNT_NORECOVERY))
-		xfs_notice(mp, "Mounting Filesystem");
-	else {
+	if (!(mp->m_flags & XFS_MOUNT_NORECOVERY)) {
+		xfs_notice(mp, "Mounting V%d Filesystem",
+			   XFS_SB_VERSION_NUM(&mp->m_sb));
+	} else {
 		xfs_notice(mp,
-"Mounting filesystem in no-recovery mode.  Filesystem will be inconsistent.");
+"Mounting V%d filesystem in no-recovery mode. Filesystem will be inconsistent.",
+			   XFS_SB_VERSION_NUM(&mp->m_sb));
 		ASSERT(mp->m_flags & XFS_MOUNT_RDONLY);
 	}
 
@@ -1163,7 +1165,7 @@ xlog_iodone(xfs_buf_t *bp)
 	/*
 	 * Race to shutdown the filesystem if we see an error.
 	 */
-	if (XFS_TEST_ERROR((xfs_buf_geterror(bp)), l->l_mp,
+	if (XFS_TEST_ERROR(bp->b_error, l->l_mp,
 			XFS_ERRTAG_IODONE_IOERR, XFS_RANDOM_IODONE_IOERR)) {
 		xfs_buf_ioerror_alert(bp, __func__);
 		xfs_buf_stale(bp);
@@ -3950,11 +3952,14 @@ xfs_log_force_umount(
 		retval = xlog_state_ioerror(log);
 		spin_unlock(&log->l_icloglock);
 	}
+
 	/*
-	 * Wake up everybody waiting on xfs_log_force.
-	 * Callback all log item committed functions as if the
-	 * log writes were completed.
+	 * Wake up everybody waiting on xfs_log_force. Wake the CIL push first
+	 * as if the log writes were completed. The abort handling in the log
+	 * item committed callback functions will do this again under lock to
+	 * avoid races.
 	 */
+	wake_up_all(&log->l_cilp->xc_commit_wait);
 	xlog_state_do_callback(log, XFS_LI_ABORTED, NULL);
 
 #ifdef XFSERRORDEBUG

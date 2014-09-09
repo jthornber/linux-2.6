@@ -201,10 +201,6 @@ xfs_mount_validate_sb(
 	 * write validation, we don't need to check feature masks.
 	 */
 	if (check_version && XFS_SB_VERSION_NUM(sbp) == XFS_SB_VERSION_5) {
-		xfs_alert(mp,
-"Version 5 superblock detected. This kernel has EXPERIMENTAL support enabled!\n"
-"Use of these features in this kernel is at your own risk!");
-
 		if (xfs_sb_has_compat_feature(sbp,
 					XFS_SB_FEAT_COMPAT_UNKNOWN)) {
 			xfs_warn(mp,
@@ -295,7 +291,8 @@ xfs_mount_validate_sb(
 	    (sbp->sb_imax_pct > 100 /* zero sb_imax_pct is valid */)	||
 	    sbp->sb_dblocks == 0					||
 	    sbp->sb_dblocks > XFS_MAX_DBLOCKS(sbp)			||
-	    sbp->sb_dblocks < XFS_MIN_DBLOCKS(sbp))) {
+	    sbp->sb_dblocks < XFS_MIN_DBLOCKS(sbp)			||
+	    sbp->sb_shared_vn != 0)) {
 		xfs_notice(mp, "SB sanity check failed");
 		return XFS_ERROR(EFSCORRUPTED);
 	}
@@ -337,15 +334,6 @@ xfs_mount_validate_sb(
 		xfs_warn(mp, "Offline file system operation in progress!");
 		return XFS_ERROR(EFSCORRUPTED);
 	}
-
-	/*
-	 * Version 1 directory format has never worked on Linux.
-	 */
-	if (unlikely(!xfs_sb_version_hasdirv2(sbp))) {
-		xfs_warn(mp, "file system using version 1 directory format");
-		return XFS_ERROR(ENOSYS);
-	}
-
 	return 0;
 }
 
@@ -495,10 +483,16 @@ xfs_sb_quota_to_disk(
 	}
 
 	/*
-	 * GQUOTINO and PQUOTINO cannot be used together in versions
-	 * of superblock that do not have pquotino. from->sb_flags
-	 * tells us which quota is active and should be copied to
-	 * disk.
+	 * GQUOTINO and PQUOTINO cannot be used together in versions of
+	 * superblock that do not have pquotino. from->sb_flags tells us which
+	 * quota is active and should be copied to disk. If neither are active,
+	 * make sure we write NULLFSINO to the sb_gquotino field as a quota
+	 * inode value of "0" is invalid when the XFS_SB_VERSION_QUOTA feature
+	 * bit is set.
+	 *
+	 * Note that we don't need to handle the sb_uquotino or sb_pquotino here
+	 * as they do not require any translation. Hence the main sb field loop
+	 * will write them appropriately from the in-core superblock.
 	 */
 	if ((*fields & XFS_SB_GQUOTINO) &&
 				(from->sb_qflags & XFS_GQUOTA_ACCT))
@@ -506,6 +500,17 @@ xfs_sb_quota_to_disk(
 	else if ((*fields & XFS_SB_PQUOTINO) &&
 				(from->sb_qflags & XFS_PQUOTA_ACCT))
 		to->sb_gquotino = cpu_to_be64(from->sb_pquotino);
+	else {
+		/*
+		 * We can't rely on just the fields being logged to tell us
+		 * that it is safe to write NULLFSINO - we should only do that
+		 * if quotas are not actually enabled. Hence only write
+		 * NULLFSINO if both in-core quota inodes are NULL.
+		 */
+		if (from->sb_gquotino == NULLFSINO &&
+		    from->sb_pquotino == NULLFSINO)
+			to->sb_gquotino = cpu_to_be64(NULLFSINO);
+	}
 
 	*fields &= ~(XFS_SB_PQUOTINO | XFS_SB_GQUOTINO);
 }

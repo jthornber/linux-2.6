@@ -27,7 +27,9 @@
 #define MAPPING_POOL_SIZE 1024
 #define PRISON_CELLS 1024
 #define COMMIT_PERIOD HZ
-#define NO_SPACE_TIMEOUT (HZ * 30)
+#define NO_SPACE_TIMEOUT_SECS 60
+
+static unsigned no_space_timeout_secs = NO_SPACE_TIMEOUT_SECS;
 
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
 		"A percentage of time allocated for copy on write");
@@ -309,11 +311,16 @@ static void cell_defer_no_holder_no_free(struct thin_c *tc,
 	wake_worker(pool);
 }
 
-static void cell_error(struct pool *pool,
-		       struct dm_bio_prison_cell *cell)
+static void cell_error_with_code(struct pool *pool,
+				 struct dm_bio_prison_cell *cell, int error_code)
 {
-	dm_cell_error(pool->prison, cell);
+	dm_cell_error(pool->prison, cell, error_code);
 	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
+static void cell_error(struct pool *pool, struct dm_bio_prison_cell *cell)
+{
+	cell_error_with_code(pool, cell, -EIO);
 }
 
 /*----------------------------------------------------------------*/
@@ -1076,7 +1083,7 @@ static void retry_on_resume(struct bio *bio)
 	spin_unlock_irqrestore(&tc->lock, flags);
 }
 
-static bool should_error_unserviceable_bio(struct pool *pool)
+static int should_error_unserviceable_bio(struct pool *pool)
 {
 	enum pool_mode m = get_pool_mode(pool);
 
@@ -1084,25 +1091,27 @@ static bool should_error_unserviceable_bio(struct pool *pool)
 	case PM_WRITE:
 		/* Shouldn't get here */
 		DMERR_LIMIT("bio unserviceable, yet pool is in PM_WRITE mode");
-		return true;
+		return -EIO;
 
 	case PM_OUT_OF_DATA_SPACE:
-		return pool->pf.error_if_no_space;
+		return pool->pf.error_if_no_space ? -ENOSPC : 0;
 
 	case PM_READ_ONLY:
 	case PM_FAIL:
-		return true;
+		return -EIO;
 	default:
 		/* Shouldn't get here */
 		DMERR_LIMIT("bio unserviceable, yet pool has an unknown mode");
-		return true;
+		return -EIO;
 	}
 }
 
 static void handle_unserviceable_bio(struct pool *pool, struct bio *bio)
 {
-	if (should_error_unserviceable_bio(pool))
-		bio_io_error(bio);
+	int error = should_error_unserviceable_bio(pool);
+
+	if (error)
+		bio_endio(bio, error);
 	else
 		retry_on_resume(bio);
 }
@@ -1111,18 +1120,21 @@ static void retry_bios_on_resume(struct pool *pool, struct dm_bio_prison_cell *c
 {
 	struct bio *bio;
 	struct bio_list bios;
+	int error;
 
-	if (should_error_unserviceable_bio(pool)) {
-		cell_error(pool, cell);
+	error = should_error_unserviceable_bio(pool);
+	if (error) {
+		cell_error_with_code(pool, cell, error);
 		return;
 	}
 
 	bio_list_init(&bios);
 	cell_release(pool, cell, &bios);
 
-	if (should_error_unserviceable_bio(pool))
+	error = should_error_unserviceable_bio(pool);
+	if (error)
 		while ((bio = bio_list_pop(&bios)))
-			bio_io_error(bio);
+			bio_endio(bio, error);
 	else
 		while ((bio = bio_list_pop(&bios)))
 			retry_on_resume(bio);
@@ -1793,6 +1805,7 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 	struct pool_c *pt = pool->ti->private;
 	bool needs_check = dm_pool_metadata_needs_check(pool->pmd);
 	enum pool_mode old_mode = get_pool_mode(pool);
+	unsigned long no_space_timeout = ACCESS_ONCE(no_space_timeout_secs) * HZ;
 
 	/*
 	 * Never allow the pool to transition to PM_WRITE mode if user
@@ -1866,8 +1879,8 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		pool->process_prepared_mapping = process_prepared_mapping;
 		pool->process_prepared_discard = process_prepared_discard_passdown;
 
-		if (!pool->pf.error_if_no_space)
-			queue_delayed_work(pool->wq, &pool->no_space_timeout, NO_SPACE_TIMEOUT);
+		if (!pool->pf.error_if_no_space && no_space_timeout)
+			queue_delayed_work(pool->wq, &pool->no_space_timeout, no_space_timeout);
 		break;
 
 	case PM_WRITE:
@@ -3249,7 +3262,8 @@ static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 	 */
 	if (pt->adjusted_pf.discard_passdown) {
 		data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
-		limits->discard_granularity = data_limits->discard_granularity;
+		limits->discard_granularity = max(data_limits->discard_granularity,
+						  pool->sectors_per_block << SECTOR_SHIFT);
 	} else
 		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
 }
@@ -3701,6 +3715,9 @@ static void dm_thin_exit(void)
 
 module_init(dm_thin_init);
 module_exit(dm_thin_exit);
+
+module_param_named(no_space_timeout, no_space_timeout_secs, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(no_space_timeout, "Out of data space queue IO timeout in seconds");
 
 MODULE_DESCRIPTION(DM_NAME " thin provisioning target");
 MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
