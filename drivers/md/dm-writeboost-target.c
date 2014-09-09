@@ -78,7 +78,7 @@ int dm_safe_io_internal(struct wb_device *wb, struct dm_io_request *io_req,
 			eb = *err_bits;
 
 		format_dev_t(buf, dev);
-		WBERR("%s() I/O error(%d), bits(%lu), dev(%s), sector(%llu), rw(%d)",
+		DMERR("%s() I/O error(%d), bits(%lu), dev(%s), sector(%llu), rw(%d)",
 		      caller, err, eb,
 		      buf, (unsigned long long) regions->sector, io_req->bi_rw);
 	}
@@ -424,8 +424,8 @@ static void acquire_new_rambuffer(struct wb_device *wb, u64 id)
 
 /*
  * Acquire the new segment and RAM buffer for the following writes.
- * Gurantees all dirty caches in the segments are migrated and all metablocks
- * in it are invalidated (Linked to null head).
+ * Gurantees all dirty caches in the segments are written back and
+ * all metablocks in it are invalidated (Linked to null head).
  */
 void acquire_new_seg(struct wb_device *wb, u64 id)
 {
@@ -438,9 +438,9 @@ void acquire_new_seg(struct wb_device *wb, u64 id)
 	wait_event(wb->inflight_ios_wq,
 		!atomic_read(&new_seg->nr_inflight_ios));
 
-	wait_for_migration(wb, SUB_ID(id, wb->nr_segments));
+	wait_for_writeback(wb, SUB_ID(id, wb->nr_segments));
 	if (count_dirty_caches_remained(new_seg)) {
-		WBERR("%u dirty caches remained. id:%llu",
+		DMERR("%u dirty caches remained. id:%llu",
 		      count_dirty_caches_remained(new_seg), id);
 		BUG();
 	}
@@ -620,8 +620,8 @@ static void increase_dirtiness(struct wb_device *wb, struct segment_header *seg,
 
 /*
  * Drop the dirtiness of the on-memory metablock to 0.
- * This only means the data of the metablock will never be migrated and
- * omitting this only results in double migration which is only a matter
+ * This only means the data of the metablock will never be written back and
+ * omitting this only results in double writeback which is only a matter
  * of performance.
  */
 void cleanup_mb_if_dirty(struct wb_device *wb, struct segment_header *seg,
@@ -666,34 +666,34 @@ u8 read_mb_dirtiness(struct wb_device *wb, struct segment_header *seg,
 
 /*----------------------------------------------------------------*/
 
-struct migrate_mb_context {
+struct writeback_mb_context {
 	struct wb_device *wb;
 	atomic_t count;
 	int err;
 };
 
-static void migrate_mb_complete(int read_err, unsigned long write_err, void *__context)
+static void writeback_mb_complete(int read_err, unsigned long write_err, void *__context)
 {
-	struct migrate_mb_context *context = __context;
+	struct writeback_mb_context *context = __context;
 
 	if (read_err || write_err)
 		context->err = 1;
 
 	if (atomic_dec_and_test(&context->count))
-		wake_up_active_wq(&context->wb->migrate_mb_wait_queue);
+		wake_up_active_wq(&context->wb->writeback_mb_wait_queue);
 }
 
 /*
- * Migrate caches in cache device (SSD) to the backnig device (HDD).
- * We don't need to make the data migrated persistent because this segment will be
- * reused only after migrate daemon migrates this segment.
+ * Write back caches in cache device (SSD) to the backnig device (HDD).
+ * We don't need to make the data written back persistent because this segment will be
+ * reused only after writeback daemon writes back this segment.
  */
-static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
-		       struct metablock *mb, u8 dirty_bits, bool thread)
+static void writeback_mb(struct wb_device *wb, struct segment_header *seg,
+			 struct metablock *mb, u8 dirty_bits, bool thread)
 {
 	int r = 0;
 
-	struct migrate_mb_context context;
+	struct writeback_mb_context context;
 	context.wb = wb;
 	context.err = 0;
 
@@ -715,7 +715,7 @@ static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
 			.sector = mb->sector,
 			.count = (1 << 3),
 		};
-		r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, migrate_mb_complete, &context);
+		r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, writeback_mb_complete, &context);
 		if (r) {
 			atomic_dec(&context.count);
 			context.err = 1;
@@ -746,7 +746,7 @@ static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
 				.sector = mb->sector + i,
 				.count = 1,
 			};
-			r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, migrate_mb_complete, &context);
+			r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, writeback_mb_complete, &context);
 			if (r) {
 				atomic_dec(&context.count);
 				context.err = 1;
@@ -754,20 +754,19 @@ static void migrate_mb(struct wb_device *wb, struct segment_header *seg,
 		}
 	}
 
-	wait_event(wb->migrate_mb_wait_queue, !atomic_read(&context.count));
+	wait_event(wb->writeback_mb_wait_queue, !atomic_read(&context.count));
 
 	if (context.err)
 		set_bit(WB_DEAD, &wb->flags);
 }
 
 /*
- * Migrate the caches on the RAM buffer to backing device.
+ * Write back the caches on the RAM buffer to backing device.
  * Calling this function is really rare so the code is not optimal.
  * There is no need to write them back with FUA flag
  * because the caches are not flushed yet and thus not persistent.
  */
-static void migrate_buffered_mb(struct wb_device *wb,
-				struct metablock *mb, u8 dirty_bits)
+static void writeback_buffered_mb(struct wb_device *wb, struct metablock *mb, u8 dirty_bits)
 {
 	int r = 0;
 
@@ -812,14 +811,14 @@ void invalidate_previous_cache(struct wb_device *wb, struct segment_header *seg,
 	u8 dirty_bits = read_mb_dirtiness(wb, seg, old_mb);
 
 	/*
-	 * First clean up the previous cache and migrate the cache if needed.
+	 * First clean up the previous cache and write back the cache if needed.
 	 */
 	bool needs_cleanup_prev_cache =
 		!overwrite_fullsize || !(dirty_bits == 255);
 
 	/*
-	 * Migration works in background and may have cleaned up the metablock.
-	 * If the metablock is clean we need not to migrate.
+	 * Writeback works in background and may have cleaned up the metablock.
+	 * If the metablock is clean we need not to write back.
 	 */
 	if (!dirty_bits)
 		needs_cleanup_prev_cache = false;
@@ -829,7 +828,7 @@ void invalidate_previous_cache(struct wb_device *wb, struct segment_header *seg,
 
 	if (unlikely(needs_cleanup_prev_cache)) {
 		wait_for_flushing(wb, seg->id);
-		migrate_mb(wb, seg, old_mb, dirty_bits, true);
+		writeback_mb(wb, seg, old_mb, dirty_bits, true);
 	}
 
 	cleanup_mb_if_dirty(wb, seg, old_mb);
@@ -911,7 +910,7 @@ static void might_queue_current_buffer(struct wb_device *wb, struct bio *bio)
  * We only discard sectors on only the backing store because blocks on
  * cache device are unlikely to be discarded.
  * Discarding blocks is likely to be operated long after writing;
- * the block is likely to be migrated before that.
+ * the block is likely to be written back before that.
  *
  * Moreover, it is very hard to implement discarding cache blocks.
  */
@@ -1108,7 +1107,7 @@ static struct write_job *alloc_write_job(struct wb_device *wb)
  * 1) If the data is on the RAM buffer, the dirtiness (dirty_bits of metablock)
  *    only "increases".
  *    The justification for this design is that
- *    the cache on the RAM buffer is seldom migrated.
+ *    the cache on the RAM buffer is seldom written back.
  * 2) If the data is, on the other hand, on the SSD after flushed the dirtiness
  *    only "decreases".
  *
@@ -1171,7 +1170,7 @@ static int process_read(struct wb_device *wb, struct bio *bio)
 	dirty_bits = read_mb_dirtiness(wb, res.found_seg, res.found_mb);
 	if (unlikely(res.on_buffer)) {
 		if (dirty_bits)
-			migrate_buffered_mb(wb, res.found_mb, dirty_bits);
+			writeback_buffered_mb(wb, res.found_mb, dirty_bits);
 
 		dec_inflight_ios(wb, res.found_seg);
 		bio_remap(bio, wb->backing_dev, bio->bi_iter.bi_sector);
@@ -1194,7 +1193,7 @@ static int process_read(struct wb_device *wb, struct bio *bio)
 			  calc_mb_start_sector(wb, res.found_seg, res.found_mb->idx) +
 			  io_offset(bio));
 	} else {
-		migrate_mb(wb, res.found_seg, res.found_mb, dirty_bits, true);
+		writeback_mb(wb, res.found_seg, res.found_mb, dirty_bits, true);
 		cleanup_mb_if_dirty(wb, res.found_seg, res.found_mb);
 
 		dec_inflight_ios(wb, res.found_seg);
@@ -1259,7 +1258,7 @@ static int consume_essential_argv(struct wb_device *wb, struct dm_arg_set *as)
 
 	r = dm_read_arg(_args, as, &tmp, &ti->error);
 	if (r) {
-		WBERR("%s", ti->error);
+		DMERR("%s", ti->error);
 		return r;
 	}
 	wb->type = tmp;
@@ -1267,14 +1266,14 @@ static int consume_essential_argv(struct wb_device *wb, struct dm_arg_set *as)
 	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
 			  &wb->backing_dev);
 	if (r) {
-		WBERR("Failed to get backing_dev");
+		DMERR("Failed to get backing_dev");
 		return r;
 	}
 
 	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
 			  &wb->cache_dev);
 	if (r) {
-		WBERR("Failed to get cache_dev");
+		DMERR("Failed to get cache_dev");
 		goto bad_get_cache;
 	}
 
@@ -1297,7 +1296,7 @@ bad_get_cache:
 			break; \
 		r = dm_read_arg(_args + (nr), as, &tmp, &ti->error); \
 		if (r) { \
-			WBERR("%s", ti->error); \
+			DMERR("%s", ti->error); \
 			break; \
 		} \
 		wb->name = tmp; \
@@ -1318,7 +1317,7 @@ static int consume_optional_argv(struct wb_device *wb, struct dm_arg_set *as)
 	if (as->argc) {
 		r = dm_read_arg_group(_args, as, &argc, &ti->error);
 		if (r) {
-			WBERR("%s", ti->error);
+			DMERR("%s", ti->error);
 			return r;
 		}
 	}
@@ -1350,11 +1349,10 @@ static int do_consume_tunable_argv(struct wb_device *wb,
 	struct dm_target *ti = wb->ti;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "Invalid allow_migrate"},
-		{0, 1, "Invalid enable_migration_modulator"},
-		{1, 1000, "Invalid barrier_deadline_ms"},
-		{1, 1000, "Invalid nr_max_batched_migration"},
-		{0, 100, "Invalid migrate_threshold"},
+		{0, 1, "Invalid allow_writeback"},
+		{0, 1, "Invalid enable_writeback_modulator"},
+		{1, 1000, "Invalid nr_max_batched_writeback"},
+		{0, 100, "Invalid writeback_threshold"},
 		{0, 3600, "Invalid update_record_interval"},
 		{0, 3600, "Invalid sync_interval"},
 	};
@@ -1366,13 +1364,12 @@ static int do_consume_tunable_argv(struct wb_device *wb,
 
 		r = -EINVAL;
 
-		consume_kv(allow_migrate, 0);
-		consume_kv(enable_migration_modulator, 1);
-		consume_kv(barrier_deadline_ms, 2);
-		consume_kv(nr_max_batched_migration, 3);
-		consume_kv(migrate_threshold, 4);
-		consume_kv(update_record_interval, 5);
-		consume_kv(sync_interval, 6);
+		consume_kv(allow_writeback, 0);
+		consume_kv(enable_writeback_modulator, 1);
+		consume_kv(nr_max_batched_writeback, 2);
+		consume_kv(writeback_threshold, 3);
+		consume_kv(update_record_interval, 4);
+		consume_kv(sync_interval, 5);
 
 		if (!r) {
 			argc--;
@@ -1398,7 +1395,7 @@ static int consume_tunable_argv(struct wb_device *wb, struct dm_arg_set *as)
 	if (as->argc) {
 		r = dm_read_arg_group(_args, as, &argc, &ti->error);
 		if (r) {
-			WBERR("%s", ti->error);
+			DMERR("%s", ti->error);
 			return r;
 		}
 		/*
@@ -1412,7 +1409,7 @@ static int consume_tunable_argv(struct wb_device *wb, struct dm_arg_set *as)
 }
 
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(wb_copy_throttle,
-		"A percentage of time allocated for one-shot migration");
+		"A percentage of time allocated for one-shot writeback");
 
 static int init_core_struct(struct dm_target *ti)
 {
@@ -1421,7 +1418,7 @@ static int init_core_struct(struct dm_target *ti)
 
 	r = dm_set_target_max_io_len(ti, 1 << 3);
 	if (r) {
-		WBERR("Failed to set max_io_len");
+		DMERR("Failed to set max_io_len");
 		return r;
 	}
 
@@ -1433,13 +1430,13 @@ static int init_core_struct(struct dm_target *ti)
 
 	wb = kzalloc(sizeof(*wb), GFP_KERNEL);
 	if (!wb) {
-		WBERR("Failed to allocate wb");
+		DMERR("Failed to allocate wb");
 		return -ENOMEM;
 	}
 	ti->private = wb;
 	wb->ti = ti;
 
-	init_waitqueue_head(&wb->migrate_mb_wait_queue);
+	init_waitqueue_head(&wb->writeback_mb_wait_queue);
 	wb->copier = dm_kcopyd_client_create(&dm_kcopyd_throttle);
 	if (IS_ERR(wb->copier)) {
 		r = PTR_ERR(wb->copier);
@@ -1477,14 +1474,14 @@ static int init_core_struct(struct dm_target *ti)
 	 */
 	wb->io_wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM, 0);
 	if (!wb->io_wq) {
-		WBERR("Failed to allocate io_wq");
+		DMERR("Failed to allocate io_wq");
 		r = -ENOMEM;
 		goto bad_io_wq;
 	}
 
 	wb->io_client = dm_io_client_create();
 	if (IS_ERR(wb->io_client)) {
-		WBERR("Failed to allocate io_client");
+		DMERR("Failed to allocate io_client");
 		r = PTR_ERR(wb->io_client);
 		goto bad_io_client;
 	}
@@ -1680,17 +1677,15 @@ static void emit_tunables(struct wb_device *wb, char *result, unsigned maxlen)
 {
 	ssize_t sz = 0;
 
-	DMEMIT(" %d", 14);
-	DMEMIT(" barrier_deadline_ms %lu",
-	       wb->barrier_deadline_ms);
-	DMEMIT(" allow_migrate %d",
-	       wb->allow_migrate ? 1 : 0);
-	DMEMIT(" enable_migration_modulator %d",
-	       wb->enable_migration_modulator ? 1 : 0);
-	DMEMIT(" migrate_threshold %d",
-	       wb->migrate_threshold);
-	DMEMIT(" nr_cur_batched_migration %u",
-	       wb->nr_cur_batched_migration);
+	DMEMIT(" %d", 12);
+	DMEMIT(" allow_writeback %d",
+	       wb->allow_writeback ? 1 : 0);
+	DMEMIT(" enable_writeback_modulator %d",
+	       wb->enable_writeback_modulator ? 1 : 0);
+	DMEMIT(" writeback_threshold %d",
+	       wb->writeback_threshold);
+	DMEMIT(" nr_cur_batched_writeback %u",
+	       wb->nr_cur_batched_writeback);
 	DMEMIT(" sync_interval %lu",
 	       wb->sync_interval);
 	DMEMIT(" update_record_interval %lu",
@@ -1719,7 +1714,7 @@ static void writeboost_status(struct dm_target *ti, status_type_t type,
 		       (long long unsigned int)
 		       atomic64_read(&wb->last_flushed_segment_id),
 		       (long long unsigned int)
-		       atomic64_read(&wb->last_migrated_segment_id),
+		       atomic64_read(&wb->last_writeback_segment_id),
 		       (long long unsigned int)
 		       atomic64_read(&wb->nr_dirty_caches));
 
@@ -1774,7 +1769,7 @@ static int __init writeboost_module_init(void)
 
 	r = dm_register_target(&writeboost_target);
 	if (r < 0) {
-		WBERR("Failed to register target");
+		DMERR("Failed to register target");
 		return r;
 	}
 
