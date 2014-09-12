@@ -1184,12 +1184,9 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			m->cell2 = cell2;
 			m->bio = bio;
 
-			if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list)) {
-				spin_lock_irqsave(&pool->lock, flags);
-				list_add_tail(&m->list, &pool->prepared_discards);
-				spin_unlock_irqrestore(&pool->lock, flags);
-				wake_worker(pool);
-			}
+			if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
+				pool->process_prepared_discard(m);
+
 		} else {
 			inc_all_io_entry(pool, bio);
 			cell_defer_no_holder(tc, cell);
