@@ -459,7 +459,8 @@ static void update_superblock_record(struct wb_device *wb)
 	o.last_writeback_segment_id =
 		cpu_to_le64(atomic64_read(&wb->last_writeback_segment_id));
 
-	buf = mempool_alloc(wb->buf_1_pool, GFP_NOIO | __GFP_ZERO);
+	buf = mempool_alloc(wb->buf_1_pool, GFP_NOIO);
+	memset(buf, 0, 1 << 9);
 	memcpy(buf, &o, sizeof(o));
 
 	io_req = (struct dm_io_request) {

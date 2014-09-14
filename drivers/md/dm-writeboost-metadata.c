@@ -515,9 +515,10 @@ static int format_all_segment_headers(struct wb_device *wb)
 
 	struct format_segmd_context context;
 
-	void *buf = mempool_alloc(wb->buf_8_pool, GFP_KERNEL | __GFP_ZERO);
+	void *buf = mempool_alloc(wb->buf_8_pool, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
+	memset(buf, 0, 1 << 12);
 	check_buffer_alignment(buf);
 
 	atomic64_set(&context.count, nr_segments);
