@@ -557,7 +557,6 @@ struct dm_thin_new_mapping {
 	struct list_head list;
 
 	bool pass_discard:1;
-	bool definitely_not_shared:1;
 
 	// Quiescing and copying and zeroing.  When this counter hits zero
 	// we know it's prepared and can be inserted into the btree.
@@ -720,31 +719,6 @@ static void process_prepared_discard_fail(struct dm_thin_new_mapping *m)
 
 	bio_io_error(m->bio);
 	cell_defer_no_holder(tc, m->cell);
-	cell_defer_no_holder(tc, m->cell2);
-	mempool_free(m, tc->pool->mapping_pool);
-}
-
-static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
-{
-	struct thin_c *tc = m->tc;
-
-	inc_all_io_entry(tc->pool, m->bio);
-	cell_defer_no_holder(tc, m->cell);
-	cell_defer_no_holder(tc, m->cell2);
-
-	if (m->pass_discard)
-		if (m->definitely_not_shared)
-			remap_and_issue(tc, m->bio, m->data_block);
-		else {
-			bool used = false;
-			if (dm_pool_block_is_used(tc->pool->pmd, m->data_block, &used) || used)
-				bio_endio(m->bio, 0);
-			else
-				remap_and_issue(tc, m->bio, m->data_block);
-		}
-	else
-		bio_endio(m->bio, 0);
-
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -757,7 +731,10 @@ static void process_prepared_discard(struct dm_thin_new_mapping *m)
 	if (r)
 		DMERR_LIMIT("dm_thin_remove_block() failed");
 
-	process_prepared_discard_passdown(m);
+	cell_defer_no_holder(tc, m->cell);
+	bio_endio(m->bio, 0);
+
+	mempool_free(m, tc->pool->mapping_pool);
 }
 
 static void process_prepared(struct pool *pool, struct list_head *head,
@@ -1144,10 +1121,9 @@ static void retry_bios_on_resume(struct pool *pool, struct dm_bio_prison_cell *c
 static void process_discard(struct thin_c *tc, struct bio *bio)
 {
 	int r;
-	unsigned long flags;
 	struct pool *pool = tc->pool;
-	struct dm_bio_prison_cell *cell, *cell2;
-	struct dm_cell_key key, key2;
+	struct dm_bio_prison_cell *cell;
+	struct dm_cell_key key;
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
 	struct dm_thin_new_mapping *m;
@@ -1160,16 +1136,9 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 	switch (r) {
 	case 0:
 		/*
-		 * Check nobody is fiddling with this pool block.  This can
-		 * happen if someone's in the process of breaking sharing
-		 * on this block.
+		 * Now that we don't support passdown, there's no need to
+		 * lock the data block.
 		 */
-		build_data_key(tc->td, lookup_result.block, &key2);
-		if (bio_detain(tc->pool, &key2, bio, &cell2)) {
-			cell_defer_no_holder(tc, cell);
-			break;
-		}
-
 		if (io_overlaps_block(pool, bio)) {
 			/*
 			 * IO may still be going to the destination block.  We must
@@ -1177,31 +1146,17 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			 */
 			m = get_next_mapping(pool);
 			m->tc = tc;
-			m->pass_discard = pool->pf.discard_passdown;
-			m->definitely_not_shared = !lookup_result.shared;
 			m->virt_block = block;
 			m->data_block = lookup_result.block;
 			m->cell = cell;
-			m->cell2 = cell2;
 			m->bio = bio;
 
 			if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
 				pool->process_prepared_discard(m);
 
 		} else {
-			inc_all_io_entry(pool, bio);
 			cell_defer_no_holder(tc, cell);
-			cell_defer_no_holder(tc, cell2);
-
-			/*
-			 * The DM core makes sure that the discard doesn't span
-			 * a block boundary.  So we submit the discard of a
-			 * partial block appropriately.
-			 */
-			if ((!lookup_result.shared) && pool->pf.discard_passdown)
-				remap_and_issue(tc, bio, lookup_result.block);
-			else
-				bio_endio(bio, 0);
+			bio_endio(bio, 0);
 		}
 		break;
 
@@ -1856,7 +1811,7 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		pool->process_bio = process_bio_read_only;
 		pool->process_discard = process_bio_success;
 		pool->process_prepared_mapping = process_prepared_mapping_fail;
-		pool->process_prepared_discard = process_prepared_discard_passdown;
+		pool->process_prepared_discard = process_prepared_discard_fail;
 
 		error_retry_list(pool);
 		break;
@@ -1875,7 +1830,7 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		pool->process_bio = process_bio_read_only;
 		pool->process_discard = process_discard;
 		pool->process_prepared_mapping = process_prepared_mapping;
-		pool->process_prepared_discard = process_prepared_discard_passdown;
+		pool->process_prepared_discard = process_prepared_discard;
 
 		if (!pool->pf.error_if_no_space && no_space_timeout)
 			queue_delayed_work(pool->wq, &pool->no_space_timeout, no_space_timeout);
@@ -2018,6 +1973,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
 			return DM_MAPIO_SUBMITTED;
 
+		// FIXME: still needed now that we don't do discard passdown?
 		build_data_key(tc->td, result.block, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
 			cell_defer_no_holder_no_free(tc, &cell1);
@@ -2091,50 +2047,17 @@ static void requeue_bios(struct pool *pool)
 /*----------------------------------------------------------------
  * Binding of control targets to a pool object
  *--------------------------------------------------------------*/
-static bool data_dev_supports_discard(struct pool_c *pt)
-{
-	struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
-
-	return q && blk_queue_discard(q);
-}
-
-static bool is_factor(sector_t block_size, uint32_t n)
-{
-	return !sector_div(block_size, n);
-}
 
 /*
- * If discard_passdown was enabled verify that the data device
- * supports discards.  Disable discard_passdown if not.
+ * Hard wired to unsupported these days.
  */
 static void disable_passdown_if_not_supported(struct pool_c *pt)
 {
-	struct pool *pool = pt->pool;
-	struct block_device *data_bdev = pt->data_dev->bdev;
-	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
-	sector_t block_size = pool->sectors_per_block << SECTOR_SHIFT;
-	const char *reason = NULL;
 	char buf[BDEVNAME_SIZE];
 
-	if (!pt->adjusted_pf.discard_passdown)
-		return;
-
-	if (!data_dev_supports_discard(pt))
-		reason = "discard unsupported";
-
-	else if (data_limits->max_discard_sectors < pool->sectors_per_block)
-		reason = "max discard sectors smaller than a block";
-
-	else if (data_limits->discard_granularity > block_size)
-		reason = "discard granularity larger than a block";
-
-	else if (!is_factor(block_size, data_limits->discard_granularity))
-		reason = "discard granularity not a factor of block size";
-
-	if (reason) {
-		DMWARN("Data device (%s) %s: Disabling discard passdown.", bdevname(data_bdev, buf), reason);
-		pt->adjusted_pf.discard_passdown = false;
-	}
+	DMWARN("Data device (%s): Discard passdown is not supported.",
+	       bdevname(pt->data_dev->bdev, buf));
+	pt->adjusted_pf.discard_passdown = false;
 }
 
 static int bind_control_target(struct pool *pool, struct dm_target *ti)
@@ -2178,7 +2101,7 @@ static void pool_features_init(struct pool_features *pf)
 	pf->mode = PM_WRITE;
 	pf->zero_new_blocks = true;
 	pf->discard_enabled = true;
-	pf->discard_passdown = true;
+	pf->discard_passdown = false;
 	pf->error_if_no_space = false;
 }
 
