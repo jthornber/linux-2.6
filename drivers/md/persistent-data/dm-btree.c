@@ -847,6 +847,8 @@ EXPORT_SYMBOL_GPL(dm_btree_find_lowest_key);
  * FIXME: We shouldn't use a recursive algorithm when we have limited stack
  * space.  Also this only works for single level trees.
  */
+
+// FIXME: ro spine only holds two locks, so can't pop every time
 static int walk_node(struct ro_spine *s, dm_block_t block,
 		     int (*fn)(void *context, uint64_t *keys, void *leaf),
 		     void *context)
