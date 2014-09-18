@@ -105,9 +105,122 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
 
 /*----------------------------------------------------------------*/
 
+static void discard_end_io(struct bio *bio, int err)
+{
+	struct bio *parent_bio = bio->bi_private;
+	bio_endio(parent_bio, err);
+	bio_put(bio);
+}
+
+/**
+ * issue_discard - queue a discard
+ * @bdev:	blockdev to issue discard for
+ * @sector:	start sector
+ * @nr_sects:	number of sectors to discard
+ * @gfp_mask:	memory allocation flags (for bio_alloc)
+ * @flags:	BLKDEV_IFL_* flags to control behaviour
+ *
+ * Description:
+ *    Issue a discard request for the sectors in question.
+ */
+static int issue_discard(struct block_device *bdev, sector_t sector,
+			 sector_t nr_sects, gfp_t gfp_mask, unsigned long flags,
+			 struct bio *parent_bio)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+	int type = REQ_WRITE | REQ_DISCARD;
+	unsigned int max_discard_sectors, granularity;
+	int alignment;
+	struct bio *bio;
+	int ret = 0;
+	struct blk_plug plug;
+
+	if (!q)
+		return -ENXIO;
+
+	if (!blk_queue_discard(q))
+		return -EOPNOTSUPP;
+
+	/* Zero-sector (unknown) and one-sector granularities are the same.  */
+	granularity = max(q->limits.discard_granularity >> 9, 1U);
+	alignment = (bdev_discard_alignment(bdev) >> 9) % granularity;
+
+	/*
+	 * Ensure that max_discard_sectors is of the proper
+	 * granularity, so that requests stay aligned after a split.
+	 */
+	max_discard_sectors = min(q->limits.max_discard_sectors, UINT_MAX >> 9);
+	max_discard_sectors -= max_discard_sectors % granularity;
+	if (unlikely(!max_discard_sectors)) {
+		/* Avoid infinite loop below. Being cautious never hurts. */
+		return -EOPNOTSUPP;
+	}
+
+	if (flags & BLKDEV_DISCARD_SECURE) {
+		if (!blk_queue_secdiscard(q))
+			return -EOPNOTSUPP;
+		type |= REQ_SECURE;
+	}
+
+	blk_start_plug(&plug);
+	while (nr_sects) {
+		unsigned int req_sects;
+		sector_t end_sect, tmp;
+
+		bio = bio_alloc(gfp_mask, 1);
+		if (!bio) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		req_sects = min_t(sector_t, nr_sects, max_discard_sectors);
+
+		/*
+		 * If splitting a request, and the next starting sector would be
+		 * misaligned, stop the discard at the previous aligned sector.
+		 */
+		end_sect = sector + req_sects;
+		tmp = end_sect;
+		if (req_sects < nr_sects &&
+		    sector_div(tmp, granularity) != alignment) {
+			end_sect = end_sect - alignment;
+			sector_div(end_sect, granularity);
+			end_sect = end_sect * granularity + alignment;
+			req_sects = end_sect - sector;
+		}
+
+		bio->bi_iter.bi_sector = sector;
+		bio->bi_end_io = discard_end_io;
+		bio->bi_bdev = bdev;
+		bio->bi_private = parent_bio;
+
+		bio->bi_iter.bi_size = req_sects << SECTOR_SHIFT;
+		nr_sects -= req_sects;
+		sector = end_sect;
+
+		atomic_inc(&parent_bio->bi_remaining);
+		submit_bio(type, bio);
+
+		/*
+		 * We can loop for a long time in here, if someone does
+		 * full device discards (like mkfs). Be nice and allow
+		 * us to schedule out to avoid softlocking if preempt
+		 * is disabled.
+		 */
+		cond_resched();
+	}
+	blk_finish_plug(&plug);
+
+	return ret;
+}
+
+/*----------------------------------------------------------------*/
+
 /*
  * Key building.
  */
+
+// FIXME: merge these
 static void build_data_key(struct dm_thin_device *td,
 			   dm_block_t b, struct dm_cell_key *key)
 {
@@ -131,6 +244,16 @@ static void build_virtual_range_key(struct dm_thin_device *td,
 				    struct dm_cell_key *key)
 {
 	key->virtual = 1;
+	key->dev = dm_thin_dev_id(td);
+	key->block_begin = b;
+	key->block_end = e;
+}
+
+static void build_data_range_key(struct dm_thin_device *td,
+				 dm_block_t b, dm_block_t e,
+				 struct dm_cell_key *key)
+{
+	key->virtual = 0;
 	key->dev = dm_thin_dev_id(td);
 	key->block_begin = b;
 	key->block_end = e;
@@ -402,6 +525,7 @@ struct dm_thin_endio_hook {
 	struct dm_deferred_entry *all_io_entry;
 	struct dm_thin_new_mapping *overwrite_mapping;
 	struct rb_node rb_node;
+	struct dm_bio_prison_cell *cell;
 };
 
 static void requeue_bio_list(struct thin_c *tc, struct bio_list *master)
@@ -464,6 +588,13 @@ static void error_retry_list(struct pool *pool)
 static bool block_size_is_power_of_two(struct pool *pool)
 {
 	return pool->sectors_per_block_shift >= 0;
+}
+
+static sector_t block_to_sectors(struct pool *pool, dm_block_t b)
+{
+	return block_size_is_power_of_two(pool) ?
+		(b << pool->sectors_per_block_shift) :
+		(b * pool->sectors_per_block);
 }
 
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
@@ -598,10 +729,11 @@ struct dm_thin_new_mapping {
 
 	int err;
 	struct thin_c *tc;
+	bool maybe_shared;
 	dm_block_t virt_block;
 	dm_block_t virt_block_end; /* used for discard ranges */
 	dm_block_t data_block;
-	struct dm_bio_prison_cell *cell, *cell2;
+	struct dm_bio_prison_cell *cell;
 
 	/*
 	 * If the bio covers the whole area of a block then we can avoid
@@ -753,11 +885,13 @@ static void process_prepared_discard_fail(struct dm_thin_new_mapping *m)
 	struct thin_c *tc = m->tc;
 
 	bio_io_error(m->bio);
+
+	// FIXME: factor this out into complete_discard_mapping?
 	cell_defer_no_holder(tc, m->cell);
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
-static void process_prepared_discard(struct dm_thin_new_mapping *m)
+static void process_prepared_discard_no_passdown(struct dm_thin_new_mapping *m)
 {
 	int r;
 	struct thin_c *tc = m->tc;
@@ -771,6 +905,34 @@ static void process_prepared_discard(struct dm_thin_new_mapping *m)
 
 	cell_defer_no_holder(tc, m->cell);
 	mempool_free(m, tc->pool->mapping_pool);
+}
+
+static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
+{
+	int r;
+	struct thin_c *tc = m->tc;
+	struct pool *pool = tc->pool;
+
+	r = dm_thin_remove_range(tc->td, m->virt_block, m->virt_block_end);
+	if (r) {
+		metadata_operation_failed(pool, "dm_thin_remove_range", r);
+		bio_io_error(m->bio);
+
+	} else if (!m->maybe_shared) {
+		r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, m->data_block),
+				  block_to_sectors(pool, m->virt_block_end - m->virt_block), GFP_NOWAIT, 0, m->bio);
+		if (r && r != -ENOMEM)
+			bio_io_error(m->bio);
+		else
+			bio_endio(m->bio, 0);
+
+	} else {
+		// FIXME: do long winded check of shared status?
+		bio_endio(m->bio, 0);
+	}
+
+	cell_defer_no_holder(tc, m->cell);
+	mempool_free(m, pool->mapping_pool);
 }
 
 static void process_prepared(struct pool *pool, struct list_head *head,
@@ -1154,7 +1316,7 @@ static void retry_bios_on_resume(struct pool *pool, struct dm_bio_prison_cell *c
 			retry_on_resume(bio);
 }
 
-static void process_discard(struct thin_c *tc, struct bio *bio)
+static void process_discard_no_passdown(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	struct dm_bio_prison_cell *cell;
@@ -1197,6 +1359,103 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 
 	if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
 		pool->process_prepared_discard(m);
+}
+
+static int break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t end,
+				struct bio *bio)
+{
+	int r;
+	struct pool *pool = tc->pool;
+	dm_block_t virt_begin, virt_end, data_begin;
+	bool maybe_shared;
+	struct dm_bio_prison_cell *data_cell;
+	struct dm_thin_lookup_result lookup_result;
+	struct dm_thin_new_mapping *m;
+	struct dm_cell_key key;
+
+	// FIXME: how do we stop this loop eating all memory?
+	while (begin != end) {
+		r = ensure_next_mapping(pool);
+		if (r)
+			return 0; /* we did our best */
+
+		r = dm_thin_find_unshared_range(tc->td, begin, end, &virt_begin, &virt_end,
+						&data_begin, &maybe_shared);
+		if (r == -ENODATA)
+			break;
+
+		if (r)
+			return r;
+
+		build_data_range_key(tc->td, data_begin, data_begin + (virt_end - virt_begin), &key);
+		if (bio_detain(tc->pool, &key, NULL, &data_cell))
+			/* contention, we'll give up with this range */
+			continue;
+
+		/*
+		 * IO may still be going to the destination block.  We must
+		 * quiesce before we can do the removal.
+		 */
+		m = get_next_mapping(pool);
+		m->tc = tc;
+		m->maybe_shared = maybe_shared;
+		m->virt_block = begin;
+		m->virt_block_end = end;
+		m->data_block = lookup_result.block;
+		m->cell = data_cell;
+		m->bio = bio;
+
+		atomic_inc(&bio->bi_remaining);
+		if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
+			pool->process_prepared_discard(m);
+
+		begin = virt_end;
+	}
+
+	return 0;
+}
+
+static void process_discard_passdown(struct thin_c *tc, struct bio *bio)
+{
+	int r;
+	struct dm_bio_prison_cell *virt_cell;
+	struct dm_cell_key key;
+	dm_block_t begin, end;
+	struct dm_thin_endio_hook *h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
+
+	get_bio_block_range(tc, bio, &begin, &end);
+	if (begin == end) {
+		/*
+		 * The discard covers less than a block, we can just pass
+		 * it down.
+		 * FIXME: no we can't we need to quiesce and check that it's not shared.
+		 */
+		//remap_and_issue(tc, bio, get_bio_block(tc, bio));
+		bio_endio(bio, 0);
+	}
+
+	build_virtual_range_key(tc->td, begin, end, &key);
+	if (bio_detain(tc->pool, &key, bio, &virt_cell))
+		/*
+		 * Potential starvation issue: We're relying on the
+		 * fs/application being well behaved, and not trying to
+		 * send IO to a region at the same time as discarding it.
+		 * If they do this persistently then it's possible this
+		 * cell will never be granted.
+		 */
+		return;
+
+	/*
+	 * The virt_cell will only get freed once the origin bio completes.
+	 * This means it will remain locked while all the individual
+	 * passdown bios are in flight.
+	 */
+	h->cell = virt_cell;
+	r = break_up_discard_bio(tc, begin, end, bio);
+	if (r)
+		bio_io_error(bio);
+	else
+		bio_endio(bio, 0);
 }
 
 static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
@@ -1775,6 +2034,11 @@ static void notify_of_pool_mode_change(struct pool *pool, const char *new_mode)
 	       dm_device_name(pool->pool_md), new_mode);
 }
 
+static bool passdown_enabled(struct pool_c *pt)
+{
+	return pt->adjusted_pf.discard_passdown;
+}
+
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 {
 	struct pool_c *pt = pool->ti->private;
@@ -1831,8 +2095,11 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 			notify_of_pool_mode_change(pool, "read-only");
 		dm_pool_metadata_read_only(pool->pmd);
 		pool->process_bio = process_bio_read_only;
-		pool->process_discard = process_bio_success;
 		pool->process_prepared_mapping = process_prepared_mapping_fail;
+
+		// FIXME: we could still do the passdown, but not the
+		// unmapping
+		pool->process_discard = process_bio_success;
 		pool->process_prepared_discard = process_prepared_discard_fail;
 
 		error_retry_list(pool);
@@ -1850,9 +2117,12 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 		if (old_mode != new_mode)
 			notify_of_pool_mode_change(pool, "out-of-data-space");
 		pool->process_bio = process_bio_read_only;
-		pool->process_discard = process_discard;
 		pool->process_prepared_mapping = process_prepared_mapping;
-		pool->process_prepared_discard = process_prepared_discard;
+
+		// FIXME: we could still do the passdown, but not the
+		// unmapping
+		pool->process_discard = process_bio_fail;
+		pool->process_prepared_discard = process_prepared_discard_fail;
 
 		if (!pool->pf.error_if_no_space && no_space_timeout)
 			queue_delayed_work(pool->wq, &pool->no_space_timeout, no_space_timeout);
@@ -1863,9 +2133,15 @@ static void set_pool_mode(struct pool *pool, enum pool_mode new_mode)
 			notify_of_pool_mode_change(pool, "write");
 		dm_pool_metadata_read_write(pool->pmd);
 		pool->process_bio = process_bio;
-		pool->process_discard = process_discard;
 		pool->process_prepared_mapping = process_prepared_mapping;
-		pool->process_prepared_discard = process_prepared_discard;
+
+		if (passdown_enabled(pt)) {
+			pool->process_discard = process_discard_passdown;
+			pool->process_prepared_discard = process_prepared_discard_passdown;
+		} else {
+			pool->process_discard = process_discard_no_passdown;
+			pool->process_prepared_discard = process_prepared_discard_no_passdown;
+		}
 		break;
 	}
 
@@ -1932,6 +2208,7 @@ static void thin_hook_bio(struct thin_c *tc, struct bio *bio)
 	h->shared_read_entry = NULL;
 	h->all_io_entry = NULL;
 	h->overwrite_mapping = NULL;
+	h->cell = NULL;
 }
 
 /*
@@ -1995,7 +2272,6 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
 			return DM_MAPIO_SUBMITTED;
 
-		// FIXME: still needed now that we don't do discard passdown?
 		build_data_key(tc->td, result.block, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
 			cell_defer_no_holder_no_free(tc, &cell1);
@@ -2069,17 +2345,50 @@ static void requeue_bios(struct pool *pool)
 /*----------------------------------------------------------------
  * Binding of control targets to a pool object
  *--------------------------------------------------------------*/
+static bool data_dev_supports_discard(struct pool_c *pt)
+{
+	struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
+
+	return q && blk_queue_discard(q);
+}
+
+static bool is_factor(sector_t block_size, uint32_t n)
+{
+	return !sector_div(block_size, n);
+}
 
 /*
- * Hard wired to unsupported these days.
+ * If discard_passdown was enabled verify that the data device
+ * supports discards.  Disable discard_passdown if not.
  */
 static void disable_passdown_if_not_supported(struct pool_c *pt)
 {
+	struct pool *pool = pt->pool;
+	struct block_device *data_bdev = pt->data_dev->bdev;
+	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
+	sector_t block_size = pool->sectors_per_block << SECTOR_SHIFT;
+	const char *reason = NULL;
 	char buf[BDEVNAME_SIZE];
 
-	DMWARN("Data device (%s): Discard passdown is not supported.",
-	       bdevname(pt->data_dev->bdev, buf));
-	pt->adjusted_pf.discard_passdown = false;
+	if (!pt->adjusted_pf.discard_passdown)
+		return;
+
+	if (!data_dev_supports_discard(pt))
+		reason = "discard unsupported";
+
+	else if (data_limits->max_discard_sectors < pool->sectors_per_block)
+		reason = "max discard sectors smaller than a block";
+
+	else if (data_limits->discard_granularity > block_size)
+		reason = "discard granularity larger than a block";
+
+	else if (!is_factor(block_size, data_limits->discard_granularity))
+		reason = "discard granularity not a factor of block size";
+
+	if (reason) {
+		DMWARN("Data device (%s) %s: Disabling discard passdown.", bdevname(data_bdev, buf), reason);
+		pt->adjusted_pf.discard_passdown = false;
+	}
 }
 
 static int bind_control_target(struct pool *pool, struct dm_target *ti)
@@ -2123,7 +2432,7 @@ static void pool_features_init(struct pool_features *pf)
 	pf->mode = PM_WRITE;
 	pf->zero_new_blocks = true;
 	pf->discard_enabled = true;
-	pf->discard_passdown = false;
+	pf->discard_passdown = true;
 	pf->error_if_no_space = false;
 }
 
@@ -3194,12 +3503,22 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-static void set_discard_limits(struct pool *pool,
-			       struct queue_limits *limits)
+static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
 {
-	// FIXME: should we allow bigger discards?
+	struct pool *pool = pt->pool;
+	struct queue_limits *data_limits;
+
 	limits->max_discard_sectors = 2048 * 1024 * 16; /* 16 G */
 	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+
+	/*
+	 * discard_granularity is just a hint, and not enforced.
+	 */
+	if (pt->adjusted_pf.discard_passdown) {
+		data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
+		limits->discard_granularity = max(data_limits->discard_granularity,
+						  limits->discard_granularity);
+	}
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -3235,7 +3554,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	}
 
 	disable_passdown_if_not_supported(pt);
-	set_discard_limits(pool, limits);
+	set_discard_limits(pt, limits);
 }
 
 static struct target_type pool_target = {
@@ -3477,6 +3796,9 @@ static int thin_endio(struct dm_target *ti, struct bio *bio, int err)
 			wake_worker(pool);
 		}
 	}
+
+	if (h->cell)
+		cell_defer_no_holder(h->tc, h->cell);
 
 	return 0;
 }
