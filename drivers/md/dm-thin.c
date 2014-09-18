@@ -112,20 +112,8 @@ static void discard_end_io(struct bio *bio, int err)
 	bio_put(bio);
 }
 
-/**
- * issue_discard - queue a discard
- * @bdev:	blockdev to issue discard for
- * @sector:	start sector
- * @nr_sects:	number of sectors to discard
- * @gfp_mask:	memory allocation flags (for bio_alloc)
- * @flags:	BLKDEV_IFL_* flags to control behaviour
- *
- * Description:
- *    Issue a discard request for the sectors in question.
- */
 static int issue_discard(struct block_device *bdev, sector_t sector,
-			 sector_t nr_sects, gfp_t gfp_mask, unsigned long flags,
-			 struct bio *parent_bio)
+			 sector_t nr_sects, gfp_t gfp_mask, struct bio *parent_bio)
 {
 	struct request_queue *q = bdev_get_queue(bdev);
 	int type = REQ_WRITE | REQ_DISCARD;
@@ -154,12 +142,6 @@ static int issue_discard(struct block_device *bdev, sector_t sector,
 	if (unlikely(!max_discard_sectors)) {
 		/* Avoid infinite loop below. Being cautious never hurts. */
 		return -EOPNOTSUPP;
-	}
-
-	if (flags & BLKDEV_DISCARD_SECURE) {
-		if (!blk_queue_secdiscard(q))
-			return -EOPNOTSUPP;
-		type |= REQ_SECURE;
 	}
 
 	blk_start_plug(&plug);
@@ -216,44 +198,10 @@ static int issue_discard(struct block_device *bdev, sector_t sector,
 
 /*----------------------------------------------------------------*/
 
-/*
- * Key building.
- */
-
-// FIXME: merge these
-static void build_data_key(struct dm_thin_device *td,
-			   dm_block_t b, struct dm_cell_key *key)
+static void build_key(struct dm_thin_device *td, bool virtual,
+		      dm_block_t b, dm_block_t e, struct dm_cell_key *key)
 {
-	key->virtual = 0;
-	key->dev = dm_thin_dev_id(td);
-	key->block_begin = b;
-	key->block_end = b + 1ULL;
-}
-
-static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
-			      struct dm_cell_key *key)
-{
-	key->virtual = 1;
-	key->dev = dm_thin_dev_id(td);
-	key->block_begin = b;
-	key->block_end = b + 1ULL;
-}
-
-static void build_virtual_range_key(struct dm_thin_device *td,
-				    dm_block_t b, dm_block_t e,
-				    struct dm_cell_key *key)
-{
-	key->virtual = 1;
-	key->dev = dm_thin_dev_id(td);
-	key->block_begin = b;
-	key->block_end = e;
-}
-
-static void build_data_range_key(struct dm_thin_device *td,
-				 dm_block_t b, dm_block_t e,
-				 struct dm_cell_key *key)
-{
-	key->virtual = 0;
+	key->virtual = virtual;
 	key->dev = dm_thin_dev_id(td);
 	key->block_begin = b;
 	key->block_end = e;
@@ -907,6 +855,45 @@ static void process_prepared_discard_no_passdown(struct dm_thin_new_mapping *m)
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
+static int passdown_double_checking_shared_status(struct dm_thin_new_mapping *m)
+{
+	/*
+	 * We're not sure if these blocks are really free, so have
+	 * to double check them one by one.  Very expensive.
+	 */
+	int r;
+	bool used = true;
+	struct thin_c *tc = m->tc;
+	struct pool *pool = tc->pool;
+	dm_block_t b = m->data_block, e, end = m->data_block + (m->virt_block_end - m->virt_block);
+
+	while (b != end) {
+
+		/* find start of unmapped run */
+		for (; b != end && used; b++) {
+			r = dm_pool_block_is_used(pool->pmd, b, &used);
+			if (r)
+				return r;
+		}
+
+		if (!r && b != end) {
+			/* find end of run */
+			for (e = b + 1; e != end && !used; e++) {
+				r = dm_pool_block_is_used(pool->pmd, e, &used);
+				if (r)
+					return r;
+			}
+
+			r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, b),
+					  block_to_sectors(pool, e - b), GFP_NOWAIT, m->bio);
+			if (r)
+				return r;
+		}
+	}
+
+	return 0;
+}
+
 static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 {
 	int r;
@@ -914,22 +901,24 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 	struct pool *pool = tc->pool;
 
 	r = dm_thin_remove_range(tc->td, m->virt_block, m->virt_block_end);
-	if (r) {
+	if (r)
 		metadata_operation_failed(pool, "dm_thin_remove_range", r);
-		bio_io_error(m->bio);
+	else {
+		if (!m->maybe_shared) {
+			r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, m->data_block),
+					  block_to_sectors(pool, m->virt_block_end - m->virt_block), GFP_NOWAIT, m->bio);
 
-	} else if (!m->maybe_shared) {
-		r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, m->data_block),
-				  block_to_sectors(pool, m->virt_block_end - m->virt_block), GFP_NOWAIT, 0, m->bio);
-		if (r && r != -ENOMEM)
-			bio_io_error(m->bio);
-		else
-			bio_endio(m->bio, 0);
-
-	} else {
-		// FIXME: do long winded check of shared status?
-		bio_endio(m->bio, 0);
+		} else
+			r = passdown_double_checking_shared_status(m);
 	}
+
+	/*
+	 * We ignore OOM issues and pretend the discard succeeded.
+	 */
+	if (r && r != -ENOMEM)
+		bio_io_error(m->bio);
+	else
+		bio_endio(m->bio, 0);
 
 	cell_defer_no_holder(tc, m->cell);
 	mempool_free(m, pool->mapping_pool);
@@ -1334,7 +1323,7 @@ static void process_discard_no_passdown(struct thin_c *tc, struct bio *bio)
 		return;
 	}
 
-	build_virtual_range_key(tc->td, begin, end, &key);
+	build_key(tc->td, true, begin, end, &key);
 	if (bio_detain(tc->pool, &key, bio, &cell))
 		/*
 		 * Potential starvation issue: We're relying on the
@@ -1387,7 +1376,7 @@ static int break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t 
 		if (r)
 			return r;
 
-		build_data_range_key(tc->td, data_begin, data_begin + (virt_end - virt_begin), &key);
+		build_key(tc->td, false, data_begin, data_begin + (virt_end - virt_begin), &key);
 		if (bio_detain(tc->pool, &key, NULL, &data_cell))
 			/* contention, we'll give up with this range */
 			continue;
@@ -1434,7 +1423,7 @@ static void process_discard_passdown(struct thin_c *tc, struct bio *bio)
 		bio_endio(bio, 0);
 	}
 
-	build_virtual_range_key(tc->td, begin, end, &key);
+	build_key(tc->td, true, begin, end, &key);
 	if (bio_detain(tc->pool, &key, bio, &virt_cell))
 		/*
 		 * Potential starvation issue: We're relying on the
@@ -1498,7 +1487,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	 * If cell is already occupied, then sharing is already in the process
 	 * of being broken so we have nothing further to do here.
 	 */
-	build_data_key(tc->td, lookup_result->block, &key);
+	build_key(tc->td, false, lookup_result->block, lookup_result->block + 1, &key);
 	if (bio_detain(pool, &key, bio, &cell))
 		return;
 
@@ -1577,7 +1566,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	 * If cell is already occupied, then the block is already
 	 * being provisioned so we have nothing further to do here.
 	 */
-	build_virtual_key(tc->td, block, &key);
+	build_key(tc->td, true, block, block + 1, &key);
 	if (bio_detain(pool, &key, bio, &cell))
 		return;
 
@@ -2268,11 +2257,11 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			return DM_MAPIO_SUBMITTED;
 		}
 
-		build_virtual_key(tc->td, block, &key);
+		build_key(tc->td, true, block, block + 1, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell1, &cell_result))
 			return DM_MAPIO_SUBMITTED;
 
-		build_data_key(tc->td, result.block, &key);
+		build_key(tc->td, false, result.block, result.block + 1, &key);
 		if (dm_bio_detain(tc->pool->prison, &key, bio, &cell2, &cell_result)) {
 			cell_defer_no_holder_no_free(tc, &cell1);
 			return DM_MAPIO_SUBMITTED;
