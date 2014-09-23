@@ -1371,8 +1371,8 @@ static int break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t 
 		if (r)
 			return 0; /* we did our best */
 
-		r = dm_thin_find_unshared_range(tc->td, begin, end, &virt_begin, &virt_end,
-						&data_begin, &maybe_shared);
+		r = dm_thin_find_mapped_range(tc->td, begin, end, &virt_begin, &virt_end,
+					      &data_begin, &maybe_shared);
 		if (r == -ENODATA)
 			break;
 

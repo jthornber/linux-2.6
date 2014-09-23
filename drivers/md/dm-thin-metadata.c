@@ -1424,10 +1424,10 @@ out:
 }
 
 /* FIXME: write a more efficient one in btree */
-int dm_thin_find_unshared_range(struct dm_thin_device *td,
-				dm_block_t begin, dm_block_t end,
-				dm_block_t *thin_begin, dm_block_t *thin_end,
-				dm_block_t *pool_begin, bool *maybe_shared)
+int dm_thin_find_mapped_range(struct dm_thin_device *td,
+			      dm_block_t begin, dm_block_t end,
+			      dm_block_t *thin_begin, dm_block_t *thin_end,
+			      dm_block_t *pool_begin, bool *maybe_shared)
 {
 	int r;
 	dm_block_t pool_end;
