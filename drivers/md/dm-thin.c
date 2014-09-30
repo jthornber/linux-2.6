@@ -250,6 +250,7 @@ struct pool {
 	dm_block_t low_water_blocks;
 	uint32_t sectors_per_block;
 	int sectors_per_block_shift;
+	uint32_t blocks_per_big_block;
 
 	struct pool_features pf;
 	bool low_water_triggered:1;	/* A dm event has been sent */
@@ -681,9 +682,9 @@ struct dm_thin_new_mapping {
 	int err;
 	struct thin_c *tc;
 	bool maybe_shared;
-	dm_block_t virt_block;
-	dm_block_t virt_block_end; /* used for discard ranges */
-	dm_block_t data_block;
+	dm_block_t virt_begin;
+	dm_block_t virt_end;
+	dm_block_t data_begin;
 	struct dm_bio_prison_cell *cell;
 
 	/*
@@ -789,6 +790,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	struct thin_c *tc = m->tc;
 	struct pool *pool = tc->pool;
 	struct bio *bio;
+	dm_block_t b, nr_blocks;
 	int r;
 
 	bio = m->bio;
@@ -807,11 +809,14 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	 * Any I/O for this block arriving after this point will get
 	 * remapped to it directly.
 	 */
-	r = dm_thin_insert_block(tc->td, m->virt_block, m->data_block);
-	if (r) {
-		metadata_operation_failed(pool, "dm_thin_insert_block", r);
-		cell_error(pool, m->cell);
-		goto out;
+	nr_blocks = m->virt_end - m->virt_begin;
+	for (b = 0; b < nr_blocks; b++) {
+		r = dm_thin_insert_block(tc->td, m->virt_begin + b, m->data_begin + b);
+		if (r) {
+			metadata_operation_failed(pool, "dm_thin_insert_block", r);
+			cell_error(pool, m->cell);
+			goto out;
+		}
 	}
 
 	/*
@@ -847,7 +852,7 @@ static void process_prepared_discard_no_passdown(struct dm_thin_new_mapping *m)
 	int r;
 	struct thin_c *tc = m->tc;
 
-	r = dm_thin_remove_range(tc->td, m->virt_block, m->virt_block_end);
+	r = dm_thin_remove_range(tc->td, m->virt_begin, m->virt_end);
 	if (r) {
 		metadata_operation_failed(tc->pool, "dm_thin_remove_range", r);
 		bio_io_error(m->bio);
@@ -868,7 +873,7 @@ static int passdown_double_checking_shared_status(struct dm_thin_new_mapping *m)
 	bool used = true;
 	struct thin_c *tc = m->tc;
 	struct pool *pool = tc->pool;
-	dm_block_t b = m->data_block, e, end = m->data_block + (m->virt_block_end - m->virt_block);
+	dm_block_t b = m->data_begin, e, end = m->data_begin + (m->virt_end - m->virt_begin);
 
 	while (b != end) {
 
@@ -903,13 +908,13 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 	struct thin_c *tc = m->tc;
 	struct pool *pool = tc->pool;
 
-	r = dm_thin_remove_range(tc->td, m->virt_block, m->virt_block_end);
+	r = dm_thin_remove_range(tc->td, m->virt_begin, m->virt_end);
 	if (r)
 		metadata_operation_failed(pool, "dm_thin_remove_range", r);
 	else {
 		if (!m->maybe_shared) {
-			r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, m->data_block),
-					  block_to_sectors(pool, m->virt_block_end - m->virt_block), GFP_NOWAIT, m->bio);
+			r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, m->data_begin),
+					  block_to_sectors(pool, m->virt_end - m->virt_begin), GFP_NOWAIT, m->bio);
 
 		} else
 			r = passdown_double_checking_shared_status(m);
@@ -956,6 +961,19 @@ static int io_overwrites_block(struct pool *pool, struct bio *bio)
 {
 	return (bio_data_dir(bio) == WRITE) &&
 		io_overlaps_block(pool, bio);
+}
+
+static bool io_overwrites_blocks(struct pool *pool, struct bio *bio,
+				 dm_block_t virt_begin, dm_block_t virt_end)
+{
+	/*
+	 * We don't accept io bigger than a single block yet. So
+	 * implementation is trivial.
+	 */
+	if (virt_end - virt_begin > 1)
+		return false;
+
+	return io_overwrites_block(pool, bio);
 }
 
 static void save_and_set_endio(struct bio *bio, bio_end_io_t **save,
@@ -1021,8 +1039,9 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	struct dm_thin_new_mapping *m = get_next_mapping(pool);
 
 	m->tc = tc;
-	m->virt_block = virt_block;
-	m->data_block = data_dest;
+	m->virt_begin = virt_block;
+	m->virt_end = virt_block + 1;
+	m->data_begin = data_dest;
 	m->cell = cell;
 
 	/*
@@ -1097,17 +1116,19 @@ static void schedule_internal_copy(struct thin_c *tc, dm_block_t virt_block,
 		      tc->pool->sectors_per_block);
 }
 
-static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
-			  dm_block_t data_block, struct dm_bio_prison_cell *cell,
-			  struct bio *bio)
+static void schedule_zero(struct thin_c *tc,
+			  dm_block_t virt_begin, dm_block_t virt_end,
+			  dm_block_t data_begin,
+			  struct dm_bio_prison_cell *cell, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	struct dm_thin_new_mapping *m = get_next_mapping(pool);
 
 	atomic_set(&m->prepare_actions, 1); /* no need to quiesce */
 	m->tc = tc;
-	m->virt_block = virt_block;
-	m->data_block = data_block;
+	m->virt_begin = virt_begin;
+	m->virt_end = virt_end;
+	m->data_begin = data_begin;
 	m->cell = cell;
 
 	/*
@@ -1118,19 +1139,19 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	if (!pool->pf.zero_new_blocks)
 		process_prepared_mapping(m);
 
-	else if (io_overwrites_block(pool, bio)) {
+	else if (io_overwrites_blocks(pool, bio, virt_begin, virt_end)) {
 		struct dm_thin_endio_hook *h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
 
 		h->overwrite_mapping = m;
 		m->bio = bio;
 		save_and_set_endio(bio, &m->saved_bi_end_io, overwrite_endio);
 		inc_all_io_entry(pool, bio);
-		remap_and_issue(tc, bio, data_block);
+		remap_and_issue(tc, bio, data_begin);
 
 	} else
 		ll_zero(tc, m,
-			data_block * pool->sectors_per_block,
-			(data_block + 1) * pool->sectors_per_block);
+			data_begin * pool->sectors_per_block,
+			(data_begin + (virt_end - virt_begin)) * pool->sectors_per_block);
 }
 
 static void schedule_external_copy(struct thin_c *tc, dm_block_t virt_block,
@@ -1152,7 +1173,7 @@ static void schedule_external_copy(struct thin_c *tc, dm_block_t virt_block,
 			      tc->origin_size - virt_block_begin);
 
 	else
-		schedule_zero(tc, virt_block, data_dest, cell, bio);
+		schedule_zero(tc, virt_block, virt_block + 1, data_dest, cell, bio);
 }
 
 /*
@@ -1189,7 +1210,8 @@ static void check_low_water_mark(struct pool *pool, dm_block_t free_blocks)
 
 static void set_pool_mode(struct pool *pool, enum pool_mode new_mode);
 
-static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
+static int alloc_data_blocks(struct thin_c *tc, unsigned count,
+			     dm_block_t *begin, dm_block_t *end)
 {
 	int r;
 	dm_block_t free_blocks;
@@ -1227,7 +1249,7 @@ static int alloc_data_block(struct thin_c *tc, dm_block_t *result)
 		}
 	}
 
-	r = dm_pool_alloc_data_block(pool->pmd, result);
+	r = dm_pool_alloc_data_blocks(pool->pmd, count, begin, end);
 	if (r) {
 		metadata_operation_failed(pool, "dm_pool_alloc_data_block", r);
 		return r;
@@ -1343,9 +1365,9 @@ static void process_discard_no_passdown(struct thin_c *tc, struct bio *bio)
 	 */
 	m = get_next_mapping(pool);
 	m->tc = tc;
-	m->virt_block = begin;
-	m->virt_block_end = end;
-	m->data_block = lookup_result.block;
+	m->virt_begin = begin;
+	m->virt_end = end;
+	m->data_begin = lookup_result.block;
 	m->cell = cell;
 	m->bio = bio;
 
@@ -1391,9 +1413,9 @@ static int break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t 
 		m = get_next_mapping(pool);
 		m->tc = tc;
 		m->maybe_shared = maybe_shared;
-		m->virt_block = begin;
-		m->virt_block_end = end;
-		m->data_block = lookup_result.block;
+		m->virt_begin = begin;
+		m->virt_end = end;
+		m->data_begin = lookup_result.block;
 		m->cell = data_cell;
 		m->bio = bio;
 
@@ -1456,14 +1478,14 @@ static void break_sharing(struct thin_c *tc, struct bio *bio, dm_block_t block,
 			  struct dm_bio_prison_cell *cell)
 {
 	int r;
-	dm_block_t data_block;
+	dm_block_t data_begin, data_end;
 	struct pool *pool = tc->pool;
 
-	r = alloc_data_block(tc, &data_block);
+	r = alloc_data_blocks(tc, 1, &data_begin, &data_end);
 	switch (r) {
 	case 0:
 		schedule_internal_copy(tc, block, lookup_result->block,
-				       data_block, cell, bio);
+				       data_begin, cell, bio);
 		break;
 
 	case -ENOSPC:
@@ -1507,13 +1529,34 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	}
 }
 
-static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block,
+static bool is_external_snapshot(struct thin_c *tc)
+{
+	return tc->origin_dev;
+}
+
+static dm_block_t distance_to_next_provisioned_block(struct thin_c *tc,
+						     dm_block_t virt_begin, dm_block_t virt_end)
+{
+	int r;
+	dm_block_t vb, ve, db;
+	bool maybe_shared;
+
+	// FIXME: find_next() would be good, I think this was already written
+	r = dm_thin_find_mapped_range(tc->td, virt_begin, virt_end, &vb, &ve, &db, &maybe_shared);
+	if (r)
+		return 1;	/* fall back to a single block */
+
+	return vb - virt_begin;
+}
+
+static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t virt_block,
 			    struct dm_bio_prison_cell *cell)
 {
 	int r;
-	dm_block_t data_block;
 	struct pool *pool = tc->pool;
+	dm_block_t data_begin, data_end, nr_blocks;
 
+	// FIXME: lift vvvvv
 	/*
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
@@ -1534,14 +1577,36 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 		bio_endio(bio, 0);
 		return;
 	}
+	// FIXME: lift ^^^^^
 
-	r = alloc_data_block(tc, &data_block);
+	if (is_external_snapshot(tc))
+		nr_blocks = 1;
+
+	else {
+		/*
+		 * try and allocate a big block.
+		 */
+		dm_block_t bb_start, bb_end;
+
+		bb_start = virt_block & (-pool->blocks_per_big_block);
+		nr_blocks = distance_to_next_provisioned_block(tc, bb_start, bb_start + pool->blocks_per_big_block);
+
+		if (nr_blocks > (virt_block - bb_start))
+			virt_block = bb_start;
+		else {
+			bb_end = (virt_block + (pool->blocks_per_big_block - 1)) & (-pool->blocks_per_big_block);
+			nr_blocks = distance_to_next_provisioned_block(tc, virt_block, virt_block + bb_end);
+		}
+	}
+
+	r = alloc_data_blocks(tc, nr_blocks, &data_begin, &data_end);
 	switch (r) {
 	case 0:
-		if (tc->origin_dev)
-			schedule_external_copy(tc, block, data_block, cell, bio);
+		nr_blocks = data_end - data_begin;
+		if (is_external_snapshot(tc))
+			schedule_external_copy(tc, virt_block, data_begin, cell, bio);
 		else
-			schedule_zero(tc, block, data_block, cell, bio);
+			schedule_zero(tc, virt_block, virt_block + nr_blocks, data_begin, cell, bio);
 		break;
 
 	case -ENOSPC:
@@ -1549,8 +1614,6 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 		break;
 
 	default:
-		DMERR_LIMIT("%s: alloc_data_block() failed: error = %d",
-			    __func__, r);
 		cell_error(pool, cell);
 		break;
 	}
@@ -1560,7 +1623,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 {
 	int r;
 	struct pool *pool = tc->pool;
-	dm_block_t block = get_bio_block(tc, bio);
+	dm_block_t block = get_bio_block(tc, bio), nr_blocks;
 	struct dm_bio_prison_cell *cell;
 	struct dm_cell_key key;
 	struct dm_thin_lookup_result lookup_result;
@@ -1569,8 +1632,12 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	 * If cell is already occupied, then the block is already
 	 * being provisioned so we have nothing further to do here.
 	 */
-	build_key(tc->td, true, block, block + 1, &key);
+
+	/* FIXME: breaking levels of abstraction here */
+	nr_blocks = is_external_snapshot(tc) ? 1 : pool->blocks_per_big_block;
+	build_key(tc->td, true, block, block + nr_blocks, &key);
 	if (bio_detain(pool, &key, bio, &cell))
+		// FIXME: should we retry with fewer blocks?
 		return;
 
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
@@ -1588,7 +1655,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 		break;
 
 	case -ENODATA:
-		if (bio_data_dir(bio) == READ && tc->origin_dev) {
+		if (bio_data_dir(bio) == READ && is_external_snapshot(tc)) {
 			inc_all_io_entry(pool, bio);
 			cell_defer_no_holder(tc, cell);
 
@@ -1641,7 +1708,7 @@ static void process_bio_read_only(struct thin_c *tc, struct bio *bio)
 			break;
 		}
 
-		if (tc->origin_dev) {
+		if (is_external_snapshot(tc)) {
 			inc_all_io_entry(tc->pool, bio);
 			remap_to_origin_and_issue(tc, bio);
 			break;
@@ -2476,6 +2543,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 
 	pool->pmd = pmd;
+	pool->blocks_per_big_block = 64; /* FIXME: hard coded */
 	pool->sectors_per_block = block_size;
 	if (block_size & (block_size - 1))
 		pool->sectors_per_block_shift = -1;
@@ -3600,7 +3668,7 @@ static void thin_dtr(struct dm_target *ti)
 	__pool_dec(tc->pool);
 	dm_pool_close_thin_device(tc->td);
 	dm_put_device(ti, tc->pool_dev);
-	if (tc->origin_dev)
+	if (is_external_snapshot(tc))
 		dm_put_device(ti, tc->origin_dev);
 	kfree(tc);
 
@@ -3740,7 +3808,7 @@ bad_pool_lookup:
 bad_common:
 	dm_put_device(ti, tc->pool_dev);
 bad_pool_dev:
-	if (tc->origin_dev)
+	if (is_external_snapshot(tc))
 		dm_put_device(ti, tc->origin_dev);
 bad_origin_dev:
 	kfree(tc);
@@ -3818,7 +3886,7 @@ static int thin_preresume(struct dm_target *ti)
 {
 	struct thin_c *tc = ti->private;
 
-	if (tc->origin_dev)
+	if (is_external_snapshot(tc))
 		tc->origin_size = get_dev_size(tc->origin_dev->bdev);
 
 	return 0;
@@ -3870,7 +3938,7 @@ static void thin_status(struct dm_target *ti, status_type_t type,
 			DMEMIT("%s %lu",
 			       format_dev_t(buf, tc->pool_dev->bdev->bd_dev),
 			       (unsigned long) tc->dev_id);
-			if (tc->origin_dev)
+			if (is_external_snapshot(tc))
 				DMEMIT(" %s", format_dev_t(buf, tc->origin_dev->bdev->bd_dev));
 			break;
 		}

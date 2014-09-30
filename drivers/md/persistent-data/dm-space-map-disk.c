@@ -167,6 +167,48 @@ static int sm_disk_new_block(struct dm_space_map *sm, dm_block_t *b)
 	return r;
 }
 
+static int sm_disk_new_contiguous_blocks(struct dm_space_map *sm, unsigned count,
+					 dm_block_t *b, dm_block_t *e)
+{
+	int r;
+	enum allocation_event ev;
+	dm_block_t i, next_free;
+	struct sm_disk *smd = container_of(sm, struct sm_disk, sm);
+
+	// FIXME: verbose
+	r = sm_ll_find_free_block(&smd->old_ll, smd->begin, smd->old_ll.nr_blocks, b);
+	if (r)
+		return r;
+
+	for (i = 1; i < count; i++) {
+		r = sm_ll_find_free_block(&smd->old_ll, smd->begin + i, smd->old_ll.nr_blocks, &next_free);
+		if (r) {
+			/*
+			 * We don't guarantee all these allocations to succeed.
+			 */
+			r = 0;
+			break;
+		}
+
+		if (next_free != *b + i)
+			break;
+	}
+
+	count = i;
+	smd->begin = *e = *b + i;
+
+	for (i = 0; i < count; i++) {
+		r = sm_ll_inc(&smd->ll, *b + i, &ev);
+		if (r)
+			return r;
+
+		BUG_ON(ev != SM_ALLOC);
+		smd->nr_allocated_this_transaction++;
+	}
+
+	return 0;
+}
+
 static int sm_disk_commit(struct dm_space_map *sm)
 {
 	int r;
@@ -230,6 +272,7 @@ static struct dm_space_map ops = {
 	.inc_block = sm_disk_inc_block,
 	.dec_block = sm_disk_dec_block,
 	.new_block = sm_disk_new_block,
+	.new_contiguous_blocks = sm_disk_new_contiguous_blocks,
 	.commit = sm_disk_commit,
 	.root_size = sm_disk_root_size,
 	.copy_root = sm_disk_copy_root,

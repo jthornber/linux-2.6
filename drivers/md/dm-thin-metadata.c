@@ -1636,13 +1636,14 @@ bool dm_thin_aborted_changes(struct dm_thin_device *td)
 	return r;
 }
 
-int dm_pool_alloc_data_block(struct dm_pool_metadata *pmd, dm_block_t *result)
+int dm_pool_alloc_data_blocks(struct dm_pool_metadata *pmd, unsigned count,
+			      dm_block_t *begin, dm_block_t *end)
 {
 	int r = -EINVAL;
 
 	down_write(&pmd->root_lock);
 	if (!pmd->fail_io)
-		r = dm_sm_new_block(pmd->data_sm, result);
+		r = dm_sm_new_contiguous_blocks(pmd->data_sm, count, begin, end);
 	up_write(&pmd->root_lock);
 
 	return r;

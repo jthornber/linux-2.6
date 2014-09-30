@@ -156,9 +156,11 @@ int dm_thin_find_mapped_range(struct dm_thin_device *td,
 			      dm_block_t *pool_begin, bool *maybe_shared);
 
 /*
- * Obtain an unused block.
+ * Obtain a number of unused, contiguous blocks.  May return fewer than
+ * count.
  */
-int dm_pool_alloc_data_block(struct dm_pool_metadata *pmd, dm_block_t *result);
+int dm_pool_alloc_data_blocks(struct dm_pool_metadata *pmd, unsigned count,
+			      dm_block_t *begin, dm_block_t *end);
 
 /*
  * Insert or remove block.
