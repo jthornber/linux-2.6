@@ -1334,8 +1334,8 @@ static void inc_hit_counter(struct cache *cache, struct bio *bio)
 
 static void inc_miss_counter(struct cache *cache, struct bio *bio)
 {
-	atomic_inc(is_write_io(bio) ?
-		   &cache->stats.write_miss : &cache->stats.read_miss);
+	atomic_inc(bio_data_dir(bio) == READ ?
+		   &cache->stats.read_miss : &cache->stats.write_miss);
 }
 
 static void process_bio(struct cache *cache, struct prealloc *structs,
@@ -2439,7 +2439,7 @@ out:
 	return r;
 }
 
-static int cache_map_(struct cache *cache, struct bio *bio, struct dm_bio_prison_cell **cell)
+static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_prison_cell **cell)
 {
 	int r;
 	dm_oblock_t block = get_bio_block(cache, bio);
@@ -2488,7 +2488,6 @@ static int cache_map_(struct cache *cache, struct bio *bio, struct dm_bio_prison
 	r = policy_map(cache->policy, block, false, can_migrate, discarded_block,
 		       bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
-		// FIXME: we should check to see if there's any spare migration bandwidth here
 		cell_defer(cache, *cell, true);
 		return DM_MAPIO_SUBMITTED;
 
@@ -2560,7 +2559,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	struct dm_bio_prison_cell *cell;
 	struct cache *cache = ti->private;
 
-	r = cache_map_(cache, bio, &cell);
+	r = __cache_map(cache, bio, &cell);
 	if (r == DM_MAPIO_REMAPPED) {
 		inc_ds(cache, bio, cell);
 		cell_defer(cache, cell, false);
@@ -2848,7 +2847,7 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		residency = policy_residency(cache->policy);
 
 		DMEMIT("%u %llu/%llu %u %llu/%llu %u %u %u %u %u %u %lu ",
-		       (unsigned)(DM_CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT),
+		       (unsigned)DM_CACHE_METADATA_BLOCK_SIZE,
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
 		       cache->sectors_per_block,
@@ -3102,7 +3101,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < cache->sectors_per_block ||
 	    do_div(io_opt_sectors, cache->sectors_per_block)) {
-		blk_limits_io_min(limits, 0);
+		blk_limits_io_min(limits, cache->sectors_per_block << SECTOR_SHIFT);
 		blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
 	}
 	set_discard_limits(cache, limits);
@@ -3112,7 +3111,7 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type cache_target = {
 	.name = "cache",
-	.version = {1, 4, 0},
+	.version = {1, 5, 0},
 	.module = THIS_MODULE,
 	.ctr = cache_ctr,
 	.dtr = cache_dtr,

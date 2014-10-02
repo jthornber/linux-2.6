@@ -558,8 +558,11 @@ struct dm_thin_new_mapping {
 	bool pass_discard:1;
 	bool definitely_not_shared:1;
 
-	// Quiescing and copying and zeroing.  When this counter hits zero
-	// we know it's prepared and can be inserted into the btree.
+	/*
+	 * Track quiescing, copying and zeroing preparation actions.  When this
+	 * counter hits zero the block is prepared and can be inserted into the
+	 * btree.
+	 */
 	atomic_t prepare_actions;
 
 	int err;
@@ -901,7 +904,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 			/*
 			 * We allow the zero to be issued, to simplify the
 			 * error path.  Otherwise we'd need to start
-			 * worrying about decing the prepare_actions
+			 * worrying about decrementing the prepare_actions
 			 * counter.
 			 */
 		}
@@ -3277,7 +3280,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < pool->sectors_per_block ||
 	    do_div(io_opt_sectors, pool->sectors_per_block)) {
-		blk_limits_io_min(limits, 0);
+		blk_limits_io_min(limits, pool->sectors_per_block << SECTOR_SHIFT);
 		blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
 	}
 
@@ -3306,7 +3309,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 12, 0},
+	.version = {1, 13, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -3657,7 +3660,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 12, 0},
+	.version = {1, 13, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
