@@ -2419,10 +2419,6 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		/* fall through */
 
 	case -EWOULDBLOCK:
-		/*
-		 * In future, the failed dm_thin_find_block above could
-		 * provide the hint to load the metadata into cache.
-		 */
 		thin_defer_bio(tc, bio);
 		return DM_MAPIO_SUBMITTED;
 
