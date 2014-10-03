@@ -1336,7 +1336,6 @@ static void process_discard_no_passdown(struct thin_c *tc, struct bio *bio)
 	struct dm_bio_prison_cell *cell;
 	struct dm_cell_key key;
 	dm_block_t begin, end;
-	struct dm_thin_lookup_result lookup_result;
 	struct dm_thin_new_mapping *m;
 
 	get_bio_block_range(tc, bio, &begin, &end);
@@ -1367,7 +1366,7 @@ static void process_discard_no_passdown(struct thin_c *tc, struct bio *bio)
 	m->tc = tc;
 	m->virt_begin = begin;
 	m->virt_end = end;
-	m->data_begin = lookup_result.block;
+	m->data_begin = 0;	/* not used */
 	m->cell = cell;
 	m->bio = bio;
 
@@ -1383,7 +1382,6 @@ static int break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t 
 	dm_block_t virt_begin, virt_end, data_begin;
 	bool maybe_shared;
 	struct dm_bio_prison_cell *data_cell;
-	struct dm_thin_lookup_result lookup_result;
 	struct dm_thin_new_mapping *m;
 	struct dm_cell_key key;
 
@@ -1415,7 +1413,7 @@ static int break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t 
 		m->maybe_shared = maybe_shared;
 		m->virt_begin = begin;
 		m->virt_end = end;
-		m->data_begin = lookup_result.block;
+		m->data_begin = data_begin;
 		m->cell = data_cell;
 		m->bio = bio;
 
@@ -1446,6 +1444,7 @@ static void process_discard_passdown(struct thin_c *tc, struct bio *bio)
 		 */
 		//remap_and_issue(tc, bio, get_bio_block(tc, bio));
 		bio_endio(bio, 0);
+		return;
 	}
 
 	build_key(tc->td, true, begin, end, &key);
