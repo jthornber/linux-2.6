@@ -148,6 +148,9 @@ static void plog_write_endio(unsigned long error, void *context)
 	struct write_job *job = context;
 	struct wb_device *wb = job->wb;
 
+	if (error)
+		mark_dead(wb);
+
 	if (atomic_dec_and_test(&wb->nr_inflight_plog_writes))
 		wake_up_active_wq(&wb->plog_wait_queue);
 
@@ -158,6 +161,7 @@ static void plog_write_endio(unsigned long error, void *context)
 static void do_append_plog_t1(struct wb_device *wb, struct bio *bio,
 			      struct write_job *job)
 {
+	int r;
 	struct dm_io_request io_req = {
 		.client = wb->io_client,
 		.bi_rw = WRITE,
@@ -178,7 +182,9 @@ static void do_append_plog_t1(struct wb_device *wb, struct bio *bio,
 	 * the process is waiting for all async plog writes complete.
 	 * Thus, essentially sync.
 	 */
-	dm_safe_io(&io_req, 1, &region, NULL, true);
+	maybe_IO(dm_safe_io(&io_req, 1, &region, NULL, true));
+	if (r)
+		plog_write_endio(0, job);
 }
 
 static void do_append_plog(struct wb_device *wb, struct bio *bio,
@@ -221,7 +227,7 @@ static void submit_flush_request(struct wb_device *wb, struct dm_dev *dev, bool 
 		.sector = 0,
 		.count = 0,
 	};
-	IO(dm_safe_io(&io_req, 1, &io_region, NULL, thread));
+	maybe_IO(dm_safe_io(&io_req, 1, &io_region, NULL, thread));
 }
 
 static void wait_plog_writes_complete(struct wb_device *wb)
@@ -715,11 +721,9 @@ static void writeback_mb(struct wb_device *wb, struct segment_header *seg,
 			.sector = mb->sector,
 			.count = (1 << 3),
 		};
-		r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, writeback_mb_complete, &context);
-		if (r) {
-			atomic_dec(&context.count);
-			context.err = 1;
-		}
+		maybe_IO(dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, writeback_mb_complete, &context));
+		if (r)
+			writeback_mb_complete(0, 0, &context);
 	} else {
 		u8 i;
 
@@ -746,18 +750,15 @@ static void writeback_mb(struct wb_device *wb, struct segment_header *seg,
 				.sector = mb->sector + i,
 				.count = 1,
 			};
-			r = dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, writeback_mb_complete, &context);
-			if (r) {
-				atomic_dec(&context.count);
-				context.err = 1;
-			}
+			maybe_IO(dm_kcopyd_copy(wb->copier, &src, 1, &dest, 0, writeback_mb_complete, &context));
+			if (r)
+				writeback_mb_complete(0, 0, &context);
 		}
 	}
 
 	wait_event(wb->writeback_mb_wait_queue, !atomic_read(&context.count));
-
 	if (context.err)
-		set_bit(WB_DEAD, &wb->flags);
+		mark_dead(wb);
 }
 
 /*
@@ -800,7 +801,7 @@ static void writeback_buffered_mb(struct wb_device *wb, struct metablock *mb, u8
 			.sector = dest,
 			.count = 1,
 		};
-		IO(dm_safe_io(&io_req, 1, &region, NULL, true));
+		maybe_IO(dm_safe_io(&io_req, 1, &region, NULL, true));
 	}
 	mempool_free(buf, wb->buf_1_pool);
 }
@@ -934,11 +935,10 @@ static int process_flush_bio(struct wb_device *wb, struct bio *bio)
 		queue_barrier_io(wb, bio);
 	} else {
 		barrier_plog_writes(wb);
-		LIVE_DEAD(
+		if (is_live(wb))
 			bio_endio(bio, 0);
-			,
+		else
 			bio_endio(bio, -EIO);
-		);
 	}
 	return DM_MAPIO_SUBMITTED;
 }
@@ -1076,11 +1076,10 @@ static int process_write_job(struct wb_device *wb, struct bio *bio,
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	LIVE_DEAD(
+	if (is_live(wb))
 		bio_endio(bio, 0);
-		,
+	else
 		bio_endio(bio, -EIO);
-	);
 
 	return DM_MAPIO_SUBMITTED;
 }
@@ -1199,6 +1198,10 @@ static int process_read(struct wb_device *wb, struct bio *bio)
 		dec_inflight_ios(wb, res.found_seg);
 		bio_remap(bio, wb->backing_dev, bio->bi_iter.bi_sector);
 	}
+
+	if (!is_live(wb))
+		bio_io_error(bio);
+
 	return DM_MAPIO_REMAPPED;
 }
 
@@ -1214,11 +1217,6 @@ static int writeboost_map(struct dm_target *ti, struct bio *bio)
 	struct per_bio_data *map_context;
 	map_context = dm_per_bio_data(bio, ti->per_bio_data_size);
 	map_context->ptr = NULL;
-
-	DEAD(
-		bio_endio(bio, -EIO);
-		return DM_MAPIO_SUBMITTED;
-	);
 
 	if (bio->bi_rw & REQ_DISCARD)
 		return process_discard_bio(wb, bio);
@@ -1626,7 +1624,7 @@ static void writeboost_postsuspend(struct dm_target *ti)
 	struct wb_device *wb = ti->private;
 
 	flush_current_buffer(wb);
-	IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
+	maybe_IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
 }
 
 static int writeboost_message(struct dm_target *ti, unsigned argc, char **argv)

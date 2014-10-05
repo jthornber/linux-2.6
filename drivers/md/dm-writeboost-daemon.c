@@ -44,7 +44,7 @@ static void process_deferred_barriers(struct wb_device *wb, struct flush_job *jo
 	 * Make all the data until now persistent.
 	 */
 	if (has_barrier)
-		IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
+		maybe_IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
 
 	/*
 	 * Ack the chained barrier requests.
@@ -52,11 +52,10 @@ static void process_deferred_barriers(struct wb_device *wb, struct flush_job *jo
 	if (has_barrier) {
 		struct bio *bio;
 		while ((bio = bio_list_pop(&job->barrier_ios))) {
-			LIVE_DEAD(
-				bio_endio(bio, 0)
-				,
-				bio_endio(bio, -EIO)
-			);
+			if (is_live(wb))
+				bio_endio(bio, 0);
+			else
+				bio_endio(bio, -EIO);
 		}
 	}
 }
@@ -87,7 +86,7 @@ void flush_proc(struct work_struct *work)
 	 * The actual write requests to the cache device are not serialized.
 	 * They may perform in parallel.
 	 */
-	IO(dm_safe_io(&io_req, 1, &region, NULL, false));
+	maybe_IO(dm_safe_io(&io_req, 1, &region, NULL, false));
 
 	/*
 	 * Deferred ACK for barrier requests
@@ -129,6 +128,8 @@ static void writeback_endio(unsigned long error, void *context)
 
 static void submit_writeback_io(struct wb_device *wb, struct writeback_io *writeback_io)
 {
+	int r;
+
 	if (!writeback_io->memorized_dirtiness)
 		return;
 
@@ -146,7 +147,9 @@ static void submit_writeback_io(struct wb_device *wb, struct writeback_io *write
 			.sector = writeback_io->sector,
 			.count = 1 << 3,
 		};
-		dm_safe_io(&io_req_w, 1, &region_w, NULL, false);
+		maybe_IO(dm_safe_io(&io_req_w, 1, &region_w, NULL, false));
+		if (r)
+			writeback_endio(0, wb);
 	} else {
 		u8 i;
 		for (i = 0; i < 8; i++) {
@@ -170,10 +173,11 @@ static void submit_writeback_io(struct wb_device *wb, struct writeback_io *write
 				.sector = writeback_io->sector + i,
 				.count = 1,
 			};
-			dm_safe_io(&io_req_w, 1, &region_w, NULL, false);
+			maybe_IO(dm_safe_io(&io_req_w, 1, &region_w, NULL, false));
+			if (r)
+				writeback_endio(0, wb);
 		}
 	}
-
 }
 
 static void submit_writeback_ios(struct wb_device *wb)
@@ -270,7 +274,7 @@ static void prepare_writeback_ios(struct wb_device *wb, struct writeback_segment
 		.sector = seg->start_sector + (1 << 3), /* Header excluded */
 		.count = seg->length << 3,
 	};
-	IO(dm_safe_io(&io_req_r, 1, &region_r, NULL, false));
+	maybe_IO(dm_safe_io(&io_req_r, 1, &region_r, NULL, false));
 
 	for (i = 0; i < seg->length; i++) {
 		struct metablock *mb = seg->mb_array + i;
@@ -295,33 +299,32 @@ static void cleanup_segment(struct wb_device *wb, struct segment_header *seg)
 	}
 }
 
-static void transport_writeback_segs(struct wb_device *wb)
+static void do_writeback_segs(struct wb_device *wb)
 {
-	int r = 0;
-	size_t k, writeback_io_count = 0;
-
+	int r;
+	size_t k;
 	struct writeback_segment *writeback_seg;
 
+	size_t writeback_io_count = 0;
+	/*
+	 * Create rbtree
+	 */
 	wb->writeback_tree = RB_ROOT;
-
 	for (k = 0; k < wb->num_writeback_segs; k++) {
 		writeback_seg = *(wb->writeback_segs + k);
 		prepare_writeback_ios(wb, writeback_seg, &writeback_io_count);
 	}
-
 	atomic_set(&wb->writeback_io_count, writeback_io_count);
 	atomic_set(&wb->writeback_fail_count, 0);
 
+	/*
+	 * Pop rbnodes out of the tree and submit writeback I/Os
+	 */
 	submit_writeback_ios(wb);
-
 	wait_event(wb->writeback_io_wait_queue, !atomic_read(&wb->writeback_io_count));
 	if (atomic_read(&wb->writeback_fail_count))
-		set_bit(WB_DEAD, &wb->flags);
+		mark_dead(wb);
 
-	/*
-	 * We clean up the metablocks because there is no reason
-	 * to leave the them dirty.
-	 */
 	for (k = 0; k < wb->num_writeback_segs; k++) {
 		writeback_seg = *(wb->writeback_segs + k);
 		cleanup_segment(wb, writeback_seg->seg);
@@ -335,7 +338,7 @@ static void transport_writeback_segs(struct wb_device *wb)
 	 * So we consider all segments are persistent and write them back
 	 * persistently.
 	 */
-	IO(blkdev_issue_flush(wb->backing_dev->bdev, GFP_NOIO, NULL));
+	maybe_IO(blkdev_issue_flush(wb->backing_dev->bdev, GFP_NOIO, NULL));
 }
 
 /*
@@ -387,7 +390,7 @@ static void do_writeback_proc(struct wb_device *wb)
 			atomic64_read(&wb->last_writeback_segment_id) + 1 + k);
 	}
 	wb->num_writeback_segs = nr_writeback;
-	transport_writeback_segs(wb);
+	do_writeback_segs(wb);
 
 	atomic64_add(nr_writeback, &wb->last_writeback_segment_id);
 	wake_up(&wb->writeback_wait_queue);
@@ -475,7 +478,7 @@ static void update_superblock_record(struct wb_device *wb)
 		.sector = (1 << 11) - 1,
 		.count = 1,
 	};
-	IO(dm_safe_io(&io_req, 1, &region, NULL, false));
+	maybe_IO(dm_safe_io(&io_req, 1, &region, NULL, false));
 
 	mempool_free(buf, wb->buf_1_pool);
 }
@@ -520,7 +523,7 @@ int sync_proc(void *data)
 		}
 
 		flush_current_buffer(wb);
-		IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
+		maybe_IO(blkdev_issue_flush(wb->cache_dev->bdev, GFP_NOIO, NULL));
 		schedule_timeout_interruptible(msecs_to_jiffies(intvl));
 	}
 	return 0;
