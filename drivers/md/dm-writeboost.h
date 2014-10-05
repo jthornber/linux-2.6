@@ -532,7 +532,7 @@ void do_check_buffer_alignment(void *, const char *, const char *);
  */
 #define dm_safe_io(io_req, num_regions, regions, err_bits, thread) \
 	dm_safe_io_internal(wb, (io_req), (num_regions), (regions), \
-			    (err_bits), (thread), __func__);
+			    (err_bits), (thread), __func__)
 int dm_safe_io_internal(struct wb_device *, struct dm_io_request *,
 			unsigned num_regions, struct dm_io_region *,
 			unsigned long *err_bits, bool thread, const char *caller);
@@ -545,52 +545,39 @@ sector_t dm_devsize(struct dm_dev *);
  * Device blockup (Marking the device as dead)
  * -------------------------------------------
  *
- * I/O error on either backing device or cache device should block
- * up the whole system immediately.
- * After the system is blocked up all the I/Os to underlying
- * devices are all ignored as if they are switched to /dev/null.
+ * I/O error on cache device blocks up the whole system.
+ * After the system is blocked up, cache device is dead,
+ * all I/Os to cache device are ignored as if it becomes /dev/null.
  */
-
-#define LIVE_DEAD(proc_live, proc_dead) \
-	do { \
-		if (likely(!test_bit(WB_DEAD, &wb->flags))) { \
-			proc_live; \
-		} else { \
-			proc_dead; \
-		} \
-	} while (0)
-
-#define noop_proc do {} while (0)
-#define LIVE(proc) LIVE_DEAD(proc, noop_proc);
-#define DEAD(proc) LIVE_DEAD(noop_proc, proc);
+#define mark_dead(wb) set_bit(WB_DEAD, &wb->flags)
+#define is_live(wb) likely(!test_bit(WB_DEAD, &wb->flags))
 
 /*
- * Macro to add context of failure to I/O routine call.
- *
- * Policies
- * --------
- * 1. Only -EIO will block up the system.
- * 2. -EOPNOTSUPP could be returned if the target device is a virtual
- *    device and we request discard to the device.
- * 3. -ENOMEM could be returned from blkdev_issue_discard (3.12-rc5)
- *    for example. Waiting for a while can make room for new allocation.
- * 4. For other unknown error codes we ignore them and ask the users to report.
+ * This macro wraps I/Os to cache device to add context of failure.
  */
-#define IO(proc) \
+#define maybe_IO(proc) \
 	do { \
 		r = 0; \
-		LIVE(r = proc); /* Do nothing after blockup */ \
-		if (r == -EOPNOTSUPP) { \
-			r = 0; \
-		} else if (r == -EIO) { \
-			set_bit(WB_DEAD, &wb->flags); \
+		if (is_live(wb)) {\
+			r = proc; \
+		} else { \
+			r = -EIO; \
+			break; \
+		} \
+		\
+		if (r == -EIO) { \
+			mark_dead(wb); \
 			DMERR("device is marked as dead"); \
+			break; \
 		} else if (r == -ENOMEM) { \
 			DMERR("I/O failed by ENOMEM"); \
 			schedule_timeout_interruptible(msecs_to_jiffies(1000));\
+			continue; \
+		} else if (r == -EOPNOTSUPP) { \
+			break; \
 		} else if (r) { \
-			r = 0;\
-			WARN_ONCE(1, "PLEASE REPORT!!! I/O FAILED FOR UNKNOWN REASON err(%d)", r); \
+			WARN_ONCE(1, "I/O failed for unknown reason err(%d)", r); \
+			break; \
 		} \
 	} while (r)
 
