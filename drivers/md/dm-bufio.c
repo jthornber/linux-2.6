@@ -1462,21 +1462,37 @@ static int __cleanup_old_buffer(struct dm_buffer *b, gfp_t gfp,
 	return 1;
 }
 
+static unsigned long get_max_age_hz(void)
+{
+	unsigned long max_age = ACCESS_ONCE(dm_bufio_max_age);
+
+	if (max_age > ULONG_MAX / HZ)
+		max_age = ULONG_MAX / HZ;
+
+	return max_age * HZ;
+}
+
 static long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
 		   gfp_t gfp_mask)
 {
 	int l;
 	struct dm_buffer *b, *tmp;
+	unsigned long max_age_hz = get_max_age_hz();
 	long freed = 0;
+
+	if (!nr_to_scan)
+		return 0;
 
 	for (l = 0; l < LIST_SIZE; l++) {
 		list_for_each_entry_safe_reverse(b, tmp, &c->lru[l], lru_list) {
-			freed += __cleanup_old_buffer(b, gfp_mask, 0);
+			freed += __cleanup_old_buffer(b, gfp_mask, max_age_hz);
 			if (!--nr_to_scan)
-				break;
+				goto out;
 		}
 		dm_bufio_cond_resched();
 	}
+
+out:
 	return freed;
 }
 
@@ -1688,11 +1704,8 @@ EXPORT_SYMBOL_GPL(dm_bufio_client_destroy);
 
 static void cleanup_old_buffers(void)
 {
-	unsigned long max_age = ACCESS_ONCE(dm_bufio_max_age);
+	unsigned long max_age_hz = get_max_age_hz();
 	struct dm_bufio_client *c;
-
-	if (max_age > ULONG_MAX / HZ)
-		max_age = ULONG_MAX / HZ;
 
 	mutex_lock(&dm_bufio_clients_lock);
 	list_for_each_entry(c, &dm_bufio_all_clients, client_list) {
@@ -1703,7 +1716,7 @@ static void cleanup_old_buffers(void)
 			struct dm_buffer *b;
 			b = list_entry(c->lru[LIST_CLEAN].prev,
 				       struct dm_buffer, lru_list);
-			if (!__cleanup_old_buffer(b, 0, max_age * HZ))
+			if (!__cleanup_old_buffer(b, 0, max_age_hz))
 				break;
 			dm_bufio_cond_resched();
 		}
