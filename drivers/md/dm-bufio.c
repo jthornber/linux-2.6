@@ -465,7 +465,6 @@ static void __relink_lru(struct dm_buffer *b, int dirty)
 	c->n_buffers[dirty]++;
 	b->list_mode = dirty;
 	list_move(&b->lru_list, &c->lru[dirty]);
-	b->last_accessed = jiffies;
 }
 
 /*----------------------------------------------------------------
@@ -972,6 +971,8 @@ found_buffer:
 	b->hold_count++;
 	__relink_lru(b, test_bit(B_DIRTY, &b->state) ||
 		     test_bit(B_WRITING, &b->state));
+	b->last_accessed = jiffies;
+
 	return b;
 }
 
@@ -1440,7 +1441,8 @@ static void drop_buffers(struct dm_bufio_client *c)
  * different bufio client.
  */
 static int __cleanup_old_buffer(struct dm_buffer *b, gfp_t gfp,
-				unsigned long max_jiffies)
+				unsigned long max_jiffies,
+				bool evict)
 {
 	if (jiffies - b->last_accessed < max_jiffies)
 		return 0;
@@ -1456,8 +1458,13 @@ static int __cleanup_old_buffer(struct dm_buffer *b, gfp_t gfp,
 		return 0;
 
 	__make_buffer_clean(b);
-	__unlink_buffer(b);
-	__free_buffer_wake(b);
+
+	if (evict) {
+		__unlink_buffer(b);
+		__free_buffer_wake(b);
+
+	} else
+		__relink_lru(b, LIST_CLEAN);
 
 	return 1;
 }
@@ -1485,7 +1492,7 @@ static long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
 
 	for (l = 0; l < LIST_SIZE; l++) {
 		list_for_each_entry_safe_reverse(b, tmp, &c->lru[l], lru_list) {
-			freed += __cleanup_old_buffer(b, gfp_mask, max_age_hz);
+			freed += __cleanup_old_buffer(b, gfp_mask, max_age_hz, true);
 			if (!--nr_to_scan)
 				goto out;
 		}
@@ -1712,11 +1719,11 @@ static void cleanup_old_buffers(void)
 		if (!dm_bufio_trylock(c))
 			continue;
 
-		while (!list_empty(&c->lru[LIST_CLEAN])) {
+		while (!list_empty(&c->lru[LIST_DIRTY])) {
 			struct dm_buffer *b;
-			b = list_entry(c->lru[LIST_CLEAN].prev,
+			b = list_entry(c->lru[LIST_DIRTY].prev,
 				       struct dm_buffer, lru_list);
-			if (!__cleanup_old_buffer(b, 0, max_age_hz))
+			if (!__cleanup_old_buffer(b, 0, max_age_hz, false))
 				break;
 			dm_bufio_cond_resched();
 		}
