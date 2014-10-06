@@ -667,11 +667,17 @@ static void write_endio(struct bio *bio, int error)
 static void __write_dirty_buffer(struct dm_buffer *b,
 				 struct list_head *write_list)
 {
+	unsigned long start, stop;
+
 	if (!test_bit(B_DIRTY, &b->state))
 		return;
 
 	clear_bit(B_DIRTY, &b->state);
+	start = jiffies;
 	wait_on_bit_lock_io(&b->state, B_WRITING, TASK_UNINTERRUPTIBLE);
+	stop = jiffies;
+	if (stop - start > 1)
+		pr_alert("__write_dirty_buffer: wait on write took %lu\n", stop - start);
 
 	if (!write_list)
 		submit_io(b, WRITE, b->block, write_endio);
@@ -700,14 +706,26 @@ static void __flush_write_list(struct list_head *write_list)
  */
 static void __make_buffer_clean(struct dm_buffer *b)
 {
+	unsigned long start, stop;
 	BUG_ON(b->hold_count);
 
 	if (!b->state)	/* fast case */
 		return;
 
+	start = jiffies;
 	wait_on_bit_io(&b->state, B_READING, TASK_UNINTERRUPTIBLE);
+	stop = jiffies;
+
+	if (stop - start > 1)
+		pr_alert("__make_buffer_clean: waiting for read took %lu\n", stop - start);
+
+	start = jiffies;
 	__write_dirty_buffer(b, NULL);
 	wait_on_bit_io(&b->state, B_WRITING, TASK_UNINTERRUPTIBLE);
+	stop = jiffies;
+
+	if (stop - start > 1)
+		pr_alert("__make_buffer_clean: waiting for write took %lu\n", stop - start);
 }
 
 /*
@@ -1026,6 +1044,7 @@ static void read_endio(struct bio *bio, int error)
 static void *new_read(struct dm_bufio_client *c, sector_t block,
 		      enum new_flag nf, struct dm_buffer **bp)
 {
+	unsigned long start, stop;
 	int need_submit;
 	struct dm_buffer *b;
 
@@ -1040,10 +1059,15 @@ static void *new_read(struct dm_bufio_client *c, sector_t block,
 	if (!b)
 		return b;
 
+	start = jiffies;
 	if (need_submit)
 		submit_io(b, READ, b->block, read_endio);
 
 	wait_on_bit_io(&b->state, B_READING, TASK_UNINTERRUPTIBLE);
+	stop = jiffies;
+
+	if (stop - start > 1)
+		pr_alert("new_read: waiting for read took %lu\n", stop - start);
 
 	if (b->read_error) {
 		int error = b->read_error;
@@ -1531,7 +1555,9 @@ static long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
 	}
 
 out:
-	pr_alert("__scan freed %lu buffers\n", freed);
+	if (freed > 0)
+		pr_alert("__scan freed %lu buffers\n", freed);
+
 	return freed;
 }
 
@@ -1755,7 +1781,8 @@ static void cleanup_old_buffers(void)
 	}
 	mutex_unlock(&dm_bufio_clients_lock);
 
-	pr_alert("cleanup_old_buffers cleaned %u\n", count);
+	if (count)
+		pr_alert("cleanup_old_buffers cleaned %u\n", count);
 }
 
 static struct workqueue_struct *dm_bufio_wq;
