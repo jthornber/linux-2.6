@@ -128,6 +128,53 @@ static void build_virtual_key(struct dm_thin_device *td, dm_block_t b,
 
 /*----------------------------------------------------------------*/
 
+#define THROTTLE_THRESHOLD (1 * HZ)
+
+struct throttle {
+	struct rw_semaphore lock;
+	unsigned long threshold;
+	bool throttle_applied;
+};
+
+static void throttle_init(struct throttle *t)
+{
+	init_rwsem(&t->lock);
+	t->throttle_applied = false;
+}
+
+static void throttle_work_start(struct throttle *t)
+{
+	t->threshold = jiffies + THROTTLE_THRESHOLD;
+}
+
+static void throttle_work_update(struct throttle *t)
+{
+	if (!t->throttle_applied && jiffies > t->threshold) {
+		down_write(&t->lock);
+		t->throttle_applied = true;
+	}
+}
+
+static void throttle_work_complete(struct throttle *t)
+{
+	if (t->throttle_applied) {
+		t->throttle_applied = false;
+		up_write(&t->lock);
+	}
+}
+
+static void throttle_lock(struct throttle *t)
+{
+	down_read(&t->lock);
+}
+
+static void throttle_unlock(struct throttle *t)
+{
+	up_read(&t->lock);
+}
+
+/*----------------------------------------------------------------*/
+
 /*
  * A pool device ties together a metadata device and a data device.  It
  * also provides the interface for creating and destroying internal
@@ -177,6 +224,7 @@ struct pool {
 	struct dm_kcopyd_client *copier;
 
 	struct workqueue_struct *wq;
+	struct throttle throttle;
 	struct work_struct worker;
 	struct delayed_work waker;
 	struct delayed_work no_space_timeout;
@@ -1572,6 +1620,7 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 			pool->process_bio(tc, bio);
 
 		if ((count++ & 127) == 0) {
+			throttle_work_update(&pool->throttle);
 			dm_pool_issue_prefetches(pool->pmd);
 		}
 	}
@@ -1659,10 +1708,15 @@ static void do_worker(struct work_struct *ws)
 {
 	struct pool *pool = container_of(ws, struct pool, worker);
 
+	throttle_work_start(&pool->throttle);
 	dm_pool_issue_prefetches(pool->pmd);
+	throttle_work_update(&pool->throttle);
 	process_prepared(pool, &pool->prepared_mappings, &pool->process_prepared_mapping);
+	throttle_work_update(&pool->throttle);
 	process_prepared(pool, &pool->prepared_discards, &pool->process_prepared_discard);
+	throttle_work_update(&pool->throttle);
 	process_deferred_bios(pool);
+	throttle_work_complete(&pool->throttle);
 }
 
 /*
@@ -1895,9 +1949,11 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 
+	throttle_lock(&pool->throttle);
 	spin_lock_irqsave(&tc->lock, flags);
 	bio_list_add(&tc->deferred_bio_list, bio);
 	spin_unlock_irqrestore(&tc->lock, flags);
+	throttle_unlock(&pool->throttle);
 
 	wake_worker(pool);
 }
@@ -2215,6 +2271,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		goto bad_wq;
 	}
 
+	throttle_init(&pool->throttle);
 	INIT_WORK(&pool->worker, do_worker);
 	INIT_DELAYED_WORK(&pool->waker, do_waker);
 	INIT_DELAYED_WORK(&pool->no_space_timeout, do_no_space_timeout);
