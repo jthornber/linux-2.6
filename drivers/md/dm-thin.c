@@ -333,6 +333,8 @@ struct pool {
 
 	process_mapping_fn process_prepared_mapping;
 	process_mapping_fn process_prepared_discard;
+
+	unsigned long gmr_jiffies;
 };
 
 static enum pool_mode get_pool_mode(struct pool *pool);
@@ -670,13 +672,24 @@ static void inc_all_io_entry(struct pool *pool, struct bio *bio)
 	h->all_io_entry = dm_deferred_entry_inc(pool->all_io_ds);
 }
 
+static void generic_make_request_tracked(struct pool *pool, struct bio *bio)
+{
+	unsigned long start, stop;
+
+	start = jiffies;
+	generic_make_request(bio);
+	stop = jiffies;
+
+	pool->gmr_jiffies += stop - start;
+}
+
 static void issue(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
 
 	if (!bio_triggers_commit(tc, bio)) {
-		generic_make_request(bio);
+		generic_make_request_tracked(pool, bio);
 		return;
 	}
 
@@ -1996,7 +2009,7 @@ static void process_deferred_bios(struct pool *pool)
 	pool->last_commit_jiffies = jiffies;
 
 	while ((bio = bio_list_pop(&bios)))
-		generic_make_request(bio);
+		generic_make_request_tracked(pool, bio);
 }
 
 static void do_worker(struct work_struct *ws)
@@ -2021,6 +2034,8 @@ static void do_worker(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct pool *pool = container_of(to_delayed_work(ws), struct pool, waker);
+
+	pr_alert("gmr wait time = %lu\n", pool->gmr_jiffies); /* FIXME: no locking */
 	wake_worker(pool);
 	queue_delayed_work(pool->wq, &pool->waker, COMMIT_PERIOD);
 }
@@ -2676,6 +2691,8 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->pool_md = pool_md;
 	pool->md_dev = metadata_dev;
 	__pool_table_insert(pool);
+
+	pool->gmr_jiffies = 0;
 
 	return pool;
 
