@@ -81,8 +81,8 @@ struct shadow_info {
 /*
  * It would be nice if we scaled with the size of transaction.
  */
-#define DM_HASH_SIZE 256
-#define DM_HASH_MASK (DM_HASH_SIZE - 1)
+#define DM_HASH_SIZE 4096
+#define DM_HASH_BITS 12
 
 struct dm_transaction_manager {
 	int is_clone;
@@ -102,15 +102,16 @@ struct dm_transaction_manager {
 static int is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	int r = 0;
-	unsigned bucket = dm_hash_block(b, DM_HASH_MASK);
+	unsigned bucket = hash_64(b, DM_HASH_BITS);
 	struct shadow_info *si;
 
 	spin_lock(&tm->lock);
-	hlist_for_each_entry(si, tm->buckets + bucket, hlist)
+	hlist_for_each_entry(si, tm->buckets + bucket, hlist) {
 		if (si->where == b) {
 			r = 1;
 			break;
 		}
+	}
 	spin_unlock(&tm->lock);
 
 	return r;
@@ -128,9 +129,22 @@ static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 	si = kmalloc(sizeof(*si), GFP_NOIO);
 	if (si) {
 		si->where = b;
-		bucket = dm_hash_block(b, DM_HASH_MASK);
+		bucket = hash_64(b, DM_HASH_BITS);
 		spin_lock(&tm->lock);
 		hlist_add_head(&si->hlist, tm->buckets + bucket);
+
+#if 1
+		{
+			unsigned count = 0;
+
+			hlist_for_each_entry(si, tm->buckets + bucket, hlist)
+				count++;
+
+			if (count > 2)
+				pr_alert("shadow hash table degrading: bucket %u hash %u entries\n",
+					 bucket, count);
+		}
+#endif
 		spin_unlock(&tm->lock);
 	}
 }
@@ -140,18 +154,23 @@ static void wipe_shadow_table(struct dm_transaction_manager *tm)
 	struct shadow_info *si;
 	struct hlist_node *tmp;
 	struct hlist_head *bucket;
+	unsigned count = 0;
 	int i;
 
 	spin_lock(&tm->lock);
 	for (i = 0; i < DM_HASH_SIZE; i++) {
 		bucket = tm->buckets + i;
-		hlist_for_each_entry_safe(si, tmp, bucket, hlist)
+		hlist_for_each_entry_safe(si, tmp, bucket, hlist) {
+			count++;
 			kfree(si);
+		}
 
 		INIT_HLIST_HEAD(bucket);
 	}
 
 	spin_unlock(&tm->lock);
+
+	pr_alert("wipe_shadow_table: %u entries\n", count);
 }
 
 /*----------------------------------------------------------------*/
