@@ -1644,7 +1644,7 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t virt_
 			virt_block = bb_start;
 		else {
 			bb_end = (virt_block + (pool->blocks_per_big_block - 1)) & (-pool->blocks_per_big_block);
-			nr_blocks = distance_to_next_provisioned_block(tc, virt_block, virt_block + bb_end);
+			nr_blocks = distance_to_next_provisioned_block(tc, virt_block, bb_end);
 		}
 	}
 
