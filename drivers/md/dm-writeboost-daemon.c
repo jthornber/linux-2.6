@@ -339,6 +339,8 @@ static void do_writeback_segs(struct wb_device *wb)
 	 * persistently.
 	 */
 	maybe_IO(blkdev_issue_flush(wb->backing_dev->bdev, GFP_NOIO, NULL));
+
+	atomic64_add(wb->num_writeback_segs, &wb->last_writeback_segment_id);
 }
 
 /*
@@ -390,9 +392,9 @@ static void do_writeback_proc(struct wb_device *wb)
 			atomic64_read(&wb->last_writeback_segment_id) + 1 + k);
 	}
 	wb->num_writeback_segs = nr_writeback;
+
 	do_writeback_segs(wb);
 
-	atomic64_add(nr_writeback, &wb->last_writeback_segment_id);
 	wake_up(&wb->writeback_wait_queue);
 }
 
