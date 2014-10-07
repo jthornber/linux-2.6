@@ -1334,12 +1334,11 @@ static int find_max_id(struct wb_device *wb, u64 *max_id)
 }
 
 /*
- * Traverse the log on the cache device and
- * apply (Recover the cache metadata)
- * valid (Checksum is correct) segments.
- * A segment is valid means that the segment was "flushed"
- * without failure. We need to ignore segments that weren't flushed
- * in complete manner. Those segments are dangerous to recover.
+ * Iterate over the logs on the cache device and
+ * apply (recover the cache metadata)
+ * valid (checksum is correct) segments.
+ * A segment is valid means that the segment was written
+ * without any failure typically due to unexpected power failure.
  *
  * @max_id (in/out)
  *   - in : The max id found in find_max_id()
@@ -1356,31 +1355,38 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 	if (!rambuf)
 		return -ENOMEM;
 
+	/*
+	 * We are starting from the segment next to the newest which can
+	 * be the oldest. The id can be zero if the logs didn't lap at all.
+	 */
 	start_idx = segment_id_to_idx(wb, *max_id + 1);
 	*max_id = 0;
+
 	for (i = start_idx; i < (start_idx + wb->nr_segments); i++) {
 		u32 actual, expected, k;
 		div_u64_rem(i, wb->nr_segments, &k);
 		seg = segment_at(wb, k);
 
 		r = read_whole_segment(rambuf, wb, seg);
-		if (r) {
-			kmem_cache_free(wb->rambuf_cachep, rambuf);
-			return r;
-		}
+		if (r)
+			break;
 
 		header = rambuf;
 
 		if (!le64_to_cpu(header->id))
 			continue;
 
+		/*
+		 * Compare the checksum
+		 * if they don't match we discard the subsequent logs.
+		 */
 		actual = calc_checksum(rambuf, header->length);
 		expected = le32_to_cpu(header->checksum);
 		if (actual != expected) {
 			DMWARN("Checksum incorrect id:%llu checksum: %u != %u",
 			       (long long unsigned int) le64_to_cpu(header->id),
 			       actual, expected);
-			continue;
+			break;
 		}
 
 		/*
@@ -1389,6 +1395,7 @@ static int apply_valid_segments(struct wb_device *wb, u64 *max_id)
 		apply_segment_header_device(wb, seg, header);
 		*max_id = le64_to_cpu(header->id);
 	}
+
 	kmem_cache_free(wb->rambuf_cachep, rambuf);
 	return r;
 }
