@@ -43,6 +43,11 @@
 #define DM_BUFIO_DEFAULT_AGE_SECS	60
 
 /*
+ * The nr of bytes of cached data to keep around.
+ */
+#define DM_BUFIO_DEFAULT_RETAIN_BYTES	(256 * 1024)
+
+/*
  * The number of bvec entries that are embedded directly in the buffer.
  * If the chunk size is larger, dm-io is used to do the io.
  */
@@ -171,7 +176,7 @@ static void dm_bufio_lock(struct dm_bufio_client *c)
 
 static int dm_bufio_trylock(struct dm_bufio_client *c)
 {
-	return mutex_trylock(&c->lock);
+       return mutex_trylock(&c->lock);
 }
 
 static void dm_bufio_unlock(struct dm_bufio_client *c)
@@ -216,6 +221,7 @@ static DEFINE_SPINLOCK(param_spinlock);
  * Buffers are freed after this timeout
  */
 static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE_SECS;
+static unsigned dm_bufio_retain_bytes = DM_BUFIO_DEFAULT_RETAIN_BYTES;
 
 static unsigned long dm_bufio_peak_allocated;
 static unsigned long dm_bufio_allocated_kmem_cache;
@@ -1480,50 +1486,6 @@ static void drop_buffers(struct dm_bufio_client *c)
 	dm_bufio_unlock(c);
 }
 
-/*
- * Test if the buffer is unused and too old, and commit it.
- * At if noio is set, we must not do any I/O because we hold
- * dm_bufio_clients_lock and we would risk deadlock if the I/O gets rerouted to
- * different bufio client.
- */
-static int __cleanup_old_buffer(struct dm_buffer *b, gfp_t gfp,
-				unsigned long max_jiffies,
-				bool evict)
-{
-	// FIXME: factor this test out
-	if (jiffies - b->last_accessed < max_jiffies)
-		return 0;
-
-	if (!(gfp & __GFP_IO)) {
-		if (test_bit(B_READING, &b->state) ||
-		    test_bit(B_WRITING, &b->state) ||
-		    test_bit(B_DIRTY, &b->state))
-			return 0;
-	}
-
-	if (b->hold_count)
-		return 0;
-
-	__make_buffer_clean(b);
-
-	if (evict) {
-		__unlink_buffer(b);
-		__free_buffer_wake(b);
-
-	} else {
-		// FIXME: this must be common code
-
-		struct dm_bufio_client *c = b->c;
-		c->n_buffers[b->list_mode]--;
-
-		b->list_mode = LIST_CLEAN;
-		c->n_buffers[LIST_CLEAN]++;
-		list_move(&b->lru_list, &c->lru[LIST_CLEAN]);
-	}
-
-	return 1;
-}
-
 static unsigned long get_max_age_hz(void)
 {
 	unsigned long max_age = ACCESS_ONCE(dm_bufio_max_age);
@@ -1534,48 +1496,90 @@ static unsigned long get_max_age_hz(void)
 	return max_age * HZ;
 }
 
-static long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
-		   gfp_t gfp_mask)
+static unsigned long get_retain_buffers(struct dm_bufio_client *c)
 {
-	int l;
+	unsigned long retain_bytes = ACCESS_ONCE(dm_bufio_retain_bytes);
+	return retain_bytes / c->block_size;
+}
+
+/*
+ * We may not be able to evict this buffer if IO pending or the client is
+ * still using it.
+ */
+static bool __try_evict_buffer(struct dm_buffer *b)
+{
+	if (test_bit(B_READING, &b->state) ||
+	    test_bit(B_WRITING, &b->state) ||
+	    test_bit(B_DIRTY, &b->state))
+		return false;
+
+	if (b->hold_count)
+		return false;
+
+	__make_buffer_clean(b);
+	__unlink_buffer(b);
+	__free_buffer_wake(b);
+
+	return true;
+}
+
+static bool older_than(struct dm_buffer *b, unsigned long age_hz)
+{
+	return (jiffies - b->last_accessed) >= age_hz;
+}
+
+static unsigned __evict_old_buffers(struct dm_bufio_client *c,
+				    unsigned max_to_evict,
+				    unsigned retain_target,
+				    unsigned long age_hz)
+{
 	struct dm_buffer *b, *tmp;
-	unsigned long max_age_hz = get_max_age_hz();
-	long freed = 0;
+	unsigned count = c->n_buffers[LIST_CLEAN] + c->n_buffers[LIST_DIRTY];
+	unsigned evicted = 0;
 
-	if (!nr_to_scan)
-		return 0;
+	list_for_each_entry_safe_reverse(b, tmp, &c->lru[LIST_CLEAN], lru_list) {
+		if (count <= retain_target || evicted >= max_to_evict)
+			break;
 
-	for (l = 0; l < LIST_SIZE; l++) {
-		list_for_each_entry_safe_reverse(b, tmp, &c->lru[l], lru_list) {
-			freed += __cleanup_old_buffer(b, gfp_mask, max_age_hz, true);
-			if (!--nr_to_scan)
-				goto out;
-		}
+		if (older_than(b, age_hz)) {
+			if (__try_evict_buffer(b)) {
+				evicted++;
+				count--;
+			}
+		} else
+			break;
+
 		dm_bufio_cond_resched();
 	}
 
-out:
-	if (freed > 0)
-		pr_alert("__scan freed %lu buffers\n", freed);
+	return evicted;
+}
 
-	return freed;
+static bool
+dm_bufio_trylock_gfp(struct dm_bufio_client *c, gfp_t gfp)
+{
+	if (gfp & __GFP_IO) {
+		dm_bufio_lock(c);
+		return 1;
+	}
+
+	return dm_bufio_trylock(c);
 }
 
 static unsigned long
 dm_bufio_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
 {
-	struct dm_bufio_client *c;
-	unsigned long freed;
+	struct dm_bufio_client *c = container_of(shrink, struct dm_bufio_client, shrinker);
+	unsigned retain_target = get_retain_buffers(c);
+	unsigned evicted;
 
-	c = container_of(shrink, struct dm_bufio_client, shrinker);
-	if (sc->gfp_mask & __GFP_IO)
-		dm_bufio_lock(c);
-	else if (!dm_bufio_trylock(c))
+	if (!dm_bufio_trylock_gfp(c, sc->gfp_mask))
 		return SHRINK_STOP;
 
-	freed  = __scan(c, sc->nr_to_scan, sc->gfp_mask);
+	evicted = __evict_old_buffers(c, sc->nr_to_scan, retain_target, get_max_age_hz());
+
 	dm_bufio_unlock(c);
-	return freed;
+	return evicted;
 }
 
 static unsigned long
@@ -1585,9 +1589,7 @@ dm_bufio_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
 	unsigned long count;
 
 	c = container_of(shrink, struct dm_bufio_client, shrinker);
-	if (sc->gfp_mask & __GFP_IO)
-		dm_bufio_lock(c);
-	else if (!dm_bufio_trylock(c))
+	if (!dm_bufio_trylock_gfp(c, sc->gfp_mask))
 		return 0;
 
 	count = c->n_buffers[LIST_CLEAN] + c->n_buffers[LIST_DIRTY];
@@ -1755,34 +1757,41 @@ void dm_bufio_client_destroy(struct dm_bufio_client *c)
 }
 EXPORT_SYMBOL_GPL(dm_bufio_client_destroy);
 
+static void __clean_old_buffers(struct dm_bufio_client *c, unsigned long age_hz,
+				struct list_head *write_list)
+{
+	struct dm_buffer *b, *tmp;
+
+	list_for_each_entry_safe_reverse(b, tmp, &c->lru[LIST_DIRTY], lru_list) {
+		if (older_than(b, age_hz)) {
+			if (!b->hold_count) {
+				__write_dirty_buffer(b, write_list);
+				__relink_lru(b, LIST_CLEAN);
+			}
+		} else
+			break;
+
+		dm_bufio_cond_resched();
+	}
+}
+
 static void cleanup_old_buffers(void)
 {
 	unsigned long max_age_hz = get_max_age_hz();
 	struct dm_bufio_client *c;
-	unsigned count = 0;
+	struct list_head write_list;
+
+	INIT_LIST_HEAD(&write_list);
 
 	mutex_lock(&dm_bufio_clients_lock);
 	list_for_each_entry(c, &dm_bufio_all_clients, client_list) {
-		if (!dm_bufio_trylock(c))
-			continue;
-
-		while (!list_empty(&c->lru[LIST_DIRTY])) {
-			struct dm_buffer *b;
-			b = list_entry(c->lru[LIST_DIRTY].prev,
-				       struct dm_buffer, lru_list);
-			if (!__cleanup_old_buffer(b, 0, max_age_hz, false))
-				break;
-			count++;
-			dm_bufio_cond_resched();
-		}
-
+		dm_bufio_lock(c);
+		__clean_old_buffers(c, (3 * max_age_hz) / 4, &write_list);
 		dm_bufio_unlock(c);
-		dm_bufio_cond_resched();
+
+		__flush_write_list(&write_list);
 	}
 	mutex_unlock(&dm_bufio_clients_lock);
-
-	if (count)
-		pr_alert("cleanup_old_buffers cleaned %u\n", count);
 }
 
 static struct workqueue_struct *dm_bufio_wq;
@@ -1905,6 +1914,9 @@ MODULE_PARM_DESC(max_cache_size_bytes, "Size of metadata cache");
 
 module_param_named(max_age_seconds, dm_bufio_max_age, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(max_age_seconds, "Max age of a buffer in seconds");
+
+module_param_named(retain_bytes, dm_bufio_retain_bytes, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(retain_bytes, "Try to keep at least this many bytes cached in memory");
 
 module_param_named(peak_allocated_bytes, dm_bufio_peak_allocated, ulong, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(peak_allocated_bytes, "Tracks the maximum allocated memory");
