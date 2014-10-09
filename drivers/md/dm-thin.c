@@ -3613,6 +3613,21 @@ err:
 	DMEMIT("Error");
 }
 
+static int thin_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+		      struct bio_vec *biovec, int max_size)
+{
+	struct thin_c *tc = ti->private;
+	struct request_queue *q = bdev_get_queue(tc->pool_dev->bdev);
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = tc->pool_dev->bdev;
+	bvm->bi_sector = dm_target_offset(ti, bvm->bi_sector);
+
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
 static int thin_iterate_devices(struct dm_target *ti,
 				iterate_devices_callout_fn fn, void *data)
 {
@@ -3637,7 +3652,7 @@ static int thin_iterate_devices(struct dm_target *ti,
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 13, 0},
+	.version = {1, 14, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
@@ -3647,6 +3662,7 @@ static struct target_type thin_target = {
 	.presuspend = thin_presuspend,
 	.postsuspend = thin_postsuspend,
 	.status = thin_status,
+	.merge = thin_merge,
 	.iterate_devices = thin_iterate_devices,
 };
 
