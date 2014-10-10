@@ -35,6 +35,8 @@ struct dm_cell_key {
  * themselves.
  */
 struct dm_bio_prison_cell {
+	struct list_head user_list;	/* for client use */
+
 	struct hlist_node list;
 	struct dm_cell_key key;
 	struct bio *holder;
