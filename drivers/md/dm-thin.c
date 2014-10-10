@@ -1685,7 +1685,7 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 {
 	int r;
 	struct pool *pool = tc->pool;
-	dm_block_t block = get_bio_block(tc, bio), nr_blocks;
+	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_bio_prison_cell *cell;
 	struct dm_cell_key key;
 	struct dm_thin_lookup_result lookup_result;
@@ -1696,8 +1696,13 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	 */
 
 	/* FIXME: breaking levels of abstraction here */
-	nr_blocks = is_external_snapshot(tc) ? 1 : pool->blocks_per_big_block;
-	build_key(tc->td, true, block, block + nr_blocks, &key);
+	if (is_external_snapshot(tc))
+		build_key(tc->td, true, block, block + 1, &key);
+	else {
+		dm_block_t bb = block & (-pool->blocks_per_big_block);
+		build_key(tc->td, true, bb, bb + pool->blocks_per_big_block, &key);
+	}
+
 	if (bio_detain(pool, &key, bio, &cell))
 		// FIXME: should we retry with fewer blocks?
 		return;
