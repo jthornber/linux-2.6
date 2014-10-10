@@ -657,6 +657,28 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 	mempool_free(m, m->tc->pool->mapping_pool);
 }
 
+static void thin_defer_bio(struct thin_c *tc, struct bio *bio);
+
+static void inc_remap_and_issue_cell(struct thin_c *tc,
+				     struct dm_bio_prison_cell *cell,
+				     dm_block_t block)
+{
+	struct bio *bio;
+	struct bio_list bios;
+
+	bio_list_init(&bios);
+	cell_release_no_holder(tc->pool, cell, &bios);
+
+	while ((bio = bio_list_pop(&bios))) {
+		if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA))
+			thin_defer_bio(tc, bio);
+		else {
+			inc_all_io_entry(tc->pool, bio);
+			remap_and_issue(tc, bio, block);
+		}
+	}
+}
+
 static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 {
 	struct thin_c *tc = m->tc;
@@ -694,10 +716,13 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	 * the bios in the cell.
 	 */
 	if (bio) {
-		cell_defer_no_holder(tc, m->cell);
+		inc_remap_and_issue_cell(tc, m->cell, m->data_block);
 		bio_endio(bio, 0);
-	} else
-		cell_defer(tc, m->cell);
+	} else {
+		inc_all_io_entry(tc->pool, m->cell->holder);
+		remap_and_issue(tc, m->cell->holder, m->data_block);
+		inc_remap_and_issue_cell(tc, m->cell, m->data_block);
+	}
 
 out:
 	list_del(&m->list);
@@ -1324,28 +1349,6 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 			    __func__, r);
 		cell_error(pool, cell);
 		break;
-	}
-}
-
-static void thin_defer_bio(struct thin_c *tc, struct bio *bio);
-
-static void inc_remap_and_issue_cell(struct thin_c *tc,
-				     struct dm_bio_prison_cell *cell,
-				     dm_block_t block)
-{
-	struct bio *bio;
-	struct bio_list bios;
-
-	bio_list_init(&bios);
-	cell_release_no_holder(tc->pool, cell, &bios);
-
-	while ((bio = bio_list_pop(&bios))) {
-		if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA))
-			thin_defer_bio(tc, bio);
-		else {
-			inc_all_io_entry(tc->pool, bio);
-			remap_and_issue(tc, bio, block);
-		}
 	}
 }
 
