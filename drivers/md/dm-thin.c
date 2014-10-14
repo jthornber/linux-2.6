@@ -663,24 +663,54 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 
 static void thin_defer_bio(struct thin_c *tc, struct bio *bio);
 
+struct remap_info {
+	struct thin_c *tc;
+	struct bio_list bios;
+};
+
+static void __inc_remap_and_issue_cell(void *context,
+				       struct dm_bio_prison_cell *cell)
+{
+	struct remap_info *info = context;
+	struct bio *bio;
+
+	while ((bio = bio_list_pop(&cell->bios))) {
+		if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA))
+			thin_defer_bio(info->tc, bio);
+		else {
+			inc_all_io_entry(info->tc->pool, bio);
+
+			/*
+			 * We can't issue the bios with the bio prison lock
+			 * held, so we add them to a list to issue on
+			 * return from this function.
+			 */
+			bio_list_add(&info->bios, bio);
+		}
+	}
+}
+
 static void inc_remap_and_issue_cell(struct thin_c *tc,
 				     struct dm_bio_prison_cell *cell,
 				     dm_block_t block)
 {
 	struct bio *bio;
-	struct bio_list bios;
+	struct remap_info info;
 
-	bio_list_init(&bios);
-	cell_release_no_holder(tc->pool, cell, &bios);
+	info.tc = tc;
+	bio_list_init(&info.bios);
 
-	while ((bio = bio_list_pop(&bios))) {
-		if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA))
-			thin_defer_bio(tc, bio);
-		else {
-			inc_all_io_entry(tc->pool, bio);
-			remap_and_issue(tc, bio, block);
-		}
-	}
+	/*
+	 * We have to be careful to inc any bios we're about to issue
+	 * before the cell is released, and avoid a race with new bios
+	 * being added to the cell.
+	 */
+	dm_cell_visit_release(tc->pool->prison,
+			      __inc_remap_and_issue_cell,
+			      &info, cell);
+
+	while ((bio = bio_list_pop(&info.bios)))
+		remap_and_issue(info.tc, bio, block);
 }
 
 static void process_prepared_mapping(struct dm_thin_new_mapping *m)
