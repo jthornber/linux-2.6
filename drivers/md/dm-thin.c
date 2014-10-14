@@ -295,6 +295,15 @@ static void cell_release(struct pool *pool,
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
+static void cell_visit_release(struct pool *pool,
+			       void (*fn)(void *, struct dm_bio_prison_cell *),
+			       void *context,
+			       struct dm_bio_prison_cell *cell)
+{
+	dm_cell_visit_release(pool->prison, fn, context, cell);
+	dm_bio_prison_free_cell(pool->prison, cell);
+}
+
 static void cell_release_no_holder(struct pool *pool,
 				   struct dm_bio_prison_cell *cell,
 				   struct bio_list *bios)
@@ -705,9 +714,8 @@ static void inc_remap_and_issue_cell(struct thin_c *tc,
 	 * before the cell is released, and avoid a race with new bios
 	 * being added to the cell.
 	 */
-	dm_cell_visit_release(tc->pool->prison,
-			      __inc_remap_and_issue_cell,
-			      &info, cell);
+	cell_visit_release(tc->pool, __inc_remap_and_issue_cell,
+			   &info, cell);
 
 	while ((bio = bio_list_pop(&info.bios)))
 		remap_and_issue(info.tc, bio, block);
