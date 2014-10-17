@@ -2182,13 +2182,20 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 
-	throttle_lock(&pool->throttle);
 	spin_lock_irqsave(&tc->lock, flags);
 	bio_list_add(&tc->deferred_bio_list, bio);
 	spin_unlock_irqrestore(&tc->lock, flags);
-	throttle_unlock(&pool->throttle);
 
 	wake_worker(pool);
+}
+
+static void thin_defer_bio_with_throttle(struct thin_c *tc, struct bio *bio)
+{
+	struct pool *pool = tc->pool;
+
+	throttle_lock(&pool->throttle);
+	thin_defer_bio(tc, bio);
+	throttle_unlock(&pool->throttle);
 }
 
 static void thin_defer_cell(struct thin_c *tc, struct dm_bio_prison_cell *cell)
@@ -2196,9 +2203,11 @@ static void thin_defer_cell(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 	unsigned long flags;
 	struct pool *pool = tc->pool;
 
+	throttle_lock(&pool->throttle);
 	spin_lock_irqsave(&tc->lock, flags);
 	list_add_tail(&cell->user_list, &tc->deferred_cells);
 	spin_unlock_irqrestore(&tc->lock, flags);
+	throttle_lock(&pool->throttle);
 
 	wake_worker(pool);
 }
@@ -2239,7 +2248,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	}
 
 	if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)) {
-		thin_defer_bio(tc, bio);
+		thin_defer_bio_with_throttle(tc, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
