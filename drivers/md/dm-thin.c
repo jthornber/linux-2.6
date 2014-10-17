@@ -707,7 +707,8 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio);
 
 struct remap_info {
 	struct thin_c *tc;
-	struct bio_list bios;
+	struct bio_list defer_bios;
+	struct bio_list issue_bios;
 };
 
 static void __inc_remap_and_issue_cell(void *context,
@@ -718,7 +719,8 @@ static void __inc_remap_and_issue_cell(void *context,
 
 	while ((bio = bio_list_pop(&cell->bios))) {
 		if (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA))
-			thin_defer_bio(info->tc, bio);
+			bio_list_add(&info->defer_bios, bio);
+
 		else {
 			inc_all_io_entry(info->tc->pool, bio);
 
@@ -727,7 +729,7 @@ static void __inc_remap_and_issue_cell(void *context,
 			 * held, so we add them to a list to issue on
 			 * return from this function.
 			 */
-			bio_list_add(&info->bios, bio);
+			bio_list_add(&info->issue_bios, bio);
 		}
 	}
 }
@@ -740,7 +742,8 @@ static void inc_remap_and_issue_cell(struct thin_c *tc,
 	struct remap_info info;
 
 	info.tc = tc;
-	bio_list_init(&info.bios);
+	bio_list_init(&info.defer_bios);
+	bio_list_init(&info.issue_bios);
 
 	/*
 	 * We have to be careful to inc any bios we're about to issue
@@ -750,7 +753,10 @@ static void inc_remap_and_issue_cell(struct thin_c *tc,
 	cell_visit_release(tc->pool, __inc_remap_and_issue_cell,
 			   &info, cell);
 
-	while ((bio = bio_list_pop(&info.bios)))
+	while ((bio = bio_list_pop(&info.defer_bios)))
+			thin_defer_bio(tc, bio);
+
+	while ((bio = bio_list_pop(&info.issue_bios)))
 		remap_and_issue(info.tc, bio, block);
 }
 
@@ -1371,13 +1377,14 @@ static void __remap_and_issue_shared_cell(void *context,
 	while ((bio = bio_list_pop(&cell->bios))) {
 		if ((bio_data_dir(bio) == WRITE) ||
 		    (bio->bi_rw & (REQ_DISCARD | REQ_FLUSH | REQ_FUA)))
-			thin_defer_bio(info->tc, bio);
+			bio_list_add(&info->defer_bios, bio);
+
 		else {
 			struct dm_thin_endio_hook *h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));;
 
 			h->shared_read_entry = dm_deferred_entry_inc(info->tc->pool->shared_read_ds);
 			inc_all_io_entry(info->tc->pool, bio);
-			bio_list_add(&info->bios, bio);
+			bio_list_add(&info->issue_bios, bio);
 		}
 	}
 }
@@ -1390,12 +1397,16 @@ static void remap_and_issue_shared_cell(struct thin_c *tc,
 	struct remap_info info;
 
 	info.tc = tc;
-	bio_list_init(&info.bios);
+	bio_list_init(&info.defer_bios);
+	bio_list_init(&info.issue_bios);
 
 	cell_visit_release(tc->pool, __remap_and_issue_shared_cell,
 			   &info, cell);
 
-	while ((bio = bio_list_pop(&info.bios)))
+	while ((bio = bio_list_pop(&info.defer_bios)))
+		thin_defer_bio(tc, bio);
+
+	while ((bio = bio_list_pop(&info.issue_bios)))
 		remap_and_issue(tc, bio, block);
 }
 
