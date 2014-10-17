@@ -2207,7 +2207,7 @@ static void thin_defer_cell(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 	spin_lock_irqsave(&tc->lock, flags);
 	list_add_tail(&cell->user_list, &tc->deferred_cells);
 	spin_unlock_irqrestore(&tc->lock, flags);
-	throttle_lock(&pool->throttle);
+	throttle_unlock(&pool->throttle);
 
 	wake_worker(pool);
 }
