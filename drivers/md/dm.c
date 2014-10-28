@@ -2738,7 +2738,7 @@ int dm_suspend(struct mapped_device *md, unsigned suspend_flags)
 	int do_lockfs = suspend_flags & DM_SUSPEND_LOCKFS_FLAG ? 1 : 0;
 	int noflush = suspend_flags & DM_SUSPEND_NOFLUSH_FLAG ? 1 : 0;
 
-	mutex_lock(&md->suspend_lock);
+	mutex_lock_nested(&md->suspend_lock, SINGLE_DEPTH_NESTING);
 
 	if (dm_suspended_md(md)) {
 		r = -EINVAL;
@@ -2875,30 +2875,66 @@ out:
  *
  * Internal suspend holds md->suspend_lock, which prevents interaction with
  * userspace-driven suspend.
+ *
+ * These methods do not support request-based DM devices.
  */
 
-void dm_internal_suspend(struct mapped_device *md)
+static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_flags)
 {
+	struct dm_table *map = NULL;
+	int noflush = suspend_flags & DM_SUSPEND_NOFLUSH_FLAG ? 1 : 0;
+
 	mutex_lock(&md->suspend_lock);
 	if (dm_suspended_md(md))
-		return;
+		return; /* nest suspend */
+
+	map = rcu_dereference(md->map);
+
+	if (noflush)
+		set_bit(DMF_NOFLUSH_SUSPENDING, &md->flags);
+
+	dm_table_presuspend_targets(map);
 
 	set_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags);
 	synchronize_srcu(&md->io_barrier);
 	flush_workqueue(md->wq);
 	dm_wait_for_completion(md, TASK_UNINTERRUPTIBLE);
+
+	if (noflush)
+		clear_bit(DMF_NOFLUSH_SUSPENDING, &md->flags);
+	synchronize_srcu(&md->io_barrier);
+
+	dm_table_postsuspend_targets(map);
 }
+
+void dm_internal_suspend(struct mapped_device *md)
+{
+	__dm_internal_suspend(md, 0);
+}
+EXPORT_SYMBOL_GPL(dm_internal_suspend);
+
+void dm_internal_suspend_noflush(struct mapped_device *md)
+{
+	__dm_internal_suspend(md, DM_SUSPEND_NOFLUSH_FLAG);
+}
+EXPORT_SYMBOL_GPL(dm_internal_suspend_noflush);
 
 void dm_internal_resume(struct mapped_device *md)
 {
 	if (dm_suspended_md(md))
-		goto done;
+		goto done; /* resume from nested suspend */
+
+	/*
+	 * FIXME: existing callers don't need to call dm_table_resume_targets
+	 * (which may fail -- so best to avoid it for now)
+	 */
 
 	dm_queue_flush(md);
 
 done:
 	mutex_unlock(&md->suspend_lock);
 }
+EXPORT_SYMBOL_GPL(dm_internal_resume);
 
 /*-----------------------------------------------------------------
  * Event notification.
