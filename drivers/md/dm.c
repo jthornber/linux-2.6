@@ -117,6 +117,7 @@ EXPORT_SYMBOL_GPL(dm_get_rq_mapinfo);
 #define DMF_NOFLUSH_SUSPENDING 5
 #define DMF_MERGE_IS_OPTIONAL 6
 #define DMF_DEFERRED_REMOVE 7
+#define DMF_SUSPENDED_INTERNALLY 8
 
 /*
  * A dummy definition to make RCU happy.
@@ -2888,9 +2889,14 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 	struct dm_table *map = NULL;
 	int noflush = suspend_flags & DM_SUSPEND_NOFLUSH_FLAG ? 1 : 0;
 
+	if (WARN_ON(dm_suspended_internally_md(md)))
+		return; /* disallow nested internal suspends! */
+
 	mutex_lock(&md->suspend_lock);
-	if (dm_suspended_md(md))
+	if (dm_suspended_md(md)) {
+		set_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 		return; /* nest suspend */
+	}
 
 	map = rcu_dereference(md->map);
 
@@ -2907,6 +2913,8 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 	if (noflush)
 		clear_bit(DMF_NOFLUSH_SUSPENDING, &md->flags);
 	synchronize_srcu(&md->io_barrier);
+
+	set_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 
 	dm_table_postsuspend_targets(map);
 }
@@ -2925,8 +2933,13 @@ EXPORT_SYMBOL_GPL(dm_internal_suspend_noflush);
 
 void dm_internal_resume(struct mapped_device *md)
 {
-	if (dm_suspended_md(md))
+	if (WARN_ON(!dm_suspended_internally_md(md)))
+		return;
+
+	if (dm_suspended_md(md)) {
+		clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 		goto done; /* resume from nested suspend */
+	}
 
 	/*
 	 * FIXME: existing callers don't need to call dm_table_resume_targets
@@ -2934,6 +2947,8 @@ void dm_internal_resume(struct mapped_device *md)
 	 */
 
 	dm_queue_flush(md);
+
+	clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 
 done:
 	mutex_unlock(&md->suspend_lock);
@@ -3015,6 +3030,11 @@ struct mapped_device *dm_get_from_kobject(struct kobject *kobj)
 int dm_suspended_md(struct mapped_device *md)
 {
 	return test_bit(DMF_SUSPENDED, &md->flags);
+}
+
+int dm_suspended_internally_md(struct mapped_device *md)
+{
+	return test_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 }
 
 int dm_test_deferred_remove_flag(struct mapped_device *md)
