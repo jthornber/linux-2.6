@@ -289,6 +289,8 @@ struct thin_c {
 
 	struct pool *pool;
 	struct dm_thin_device *td;
+	struct mapped_device *thin_md;
+
 	bool requeue_mode:1;
 	spinlock_t lock;
 	struct list_head deferred_cells;
@@ -3109,6 +3111,17 @@ static int pool_preresume(struct dm_target *ti)
 	return 0;
 }
 
+static void pool_resume_active_thins(struct pool *pool)
+{
+	struct thin_c *tc;
+
+	tc = get_first_thin(pool);
+	while (tc) {
+		dm_internal_resume(tc->thin_md);
+		tc = get_next_thin(pool, tc);
+	}
+}
+
 static void pool_resume(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
@@ -3121,6 +3134,31 @@ static void pool_resume(struct dm_target *ti)
 	requeue_bios(pool);
 
 	do_waker(&pool->waker.work);
+
+	/* resume all active thin devices */
+	pool_resume_active_thins(pool);
+}
+
+static void pool_presuspend(struct dm_target *ti)
+{
+	struct thin_c *tc;
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+
+	/* suspend all active thin devices */
+	tc = get_first_thin(pool);
+	while (tc) {
+		dm_internal_suspend_noflush(tc->thin_md);
+		tc = get_next_thin(pool, tc);
+	}
+}
+
+static void pool_presuspend_undo(struct dm_target *ti)
+{
+	struct pool_c *pt = ti->private;
+	struct pool *pool = pt->pool;
+
+	pool_resume_active_thins(pool);
 }
 
 static void pool_postsuspend(struct dm_target *ti)
@@ -3585,6 +3623,8 @@ static struct target_type pool_target = {
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
 	.map = pool_map,
+	.presuspend = pool_presuspend,
+	.presuspend_undo = pool_presuspend_undo,
 	.postsuspend = pool_postsuspend,
 	.preresume = pool_preresume,
 	.resume = pool_resume,
@@ -3668,6 +3708,7 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		r = -ENOMEM;
 		goto out_unlock;
 	}
+	tc->thin_md = dm_table_get_md(ti->table);
 	spin_lock_init(&tc->lock);
 	INIT_LIST_HEAD(&tc->deferred_cells);
 	bio_list_init(&tc->deferred_bio_list);
