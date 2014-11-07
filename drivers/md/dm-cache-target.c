@@ -1119,7 +1119,20 @@ static void issue_discard(struct dm_cache_migration *mg)
 		b = to_dblock(from_dblock(b) + 1);
 	}
 
-	bio_endio(bio, 0);
+	/*
+	 * The discard gets remapped to the origin and gets passed down.
+	 * Irrespective of whether it covers data that is in the cache.
+	 * This is safe to do since discarded data can have essentially any
+	 * value.  There's no point passing down the discard to the fast
+	 * device, we'll be reusing the space shortly.
+	 *
+	 * Obviously this means we can't honour any 'discard zeroes data'
+	 * properties of the underlying device.
+	 */
+	remap_to_origin(mg->cache, bio);
+	inc_ds(mg->cache, bio, mg->new_ocell);
+	issue(mg->cache, bio);
+
 	cell_defer(mg->cache, mg->new_ocell, false);
 	free_migration(mg);
 }
@@ -3206,7 +3219,7 @@ static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 	 * FIXME: these limits may be incompatible with the cache device
 	 */
 	limits->max_discard_sectors = cache->discard_block_size * 1024;
-	limits->discard_granularity = cache->discard_block_size << SECTOR_SHIFT;
+	limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
