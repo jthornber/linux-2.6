@@ -230,6 +230,7 @@ struct pool {
 
 	struct workqueue_struct *wq;
 	struct throttle throttle;
+	struct rw_semaphore thin_lock;
 	struct work_struct worker;
 	struct delayed_work waker;
 	struct delayed_work no_space_timeout;
@@ -2523,6 +2524,8 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 
 	throttle_init(&pool->throttle);
+	init_rwsem(&pool->thin_lock);
+	down_write(&pool->thin_lock); /* this will be raised when the pool is resumed */
 	INIT_WORK(&pool->worker, do_worker);
 	INIT_DELAYED_WORK(&pool->waker, do_waker);
 	INIT_DELAYED_WORK(&pool->no_space_timeout, do_no_space_timeout);
@@ -3078,6 +3081,7 @@ static void pool_resume(struct dm_target *ti)
 	pool->low_water_triggered = false;
 	spin_unlock_irqrestore(&pool->lock, flags);
 	requeue_bios(pool);
+	up_write(&pool->thin_lock);
 
 	do_waker(&pool->waker.work);
 }
@@ -3087,6 +3091,7 @@ static void pool_postsuspend(struct dm_target *ti)
 	struct pool_c *pt = ti->private;
 	struct pool *pool = pt->pool;
 
+	down_write(&pool->thin_lock);
 	cancel_delayed_work(&pool->waker);
 	cancel_delayed_work(&pool->no_space_timeout);
 	flush_workqueue(pool->wq);
@@ -3740,9 +3745,15 @@ out_unlock:
 
 static int thin_map(struct dm_target *ti, struct bio *bio)
 {
-	bio->bi_iter.bi_sector = dm_target_offset(ti, bio->bi_iter.bi_sector);
+	int r;
+	struct thin_c *tc = ti->private;
 
-	return thin_bio_map(ti, bio);
+	down_read(&tc->pool->thin_lock);
+	bio->bi_iter.bi_sector = dm_target_offset(ti, bio->bi_iter.bi_sector);
+	r = thin_bio_map(ti, bio);
+	up_read(&tc->pool->thin_lock);
+
+	return r;
 }
 
 static int thin_endio(struct dm_target *ti, struct bio *bio, int err)
