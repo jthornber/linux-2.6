@@ -2298,8 +2298,7 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 {
 	sector_t discard_block_size;
 
-	discard_block_size = roundup_pow_of_two(cache_block_size);
-
+	discard_block_size = cache_block_size;
 	if (origin_size)
 		while (too_many_discard_blocks(discard_block_size, origin_size))
 			discard_block_size *= 2;
