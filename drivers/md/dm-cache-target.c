@@ -2447,8 +2447,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->discard_block_size =
 		calculate_discard_block_size(cache->sectors_per_block,
 					     cache->origin_sectors);
-	cache->discard_nr_blocks = to_dblock(dm_div_up(cache->origin_sectors,
-						       cache->discard_block_size));
+	cache->discard_nr_blocks = to_dblock(dm_sector_div_up(cache->origin_sectors,
+							      cache->discard_block_size));
 	cache->discard_bitset = alloc_bitset(from_dblock(cache->discard_nr_blocks));
 	if (!cache->discard_bitset) {
 		*error = "could not allocate discard bitset";
