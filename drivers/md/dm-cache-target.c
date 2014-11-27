@@ -1437,15 +1437,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	dm_oblock_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *cell_prealloc, *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
-
-	/*
-	 * The discarded state is retrieved without any cell being held,
-	 * which introduces a race.  However it is only used as a hint, so
-	 * this should be harmless.
-	 */
-	bool discarded_block = is_discarded_oblock(cache, block);
 	bool passthrough = passthrough_mode(&cache->features);
-	bool can_migrate = !passthrough && (discarded_block || spare_migration_bandwidth(cache));
+	bool discarded_block, can_migrate;
 
 	/*
 	 * Check to see if that block is currently migrating.
@@ -1456,6 +1449,9 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 		       structs, &new_ocell);
 	if (r > 0)
 		return;
+
+	discarded_block = is_discarded_oblock(cache, block);
+	can_migrate = !passthrough && (discarded_block || spare_migration_bandwidth(cache));
 
 	r = policy_map(cache->policy, block, true, can_migrate, discarded_block,
 		       bio, &lookup_result);
