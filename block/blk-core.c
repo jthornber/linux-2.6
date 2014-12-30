@@ -236,7 +236,7 @@ EXPORT_SYMBOL(blk_stop_queue);
  *     this function.
  *
  *     This function does not cancel any asynchronous activity arising
- *     out of elevator or throttling code. That would require elevaotor_exit()
+ *     out of elevator or throttling code. That would require elevator_exit()
  *     and blkcg_exit_queue() to be called with queue lock initialized.
  *
  */
@@ -524,6 +524,9 @@ void blk_cleanup_queue(struct request_queue *q)
 	/* @q won't process any more request, flush async actions */
 	del_timer_sync(&q->backing_dev_info.laptop_mode_wb_timer);
 	blk_sync_queue(q);
+
+	if (q->mq_ops)
+		blk_mq_free_queue(q);
 
 	spin_lock_irq(lock);
 	if (q->queue_lock != &q->__queue_lock)
@@ -1060,8 +1063,8 @@ fail_elvpriv:
 	 * shouldn't stall IO.  Treat this request as !elvpriv.  This will
 	 * disturb iosched and blkcg but weird is bettern than dead.
 	 */
-	printk_ratelimited(KERN_WARNING "%s: request aux data allocation failed, iosched may be disturbed\n",
-			   dev_name(q->backing_dev_info.dev));
+	printk_ratelimited(KERN_WARNING "%s: dev %s: request aux data allocation failed, iosched may be disturbed\n",
+			   __func__, dev_name(q->backing_dev_info.dev));
 
 	rq->cmd_flags &= ~REQ_ELVPRIV;
 	rq->elv.icq = NULL;
@@ -1236,7 +1239,7 @@ struct request *blk_make_request(struct request_queue *q, struct bio *bio,
 EXPORT_SYMBOL(blk_make_request);
 
 /**
- * blk_rq_set_block_pc - initialize a requeest to type BLOCK_PC
+ * blk_rq_set_block_pc - initialize a request to type BLOCK_PC
  * @rq:		request to be initialized
  *
  */
@@ -1266,7 +1269,7 @@ void blk_requeue_request(struct request_queue *q, struct request *rq)
 	blk_clear_rq_complete(rq);
 	trace_block_rq_requeue(q, rq);
 
-	if (blk_rq_tagged(rq))
+	if (rq->cmd_flags & REQ_QUEUED)
 		blk_queue_end_tag(q, rq);
 
 	BUG_ON(blk_queued_rq(rq));
@@ -1325,7 +1328,7 @@ void part_round_stats(int cpu, struct hd_struct *part)
 }
 EXPORT_SYMBOL_GPL(part_round_stats);
 
-#ifdef CONFIG_PM_RUNTIME
+#ifdef CONFIG_PM
 static void blk_pm_put_request(struct request *rq)
 {
 	if (rq->q->dev && !(rq->cmd_flags & REQ_PM) && !--rq->q->nr_pending)
@@ -2134,7 +2137,7 @@ void blk_account_io_done(struct request *req)
 	}
 }
 
-#ifdef CONFIG_PM_RUNTIME
+#ifdef CONFIG_PM
 /*
  * Don't process normal requests when queue is suspended
  * or in the process of suspending/resuming
@@ -2444,8 +2447,8 @@ bool blk_update_request(struct request *req, int error, unsigned int nr_bytes)
 			error_type = "I/O";
 			break;
 		}
-		printk_ratelimited(KERN_ERR "end_request: %s error, dev %s, sector %llu\n",
-				   error_type, req->rq_disk ?
+		printk_ratelimited(KERN_ERR "%s: %s error, dev %s, sector %llu\n",
+				   __func__, error_type, req->rq_disk ?
 				   req->rq_disk->disk_name : "?",
 				   (unsigned long long)blk_rq_pos(req));
 
@@ -2554,7 +2557,7 @@ EXPORT_SYMBOL_GPL(blk_unprep_request);
  */
 void blk_finish_request(struct request *req, int error)
 {
-	if (blk_rq_tagged(req))
+	if (req->cmd_flags & REQ_QUEUED)
 		blk_queue_end_tag(req->q, req);
 
 	BUG_ON(blk_queued_rq(req));
@@ -3159,7 +3162,7 @@ void blk_finish_plug(struct blk_plug *plug)
 }
 EXPORT_SYMBOL(blk_finish_plug);
 
-#ifdef CONFIG_PM_RUNTIME
+#ifdef CONFIG_PM
 /**
  * blk_pm_runtime_init - Block layer runtime PM initialization routine
  * @q: the queue of the device

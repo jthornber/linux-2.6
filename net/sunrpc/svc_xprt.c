@@ -15,6 +15,7 @@
 #include <linux/sunrpc/svcsock.h>
 #include <linux/sunrpc/xprt.h>
 #include <linux/module.h>
+#include <trace/events/sunrpc.h>
 
 #define RPCDBG_FACILITY	RPCDBG_SVCXPRT
 
@@ -346,20 +347,6 @@ static void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 	if (!svc_xprt_has_something_to_do(xprt))
 		return;
 
-	cpu = get_cpu();
-	pool = svc_pool_for_cpu(xprt->xpt_server, cpu);
-	put_cpu();
-
-	spin_lock_bh(&pool->sp_lock);
-
-	if (!list_empty(&pool->sp_threads) &&
-	    !list_empty(&pool->sp_sockets))
-		printk(KERN_ERR
-		       "svc_xprt_enqueue: "
-		       "threads and transports both waiting??\n");
-
-	pool->sp_stats.packets++;
-
 	/* Mark transport as busy. It will remain in this state until
 	 * the provider calls svc_xprt_received. We update XPT_BUSY
 	 * atomically because it also guards against trying to enqueue
@@ -368,8 +355,14 @@ static void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 	if (test_and_set_bit(XPT_BUSY, &xprt->xpt_flags)) {
 		/* Don't enqueue transport while already enqueued */
 		dprintk("svc: transport %p busy, not enqueued\n", xprt);
-		goto out_unlock;
+		return;
 	}
+
+	cpu = get_cpu();
+	pool = svc_pool_for_cpu(xprt->xpt_server, cpu);
+	spin_lock_bh(&pool->sp_lock);
+
+	pool->sp_stats.packets++;
 
 	if (!list_empty(&pool->sp_threads)) {
 		rqstp = list_entry(pool->sp_threads.next,
@@ -382,18 +375,23 @@ static void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 			printk(KERN_ERR
 				"svc_xprt_enqueue: server %p, rq_xprt=%p!\n",
 				rqstp, rqstp->rq_xprt);
-		rqstp->rq_xprt = xprt;
+		/* Note the order of the following 3 lines:
+		 * We want to assign xprt to rqstp->rq_xprt only _after_
+		 * we've woken up the process, so that we don't race with
+		 * the lockless check in svc_get_next_xprt().
+		 */
 		svc_xprt_get(xprt);
+		wake_up_process(rqstp->rq_task);
+		rqstp->rq_xprt = xprt;
 		pool->sp_stats.threads_woken++;
-		wake_up(&rqstp->rq_wait);
 	} else {
 		dprintk("svc: transport %p put into queue\n", xprt);
 		list_add_tail(&xprt->xpt_ready, &pool->sp_sockets);
 		pool->sp_stats.sockets_queued++;
 	}
 
-out_unlock:
 	spin_unlock_bh(&pool->sp_lock);
+	put_cpu();
 }
 
 /*
@@ -509,7 +507,7 @@ void svc_wake_up(struct svc_serv *serv)
 			svc_thread_dequeue(pool, rqstp);
 			rqstp->rq_xprt = NULL;
 			 */
-			wake_up(&rqstp->rq_wait);
+			wake_up_process(rqstp->rq_task);
 		} else
 			pool->sp_task_pending = 1;
 		spin_unlock_bh(&pool->sp_lock);
@@ -628,8 +626,7 @@ static struct svc_xprt *svc_get_next_xprt(struct svc_rqst *rqstp, long timeout)
 {
 	struct svc_xprt *xprt;
 	struct svc_pool		*pool = rqstp->rq_pool;
-	DECLARE_WAITQUEUE(wait, current);
-	long			time_left;
+	long			time_left = 0;
 
 	/* Normally we will wait up to 5 seconds for any required
 	 * cache information to be provided.
@@ -651,40 +648,32 @@ static struct svc_xprt *svc_get_next_xprt(struct svc_rqst *rqstp, long timeout)
 	} else {
 		if (pool->sp_task_pending) {
 			pool->sp_task_pending = 0;
-			spin_unlock_bh(&pool->sp_lock);
-			return ERR_PTR(-EAGAIN);
+			xprt = ERR_PTR(-EAGAIN);
+			goto out;
 		}
-		/* No data pending. Go to sleep */
-		svc_thread_enqueue(pool, rqstp);
-
 		/*
 		 * We have to be able to interrupt this wait
 		 * to bring down the daemons ...
 		 */
 		set_current_state(TASK_INTERRUPTIBLE);
 
-		/*
-		 * checking kthread_should_stop() here allows us to avoid
-		 * locking and signalling when stopping kthreads that call
-		 * svc_recv. If the thread has already been woken up, then
-		 * we can exit here without sleeping. If not, then it
-		 * it'll be woken up quickly during the schedule_timeout
-		 */
-		if (kthread_should_stop()) {
-			set_current_state(TASK_RUNNING);
-			spin_unlock_bh(&pool->sp_lock);
-			return ERR_PTR(-EINTR);
-		}
-
-		add_wait_queue(&rqstp->rq_wait, &wait);
+		/* No data pending. Go to sleep */
+		svc_thread_enqueue(pool, rqstp);
 		spin_unlock_bh(&pool->sp_lock);
 
-		time_left = schedule_timeout(timeout);
+		if (!(signalled() || kthread_should_stop())) {
+			time_left = schedule_timeout(timeout);
+			__set_current_state(TASK_RUNNING);
 
-		try_to_freeze();
+			try_to_freeze();
+
+			xprt = rqstp->rq_xprt;
+			if (xprt != NULL)
+				return xprt;
+		} else
+			__set_current_state(TASK_RUNNING);
 
 		spin_lock_bh(&pool->sp_lock);
-		remove_wait_queue(&rqstp->rq_wait, &wait);
 		if (!time_left)
 			pool->sp_stats.threads_timedout++;
 
@@ -699,6 +688,7 @@ static struct svc_xprt *svc_get_next_xprt(struct svc_rqst *rqstp, long timeout)
 				return ERR_PTR(-EAGAIN);
 		}
 	}
+out:
 	spin_unlock_bh(&pool->sp_lock);
 	return xprt;
 }
@@ -744,7 +734,7 @@ static int svc_handle_xprt(struct svc_rqst *rqstp, struct svc_xprt *xprt)
 			svc_add_new_temp_xprt(serv, newxpt);
 		else
 			module_put(xprt->xpt_class->xcl_owner);
-	} else if (xprt->xpt_ops->xpo_has_wspace(xprt)) {
+	} else {
 		/* XPT_DATA|XPT_DEFERRED case: */
 		dprintk("svc: server %p, pool %u, transport %p, inuse=%d\n",
 			rqstp, rqstp->rq_pool->sp_id, xprt,
@@ -781,42 +771,46 @@ int svc_recv(struct svc_rqst *rqstp, long timeout)
 		printk(KERN_ERR
 			"svc_recv: service %p, transport not NULL!\n",
 			 rqstp);
-	if (waitqueue_active(&rqstp->rq_wait))
-		printk(KERN_ERR
-			"svc_recv: service %p, wait queue active!\n",
-			 rqstp);
 
 	err = svc_alloc_arg(rqstp);
 	if (err)
-		return err;
+		goto out;
 
 	try_to_freeze();
 	cond_resched();
+	err = -EINTR;
 	if (signalled() || kthread_should_stop())
-		return -EINTR;
+		goto out;
 
 	xprt = svc_get_next_xprt(rqstp, timeout);
-	if (IS_ERR(xprt))
-		return PTR_ERR(xprt);
+	if (IS_ERR(xprt)) {
+		err = PTR_ERR(xprt);
+		goto out;
+	}
 
 	len = svc_handle_xprt(rqstp, xprt);
 
 	/* No data, incomplete (TCP) read, or accept() */
+	err = -EAGAIN;
 	if (len <= 0)
-		goto out;
+		goto out_release;
 
 	clear_bit(XPT_OLD, &xprt->xpt_flags);
 
 	rqstp->rq_secure = xprt->xpt_ops->xpo_secure_port(rqstp);
 	rqstp->rq_chandle.defer = svc_defer;
+	rqstp->rq_xid = svc_getu32(&rqstp->rq_arg.head[0]);
 
 	if (serv->sv_stats)
 		serv->sv_stats->netcnt++;
+	trace_svc_recv(rqstp, len);
 	return len;
-out:
+out_release:
 	rqstp->rq_res.len = 0;
 	svc_xprt_release(rqstp);
-	return -EAGAIN;
+out:
+	trace_svc_recv(rqstp, err);
+	return err;
 }
 EXPORT_SYMBOL_GPL(svc_recv);
 
@@ -836,12 +830,12 @@ EXPORT_SYMBOL_GPL(svc_drop);
 int svc_send(struct svc_rqst *rqstp)
 {
 	struct svc_xprt	*xprt;
-	int		len;
+	int		len = -EFAULT;
 	struct xdr_buf	*xb;
 
 	xprt = rqstp->rq_xprt;
 	if (!xprt)
-		return -EFAULT;
+		goto out;
 
 	/* release the receive skb before sending the reply */
 	rqstp->rq_xprt->xpt_ops->xpo_release_rqst(rqstp);
@@ -864,7 +858,9 @@ int svc_send(struct svc_rqst *rqstp)
 	svc_xprt_release(rqstp);
 
 	if (len == -ECONNREFUSED || len == -ENOTCONN || len == -EAGAIN)
-		return 0;
+		len = 0;
+out:
+	trace_svc_send(rqstp, len);
 	return len;
 }
 

@@ -399,33 +399,9 @@ static pteval_t pte_pfn_to_mfn(pteval_t val)
 		if (unlikely(mfn == INVALID_P2M_ENTRY)) {
 			mfn = 0;
 			flags = 0;
-		} else {
-			/*
-			 * Paramount to do this test _after_ the
-			 * INVALID_P2M_ENTRY as INVALID_P2M_ENTRY &
-			 * IDENTITY_FRAME_BIT resolves to true.
-			 */
-			mfn &= ~FOREIGN_FRAME_BIT;
-			if (mfn & IDENTITY_FRAME_BIT) {
-				mfn &= ~IDENTITY_FRAME_BIT;
-				flags |= _PAGE_IOMAP;
-			}
-		}
+		} else
+			mfn &= ~(FOREIGN_FRAME_BIT | IDENTITY_FRAME_BIT);
 		val = ((pteval_t)mfn << PAGE_SHIFT) | flags;
-	}
-
-	return val;
-}
-
-static pteval_t iomap_pte(pteval_t val)
-{
-	if (val & _PAGE_PRESENT) {
-		unsigned long pfn = (val & PTE_PFN_MASK) >> PAGE_SHIFT;
-		pteval_t flags = val & PTE_FLAGS_MASK;
-
-		/* We assume the pte frame number is a MFN, so
-		   just use it as-is. */
-		val = ((pteval_t)pfn << PAGE_SHIFT) | flags;
 	}
 
 	return val;
@@ -434,15 +410,6 @@ static pteval_t iomap_pte(pteval_t val)
 __visible pteval_t xen_pte_val(pte_t pte)
 {
 	pteval_t pteval = pte.pte;
-#if 0
-	/* If this is a WC pte, convert back from Xen WC to Linux WC */
-	if ((pteval & (_PAGE_PAT | _PAGE_PCD | _PAGE_PWT)) == _PAGE_PAT) {
-		WARN_ON(!pat_enabled);
-		pteval = (pteval & ~_PAGE_PAT) | _PAGE_PWT;
-	}
-#endif
-	if (xen_initial_domain() && (pteval & _PAGE_IOMAP))
-		return pteval;
 
 	return pte_mfn_to_pfn(pteval);
 }
@@ -454,61 +421,9 @@ __visible pgdval_t xen_pgd_val(pgd_t pgd)
 }
 PV_CALLEE_SAVE_REGS_THUNK(xen_pgd_val);
 
-/*
- * Xen's PAT setup is part of its ABI, though I assume entries 6 & 7
- * are reserved for now, to correspond to the Intel-reserved PAT
- * types.
- *
- * We expect Linux's PAT set as follows:
- *
- * Idx  PTE flags        Linux    Xen    Default
- * 0                     WB       WB     WB
- * 1            PWT      WC       WT     WT
- * 2        PCD          UC-      UC-    UC-
- * 3        PCD PWT      UC       UC     UC
- * 4    PAT              WB       WC     WB
- * 5    PAT     PWT      WC       WP     WT
- * 6    PAT PCD          UC-      rsv    UC-
- * 7    PAT PCD PWT      UC       rsv    UC
- */
-
-void xen_set_pat(u64 pat)
-{
-	/* We expect Linux to use a PAT setting of
-	 * UC UC- WC WB (ignoring the PAT flag) */
-	WARN_ON(pat != 0x0007010600070106ull);
-}
-
 __visible pte_t xen_make_pte(pteval_t pte)
 {
-	phys_addr_t addr = (pte & PTE_PFN_MASK);
-#if 0
-	/* If Linux is trying to set a WC pte, then map to the Xen WC.
-	 * If _PAGE_PAT is set, then it probably means it is really
-	 * _PAGE_PSE, so avoid fiddling with the PAT mapping and hope
-	 * things work out OK...
-	 *
-	 * (We should never see kernel mappings with _PAGE_PSE set,
-	 * but we could see hugetlbfs mappings, I think.).
-	 */
-	if (pat_enabled && !WARN_ON(pte & _PAGE_PAT)) {
-		if ((pte & (_PAGE_PCD | _PAGE_PWT)) == _PAGE_PWT)
-			pte = (pte & ~(_PAGE_PCD | _PAGE_PWT)) | _PAGE_PAT;
-	}
-#endif
-	/*
-	 * Unprivileged domains are allowed to do IOMAPpings for
-	 * PCI passthrough, but not map ISA space.  The ISA
-	 * mappings are just dummy local mappings to keep other
-	 * parts of the kernel happy.
-	 */
-	if (unlikely(pte & _PAGE_IOMAP) &&
-	    (xen_initial_domain() || addr >= ISA_END_ADDRESS)) {
-		pte = iomap_pte(pte);
-	} else {
-		pte &= ~_PAGE_IOMAP;
-		pte = pte_pfn_to_mfn(pte);
-	}
+	pte = pte_pfn_to_mfn(pte);
 
 	return native_make_pte(pte);
 }
@@ -1257,10 +1172,13 @@ static void __init xen_pagetable_p2m_copy(void)
 static void __init xen_pagetable_init(void)
 {
 	paging_init();
-	xen_setup_shared_info();
 #ifdef CONFIG_X86_64
 	xen_pagetable_p2m_copy();
 #endif
+	/* Allocate and initialize top and mid mfn levels for p2m structure */
+	xen_build_mfn_list_list();
+
+	xen_setup_shared_info();
 	xen_post_allocator_init();
 }
 static void xen_write_cr2(unsigned long cr2)
@@ -1494,8 +1412,10 @@ static int xen_pgd_alloc(struct mm_struct *mm)
 		page->private = (unsigned long)user_pgd;
 
 		if (user_pgd != NULL) {
+#ifdef CONFIG_X86_VSYSCALL_EMULATION
 			user_pgd[pgd_index(VSYSCALL_ADDR)] =
 				__pgd(__pa(level3_user_vsyscall) | _PAGE_TABLE);
+#endif
 			ret = 0;
 		}
 
@@ -2058,7 +1978,7 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
 # ifdef CONFIG_HIGHMEM
 	case FIX_KMAP_BEGIN ... FIX_KMAP_END:
 # endif
-#else
+#elif defined(CONFIG_X86_VSYSCALL_EMULATION)
 	case VSYSCALL_PAGE:
 #endif
 	case FIX_TEXT_POKE0:
@@ -2091,13 +2011,13 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
 
 	default:
 		/* By default, set_fixmap is used for hardware mappings */
-		pte = mfn_pte(phys, __pgprot(pgprot_val(prot) | _PAGE_IOMAP));
+		pte = mfn_pte(phys, prot);
 		break;
 	}
 
 	__native_set_fixmap(idx, pte);
 
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_X86_VSYSCALL_EMULATION
 	/* Replicate changes to map the vsyscall page into the user
 	   pagetable vsyscall mapping. */
 	if (idx == VSYSCALL_PAGE) {

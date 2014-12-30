@@ -156,21 +156,25 @@ static int handle_store_cpu_address(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
-static void __skey_check_enable(struct kvm_vcpu *vcpu)
+static int __skey_check_enable(struct kvm_vcpu *vcpu)
 {
+	int rc = 0;
 	if (!(vcpu->arch.sie_block->ictl & (ICTL_ISKE | ICTL_SSKE | ICTL_RRBE)))
-		return;
+		return rc;
 
-	s390_enable_skey();
+	rc = s390_enable_skey();
 	trace_kvm_s390_skey_related_inst(vcpu);
 	vcpu->arch.sie_block->ictl &= ~(ICTL_ISKE | ICTL_SSKE | ICTL_RRBE);
+	return rc;
 }
 
 
 static int handle_skey(struct kvm_vcpu *vcpu)
 {
-	__skey_check_enable(vcpu);
+	int rc = __skey_check_enable(vcpu);
 
+	if (rc)
+		return rc;
 	vcpu->stat.instruction_storage_key++;
 
 	if (vcpu->arch.sie_block->gpsw.mask & PSW_MASK_PSTATE)
@@ -352,13 +356,6 @@ static int handle_stfl(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
-static void handle_new_psw(struct kvm_vcpu *vcpu)
-{
-	/* Check whether the new psw is enabled for machine checks. */
-	if (vcpu->arch.sie_block->gpsw.mask & PSW_MASK_MCHECK)
-		kvm_s390_deliver_pending_machine_checks(vcpu);
-}
-
 #define PSW_MASK_ADDR_MODE (PSW_MASK_EA | PSW_MASK_BA)
 #define PSW_MASK_UNASSIGNED 0xb80800fe7fffffffUL
 #define PSW_ADDR_24 0x0000000000ffffffUL
@@ -405,7 +402,6 @@ int kvm_s390_handle_lpsw(struct kvm_vcpu *vcpu)
 	gpsw->addr = new_psw.addr & ~PSW32_ADDR_AMODE;
 	if (!is_valid_psw(gpsw))
 		return kvm_s390_inject_program_int(vcpu, PGM_SPECIFICATION);
-	handle_new_psw(vcpu);
 	return 0;
 }
 
@@ -427,7 +423,6 @@ static int handle_lpswe(struct kvm_vcpu *vcpu)
 	vcpu->arch.sie_block->gpsw = new_psw;
 	if (!is_valid_psw(&vcpu->arch.sie_block->gpsw))
 		return kvm_s390_inject_program_int(vcpu, PGM_SPECIFICATION);
-	handle_new_psw(vcpu);
 	return 0;
 }
 
@@ -692,7 +687,10 @@ static int handle_pfmf(struct kvm_vcpu *vcpu)
 		}
 
 		if (vcpu->run->s.regs.gprs[reg1] & PFMF_SK) {
-			__skey_check_enable(vcpu);
+			int rc = __skey_check_enable(vcpu);
+
+			if (rc)
+				return rc;
 			if (set_guest_storage_key(current->mm, useraddr,
 					vcpu->run->s.regs.gprs[reg1] & PFMF_KEY,
 					vcpu->run->s.regs.gprs[reg1] & PFMF_NQ))
@@ -738,7 +736,7 @@ static int handle_essa(struct kvm_vcpu *vcpu)
 			/* invalid entry */
 			break;
 		/* try to free backing */
-		__gmap_zap(cbrle, gmap);
+		__gmap_zap(gmap, cbrle);
 	}
 	up_read(&gmap->mm->mmap_sem);
 	if (i < entries)

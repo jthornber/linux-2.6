@@ -527,14 +527,15 @@ retry:
 		goto out;
 
 	tgt = dm_table_get_target(map, 0);
+	if (!tgt->type->ioctl)
+		goto out;
 
 	if (dm_suspended_md(md)) {
 		r = -EAGAIN;
 		goto out;
 	}
 
-	if (tgt->type->ioctl)
-		r = tgt->type->ioctl(tgt, cmd, arg);
+	r = tgt->type->ioctl(tgt, cmd, arg);
 
 out:
 	dm_put_live_table(md, srcu_idx);
@@ -604,13 +605,10 @@ static void end_io_acct(struct dm_io *io)
 	struct mapped_device *md = io->md;
 	struct bio *bio = io->bio;
 	unsigned long duration = jiffies - io->start_time;
-	int pending, cpu;
+	int pending;
 	int rw = bio_data_dir(bio);
 
-	cpu = part_stat_lock();
-	part_round_stats(cpu, &dm_disk(md)->part0);
-	part_stat_add(cpu, &dm_disk(md)->part0, ticks[rw], duration);
-	part_stat_unlock();
+	generic_end_io_acct(rw, &dm_disk(md)->part0, io->start_time);
 
 	if (unlikely(dm_stats_used(&md->stats)))
 		dm_stats_account_io(&md->stats, bio->bi_rw, bio->bi_iter.bi_sector,
@@ -903,7 +901,7 @@ static void disable_write_same(struct mapped_device *md)
 
 static void clone_endio(struct bio *bio, int error)
 {
-	int r = 0;
+	int r = error;
 	struct dm_target_io *tio = container_of(bio, struct dm_target_io, clone);
 	struct dm_io *io = tio->io;
 	struct mapped_device *md = tio->io->md;
@@ -1652,16 +1650,12 @@ static void _dm_request(struct request_queue *q, struct bio *bio)
 {
 	int rw = bio_data_dir(bio);
 	struct mapped_device *md = q->queuedata;
-	int cpu;
 	int srcu_idx;
 	struct dm_table *map;
 
 	map = dm_get_live_table(md, &srcu_idx);
 
-	cpu = part_stat_lock();
-	part_stat_inc(cpu, &dm_disk(md)->part0, ios[rw]);
-	part_stat_add(cpu, &dm_disk(md)->part0, sectors[rw], bio_sectors(bio));
-	part_stat_unlock();
+	generic_start_io_acct(rw, bio_sectors(bio), &dm_disk(md)->part0);
 
 	/* if we're suspended, we have to queue this io for later */
 	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags))) {
@@ -2336,7 +2330,7 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 
 	merge_is_optional = dm_table_merge_is_optional(t);
 
-	old_map = rcu_dereference(md->map);
+	old_map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
 	rcu_assign_pointer(md->map, t);
 	md->immutable_target_type = dm_table_get_immutable_target_type(t);
 
@@ -2356,7 +2350,7 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
  */
 static struct dm_table *__unbind(struct mapped_device *md)
 {
-	struct dm_table *map = rcu_dereference(md->map);
+	struct dm_table *map = rcu_dereference_protected(md->map, 1);
 
 	if (!map)
 		return NULL;
@@ -2755,8 +2749,10 @@ static int __dm_suspend(struct mapped_device *md, struct dm_table *map,
 	 */
 	if (!noflush && do_lockfs) {
 		r = lock_fs(md);
-		if (r)
+		if (r) {
+			dm_table_presuspend_undo_targets(map);
 			return r;
+		}
 	}
 
 	/*
@@ -2789,8 +2785,7 @@ static int __dm_suspend(struct mapped_device *md, struct dm_table *map,
 	 * We call dm_wait_for_completion to wait for all existing requests
 	 * to finish.
 	 */
-	r = dm_wait_for_completion(md, (interruptible ?
-					TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE));
+	r = dm_wait_for_completion(md, interruptible);
 
 	if (noflush)
 		clear_bit(DMF_NOFLUSH_SUSPENDING, &md->flags);
@@ -2850,9 +2845,11 @@ retry:
 		goto retry;
 	}
 
-	map = rcu_dereference(md->map);
+	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
 
-	r = __dm_suspend(md, map, suspend_flags, true);
+	r = __dm_suspend(md, map, suspend_flags, TASK_INTERRUPTIBLE);
+	if (r)
+		goto out_unlock;
 
 	set_bit(DMF_SUSPENDED, &md->flags);
 
@@ -2863,10 +2860,9 @@ out_unlock:
 	return r;
 }
 
-static int __dm_resume(struct mapped_device *md, struct dm_table *map,
-		       bool resume_targets)
+static int __dm_resume(struct mapped_device *md, struct dm_table *map)
 {
-	if (resume_targets) {
+	if (map) {
 		int r = dm_table_resume_targets(map);
 		if (r)
 			return r;
@@ -2907,11 +2903,11 @@ retry:
 		goto retry;
 	}
 
-	map = rcu_dereference(md->map);
+	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
 	if (!map || !dm_table_get_size(map))
 		goto out;
 
-	r = __dm_resume(md, map, true);
+	r = __dm_resume(md, map);
 	if (r)
 		goto out;
 
@@ -2934,18 +2930,23 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 {
 	struct dm_table *map = NULL;
 
-	if (WARN_ON(dm_suspended_internally_md(md)))
-		return; /* disallow nested internal suspends! */
+	if (dm_suspended_internally_md(md))
+		return; /* nested internal suspend */
 
 	if (dm_suspended_md(md)) {
 		set_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 		return; /* nest suspend */
 	}
 
-	map = rcu_dereference(md->map);
+	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
 
-	/* FIXME: should __dm_suspend always be interruptible? */
-	(void) __dm_suspend(md, map, suspend_flags, false);
+	/*
+	 * Using TASK_UNINTERRUPTIBLE because only NOFLUSH internal suspend is
+	 * supported.  Properly supporting a TASK_INTERRUPTIBLE internal suspend
+	 * would require changing .presuspend to return an error -- avoid this
+	 * until there is a need for more elaborate variants of internal suspend.
+	 */
+	(void) __dm_suspend(md, map, suspend_flags, TASK_UNINTERRUPTIBLE);
 
 	set_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 
@@ -2954,23 +2955,17 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 
 static void __dm_internal_resume(struct mapped_device *md)
 {
-	struct dm_table *map = NULL;
-
-	if (WARN_ON(!dm_suspended_internally_md(md)))
-		return;
+	if (!dm_suspended_internally_md(md))
+		return; /* resume from nested internal suspend */
 
 	if (dm_suspended_md(md))
 		goto done; /* resume from nested suspend */
 
-	map = rcu_dereference(md->map);
-	if (WARN_ON(!map))
-		return;
-
 	/*
-	 * FIXME: existing callers don't need to call dm_table_resume_targets
-	 * (which may fail -- so best to avoid it for now)
+	 * NOTE: existing callers don't need to call dm_table_resume_targets
+	 * (which may fail -- so best to avoid it for now by passing NULL map)
 	 */
-	(void) __dm_resume(md, map, false);
+	(void) __dm_resume(md, NULL);
 
 done:
 	clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);

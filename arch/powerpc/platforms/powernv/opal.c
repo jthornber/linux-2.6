@@ -50,7 +50,6 @@ static int mc_recoverable_range_len;
 
 struct device_node *opal_node;
 static DEFINE_SPINLOCK(opal_write_lock);
-extern u64 opal_mc_secondary_handler[];
 static unsigned int *opal_irqs;
 static unsigned int opal_irq_count;
 static ATOMIC_NOTIFIER_HEAD(opal_notifier_head);
@@ -105,12 +104,12 @@ int __init early_init_dt_scan_opal(unsigned long node,
 	if (of_flat_dt_is_compatible(node, "ibm,opal-v3")) {
 		powerpc_firmware_features |= FW_FEATURE_OPALv2;
 		powerpc_firmware_features |= FW_FEATURE_OPALv3;
-		printk("OPAL V3 detected !\n");
+		pr_info("OPAL V3 detected !\n");
 	} else if (of_flat_dt_is_compatible(node, "ibm,opal-v2")) {
 		powerpc_firmware_features |= FW_FEATURE_OPALv2;
-		printk("OPAL V2 detected !\n");
+		pr_info("OPAL V2 detected !\n");
 	} else {
-		printk("OPAL V1 detected !\n");
+		pr_info("OPAL V1 detected !\n");
 	}
 
 	/* Reinit all cores with the right endian */
@@ -194,6 +193,27 @@ static int __init opal_register_exception_handlers(void)
 	 * fwnmi area at 0x7000 to provide the glue space to OPAL
 	 */
 	glue = 0x7000;
+
+	/*
+	 * Check if we are running on newer firmware that exports
+	 * OPAL_HANDLE_HMI token. If yes, then don't ask OPAL to patch
+	 * the HMI interrupt and we catch it directly in Linux.
+	 *
+	 * For older firmware (i.e currently released POWER8 System Firmware
+	 * as of today <= SV810_087), we fallback to old behavior and let OPAL
+	 * patch the HMI vector and handle it inside OPAL firmware.
+	 *
+	 * For newer firmware (in development/yet to be released) we will
+	 * start catching/handling HMI directly in Linux.
+	 */
+	if (!opal_check_token(OPAL_HANDLE_HMI)) {
+		pr_info("opal: Old firmware detected, OPAL handles HMIs.\n");
+		opal_register_exception_handler(
+				OPAL_HYPERVISOR_MAINTENANCE_HANDLER,
+				0, glue);
+		glue += 128;
+	}
+
 	opal_register_exception_handler(OPAL_SOFTPATCH_HANDLER, 0, glue);
 #endif
 
@@ -322,7 +342,7 @@ static void opal_handle_message(void)
 
 	/* check for errors. */
 	if (ret) {
-		pr_warning("%s: Failed to retrive opal message, err=%lld\n",
+		pr_warning("%s: Failed to retrieve opal message, err=%lld\n",
 				__func__, ret);
 		return;
 	}
@@ -623,6 +643,16 @@ static void __init opal_dump_region_init(void)
 		pr_warn("DUMP: Failed to register kernel log buffer. "
 			"rc = %d\n", rc);
 }
+
+static void opal_ipmi_init(struct device_node *opal_node)
+{
+	struct device_node *np;
+
+	for_each_child_of_node(opal_node, np)
+		if (of_device_is_compatible(np, "ibm,opal-ipmi"))
+			of_platform_device_create(np, NULL, NULL);
+}
+
 static int __init opal_init(void)
 {
 	struct device_node *np, *consoles;
@@ -686,6 +716,8 @@ static int __init opal_init(void)
 		opal_msglog_init();
 	}
 
+	opal_ipmi_init(opal_node);
+
 	return 0;
 }
 machine_subsys_initcall(powernv, opal_init);
@@ -721,6 +753,8 @@ void opal_shutdown(void)
 
 /* Export this so that test modules can use it */
 EXPORT_SYMBOL_GPL(opal_invalid_call);
+EXPORT_SYMBOL_GPL(opal_ipmi_send);
+EXPORT_SYMBOL_GPL(opal_ipmi_recv);
 
 /* Convert a region of vmalloc memory to an opal sg list */
 struct opal_sg_list *opal_vmalloc_to_sg_list(void *vmalloc_addr,
@@ -784,3 +818,9 @@ void opal_free_sg_list(struct opal_sg_list *sg)
 			sg = NULL;
 	}
 }
+
+EXPORT_SYMBOL_GPL(opal_poll_events);
+EXPORT_SYMBOL_GPL(opal_rtc_read);
+EXPORT_SYMBOL_GPL(opal_rtc_write);
+EXPORT_SYMBOL_GPL(opal_tpo_read);
+EXPORT_SYMBOL_GPL(opal_tpo_write);

@@ -559,7 +559,6 @@ static struct attribute_group fujitsupf_attribute_group = {
 static struct platform_driver fujitsupf_driver = {
 	.driver = {
 		   .name = "fujitsu-laptop",
-		   .owner = THIS_MODULE,
 		   }
 };
 
@@ -1050,6 +1049,13 @@ static struct acpi_driver acpi_fujitsu_hotkey_driver = {
 		},
 };
 
+static const struct acpi_device_id fujitsu_ids[] __used = {
+	{ACPI_FUJITSU_HID, 0},
+	{ACPI_FUJITSU_HOTKEY_HID, 0},
+	{"", 0}
+};
+MODULE_DEVICE_TABLE(acpi, fujitsu_ids);
+
 static int __init fujitsu_init(void)
 {
 	int ret, result, max_brightness;
@@ -1208,12 +1214,3 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS("dmi:*:svnFUJITSUSIEMENS:*:pvr:rvnFUJITSU:rnFJNB1D3:*:cvrS6410:*");
 MODULE_ALIAS("dmi:*:svnFUJITSUSIEMENS:*:pvr:rvnFUJITSU:rnFJNB1E6:*:cvrS6420:*");
 MODULE_ALIAS("dmi:*:svnFUJITSU:*:pvr:rvnFUJITSU:rnFJNB19C:*:cvrS7020:*");
-
-static struct pnp_device_id pnp_ids[] __used = {
-	{.id = "FUJ02bf"},
-	{.id = "FUJ02B1"},
-	{.id = "FUJ02E3"},
-	{.id = ""}
-};
-
-MODULE_DEVICE_TABLE(pnp, pnp_ids);

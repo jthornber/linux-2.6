@@ -39,6 +39,8 @@
 
 #define _ALL_SOURCE 1
 #define _BSD_SOURCE 1
+/* glibc 2.20 deprecates _BSD_SOURCE in favour of _DEFAULT_SOURCE */
+#define _DEFAULT_SOURCE 1
 #define HAS_BOOL
 
 #include <unistd.h>
@@ -64,16 +66,18 @@
 #include <regex.h>
 #include <utime.h>
 #include <sys/wait.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <inttypes.h>
+#include <linux/kernel.h>
 #include <linux/magic.h>
 #include <linux/types.h>
 #include <sys/ttydefaults.h>
 #include <api/fs/debugfs.h>
 #include <termios.h>
 #include <linux/bitops.h>
+#include <termios.h>
 
 extern const char *graph_line;
 extern const char *graph_dotted_line;
@@ -150,7 +154,6 @@ extern void set_die_routine(void (*routine)(const char *err, va_list params) NOR
 
 extern int prefixcmp(const char *str, const char *prefix);
 extern void set_buildid_dir(void);
-extern void disable_buildid_cache(void);
 
 static inline const char *skip_prefix(const char *str, const char *prefix)
 {
@@ -307,6 +310,7 @@ extern unsigned int page_size;
 extern int cacheline_size;
 
 void get_term_dimensions(struct winsize *ws);
+void set_term_quiet_input(struct termios *old);
 
 struct parse_tag {
 	char tag;
@@ -317,9 +321,26 @@ unsigned long parse_tag_value(const char *str, struct parse_tag *tags);
 
 #define SRCLINE_UNKNOWN  ((char *) "??:0")
 
-struct dso;
+static inline int path__join(char *bf, size_t size,
+			     const char *path1, const char *path2)
+{
+	return scnprintf(bf, size, "%s%s%s", path1, path1[0] ? "/" : "", path2);
+}
 
-char *get_srcline(struct dso *dso, unsigned long addr);
+static inline int path__join3(char *bf, size_t size,
+			      const char *path1, const char *path2,
+			      const char *path3)
+{
+	return scnprintf(bf, size, "%s%s%s%s%s",
+			 path1, path1[0] ? "/" : "",
+			 path2, path2[0] ? "/" : "", path3);
+}
+
+struct dso;
+struct symbol;
+
+char *get_srcline(struct dso *dso, unsigned long addr, struct symbol *sym,
+		  bool show_sym);
 void free_srcline(char *srcline);
 
 int filename__read_int(const char *filename, int *value);
@@ -330,4 +351,10 @@ void mem_bswap_64(void *src, int byte_size);
 void mem_bswap_32(void *src, int byte_size);
 
 const char *get_filename_for_perf_kvm(void);
+bool find_process(const char *name);
+
+#ifdef HAVE_ZLIB_SUPPORT
+int gzip_decompress_to_file(const char *input, int output_fd);
+#endif
+
 #endif /* GIT_COMPAT_UTIL_H */

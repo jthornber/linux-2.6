@@ -2286,9 +2286,8 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 }
 
 /*
- * We want the discard block size to be a power of two, at least the size
- * of the cache block size, and have no more than 2^14 discard blocks
- * across the origin.
+ * We want the discard block size to be at least the size of the cache
+ * block size and have no more than 2^14 discard blocks across the origin.
  */
 #define MAX_DISCARD_BLOCKS (1 << 14)
 
@@ -2303,9 +2302,8 @@ static bool too_many_discard_blocks(sector_t discard_block_size,
 static sector_t calculate_discard_block_size(sector_t cache_block_size,
 					     sector_t origin_size)
 {
-	sector_t discard_block_size;
+	sector_t discard_block_size = cache_block_size;
 
-	discard_block_size = cache_block_size;
 	if (origin_size)
 		while (too_many_discard_blocks(discard_block_size, origin_size))
 			discard_block_size *= 2;
@@ -2317,7 +2315,7 @@ static void set_cache_size(struct cache *cache, dm_cblock_t size)
 {
 	dm_block_t nr_blocks = from_cblock(size);
 
-	if (nr_blocks > (1 << 20))
+	if (nr_blocks > (1 << 20) && cache->cache_size != size)
 		DMWARN_LIMIT("You have created a cache device with a lot of individual cache blocks (%llu)\n"
 			     "All these mappings can consume a lot of kernel memory, and take some time to read/write.\n"
 			     "Please consider increasing the cache block size to reduce the overall cache block count.",
@@ -2350,8 +2348,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->num_discard_bios = 1;
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
-
-	/* Discard bios must be split on a block boundary */
 	ti->split_discard_bios = false;
 
 	cache->features = ca->features;

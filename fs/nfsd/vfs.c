@@ -445,6 +445,16 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap,
 		if (err)
 			goto out;
 		size_change = 1;
+
+		/*
+		 * RFC5661, Section 18.30.4:
+		 *   Changing the size of a file with SETATTR indirectly
+		 *   changes the time_modify and change attributes.
+		 *
+		 * (and similar for the older RFCs)
+		 */
+		if (iap->ia_size != i_size_read(inode))
+			iap->ia_valid |= ATTR_MTIME;
 	}
 
 	iap->ia_valid |= ATTR_CTIME;
@@ -649,6 +659,7 @@ nfsd_open(struct svc_rqst *rqstp, struct svc_fh *fhp, umode_t type,
 {
 	struct path	path;
 	struct inode	*inode;
+	struct file	*file;
 	int		flags = O_RDONLY|O_LARGEFILE;
 	__be32		err;
 	int		host_err = 0;
@@ -703,19 +714,25 @@ nfsd_open(struct svc_rqst *rqstp, struct svc_fh *fhp, umode_t type,
 		else
 			flags = O_WRONLY|O_LARGEFILE;
 	}
-	*filp = dentry_open(&path, flags, current_cred());
-	if (IS_ERR(*filp)) {
-		host_err = PTR_ERR(*filp);
-		*filp = NULL;
-	} else {
-		host_err = ima_file_check(*filp, may_flags);
 
-		if (may_flags & NFSD_MAY_64BIT_COOKIE)
-			(*filp)->f_mode |= FMODE_64BITHASH;
-		else
-			(*filp)->f_mode |= FMODE_32BITHASH;
+	file = dentry_open(&path, flags, current_cred());
+	if (IS_ERR(file)) {
+		host_err = PTR_ERR(file);
+		goto out_nfserr;
 	}
 
+	host_err = ima_file_check(file, may_flags, 0);
+	if (host_err) {
+		nfsd_close(file);
+		goto out_nfserr;
+	}
+
+	if (may_flags & NFSD_MAY_64BIT_COOKIE)
+		file->f_mode |= FMODE_64BITHASH;
+	else
+		file->f_mode |= FMODE_32BITHASH;
+
+	*filp = file;
 out_nfserr:
 	err = nfserrno(host_err);
 out:
@@ -913,7 +930,6 @@ nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 				unsigned long *cnt, int *stablep)
 {
 	struct svc_export	*exp;
-	struct dentry		*dentry;
 	struct inode		*inode;
 	mm_segment_t		oldfs;
 	__be32			err = 0;
@@ -932,8 +948,7 @@ nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 		 */
 		current->flags |= PF_LESS_THROTTLE;
 
-	dentry = file->f_path.dentry;
-	inode = dentry->d_inode;
+	inode = file_inode(file);
 	exp   = fhp->fh_export;
 
 	use_wgather = (rqstp->rq_vers == 2) && EX_WGATHER(exp);
@@ -1802,10 +1817,12 @@ struct readdir_data {
 	int		full;
 };
 
-static int nfsd_buffered_filldir(void *__buf, const char *name, int namlen,
-				 loff_t offset, u64 ino, unsigned int d_type)
+static int nfsd_buffered_filldir(struct dir_context *ctx, const char *name,
+				 int namlen, loff_t offset, u64 ino,
+				 unsigned int d_type)
 {
-	struct readdir_data *buf = __buf;
+	struct readdir_data *buf =
+		container_of(ctx, struct readdir_data, ctx);
 	struct buffered_dirent *de = (void *)(buf->dirent + buf->used);
 	unsigned int reclen;
 
@@ -1825,7 +1842,7 @@ static int nfsd_buffered_filldir(void *__buf, const char *name, int namlen,
 	return 0;
 }
 
-static __be32 nfsd_buffered_readdir(struct file *file, filldir_t func,
+static __be32 nfsd_buffered_readdir(struct file *file, nfsd_filldir_t func,
 				    struct readdir_cd *cdp, loff_t *offsetp)
 {
 	struct buffered_dirent *de;
@@ -1909,7 +1926,7 @@ static __be32 nfsd_buffered_readdir(struct file *file, filldir_t func,
  */
 __be32
 nfsd_readdir(struct svc_rqst *rqstp, struct svc_fh *fhp, loff_t *offsetp, 
-	     struct readdir_cd *cdp, filldir_t func)
+	     struct readdir_cd *cdp, nfsd_filldir_t func)
 {
 	__be32		err;
 	struct file	*file;

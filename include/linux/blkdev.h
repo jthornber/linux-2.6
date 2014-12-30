@@ -398,7 +398,7 @@ struct request_queue {
 	 */
 	struct kobject mq_kobj;
 
-#ifdef CONFIG_PM_RUNTIME
+#ifdef CONFIG_PM
 	struct device		*dev;
 	int			rpm_status;
 	unsigned int		nr_pending;
@@ -1057,7 +1057,7 @@ extern void blk_put_queue(struct request_queue *);
 /*
  * block layer runtime pm functions
  */
-#ifdef CONFIG_PM_RUNTIME
+#ifdef CONFIG_PM
 extern void blk_pm_runtime_init(struct request_queue *q, struct device *dev);
 extern int blk_pre_runtime_suspend(struct request_queue *q);
 extern void blk_post_runtime_suspend(struct request_queue *q, int err);
@@ -1136,8 +1136,6 @@ static inline bool blk_needs_flush_plug(struct task_struct *tsk)
 /*
  * tag stuff
  */
-#define blk_rq_tagged(rq) \
-	((rq)->mq_ctx || ((rq)->cmd_flags & REQ_QUEUED))
 extern int blk_queue_start_tag(struct request_queue *, struct request *);
 extern struct request *blk_queue_find_tag(struct request_queue *, int);
 extern void blk_queue_end_tag(struct request_queue *, struct request *);
@@ -1186,7 +1184,6 @@ extern int blk_verify_command(unsigned char *cmd, fmode_t has_write_perm);
 enum blk_default_limits {
 	BLK_MAX_SEGMENTS	= 128,
 	BLK_SAFE_MAX_SECTORS	= 255,
-	BLK_DEF_MAX_SECTORS	= 1024,
 	BLK_MAX_SEGMENT_SIZE	= 65536,
 	BLK_SEG_BOUNDARY_MASK	= 0xFFFFFFFFUL,
 };
@@ -1279,10 +1276,9 @@ static inline int queue_alignment_offset(struct request_queue *q)
 static inline int queue_limit_alignment_offset(struct queue_limits *lim, sector_t sector)
 {
 	unsigned int granularity = max(lim->physical_block_size, lim->io_min);
-	unsigned int alignment = (sector << 9) & (granularity - 1);
+	unsigned int alignment = sector_div(sector, granularity >> 9) << 9;
 
-	return (granularity + lim->alignment_offset - alignment)
-		& (granularity - 1);
+	return (granularity + lim->alignment_offset - alignment) % granularity;
 }
 
 static inline int bdev_alignment_offset(struct block_device *bdev)
@@ -1554,7 +1550,7 @@ static inline int blk_rq_map_integrity_sg(struct request_queue *q,
 }
 static inline struct blk_integrity *bdev_get_integrity(struct block_device *b)
 {
-	return 0;
+	return NULL;
 }
 static inline struct blk_integrity *blk_get_integrity(struct gendisk *disk)
 {
@@ -1584,13 +1580,13 @@ static inline bool blk_integrity_merge_rq(struct request_queue *rq,
 					  struct request *r1,
 					  struct request *r2)
 {
-	return 0;
+	return true;
 }
 static inline bool blk_integrity_merge_bio(struct request_queue *rq,
 					   struct request *r,
 					   struct bio *b)
 {
-	return 0;
+	return true;
 }
 static inline bool blk_integrity_is_initialized(struct gendisk *g)
 {

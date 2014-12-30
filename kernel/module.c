@@ -135,7 +135,7 @@ static int param_set_bool_enable_only(const char *val,
 }
 
 static const struct kernel_param_ops param_ops_bool_enable_only = {
-	.flags = KERNEL_PARAM_FL_NOARG,
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
 	.set = param_set_bool_enable_only,
 	.get = param_get_bool,
 };
@@ -1842,7 +1842,9 @@ static void free_module(struct module *mod)
 
 	/* We leave it in list to prevent duplicate loads, but make sure
 	 * that noone uses it while it's being deconstructed. */
+	mutex_lock(&module_mutex);
 	mod->state = MODULE_STATE_UNFORMED;
+	mutex_unlock(&module_mutex);
 
 	/* Remove dynamic debug info */
 	ddebug_remove_module(mod->name);
@@ -3095,6 +3097,32 @@ static int may_init_module(void)
 }
 
 /*
+ * Can't use wait_event_interruptible() because our condition
+ * 'finished_loading()' contains a blocking primitive itself (mutex_lock).
+ */
+static int wait_finished_loading(struct module *mod)
+{
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+	int ret = 0;
+
+	add_wait_queue(&module_wq, &wait);
+	for (;;) {
+		if (finished_loading(mod->name))
+			break;
+
+		if (signal_pending(current)) {
+			ret = -ERESTARTSYS;
+			break;
+		}
+
+		wait_woken(&wait, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
+	}
+	remove_wait_queue(&module_wq, &wait);
+
+	return ret;
+}
+
+/*
  * We try to place it in the list now to make sure it's unique before
  * we dedicate too many resources.  In particular, temporary percpu
  * memory exhaustion.
@@ -3114,8 +3142,8 @@ again:
 		    || old->state == MODULE_STATE_UNFORMED) {
 			/* Wait in case it fails to load. */
 			mutex_unlock(&module_mutex);
-			err = wait_event_interruptible(module_wq,
-					       finished_loading(mod->name));
+
+			err = wait_finished_loading(mod);
 			if (err)
 				goto out_unlocked;
 			goto again;
@@ -3388,7 +3416,7 @@ static inline int is_arm_mapping_symbol(const char *str)
 {
 	if (str[0] == '.' && str[1] == 'L')
 		return true;
-	return str[0] == '$' && strchr("atd", str[1])
+	return str[0] == '$' && strchr("axtd", str[1])
 	       && (str[2] == '\0' || str[2] == '.');
 }
 

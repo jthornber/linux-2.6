@@ -159,6 +159,9 @@ static int add_keys(struct mlx5_ib_dev *dev, int c, int num)
 					    sizeof(*in), reg_mr_callback,
 					    mr, &mr->out);
 		if (err) {
+			spin_lock_irq(&ent->lock);
+			ent->pending--;
+			spin_unlock_irq(&ent->lock);
 			mlx5_ib_warn(dev, "create mkey failed %d\n", err);
 			kfree(mr);
 			break;
@@ -853,14 +856,14 @@ static struct mlx5_ib_mr *reg_create(struct ib_pd *pd, u64 virt_addr,
 		goto err_2;
 	}
 	mr->umem = umem;
-	mlx5_vfree(in);
+	kvfree(in);
 
 	mlx5_ib_dbg(dev, "mkey = 0x%x\n", mr->mmr.key);
 
 	return mr;
 
 err_2:
-	mlx5_vfree(in);
+	kvfree(in);
 
 err_1:
 	kfree(mr);
@@ -881,12 +884,12 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	int order;
 	int err;
 
-	mlx5_ib_dbg(dev, "start 0x%llx, virt_addr 0x%llx, length 0x%llx\n",
-		    start, virt_addr, length);
+	mlx5_ib_dbg(dev, "start 0x%llx, virt_addr 0x%llx, length 0x%llx, access_flags 0x%x\n",
+		    start, virt_addr, length, access_flags);
 	umem = ib_umem_get(pd->uobject->context, start, length, access_flags,
 			   0);
 	if (IS_ERR(umem)) {
-		mlx5_ib_dbg(dev, "umem get failed\n");
+		mlx5_ib_dbg(dev, "umem get failed (%ld)\n", PTR_ERR(umem));
 		return (void *)umem;
 	}
 

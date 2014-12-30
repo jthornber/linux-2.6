@@ -274,9 +274,6 @@ out:
 
 invalid:
 	ret = 0;
-
-	if (!(flags & LOOKUP_RCU) && check_submounts_and_drop(entry) != 0)
-		ret = 1;
 	goto out;
 }
 
@@ -375,7 +372,7 @@ static struct dentry *fuse_lookup(struct inode *dir, struct dentry *entry,
 	if (inode && get_node_id(inode) == FUSE_ROOT_ID)
 		goto out_iput;
 
-	newent = d_materialise_unique(entry, inode);
+	newent = d_splice_alias(inode, entry);
 	err = PTR_ERR(newent);
 	if (IS_ERR(newent))
 		goto out_err;
@@ -1289,9 +1286,7 @@ static int fuse_direntplus_link(struct file *file,
 			d_drop(dentry);
 		} else if (get_node_id(inode) != o->nodeid ||
 			   ((o->attr.mode ^ inode->i_mode) & S_IFMT)) {
-			err = d_invalidate(dentry);
-			if (err)
-				goto out;
+			d_invalidate(dentry);
 		} else if (is_bad_inode(inode)) {
 			err = -EIO;
 			goto out;
@@ -1325,7 +1320,7 @@ static int fuse_direntplus_link(struct file *file,
 	if (!inode)
 		goto out;
 
-	alias = d_materialise_unique(dentry, inode);
+	alias = d_splice_alias(inode, dentry);
 	err = PTR_ERR(alias);
 	if (IS_ERR(alias))
 		goto out;

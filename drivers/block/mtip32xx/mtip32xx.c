@@ -3775,9 +3775,10 @@ static bool mtip_check_unal_depth(struct blk_mq_hw_ctx *hctx,
 	return false;
 }
 
-static int mtip_queue_rq(struct blk_mq_hw_ctx *hctx, struct request *rq,
-		bool last)
+static int mtip_queue_rq(struct blk_mq_hw_ctx *hctx,
+			 const struct blk_mq_queue_data *bd)
 {
+	struct request *rq = bd->rq;
 	int ret;
 
 	if (unlikely(mtip_check_unal_depth(hctx, rq)))
@@ -3954,6 +3955,7 @@ skip_create_disk:
 
 	/* Set device limits. */
 	set_bit(QUEUE_FLAG_NONROT, &dd->queue->queue_flags);
+	clear_bit(QUEUE_FLAG_ADD_RANDOM, &dd->queue->queue_flags);
 	blk_queue_max_segments(dd->queue, MTIP_MAX_SG);
 	blk_queue_physical_block_size(dd->queue, 4096);
 	blk_queue_max_hw_sectors(dd->queue, 0xffff);

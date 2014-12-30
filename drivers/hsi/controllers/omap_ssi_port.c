@@ -1260,7 +1260,7 @@ static int __exit ssi_port_remove(struct platform_device *pd)
 	return 0;
 }
 
-#ifdef CONFIG_PM_RUNTIME
+#ifdef CONFIG_PM
 static int ssi_save_port_ctx(struct omap_ssi_port *omap_port)
 {
 	struct hsi_port *port = to_hsi_port(omap_port->dev);
@@ -1385,7 +1385,6 @@ static struct platform_driver ssi_port_pdriver = {
 	.remove	= __exit_p(ssi_port_remove),
 	.driver	= {
 		.name	= "omap_ssi_port",
-		.owner	= THIS_MODULE,
 		.of_match_table = omap_ssi_port_of_match,
 		.pm	= DEV_PM_OPS,
 	},

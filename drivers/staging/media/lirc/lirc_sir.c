@@ -280,6 +280,7 @@ static long lirc_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 	u32 __user *uptr = (u32 __user *)arg;
 	int retval = 0;
 	u32 value = 0;
+
 	if (cmd == LIRC_GET_FEATURES)
 		value = LIRC_CAN_SEND_PULSE | LIRC_CAN_REC_MODE2;
 	else if (cmd == LIRC_GET_SEND_MODE)
@@ -930,7 +931,6 @@ static struct platform_driver lirc_sir_driver = {
 	.remove		= lirc_sir_remove,
 	.driver		= {
 		.name	= "lirc_sir",
-		.owner	= THIS_MODULE,
 	},
 };
 

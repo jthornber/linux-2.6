@@ -17,6 +17,7 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/irq.h>
+#include <linux/of_irq.h>
 
 #include "soc.h"
 #include "common.h"
@@ -28,6 +29,11 @@
 #include "prm-regbits-34xx.h"
 #include "cm3xxx.h"
 #include "cm-regbits-34xx.h"
+
+static void omap3xxx_prm_read_pending_irqs(unsigned long *events);
+static void omap3xxx_prm_ocp_barrier(void);
+static void omap3xxx_prm_save_and_clear_irqen(u32 *saved_mask);
+static void omap3xxx_prm_restore_irqen(u32 *saved_mask);
 
 static const struct omap_prcm_irq omap3_prcm_irqs[] = {
 	OMAP_PRCM_IRQ("wkup",	0,	0),
@@ -45,7 +51,7 @@ static struct omap_prcm_irq_setup omap3_prcm_irq_setup = {
 	.ocp_barrier		= &omap3xxx_prm_ocp_barrier,
 	.save_and_clear_irqen	= &omap3xxx_prm_save_and_clear_irqen,
 	.restore_irqen		= &omap3xxx_prm_restore_irqen,
-	.reconfigure_io_chain	= &omap3xxx_prm_reconfigure_io_chain,
+	.reconfigure_io_chain	= NULL,
 };
 
 /*
@@ -130,7 +136,7 @@ u32 omap3_prm_vcvp_rmw(u32 mask, u32 bits, u8 offset)
  * recommended way to restart the SoC, considering Errata i520.  No
  * return value.
  */
-void omap3xxx_prm_dpll3_reset(void)
+static void omap3xxx_prm_dpll3_reset(void)
 {
 	omap2_prm_set_mod_reg_bits(OMAP_RST_DPLL3_MASK, OMAP3430_GR_MOD,
 				   OMAP2_RM_RSTCTRL);
@@ -146,7 +152,7 @@ void omap3xxx_prm_dpll3_reset(void)
  * MPU IRQs, and store the result into the u32 pointed to by @events.
  * No return value.
  */
-void omap3xxx_prm_read_pending_irqs(unsigned long *events)
+static void omap3xxx_prm_read_pending_irqs(unsigned long *events)
 {
 	u32 mask, st;
 
@@ -165,7 +171,7 @@ void omap3xxx_prm_read_pending_irqs(unsigned long *events)
  * block, to avoid race conditions after acknowledging or clearing IRQ
  * bits.  No return value.
  */
-void omap3xxx_prm_ocp_barrier(void)
+static void omap3xxx_prm_ocp_barrier(void)
 {
 	omap2_prm_read_mod_reg(OCP_MOD, OMAP3_PRM_REVISION_OFFSET);
 }
@@ -181,7 +187,7 @@ void omap3xxx_prm_ocp_barrier(void)
  * returning; otherwise, spurious interrupts might occur.  No return
  * value.
  */
-void omap3xxx_prm_save_and_clear_irqen(u32 *saved_mask)
+static void omap3xxx_prm_save_and_clear_irqen(u32 *saved_mask)
 {
 	saved_mask[0] = omap2_prm_read_mod_reg(OCP_MOD,
 					       OMAP3_PRM_IRQENABLE_MPU_OFFSET);
@@ -201,7 +207,7 @@ void omap3xxx_prm_save_and_clear_irqen(u32 *saved_mask)
  * barrier should be needed here; any pending PRM interrupts will fire
  * once the writes reach the PRM.  No return value.
  */
-void omap3xxx_prm_restore_irqen(u32 *saved_mask)
+static void omap3xxx_prm_restore_irqen(u32 *saved_mask)
 {
 	omap2_prm_write_mod_reg(saved_mask[0], OCP_MOD,
 				OMAP3_PRM_IRQENABLE_MPU_OFFSET);
@@ -369,15 +375,30 @@ void __init omap3_prm_init_pm(bool has_uart4, bool has_iva)
 }
 
 /**
- * omap3xxx_prm_reconfigure_io_chain - clear latches and reconfigure I/O chain
+ * omap3430_pre_es3_1_reconfigure_io_chain - restart wake-up daisy chain
+ *
+ * The ST_IO_CHAIN bit does not exist in 3430 before es3.1. The only
+ * thing we can do is toggle EN_IO bit for earlier omaps.
+ */
+static void omap3430_pre_es3_1_reconfigure_io_chain(void)
+{
+	omap2_prm_clear_mod_reg_bits(OMAP3430_EN_IO_MASK, WKUP_MOD,
+				     PM_WKEN);
+	omap2_prm_set_mod_reg_bits(OMAP3430_EN_IO_MASK, WKUP_MOD,
+				   PM_WKEN);
+	omap2_prm_read_mod_reg(WKUP_MOD, PM_WKEN);
+}
+
+/**
+ * omap3_prm_reconfigure_io_chain - clear latches and reconfigure I/O chain
  *
  * Clear any previously-latched I/O wakeup events and ensure that the
  * I/O wakeup gates are aligned with the current mux settings.  Works
  * by asserting WUCLKIN, waiting for WUCLKOUT to be asserted, and then
  * deasserting WUCLKIN and clearing the ST_IO_CHAIN WKST bit.  No
- * return value.
+ * return value. These registers are only available in 3430 es3.1 and later.
  */
-void omap3xxx_prm_reconfigure_io_chain(void)
+static void omap3_prm_reconfigure_io_chain(void)
 {
 	int i = 0;
 
@@ -639,6 +660,10 @@ static int omap3xxx_prm_late_init(void);
 static struct prm_ll_data omap3xxx_prm_ll_data = {
 	.read_reset_sources = &omap3xxx_prm_read_reset_sources,
 	.late_init = &omap3xxx_prm_late_init,
+	.assert_hardreset = &omap2_prm_assert_hardreset,
+	.deassert_hardreset = &omap2_prm_deassert_hardreset,
+	.is_hardreset_asserted = &omap2_prm_is_hardreset_asserted,
+	.reset_system = &omap3xxx_prm_dpll3_reset,
 };
 
 int __init omap3xxx_prm_init(void)
@@ -649,12 +674,36 @@ int __init omap3xxx_prm_init(void)
 	return prm_register(&omap3xxx_prm_ll_data);
 }
 
+static struct of_device_id omap3_prm_dt_match_table[] = {
+	{ .compatible = "ti,omap3-prm" },
+	{ }
+};
+
 static int omap3xxx_prm_late_init(void)
 {
 	int ret;
 
 	if (!(prm_features & PRM_HAS_IO_WAKEUP))
 		return 0;
+
+	if (omap3_has_io_chain_ctrl())
+		omap3_prcm_irq_setup.reconfigure_io_chain =
+			omap3_prm_reconfigure_io_chain;
+	else
+		omap3_prcm_irq_setup.reconfigure_io_chain =
+			omap3430_pre_es3_1_reconfigure_io_chain;
+
+	if (of_have_populated_dt()) {
+		struct device_node *np;
+		int irq_num;
+
+		np = of_find_matching_node(NULL, omap3_prm_dt_match_table);
+		if (np) {
+			irq_num = of_irq_get(np, 0);
+			if (irq_num >= 0)
+				omap3_prcm_irq_setup.irq = irq_num;
+		}
+	}
 
 	omap3xxx_prm_enable_io_wakeup();
 	ret = omap_prcm_register_chain_handler(&omap3_prcm_irq_setup);

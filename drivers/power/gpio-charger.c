@@ -55,7 +55,7 @@ static int gpio_charger_get_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
-		val->intval = gpio_get_value_cansleep(pdata->gpio);
+		val->intval = !!gpio_get_value_cansleep(pdata->gpio);
 		val->intval ^= pdata->gpio_active_low;
 		break;
 	default:
@@ -194,7 +194,6 @@ static struct platform_driver gpio_charger_driver = {
 	.remove = gpio_charger_remove,
 	.driver = {
 		.name = "gpio-charger",
-		.owner = THIS_MODULE,
 		.pm = &gpio_charger_pm_ops,
 	},
 };

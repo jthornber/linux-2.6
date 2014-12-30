@@ -73,7 +73,7 @@ _GLOBAL(power7_powersave_common)
 
 	/* Check if something happened while soft-disabled */
 	lbz	r0,PACAIRQHAPPENED(r13)
-	cmpwi	cr0,r0,0
+	andi.	r0,r0,~PACA_IRQ_HARD_DIS@l
 	beq	1f
 	cmpwi	cr0,r4,0
 	beq	1f
@@ -212,6 +212,10 @@ END_FTR_SECTION_IFSET(CPU_FTR_HVMODE)
 	mtspr	SPRN_SRR0,r5
 	rfid
 
+/*
+ * R3 here contains the value that will be returned to the caller
+ * of power7_nap.
+ */
 _GLOBAL(power7_wakeup_loss)
 	ld	r1,PACAR1(r13)
 BEGIN_FTR_SECTION
@@ -219,15 +223,19 @@ BEGIN_FTR_SECTION
 END_FTR_SECTION_IFSET(CPU_FTR_HVMODE)
 	REST_NVGPRS(r1)
 	REST_GPR(2, r1)
-	ld	r3,_CCR(r1)
+	ld	r6,_CCR(r1)
 	ld	r4,_MSR(r1)
 	ld	r5,_NIP(r1)
 	addi	r1,r1,INT_FRAME_SIZE
-	mtcr	r3
+	mtcr	r6
 	mtspr	SPRN_SRR1,r4
 	mtspr	SPRN_SRR0,r5
 	rfid
 
+/*
+ * R3 here contains the value that will be returned to the caller
+ * of power7_nap.
+ */
 _GLOBAL(power7_wakeup_noloss)
 	lbz	r0,PACA_NAPSTATELOST(r13)
 	cmpwi	r0,0
