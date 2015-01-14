@@ -1091,14 +1091,38 @@ static int mq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
 	return r;
 }
 
+#define CLEAN_TARGET_PERCENTAGE 25
+
+static bool clean_target_met(struct mq_policy *mq)
+{
+	/*
+	 * Cache entries may not be populated.  So we're cannot rely on the
+	 * size of the clean queue.
+	 */
+	unsigned nr_clean = from_cblock(mq->cache_size) - queue_size(&mq->cache_dirty);
+	unsigned target = from_cblock(mq->cache_size) * CLEAN_TARGET_PERCENTAGE / 100;
+
+	return nr_clean >= target;
+}
+
 static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 			      dm_cblock_t *cblock)
 {
-	struct entry *e = pop(mq, &mq->cache_dirty);
+	struct entry *e;
 
-	if (!e)
-		return -ENODATA;
+	if (clean_target_met(mq)) {
+		/*
+		 * We only writeback blocks that haven't been hit for a
+		 * while.
+		 */
+		e = peek(&mq->cache_dirty);
 
+		// FIXME: 1 tick is probably too short
+		if (!e || e->tick < mq->tick - 100)
+			return -ENODATA;
+	}
+
+	e = pop(mq, &mq->cache_dirty);
 	*oblock = e->oblock;
 	*cblock = infer_cblock(&mq->cache_pool, e);
 	e->dirty = false;
