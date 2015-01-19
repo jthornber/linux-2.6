@@ -181,46 +181,6 @@ static bool is_sentinel(struct queue *q, struct list_head *h)
 		(h < (q->sentinels + sizeof(q->sentinels)));
 }
 
-static bool only_contains_sentinels(struct queue *q, struct list_head *lst)
-{
-	struct list_head *tmp;
-
-	list_for_each(tmp, lst)
-		if (!is_sentinel(q, tmp))
-			return false;
-
-	return true;
-}
-
-/*
- * Shifts all regions down one level.  This has no effect on the order of
- * the queue.
- */
-static void queue_shift_down_(struct queue *q)
-{
-	unsigned level;
-
-	for (level = 1; level < NR_QUEUE_LEVELS; level++)
-		list_splice_init(q->qs + level, q->qs + level - 1);
-}
-
-static void queue_shift_down(struct queue *q)
-{
-	struct list_head *h, *tmp;
-
-	if (list_empty(q->qs))
-		queue_shift_down_(q);
-
-	else if (only_contains_sentinels(q, q->qs)) {
-		list_for_each_safe (h, tmp, q->qs) {
-			list_del(h);
-			INIT_LIST_HEAD(h);
-		}
-
-		queue_shift_down_(q);
-	}
-}
-
 /*
  * Gives us the oldest entry of the lowest popoulated level.  If the first
  * level is emptied then we shift down one level.
@@ -239,7 +199,7 @@ static struct list_head *queue_peek(struct queue *q)
 	return NULL;
 }
 
-static struct list_head *queue_pop_(struct queue *q)
+static struct list_head *queue_pop(struct queue *q)
 {
 	unsigned level;
 	struct list_head *h, *tmp;
@@ -256,20 +216,12 @@ static struct list_head *queue_pop_(struct queue *q)
 	}
 
 	return NULL;
-}
-
-static struct list_head *queue_pop(struct queue *q)
-{
-	struct list_head *h = queue_pop_(q);
-	queue_shift_down(q);
-
-	return h;
 }
 
 /*
  * Pops an entry from a level that is not past a sentinel.
  */
-static struct list_head *queue_pop_old_(struct queue *q)
+static struct list_head *queue_pop_old(struct queue *q)
 {
 	unsigned level;
 	struct list_head *h, *tmp;
@@ -286,14 +238,6 @@ static struct list_head *queue_pop_old_(struct queue *q)
 	}
 
 	return NULL;
-}
-
-static struct list_head *queue_pop_old(struct queue *q)
-{
-	struct list_head *h = queue_pop_old_(q);
-	queue_shift_down(q);
-
-	return h;
 }
 
 static struct list_head *list_pop(struct list_head *lh)
@@ -372,7 +316,6 @@ struct entry {
 	 */
 	bool dirty:1;
 	unsigned hit_count;
-	unsigned generation;
 };
 
 /*
@@ -734,12 +677,6 @@ static void check_generation(struct mq_policy *mq)
 static void requeue(struct mq_policy *mq, struct entry *e)
 {
 	check_generation(mq);
-
-	/* generation adjustment, to stop the counts increasing forever. */
-	/* FIXME: divide? */
-	/* e->hit_count -= min(e->hit_count - 1, mq->generation - e->generation); */
-	e->generation = mq->generation;
-
 	del(mq, e);
 	push(mq, e);
 }
@@ -883,7 +820,6 @@ static int pre_cache_to_cache(struct mq_policy *mq, struct entry *e,
 	new_e->oblock = e->oblock;
 	new_e->dirty = false;
 	new_e->hit_count = e->hit_count;
-	new_e->generation = e->generation;
 
 	del(mq, e);
 	free_entry(&mq->pre_cache_pool, e);
@@ -935,7 +871,6 @@ static void insert_in_pre_cache(struct mq_policy *mq,
 	e->dirty = false;
 	e->oblock = oblock;
 	e->hit_count = 1;
-	e->generation = mq->generation;
 	push(mq, e);
 }
 
@@ -968,7 +903,6 @@ static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 	e->oblock = oblock;
 	e->dirty = false;
 	e->hit_count = 1;
-	e->generation = mq->generation;
 	push(mq, e);
 
 	result->cblock = infer_cblock(&mq->cache_pool, e);
@@ -1166,7 +1100,6 @@ static int mq_load_mapping(struct dm_cache_policy *p,
 	e->oblock = oblock;
 	e->dirty = false;	/* this gets corrected in a minute */
 	e->hit_count = hint_valid ? hint : 1;
-	e->generation = mq->generation;
 	push(mq, e);
 
 	return 0;
