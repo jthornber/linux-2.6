@@ -264,7 +264,6 @@ struct cache {
 	struct dm_deferred_set *all_io_ds;
 
 	mempool_t *migration_pool;
-	struct dm_cache_migration *next_migration;
 
 	struct dm_cache_policy *policy;
 	unsigned policy_nr_args;
@@ -1898,9 +1897,6 @@ static void destroy(struct cache *cache)
 {
 	unsigned i;
 
-	if (cache->next_migration)
-		mempool_free(cache->next_migration, cache->migration_pool);
-
 	if (cache->migration_pool)
 		mempool_destroy(cache->migration_pool);
 
@@ -2509,8 +2505,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		*error = "Error creating cache's migration mempool";
 		goto bad;
 	}
-
-	cache->next_migration = NULL;
 
 	cache->need_tick_bio = true;
 	cache->sized = false;
