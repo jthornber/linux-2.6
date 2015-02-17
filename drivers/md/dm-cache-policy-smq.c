@@ -28,98 +28,6 @@ static unsigned next_power(unsigned n, unsigned min)
 /*----------------------------------------------------------------*/
 
 /*
- * Large, sequential ios are probably better left on the origin device since
- * spindles tend to have good bandwidth.
- *
- * The io_tracker tries to spot when the io is in one of these sequential
- * modes.
- *
- * Two thresholds to switch between random and sequential io mode are defaulting
- * as follows and can be adjusted via the constructor and message interfaces.
- */
-#define RANDOM_THRESHOLD_DEFAULT 4
-#define SEQUENTIAL_THRESHOLD_DEFAULT 512
-
-enum io_pattern {
-	PATTERN_SEQUENTIAL,
-	PATTERN_RANDOM
-};
-
-struct io_tracker {
-	enum io_pattern pattern;
-
-	unsigned nr_seq_samples;
-	unsigned nr_rand_samples;
-	unsigned thresholds[2];
-
-	dm_oblock_t last_end_oblock;
-};
-
-static void iot_init(struct io_tracker *t,
-		     int sequential_threshold, int random_threshold)
-{
-	t->pattern = PATTERN_RANDOM;
-	t->nr_seq_samples = 0;
-	t->nr_rand_samples = 0;
-	t->last_end_oblock = 0;
-	t->thresholds[PATTERN_RANDOM] = random_threshold;
-	t->thresholds[PATTERN_SEQUENTIAL] = sequential_threshold;
-}
-
-static enum io_pattern iot_pattern(struct io_tracker *t)
-{
-	return t->pattern;
-}
-
-static void iot_update_stats(struct io_tracker *t, struct bio *bio)
-{
-	if (bio->bi_iter.bi_sector == from_oblock(t->last_end_oblock) + 1)
-		t->nr_seq_samples++;
-	else {
-		/*
-		 * Just one non-sequential IO is enough to reset the
-		 * counters.
-		 */
-		if (t->nr_seq_samples) {
-			t->nr_seq_samples = 0;
-			t->nr_rand_samples = 0;
-		}
-
-		t->nr_rand_samples++;
-	}
-
-	t->last_end_oblock = to_oblock(bio_end_sector(bio) - 1);
-}
-
-static void iot_check_for_pattern_switch(struct io_tracker *t)
-{
-	switch (t->pattern) {
-	case PATTERN_SEQUENTIAL:
-		if (t->nr_rand_samples >= t->thresholds[PATTERN_RANDOM]) {
-			t->pattern = PATTERN_RANDOM;
-			t->nr_seq_samples = t->nr_rand_samples = 0;
-		}
-		break;
-
-	case PATTERN_RANDOM:
-		if (t->nr_seq_samples >= t->thresholds[PATTERN_SEQUENTIAL]) {
-			t->pattern = PATTERN_SEQUENTIAL;
-			t->nr_seq_samples = t->nr_rand_samples = 0;
-		}
-		break;
-	}
-}
-
-static void iot_examine_bio(struct io_tracker *t, struct bio *bio)
-{
-	iot_update_stats(t, bio);
-	iot_check_for_pattern_switch(t);
-}
-
-/*----------------------------------------------------------------*/
-
-
-/*
  * This queue is divided up into different levels.  Allowing us to push
  * entries to the back of any of the levels.  Think of it as a partially
  * sorted queue.
@@ -422,7 +330,6 @@ struct mq_policy {
 	/* protects everything */
 	struct mutex lock;
 	dm_cblock_t cache_size;
-	struct io_tracker tracker;
 
 	/*
 	 * Entries come from two pools, one of pre-cache entries, and one
@@ -940,10 +847,6 @@ static int map(struct mq_policy *mq, dm_oblock_t oblock,
 	if (e && in_cache(mq, e))
 		r = cache_entry_found(mq, e, result);
 
-	else if (mq->tracker.thresholds[PATTERN_SEQUENTIAL] &&
-		 iot_pattern(&mq->tracker) == PATTERN_SEQUENTIAL)
-		result->op = POLICY_MISS;
-
 	else if (e)
 		r = pre_cache_entry_found(mq, e, can_migrate, discarded_oblock,
 					  data_dir, result);
@@ -1030,7 +933,6 @@ static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 
 	copy_tick(mq);
 
-	iot_examine_bio(&mq->tracker, bio);
 	r = map(mq, oblock, can_migrate, discarded_oblock,
 		bio_data_dir(bio), result);
 
@@ -1290,13 +1192,7 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 	if (kstrtoul(value, 10, &tmp))
 		return -EINVAL;
 
-	if (!strcasecmp(key, "random_threshold")) {
-		mq->tracker.thresholds[PATTERN_RANDOM] = tmp;
-
-	} else if (!strcasecmp(key, "sequential_threshold")) {
-		mq->tracker.thresholds[PATTERN_SEQUENTIAL] = tmp;
-
-	} else if (!strcasecmp(key, "discard_promote_adjustment"))
+	else if (!strcasecmp(key, "discard_promote_adjustment"))
 		mq->discard_promote_adjustment = tmp;
 
 	else if (!strcasecmp(key, "read_promote_adjustment"))
@@ -1316,13 +1212,9 @@ static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsign
 	ssize_t sz = 0;
 	struct mq_policy *mq = to_mq_policy(p);
 
-	DMEMIT("10 random_threshold %u "
-	       "sequential_threshold %u "
-	       "discard_promote_adjustment %u "
+	DMEMIT("6 discard_promote_adjustment %u "
 	       "read_promote_adjustment %u "
 	       "write_promote_adjustment %u",
-	       mq->tracker.thresholds[PATTERN_RANDOM],
-	       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
 	       mq->discard_promote_adjustment,
 	       mq->read_promote_adjustment,
 	       mq->write_promote_adjustment);
@@ -1360,7 +1252,6 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 		return NULL;
 
 	init_policy_functions(mq);
-	iot_init(&mq->tracker, SEQUENTIAL_THRESHOLD_DEFAULT, RANDOM_THRESHOLD_DEFAULT);
 	mq->cache_size = cache_size;
 
 	if (epool_init(&mq->pre_cache_pool, from_cblock(cache_size))) {
