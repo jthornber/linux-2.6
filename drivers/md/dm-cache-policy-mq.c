@@ -229,7 +229,7 @@ static struct list_head *queue_pop_old(struct queue *q)
 	for (level = 0; level < NR_QUEUE_LEVELS; level++) {
 		list_for_each_safe(h, tmp, q->qs + level) {
 			if (is_sentinel(q, h))
-				continue;
+				break;
 
 			q->nr_elts--;
 			list_del(h);
