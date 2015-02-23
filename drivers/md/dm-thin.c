@@ -3488,7 +3488,7 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv)
 	struct pool *pool = pt->pool;
 
 	if (get_pool_mode(pool) >= PM_READ_ONLY) {
-		DMERR("%s: unable to service pool target messages in READ_ONLY or FAIL mode\n",
+		DMERR("%s: unable to service pool target messages in READ_ONLY or FAIL mode",
 		      dm_device_name(pool->pool_md));
 		return -EINVAL;
 	}

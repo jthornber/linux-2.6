@@ -778,7 +778,9 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 bool may_format_device,
 						 size_t policy_hint_size)
 {
-	struct dm_cache_metadata *cmd = lookup_or_open(bdev, data_block_size, may_format_device, policy_hint_size);
+	struct dm_cache_metadata *cmd = lookup_or_open(bdev, data_block_size,
+						       may_format_device, policy_hint_size);
+
 	if (!IS_ERR(cmd) && !same_params(cmd, data_block_size)) {
 		dm_cache_metadata_close(cmd);
 		return ERR_PTR(-EINVAL);

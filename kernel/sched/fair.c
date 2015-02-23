@@ -1730,7 +1730,7 @@ static int preferred_group_nid(struct task_struct *p, int nid)
 	nodes = node_online_map;
 	for (dist = sched_max_numa_distance; dist > LOCAL_DISTANCE; dist--) {
 		unsigned long max_faults = 0;
-		nodemask_t max_group;
+		nodemask_t max_group = NODE_MASK_NONE;
 		int a, b;
 
 		/* Are there nodes at this distance from each other? */
@@ -4005,6 +4005,10 @@ void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b, bool force)
 
 static void destroy_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
 {
+	/* init_cfs_bandwidth() was not called */
+	if (!cfs_b->throttled_cfs_rq.next)
+		return;
+
 	hrtimer_cancel(&cfs_b->period_timer);
 	hrtimer_cancel(&cfs_b->slack_timer);
 }
@@ -4424,7 +4428,7 @@ static long effective_load(struct task_group *tg, int cpu, long wl, long wg)
 		 * wl = S * s'_i; see (2)
 		 */
 		if (W > 0 && w < W)
-			wl = (w * tg->shares) / W;
+			wl = (w * (long)tg->shares) / W;
 		else
 			wl = tg->shares;
 
