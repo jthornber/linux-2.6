@@ -178,7 +178,7 @@ static void queue_remove(struct queue *q, struct list_head *elt)
 static bool is_sentinel(struct queue *q, struct list_head *h)
 {
 	return (h >= q->sentinels) &&
-		(h < (q->sentinels + sizeof(q->sentinels)));
+		(h < (q->sentinels + (sizeof(q->sentinels) / sizeof(q->sentinels[0]))));
 }
 
 /*
