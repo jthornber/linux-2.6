@@ -150,6 +150,9 @@ static void ilist_del(struct indexer *ix, struct ilist *l, struct entry *elt)
 	else
 		l->tail = elt->prev;
 
+	// FIXME: debug only
+	elt->next = elt->prev = INDEXER_NULL;
+
 	l->nr_elts--;
 }
 
@@ -176,8 +179,8 @@ static void ilist_splice_tail(struct indexer *ix, struct ilist *l1, struct ilist
 		memcpy(l1, l2, sizeof(*l1));
 
 	else if (l2->head != INDEXER_NULL) {
-		struct entry *head2 = to_obj(ix, l2->head);
-		struct entry *tail1 = to_obj(ix, l1->tail);
+		struct entry *head2 = head_obj(ix, l2);
+		struct entry *tail1 = tail_obj(ix, l1);
 
 		tail1->next = l2->head;
 		head2->prev = l1->tail;
@@ -193,13 +196,28 @@ static void ilist_check(struct indexer *ix, struct ilist *l, unsigned level)
 {
 	unsigned count = 0;
 	struct entry *elt;
+	index_t prev_index = INDEXER_NULL;
 
 	for (elt = head_obj(ix, l); elt; elt = next_obj(ix, elt)) {
-		BUG_ON(elt->level != level);
+		// BUG_ON(elt->level != level);
+		BUG_ON(elt->prev != prev_index);
+		prev_index = to_index(ix, elt);
 		count++;
 	}
+	BUG_ON(l->tail != prev_index);
 
 	BUG_ON(l->nr_elts != count);
+}
+
+static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct entry *e)
+{
+	struct entry *elt;
+
+	for (elt = head_obj(ix, l); elt; elt = next_obj(ix, elt))
+		BUG_ON(elt == e);
+
+	for (elt = tail_obj(ix, l); elt; elt = prev_obj(ix, elt))
+		BUG_ON(elt == e);
 }
 
 /*----------------------------------------------------------------*/
@@ -273,7 +291,7 @@ static void queue_remove(struct queue *q, struct entry *elt)
 
 static bool is_sentinel(struct queue *q, struct entry *elt)
 {
-	return to_index(q->ix, elt) < NR_SENTINELS;
+	return to_index(q->ix, elt) < (NR_SENTINELS * 2);
 }
 
 /*
@@ -397,8 +415,9 @@ static void queue_redistribute(struct queue *q)
 	init_ilist(&all);
 	for (level = 0u; level < NR_LEVELS; level++) {
 		ilist_splice_tail(q->ix, &all, q->qs + level);
-		init_ilist(q->qs);
+		init_ilist(q->qs + level);
 	}
+	BUG_ON(all.nr_elts != q->nr_elts);
 
 	entries_per_level = all.nr_elts / NR_LEVELS;
         remainder = all.nr_elts % NR_LEVELS;
@@ -407,7 +426,9 @@ static void queue_redistribute(struct queue *q)
                 while (count--) {
 			elt = head_obj(q->ix, &all);
 
-			BUG_ON(!elt);
+			if (!elt) {
+				BUG();
+			}
 
 			ilist_del(q->ix, &all, elt);
 			elt->level = level;
@@ -416,13 +437,13 @@ static void queue_redistribute(struct queue *q)
         }
 
 	if (need_redistribute(q))
-		pr_alert("redistribute didn't\n");
+		pr_alert("redistribute didn't, %u\n", q->nr_elts);
 }
 
 // FIXME: slow
 static void queue_shuffle(struct queue *q, unsigned adjustment)
 {
-	unsigned level, count;
+	unsigned level, count, tweaked_adjustment;
 	struct ilist promote[NR_LEVELS];
 	struct ilist demote[NR_LEVELS];
 	struct entry *e, *next, *prev;
@@ -434,30 +455,35 @@ static void queue_shuffle(struct queue *q, unsigned adjustment)
 
 	for (level = 0u; level < NR_LEVELS; level++) {
 		ilist_check(q->ix, q->qs + level, level);
+		tweaked_adjustment = min(adjustment, q->qs[level].nr_elts / 2);
 
 		if (level < NR_LEVELS - 1) {
-			for (count = 0, e = head_obj(q->ix, q->qs + level); e && count < adjustment; count++) {
+			for (count = 0, e = head_obj(q->ix, q->qs + level); e && count < tweaked_adjustment;) {
 				next = next_obj(q->ix, e);
 
 				if (!is_sentinel(q, e)) {
 					ilist_del(q->ix, q->qs + level, e);
 					e->level++;
 					ilist_add_tail(q->ix, promote + level + 1, e);
-				}
+					count++;
+				} else
+					BUG(); /* I'm not using sentinels yet */
 
 				e = next;
 			}
 		}
 
 		if (level > 0) {
-			for (count = 0, e = tail_obj(q->ix, q->qs + level); e && count < adjustment; count++) {
+			for (count = 0, e = tail_obj(q->ix, q->qs + level); e && count < tweaked_adjustment;) {
 				prev = prev_obj(q->ix, e);
 
 				if (!is_sentinel(q, e)) {
 					ilist_del(q->ix, q->qs + level, e);
 					e->level--;
 					ilist_add_head(q->ix, demote + level - 1, e);
-				}
+					count++;
+				} else
+					BUG();
 
 				e = prev;
 			}
@@ -470,7 +496,12 @@ static void queue_shuffle(struct queue *q, unsigned adjustment)
 		ilist_check(q->ix, q->qs + level, level);
         }
 
-	BUG_ON(need_redistribute(q));
+	if (need_redistribute(q)) {
+		for (level = 0u; level < NR_LEVELS; level++)
+			pr_alert("level %u: nr_elts = %u, promotes = %u, demotes = %u\n",
+				 level, q->qs[level].nr_elts, promote[level].nr_elts, demote[level].nr_elts);
+		BUG();
+	}
 }
 
 /*
@@ -525,7 +556,7 @@ static bool queue_requeue(struct queue *q, struct entry *e)
 	else
 		q->autotune_misses++;
 
-	if ((q->autotune_hits + q->autotune_misses) > q->nr_elts) {
+	if ((q->autotune_hits + q->autotune_misses) > max(8192u, q->nr_elts)) {
 		queue_redistribute(q);
 		queue_shuffle(q, queue_autotune_adjustment(q));
 		queue_reset_autotune(q);
@@ -542,7 +573,7 @@ static bool queue_requeue(struct queue *q, struct entry *e)
  * sentinels all get allocated together in one big array.  We need to be
  * able to infer the cblock based on the entry position.
  *
- * | cache entries | hotspot entries | cache sentinels | hotspot sentinels |
+ * | cache sentinels | hotspot sentinels | cache entries | hotspot entries |
  *
  * Free entries are linked together into a list.
  */
@@ -552,10 +583,10 @@ struct entry_pool {
 
 	struct entry *entries, *entries_end;
 
-	struct entry *cache_entries;
-	struct entry *hotspot_entries;
 	struct entry *cache_sentinels;
 	struct entry *hotspot_sentinels;
+	struct entry *cache_entries;
+	struct entry *hotspot_entries;
 
 	/*
 	 * Just the cache entries get linked onto the free list.
@@ -587,15 +618,15 @@ static int epool_init(struct entry_pool *ep, unsigned nr_cache_entries,
 
 	ep->entries_end = ep->entries + nr_entries;
 
-	ep->cache_entries = ep->entries;
-	ep->hotspot_entries = ep->entries + nr_cache_entries;
-	ep->cache_sentinels = ep->entries + nr_cache_entries + nr_hotspot_entries;
-	ep->hotspot_sentinels = ep->entries + nr_cache_entries + nr_hotspot_entries + NR_SENTINELS;
+	ep->cache_sentinels = ep->entries;
+	ep->hotspot_sentinels = ep->entries + NR_SENTINELS;
+	ep->cache_entries = ep->entries + 2 * NR_SENTINELS;
+	ep->hotspot_entries = ep->entries + 2 * NR_SENTINELS + nr_cache_entries;
 
 	ep->nr_allocated = 0;
 	INIT_LIST_HEAD(&ep->free);
 	for (i = 0; i < nr_cache_entries; i++)
-		list_add((struct list_head *) ep->cache_entries + i, &ep->free);
+		list_add((struct list_head *) (ep->cache_entries + i), &ep->free);
 
 	ep->ix.elt_size = sizeof(struct entry);
 	ep->ix.base = (char *)ep->entries;
@@ -631,8 +662,10 @@ static struct entry *alloc_entry(struct entry_pool *ep)
 {
 	struct entry *e;
 
-	if (list_empty(&ep->free))
+	if (list_empty(&ep->free)) {
+		pr_alert("alloc_entry returning NULL\n");
 		return NULL;
+	}
 
 	e = (struct entry *) list_pop(&ep->free);
 	init_entry(e);
@@ -646,7 +679,7 @@ static struct entry *alloc_entry(struct entry_pool *ep)
  */
 static struct entry *alloc_particular_entry(struct entry_pool *ep, dm_cblock_t cblock)
 {
-	struct entry *e = ep->entries + from_cblock(cblock);
+	struct entry *e = ep->cache_entries + from_cblock(cblock);
 
 	list_del_init((struct list_head *) e);
 	init_entry(e);
@@ -668,7 +701,7 @@ static void free_entry(struct entry_pool *ep, struct entry *e)
  */
 static struct entry *epool_find(struct entry_pool *ep, dm_cblock_t cblock)
 {
-	struct entry *e = ep->entries + from_cblock(cblock);
+	struct entry *e = ep->cache_entries + from_cblock(cblock);
 	return !hlist_unhashed(&e->hlist) ? e : NULL;
 }
 
@@ -679,7 +712,7 @@ static bool epool_empty(struct entry_pool *ep)
 
 static dm_cblock_t infer_cblock(struct entry_pool *ep, struct entry *e)
 {
-	return to_cblock(e - ep->entries);
+	return to_cblock(e - ep->cache_entries);
 }
 
 static struct entry *hotspot_entry(struct entry_pool *ep, unsigned hs_block)
@@ -717,6 +750,7 @@ struct mq_policy {
 	unsigned nr_hotspot_blocks;
 	struct queue hotspot;
 
+	// FIXME: rename clean and dirty
 	struct queue cache_clean;
 	struct queue cache_dirty;
 
@@ -863,11 +897,8 @@ static struct entry *hash_lookup(struct mq_policy *mq, dm_oblock_t oblock)
 	struct entry *e;
 
 	hlist_for_each_entry(e, bucket, hlist)
-		if (e->oblock == oblock) {
-			hlist_del(&e->hlist);
-			hlist_add_head(&e->hlist, bucket);
+		if (e->oblock == oblock)
 			return e;
-		}
 
 	return NULL;
 }
@@ -888,6 +919,11 @@ static void push(struct mq_policy *mq, struct entry *e)
 {
 	hash_insert(mq, e);
 	queue_push(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+
+	{
+		struct entry *e2 = hash_lookup(mq, e->oblock);
+		BUG_ON(!e2);
+	}
 }
 
 /*
@@ -906,14 +942,16 @@ static void del(struct mq_policy *mq, struct entry *e)
 static struct entry *pop(struct mq_policy *mq, struct queue *q)
 {
 	struct entry *e = queue_pop(q);
-	hash_remove(e);
+	if (e)
+		hash_remove(e);
 	return e;
 }
 
 static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
 {
 	struct entry *e = queue_pop_old(q);
-	hash_remove(e);
+	if (e)
+		hash_remove(e);
 	return e;
 }
 
@@ -929,7 +967,6 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 {
 	struct entry *demoted = pop(mq, &mq->cache_clean);
-
 	if (!demoted)
 		/*
 		 * We could get a block from mq->cache_dirty, but that
@@ -952,18 +989,13 @@ static unsigned to_hotspot_block(struct mq_policy *mq, sector_t s)
 	return (unsigned) s;
 }
 
-/*
- * This also updates the heatmap.
- */
-static bool should_promote(struct mq_policy *mq, struct bio *bio,
+static bool should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
 			   bool fast_promote)
 {
-	// FIXME: take into account whether there are any free cache
-	// blocks, the data direction, the fast_promote flag.
-	struct entry *e = hotspot_entry(&mq->pool,
-					to_hotspot_block(mq, bio->bi_iter.bi_sector));
-	queue_requeue(&mq->hotspot, e);
-	return e->level > ((3 * NR_LEVELS) / 4); /* FIXME: hard coded */
+	if (bio_data_dir(bio) == WRITE && fast_promote && !epool_empty(&mq->pool))
+		return true;
+
+	return hs_e->level > ((3 * NR_LEVELS) / 4); /* FIXME: hard coded */
 }
 
 static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
@@ -979,14 +1011,14 @@ static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 			result->op = POLICY_MISS;
 			return;
 		}
+
 	} else
 		result->op = POLICY_NEW;
 
 	e = alloc_entry(&mq->pool);
+	BUG_ON(!e);
 	e->oblock = oblock;
-	e->dirty = false;
 	push(mq, e);
-
 	result->cblock = infer_cblock(&mq->pool, e);
 }
 
@@ -998,9 +1030,14 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	       bool can_migrate, bool fast_promote,
 	       struct policy_result *result)
 {
-#if 0
-	struct entry *e = hash_lookup(mq, oblock);
+	struct entry *e, *hs_e;
 
+	hs_e = hotspot_entry(&mq->pool,
+			     to_hotspot_block(mq, bio->bi_iter.bi_sector));
+	if (queue_requeue(&mq->hotspot, hs_e))
+		display_heatmap(mq);
+
+	e = hash_lookup(mq, oblock);
 	if (e) {
 		requeue(mq, e);
 		result->op = POLICY_HIT;
@@ -1008,26 +1045,18 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 		return 0;
 	}
 
-	if (!can_migrate) {
-		result->op = POLICY_MISS;
-		return -EWOULDBLOCK;
-	}
+	if (should_promote(mq, hs_e, bio, fast_promote)) {
+		if (!can_migrate) {
+			result->op = POLICY_MISS;
+			return -EWOULDBLOCK;
+		}
 
-	if (should_promote(mq, bio, fast_promote)) {
 		insert_in_cache(mq, oblock, result);
-		return 0;
-	}
 
-	result->op = POLICY_MISS;
+	} else
+		result->op = POLICY_MISS;
+
 	return 0;
-#else
-	// Only playing with the hotspot queue atm
-	struct entry *e = hotspot_entry(&mq->pool, to_hotspot_block(mq, bio->bi_iter.bi_sector));
-	if (queue_requeue(&mq->hotspot, e))
-		display_heatmap(mq);
-	result->op = POLICY_MISS;
-	return 0;
-#endif
 }
 
 /*----------------------------------------------------------------*/
@@ -1284,7 +1313,6 @@ static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 static int mq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
 			     dm_cblock_t *cblock)
 {
-#if 0
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
@@ -1293,9 +1321,6 @@ static int mq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
 	mutex_unlock(&mq->lock);
 
 	return r;
-#else
-	return -ENODATA;
-#endif
 }
 
 static void __force_mapping(struct mq_policy *mq,
