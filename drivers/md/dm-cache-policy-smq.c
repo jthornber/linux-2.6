@@ -25,6 +25,11 @@ static unsigned next_power(unsigned n, unsigned min)
 
 /*----------------------------------------------------------------*/
 
+#define NR_LEVELS 8u
+
+/* two writeback sentinels per level */
+#define NR_SENTINELS (NR_LEVELS * 2)
+
 struct entry {
 	unsigned prev:28;
 	unsigned next:28;
@@ -38,7 +43,6 @@ struct entry {
 
 /*----------------------------------------------------------------*/
 
-// FIXME: I hate this
 #define INDEXER_NULL ((1u << 28u) - 1u)
 
 typedef uint32_t index_t;
@@ -70,6 +74,11 @@ static void *to_obj(struct indexer *ix, index_t i)
 	}
 
 	return ptr;
+}
+
+static bool is_sentinel(struct indexer *ix, struct entry *elt)
+{
+	return to_index(ix, elt) < NR_SENTINELS;
 }
 
 /*----------------------------------------------------------------*/
@@ -202,10 +211,11 @@ static void ilist_check(struct indexer *ix, struct ilist *l, unsigned level)
 		// BUG_ON(elt->level != level);
 		BUG_ON(elt->prev != prev_index);
 		prev_index = to_index(ix, elt);
+
 		count++;
 	}
-	BUG_ON(l->tail != prev_index);
 
+	BUG_ON(l->tail != prev_index);
 	BUG_ON(l->nr_elts != count);
 }
 
@@ -227,19 +237,13 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
  * entries to the back of any of the levels.  Think of it as a partially
  * sorted queue.
  */
-#define NR_LEVELS 8u
-
-/* two writeback sentinels */
-#define NR_SENTINELS (NR_LEVELS * 2)
-#define WRITEBACK_PERIOD HZ
+#define WRITEBACK_PERIOD (5 * HZ)
 
 struct queue {
 	struct indexer *ix;
 
 	unsigned nr_elts;
 	struct ilist qs[NR_LEVELS];
-
-	bool current_writeback_sentinels;
 
 	/*
 	 * Used to autotune the shuffle adjustment.
@@ -261,7 +265,6 @@ static void queue_init(struct queue *q, struct indexer *ix)
 	for (i = 0; i < NR_LEVELS; i++)
 		init_ilist(q->qs + i);
 
-	q->current_writeback_sentinels = false;
 	q->hit_threshold_level = (NR_LEVELS * 7) / 8u;
 	q->autotune_hits = 0u;
 	q->autotune_misses = 0u;
@@ -279,52 +282,57 @@ static unsigned queue_size(struct queue *q)
  */
 static void queue_push(struct queue *q, struct entry *elt)
 {
-	q->nr_elts++;
+	if (!is_sentinel(q->ix, elt))
+		q->nr_elts++;
+	ilist_add_tail(q->ix, q->qs + elt->level, elt);
+}
+
+static void queue_push_sentinel(struct queue *q, struct entry *elt)
+{
+	/*
+	 * Sentinels don't count towards the q->nr_elts.
+	 */
 	ilist_add_tail(q->ix, q->qs + elt->level, elt);
 }
 
 static void queue_remove(struct queue *q, struct entry *elt)
 {
 	ilist_del(q->ix, q->qs + elt->level, elt);
-	q->nr_elts--;
-}
-
-static bool is_sentinel(struct queue *q, struct entry *elt)
-{
-	return to_index(q->ix, elt) < (NR_SENTINELS * 2);
+	if (!is_sentinel(q->ix, elt))
+		q->nr_elts--;
 }
 
 /*
  * Return the oldest entry of the lowest populated level.
  */
-static struct entry *queue_peek(struct queue *q)
-{
-	unsigned level;
-	struct entry *elt;
-
-	for (level = 0; level < NR_LEVELS; level++)
-		for (elt = head_obj(q->ix, q->qs + level); elt; elt = next_obj(q->ix, elt))
-			if (!is_sentinel(q, elt))
-				return elt;
-
-	return NULL;
-}
-
-static struct entry *queue_pop(struct queue *q)
+static struct entry *queue_peek(struct queue *q, bool can_cross_sentry)
 {
 	unsigned level;
 	struct entry *elt;
 
 	for (level = 0; level < NR_LEVELS; level++)
 		for (elt = head_obj(q->ix, q->qs + level); elt; elt = next_obj(q->ix, elt)) {
-			if (is_sentinel(q, elt))
-				continue;
+			if (is_sentinel(q->ix, elt)) {
+				if (can_cross_sentry)
+					continue;
+				else
+					break;
+			}
 
-			queue_remove(q, elt);
 			return elt;
 		}
 
 	return NULL;
+}
+
+static struct entry *queue_pop(struct queue *q)
+{
+	struct entry *elt = queue_peek(q, true);
+
+	if (elt)
+		queue_remove(q, elt);
+
+	return elt;
 }
 
 /*
@@ -332,55 +340,12 @@ static struct entry *queue_pop(struct queue *q)
  */
 static struct entry *queue_pop_old(struct queue *q)
 {
-	unsigned level;
-	struct entry *elt;
+	struct entry *elt = queue_peek(q, false);
 
-	for (level = 0; level < NR_LEVELS; level++)
-		for (elt = head_obj(q->ix, q->qs + level); elt; elt = next_obj(q->ix, elt)) {
-			if (is_sentinel(q, elt))
-				break;
+	if (elt)
+		queue_remove(q, elt);
 
-			queue_remove(q, elt);
-			return elt;
-		}
-
-	return NULL;
-}
-
-static struct list_head *writeback_sentinel(struct queue *q, unsigned level)
-{
-#if 0
-	if (q->current_writeback_sentinels)
-		return q->sentinels + level;
-	else
-		return q->sentinels + NR_LEVELS + level;
-#else
-	return NULL;
-#endif
-}
-
-/*
- * Sometimes we want to iterate through entries that have been pushed since
- * a certain event.  We use sentinel entries on the queues to delimit these
- * 'tick' events.
- */
-static void queue_update_writeback_sentinels(struct queue *q)
-{
-#if 0
-	unsigned level;
-	struct entry *sentinel;
-
-	if (time_after(jiffies, q->next_writeback)) {
-		for (level = 0; level < NR_LEVELS; level++) {
-			sentinel = writeback_sentinel(q, level);
-			ilist_del(q->ix, q->qs + level, sentinel);
-			ilist_add_tail(q->ix, q->qs + level, sentinel);
-		}
-
-		q->next_writeback = jiffies + WRITEBACK_PERIOD;
-		q->current_writeback_sentinels = !q->current_writeback_sentinels;
-	}
-#endif
+	return elt;
 }
 
 static bool within(unsigned n, unsigned target, unsigned variance)
@@ -404,7 +369,7 @@ static bool need_redistribute(struct queue *q)
 static void queue_redistribute(struct queue *q)
 {
 	unsigned level;
-	struct ilist all;
+	struct ilist all, *l;
 	struct entry *elt;
 	unsigned entries_per_level, remainder, count;
 
@@ -412,10 +377,12 @@ static void queue_redistribute(struct queue *q)
 		return;
 
 	pr_alert("redistributing\n");
+
 	init_ilist(&all);
 	for (level = 0u; level < NR_LEVELS; level++) {
-		ilist_splice_tail(q->ix, &all, q->qs + level);
-		init_ilist(q->qs + level);
+		l = q->qs + level;
+		ilist_splice_tail(q->ix, &all, l);
+		init_ilist(l);
 	}
 	BUG_ON(all.nr_elts != q->nr_elts);
 
@@ -426,10 +393,7 @@ static void queue_redistribute(struct queue *q)
                 while (count--) {
 			elt = head_obj(q->ix, &all);
 
-			if (!elt) {
-				BUG();
-			}
-
+			BUG_ON(!elt);
 			ilist_del(q->ix, &all, elt);
 			elt->level = level;
                         ilist_add_tail(q->ix, q->qs + level, elt);
@@ -438,10 +402,13 @@ static void queue_redistribute(struct queue *q)
 
 	if (need_redistribute(q))
 		pr_alert("redistribute didn't, %u\n", q->nr_elts);
+
+	for (level = 0u; level < NR_LEVELS; level++)
+		ilist_check(q->ix, q->qs + level, level);
 }
 
 // FIXME: slow
-static void queue_shuffle(struct queue *q, unsigned adjustment)
+static void queue_shuffle_ll(struct queue *q, unsigned adjustment)
 {
 	unsigned level, count, tweaked_adjustment;
 	struct ilist promote[NR_LEVELS];
@@ -461,13 +428,12 @@ static void queue_shuffle(struct queue *q, unsigned adjustment)
 			for (count = 0, e = head_obj(q->ix, q->qs + level); e && count < tweaked_adjustment;) {
 				next = next_obj(q->ix, e);
 
-				if (!is_sentinel(q, e)) {
+				if (!is_sentinel(q->ix, e)) {
 					ilist_del(q->ix, q->qs + level, e);
 					e->level++;
 					ilist_add_tail(q->ix, promote + level + 1, e);
 					count++;
-				} else
-					BUG(); /* I'm not using sentinels yet */
+				}
 
 				e = next;
 			}
@@ -477,13 +443,12 @@ static void queue_shuffle(struct queue *q, unsigned adjustment)
 			for (count = 0, e = tail_obj(q->ix, q->qs + level); e && count < tweaked_adjustment;) {
 				prev = prev_obj(q->ix, e);
 
-				if (!is_sentinel(q, e)) {
+				if (!is_sentinel(q->ix, e)) {
 					ilist_del(q->ix, q->qs + level, e);
 					e->level--;
 					ilist_add_head(q->ix, demote + level - 1, e);
 					count++;
-				} else
-					BUG();
+				}
 
 				e = prev;
 			}
@@ -517,7 +482,7 @@ static unsigned queue_autotune_adjustment_(struct queue *q)
 		return max_adjustment;
 
 	else {
-		unsigned miss_ratio = (q->autotune_misses << FP_SHIFT) / q->autotune_hits; /* it is correct to not shift q->autotune_hits */
+		unsigned miss_ratio = (q->autotune_misses << FP_SHIFT) / q->autotune_hits;
 		unsigned adjustment = ((miss_ratio - (1u << FP_SHIFT)) * 4u) + (1u << FP_SHIFT);
 
 		adjustment = min(adjustment, max_adjustment << FP_SHIFT);
@@ -543,10 +508,7 @@ static void queue_reset_autotune(struct queue *q)
 	q->autotune_misses = 0;
 }
 
-/*
- * Return true if the queue was shuffled.
- */
-static bool queue_requeue(struct queue *q, struct entry *e)
+static void queue_requeue(struct queue *q, struct entry *e)
 {
 	queue_remove(q, e);
 	queue_push(q, e);
@@ -555,15 +517,19 @@ static bool queue_requeue(struct queue *q, struct entry *e)
 		q->autotune_hits++;
 	else
 		q->autotune_misses++;
+}
 
-	if ((q->autotune_hits + q->autotune_misses) > max(8192u, q->nr_elts)) {
-		queue_redistribute(q);
-		queue_shuffle(q, queue_autotune_adjustment(q));
-		queue_reset_autotune(q);
-		return true;
-	}
+static bool queue_shuffle_due(struct queue *q)
+{
+	// FIXME: what if q->nr_elts is *huge* ?
+	return (q->autotune_hits + q->autotune_misses) > max(8192u, q->nr_elts);
+}
 
-	return false;
+static void queue_shuffle(struct queue *q)
+{
+	queue_redistribute(q);
+	queue_shuffle_ll(q, queue_autotune_adjustment(q));
+	queue_reset_autotune(q);
 }
 
 /*----------------------------------------------------------------*/
@@ -584,7 +550,6 @@ struct entry_pool {
 	struct entry *entries, *entries_end;
 
 	struct entry *cache_sentinels;
-	struct entry *hotspot_sentinels;
 	struct entry *cache_entries;
 	struct entry *hotspot_entries;
 
@@ -601,7 +566,7 @@ static int epool_init(struct entry_pool *ep, unsigned nr_cache_entries,
 		      unsigned nr_hotspot_entries)
 {
 	unsigned i;
-	unsigned nr_entries = nr_cache_entries + nr_hotspot_entries + 2 * NR_SENTINELS;
+	unsigned nr_entries = nr_cache_entries + nr_hotspot_entries + NR_SENTINELS;
 
 	pr_alert("nr_cache_entries = %u, nr_hotspot_entries = %u, nr_entries = %u\n",
 		 nr_cache_entries, nr_hotspot_entries, nr_entries);
@@ -619,9 +584,8 @@ static int epool_init(struct entry_pool *ep, unsigned nr_cache_entries,
 	ep->entries_end = ep->entries + nr_entries;
 
 	ep->cache_sentinels = ep->entries;
-	ep->hotspot_sentinels = ep->entries + NR_SENTINELS;
-	ep->cache_entries = ep->entries + 2 * NR_SENTINELS;
-	ep->hotspot_entries = ep->entries + 2 * NR_SENTINELS + nr_cache_entries;
+	ep->cache_entries = ep->entries + NR_SENTINELS;
+	ep->hotspot_entries = ep->entries + NR_SENTINELS + nr_cache_entries;
 
 	ep->nr_allocated = 0;
 	INIT_LIST_HEAD(&ep->free);
@@ -793,6 +757,9 @@ struct mq_policy {
 	unsigned nr_buckets;
 	dm_block_t hash_bits;
 	struct hlist_head *table;
+
+	bool current_writeback_sentinels;
+	unsigned long next_writeback;
 };
 
 #define DEFAULT_DISCARD_PROMOTE_ADJUSTMENT 1
@@ -910,6 +877,76 @@ static void hash_remove(struct entry *e)
 
 /*----------------------------------------------------------------*/
 
+static struct entry *writeback_sentinel(struct mq_policy *mq, unsigned level)
+{
+	if (mq->current_writeback_sentinels)
+		return mq->pool.cache_sentinels + level;
+	else
+		return mq->pool.cache_sentinels + NR_LEVELS + level;
+}
+
+static void update_writeback_sentinels(struct mq_policy *mq)
+{
+	unsigned level;
+	struct entry *sentinel;
+
+	if (time_after(jiffies, mq->next_writeback)) {
+		pr_alert("updating writeback sentinels\n");
+		for (level = 0; level < NR_LEVELS; level++) {
+			sentinel = writeback_sentinel(mq, level);
+			queue_remove(&mq->cache_dirty, sentinel);
+			queue_push_sentinel(&mq->cache_dirty, sentinel);
+		}
+
+		mq->next_writeback = jiffies + WRITEBACK_PERIOD;
+		mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
+	}
+}
+
+// FIXME: refactor
+static void writeback_sentinels_init(struct mq_policy *mq)
+{
+	unsigned level;
+	struct entry *sentinel;
+
+	mq->current_writeback_sentinels = false;
+	mq->next_writeback = jiffies + WRITEBACK_PERIOD;
+
+	for (level = 0; level < NR_LEVELS; level++) {
+		sentinel = writeback_sentinel(mq, level);
+		sentinel->level = level;
+		queue_push_sentinel(&mq->cache_dirty, sentinel);
+	}
+
+	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
+
+	for (level = 0; level < NR_LEVELS; level++) {
+		sentinel = writeback_sentinel(mq, level);
+		sentinel->level = level;
+		queue_push_sentinel(&mq->cache_dirty, sentinel);
+	}
+}
+
+static void writeback_sentinels_remove(struct mq_policy *mq)
+{
+	unsigned level;
+	struct entry *sentinel;
+
+	for (level = 0; level < NR_LEVELS; level++) {
+		sentinel = writeback_sentinel(mq, level);
+		queue_remove(&mq->cache_dirty, sentinel);
+	}
+
+	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
+
+	for (level = 0; level < NR_LEVELS; level++) {
+		sentinel = writeback_sentinel(mq, level);
+		queue_remove(&mq->cache_dirty, sentinel);
+	}
+}
+
+/*----------------------------------------------------------------*/
+
 /*
  * Inserts the entry into the pre_cache or the cache.  Ensures the cache
  * block is marked as allocated if necc.  Inserts into the hash table.
@@ -961,7 +998,18 @@ static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
  */
 static void requeue(struct mq_policy *mq, struct entry *e)
 {
-	queue_requeue(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+	if (e->dirty) {
+		queue_requeue(&mq->cache_dirty, e);
+		if (queue_shuffle_due(&mq->cache_dirty)) {
+			writeback_sentinels_remove(mq);
+			queue_shuffle(&mq->cache_dirty);
+			writeback_sentinels_init(mq);
+		}
+	} else {
+		queue_requeue(&mq->cache_clean, e);
+		if (queue_shuffle_due(&mq->cache_clean))
+			queue_shuffle(&mq->cache_clean);
+	}
 }
 
 static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
@@ -992,10 +1040,15 @@ static unsigned to_hotspot_block(struct mq_policy *mq, sector_t s)
 static bool should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
 			   bool fast_promote)
 {
-	if (bio_data_dir(bio) == WRITE && fast_promote && !epool_empty(&mq->pool))
-		return true;
+	/* FIXME: hard coded thresholds */
+	if (bio_data_dir(bio) == WRITE) {
+		if (fast_promote && !epool_empty(&mq->pool))
+			return true;
 
-	return hs_e->level > ((3 * NR_LEVELS) / 4); /* FIXME: hard coded */
+		return hs_e->level > ((7u * NR_LEVELS) / 8u);
+
+	} else
+		return hs_e->level > ((3 * NR_LEVELS) / 4);
 }
 
 static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
@@ -1034,8 +1087,11 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 
 	hs_e = hotspot_entry(&mq->pool,
 			     to_hotspot_block(mq, bio->bi_iter.bi_sector));
-	if (queue_requeue(&mq->hotspot, hs_e))
+	queue_requeue(&mq->hotspot, hs_e);
+	if (queue_shuffle_due(&mq->hotspot)) {
+		queue_shuffle(&mq->hotspot);
 		display_heatmap(mq);
+	}
 
 	e = hash_lookup(mq, oblock);
 	if (e) {
@@ -1084,19 +1140,16 @@ static void mq_destroy(struct dm_cache_policy *p)
 	kfree(mq);
 }
 
-static void update_cache_hits(struct list_head *h, void *context)
-{
-	struct mq_policy *mq = context;
-	mq->hit_count++;
-}
-
-// FIXME: redundant?
 static void copy_tick(struct mq_policy *mq)
 {
 	unsigned long flags, tick;
 
 	spin_lock_irqsave(&mq->tick_lock, flags);
 	tick = mq->tick_protected;
+	if (tick != mq->tick) {
+		update_writeback_sentinels(mq);
+		mq->tick = tick;
+	}
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
@@ -1204,7 +1257,7 @@ static int mq_save_hints(struct mq_policy *mq, struct queue *q,
 
 	for (level = 0; level < NR_LEVELS; level++)
 		for (e = head_obj(q->ix, q->qs + level); e; e = next_obj(q->ix, e)) {
-			if (!is_sentinel(q, e)) {
+			if (!is_sentinel(q->ix, e)) {
 				r = fn(context, infer_cblock(&mq->pool, e),
 				       e->oblock, e->level);
 				if (r)
@@ -1296,8 +1349,10 @@ static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 {
 	struct entry *e = pop_old(mq, &mq->cache_dirty);
 
-	if (!e && !clean_target_met(mq))
+	if (!e && !clean_target_met(mq)) {
+		pr_alert("poping new because clean target not met\n");
 		e = pop(mq, &mq->cache_dirty);
+	}
 
 	if (!e)
 		return -ENODATA;
@@ -1479,7 +1534,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	if (!mq->table)
 		goto bad_alloc_table;
 
-	pr_alert("mq_create 7\n");
+	writeback_sentinels_init(mq);
 	return &mq->policy;
 
 bad_alloc_table:
