@@ -53,10 +53,9 @@ static void free_bitset(unsigned long *bits)
 struct entry {
 	unsigned prev:28;
 	unsigned next:28;
-	unsigned level:5;
+	unsigned level:6;
 	bool dirty:1;
 	bool sentinel:1;
-	bool hit:1;
 
 	struct hlist_node hlist; /* FIXME: replace with an index */
 	dm_oblock_t oblock;
@@ -265,7 +264,7 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
  */
 #define NR_HOTSPOT_LEVELS 16u
 #define NR_CACHE_LEVELS 32u
-#define MAX_LEVELS 32u
+#define MAX_LEVELS 64u
 
 /* two writeback sentinels per level */
 #define NR_SENTINELS (NR_CACHE_LEVELS * 2)
@@ -498,32 +497,32 @@ static void q_adjust_period(struct queue *q)
 	q_reset_autotune(q);
 }
 
-static void q_requeue(struct queue *q, struct entry *e)
+static void q_update_autotune(struct queue *q, struct entry *e)
 {
-	struct entry *demote_e;
-
-	if (!e->hit) {
-		q_remove(q, e);
-
-		if (e->level < q->nr_levels - 1u) {
-			demote_e = head_obj(q->ix, q->qs + e->level + 1u);
-			if (demote_e) {
-				q_remove(q, demote_e);
-				demote_e->level--;
-				q_push(q, demote_e);
-			}
-
-			e->level++;
-		}
-
-		q_push(q, e);
-		e->hit = true;
-	}
-
 	if (e->level >= q->hit_threshold_level)
 		q->autotune_hits++;
 	else
 		q->autotune_misses++;
+}
+
+static void q_requeue(struct queue *q, struct entry *e, bool up_level)
+{
+	struct entry *demote_e;
+
+	q_remove(q, e);
+
+	if (up_level && (e->level < q->nr_levels - 1u)) {
+		demote_e = head_obj(q->ix, q->qs + e->level + 1u);
+		if (demote_e) {
+			q_remove(q, demote_e);
+			demote_e->level--;
+			q_push(q, demote_e);
+		}
+
+		e->level++;
+	}
+
+	q_push(q, e);
 }
 
 static bool q_period_complete(struct queue *q)
@@ -532,20 +531,9 @@ static bool q_period_complete(struct queue *q)
 	return (q->autotune_hits + q->autotune_misses) > q->generation_period;
 }
 
-static void q_clear_hits(struct queue *q)
-{
-	unsigned level;
-	struct entry *e;
-
-	for (level = 0u; level < q->nr_levels; level++)
-		for (e = head_obj(q->ix, q->qs + level); e; e = next_obj(q->ix, e))
-			e->hit = false;
-}
-
 static void q_end_period(struct queue *q)
 {
 	q_redistribute(q);
-	q_clear_hits(q);
 	q_adjust_period(q);
 }
 
@@ -720,7 +708,8 @@ struct mq_policy {
 	sector_t cache_block_size;
 
 	struct entry_pool pool;
-	unsigned long *hit_bitset;
+	unsigned long *hotspot_hit_bits;
+	unsigned long *cache_hit_bits;
 
 	/*
 	 * We maintain three queues of entries.  The cache proper,
@@ -1018,16 +1007,28 @@ static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
 static void requeue(struct mq_policy *mq, struct entry *e)
 {
 	if (e->dirty) {
-		q_requeue(&mq->cache_dirty, e);
+		q_update_autotune(&mq->cache_dirty, e);
+		q_requeue(&mq->cache_dirty, e,
+			  !test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
+					    mq->cache_hit_bits));
+
+		/*
+		 * This completes the period for both clean and dirty
+		 * queues.
+		 * FIXME: what if there's no dirty data?  Use counts from both queues.
+		 */
 		if (q_period_complete(&mq->cache_dirty)) {
 			writeback_sentinels_remove(mq);
+			clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 			q_end_period(&mq->cache_dirty);
-			writeback_sentinels_init(mq);
+			q_end_period(&mq->cache_clean);
+			writeback_sentinels_init(mq); /* FIXME: better to leave these in, otherwise pop_old degrades every time we run this. */
 		}
 	} else {
-		q_requeue(&mq->cache_clean, e);
-		if (q_period_complete(&mq->cache_clean))
-			q_end_period(&mq->cache_clean);
+		q_update_autotune(&mq->cache_clean, e);
+		q_requeue(&mq->cache_clean, e,
+			  !test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
+					    mq->cache_hit_bits));
 	}
 }
 
@@ -1126,12 +1127,17 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	       struct policy_result *result)
 {
 	struct entry *e, *hs_e;
+	unsigned hs_block = to_hotspot_block(mq, bio->bi_iter.bi_sector);
 
-	hs_e = hotspot_entry(&mq->pool,
-			     to_hotspot_block(mq, bio->bi_iter.bi_sector));
-	q_requeue(&mq->hotspot, hs_e);
+	hs_e = hotspot_entry(&mq->pool, hs_block);
+
+	q_update_autotune(&mq->hotspot, hs_e);
+	q_requeue(&mq->hotspot, hs_e,
+		  !test_and_set_bit(hs_block, mq->hotspot_hit_bits));
+
 	if (q_period_complete(&mq->hotspot)) {
 		update_promote_levels(mq);
+		clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
 		q_end_period(&mq->hotspot);
 		//display_heatmap(mq);
 	}
@@ -1179,7 +1185,8 @@ static void mq_destroy(struct dm_cache_policy *p)
 		 mq->hotspot.autotune_total_misses);
 
 	vfree(mq->table);
-	free_bitset(mq->hit_bitset);
+	free_bitset(mq->hotspot_hit_bits);
+	free_bitset(mq->cache_hit_bits);
 	epool_exit(&mq->pool);
 	kfree(mq);
 }
@@ -1546,12 +1553,19 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 		goto bad_pool_init;
 	}
 
-	mq->hit_bitset = alloc_bitset(from_cblock(cache_size));
-	if (!mq->hit_bitset) {
-		DMERR("couldn't allocate hit bitset");
-		goto bad_hit_bitset;
+	mq->hotspot_hit_bits = alloc_bitset(mq->nr_hotspot_blocks);
+	if (!mq->hotspot_hit_bits) {
+		DMERR("couldn't allocate hotspot hit bitset");
+		goto bad_hotspot_hit_bits;
 	}
-	clear_bitset(mq->hit_bitset, from_cblock(cache_size));
+	clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
+
+	mq->cache_hit_bits = alloc_bitset(from_cblock(cache_size));
+	if (!mq->cache_hit_bits) {
+		DMERR("couldn't allocate cache hit bitset");
+		goto bad_cache_hit_bits;
+	}
+	clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 
 	mq->tick_protected = 0;
 	mq->tick = 0;
@@ -1584,8 +1598,10 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	return &mq->policy;
 
 bad_alloc_table:
-	free_bitset(mq->hit_bitset);
-bad_hit_bitset:
+	free_bitset(mq->cache_hit_bits);
+bad_cache_hit_bits:
+	free_bitset(mq->hotspot_hit_bits);
+bad_hotspot_hit_bits:
 	epool_exit(&mq->pool);
 bad_pool_init:
 	kfree(mq);
