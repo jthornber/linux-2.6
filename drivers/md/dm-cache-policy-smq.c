@@ -25,12 +25,38 @@ static unsigned next_power(unsigned n, unsigned min)
 
 /*----------------------------------------------------------------*/
 
+// FIXME: duplicate code with main target
+static size_t bitset_size_in_bytes(unsigned nr_entries)
+{
+	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
+}
+
+static unsigned long *alloc_bitset(unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	return vzalloc(s);
+}
+
+static void clear_bitset(void *bitset, unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	memset(bitset, 0, s);
+}
+
+static void free_bitset(unsigned long *bits)
+{
+	vfree(bits);
+}
+
+/*----------------------------------------------------------------*/
+
 struct entry {
 	unsigned prev:28;
 	unsigned next:28;
 	unsigned level:5;
 	bool dirty:1;
 	bool sentinel:1;
+	bool hit:1;
 
 	struct hlist_node hlist; /* FIXME: replace with an index */
 	dm_oblock_t oblock;
@@ -238,8 +264,8 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
  * sorted queue.
  */
 #define NR_HOTSPOT_LEVELS 16u
-#define NR_CACHE_LEVELS 16u
-#define MAX_LEVELS 16u
+#define NR_CACHE_LEVELS 32u
+#define MAX_LEVELS 32u
 
 /* two writeback sentinels per level */
 #define NR_SENTINELS (NR_CACHE_LEVELS * 2)
@@ -254,8 +280,10 @@ struct queue {
 	unsigned nr_levels;
 	struct ilist qs[MAX_LEVELS];
 
+	unsigned generation_period;
+
 	/*
-	 * Used to autotune the shuffle adjustment.
+	 * Used to autotune the generation period.
 	 */
 	unsigned hit_threshold_level;
 	unsigned autotune_hits;
@@ -274,6 +302,8 @@ static void queue_init(struct queue *q, struct indexer *ix, unsigned nr_levels)
 
 	for (i = 0; i < q->nr_levels; i++)
 		init_ilist(q->qs + i);
+
+	q->generation_period = 8192u; /* FIXME: use #define */
 
 	q->hit_threshold_level = (q->nr_levels * 7) / 8u;
 	q->autotune_hits = 0u;
@@ -418,99 +448,37 @@ static void queue_redistribute(struct queue *q)
 		ilist_check(q->ix, q->qs + level, level);
 }
 
-// FIXME: slow
-static void queue_shuffle_ll(struct queue *q, unsigned adjustment)
-{
-	unsigned level, count, tweaked_adjustment;
-	struct ilist promote[MAX_LEVELS];
-	struct ilist demote[MAX_LEVELS];
-	struct entry *e, *next, *prev;
-
-	if (q->nr_levels == 1)
-		return;
-
-	for (level = 0u; level < q->nr_levels; level++) {
-		init_ilist(promote + level);
-		init_ilist(demote + level);
-	}
-
-	for (level = 0u; level < q->nr_levels; level++) {
-		ilist_check(q->ix, q->qs + level, level);
-		tweaked_adjustment = min(adjustment, q->qs[level].nr_elts / 2);
-
-		if (level < q->nr_levels - 1) {
-			for (count = 0, e = head_obj(q->ix, q->qs + level); e && count < tweaked_adjustment;) {
-				next = next_obj(q->ix, e);
-
-				if (!is_sentinel(q->ix, e)) {
-					ilist_del(q->ix, q->qs + level, e);
-					e->level++;
-					ilist_add_tail(q->ix, promote + level + 1, e);
-					count++;
-				}
-
-				e = next;
-			}
-		}
-
-		if (level > 0) {
-			for (count = 0, e = tail_obj(q->ix, q->qs + level); e && count < tweaked_adjustment;) {
-				prev = prev_obj(q->ix, e);
-
-				if (!is_sentinel(q->ix, e)) {
-					ilist_del(q->ix, q->qs + level, e);
-					e->level--;
-					ilist_add_head(q->ix, demote + level - 1, e);
-					count++;
-				}
-
-				e = prev;
-			}
-		}
-	}
-
-	for (level = 0u; level < q->nr_levels; level++) {
-		ilist_splice_head(q->ix, q->qs + level, promote + level);
-                ilist_splice_tail(q->ix, q->qs + level, demote + level);
-		ilist_check(q->ix, q->qs + level, level);
-        }
-
-	if (need_redistribute(q)) {
-		for (level = 0u; level < q->nr_levels; level++)
-			pr_alert("level %u: nr_elts = %u, promotes = %u, demotes = %u\n",
-				 level, q->qs[level].nr_elts, promote[level].nr_elts, demote[level].nr_elts);
-		BUG();
-	}
-}
-
 /*
- * We use some fixed point math to calculate the autotune adjustment.
+ * We use some fixed point math to calculate the autotune period.
  */
 #define FP_SHIFT 8
 
-static unsigned queue_autotune_adjustment_(struct queue *q)
+static unsigned queue_autotune_period(struct queue *q)
 {
-	unsigned max_adjustment = (q->nr_elts / q->nr_levels) / 4u;
+	unsigned min_period = max(q->nr_elts / 4u, 1024u);
+	unsigned max_period = max(q->nr_elts, 8192u);
+
+	unsigned low_hit_ratio = 1u << (FP_SHIFT - 3u); /* 0.125 */
+	unsigned high_hit_ratio = 1u << (FP_SHIFT - 1u); /* 0.5 */
+
+	unsigned hit_ratio, numerator, denominator;
 
 	if (!q->autotune_hits)
-		return max_adjustment;
+		return min_period;
 
 	else {
-		unsigned miss_ratio = (q->autotune_misses << FP_SHIFT) / q->autotune_hits;
-		unsigned adjustment = ((miss_ratio - (1u << FP_SHIFT)) * 4u) + (1u << FP_SHIFT);
+		hit_ratio = (q->autotune_hits << FP_SHIFT) / (q->autotune_hits + q->autotune_misses);
 
-		adjustment = min(adjustment, max_adjustment << FP_SHIFT);
-		adjustment = max(adjustment, 1u << FP_SHIFT);
-		return adjustment >> FP_SHIFT;
+		if (hit_ratio < low_hit_ratio)
+			return min_period;
+
+		if (hit_ratio > high_hit_ratio)
+			return max_period;
+
+		numerator = ((max_period - min_period) * (hit_ratio - low_hit_ratio)) >> FP_SHIFT;
+		denominator = high_hit_ratio - low_hit_ratio;
+		return min_period + (numerator / denominator);
 	}
-}
-
-static unsigned queue_autotune_adjustment(struct queue *q)
-{
-	unsigned r = queue_autotune_adjustment_(q);
-	pr_alert("hits = %u, misses = %u, adjustment = %u\n",
-		 q->autotune_hits, q->autotune_misses, r);
-	return r;
 }
 
 static void queue_reset_autotune(struct queue *q)
@@ -522,10 +490,36 @@ static void queue_reset_autotune(struct queue *q)
 	q->autotune_misses = 0;
 }
 
+static void queue_adjust_period(struct queue *q)
+{
+	q->generation_period = queue_autotune_period(q);
+	pr_alert("hits = %u, misses = %u, adjustment = %u\n",
+		 q->autotune_hits, q->autotune_misses, q->generation_period);
+
+	queue_reset_autotune(q);
+}
+
 static void queue_requeue(struct queue *q, struct entry *e)
 {
-	queue_remove(q, e);
-	queue_push(q, e);
+	struct entry *demote_e;
+
+	if (!e->hit) {
+		queue_remove(q, e);
+
+		if (e->level < q->nr_levels - 1u) {
+			demote_e = head_obj(q->ix, q->qs + e->level + 1u);
+			if (demote_e) {
+				queue_remove(q, demote_e);
+				demote_e->level--;
+				queue_push(q, demote_e);
+			}
+
+			e->level++;
+		}
+
+		queue_push(q, e);
+		e->hit = true;
+	}
 
 	if (e->level >= q->hit_threshold_level)
 		q->autotune_hits++;
@@ -533,17 +527,27 @@ static void queue_requeue(struct queue *q, struct entry *e)
 		q->autotune_misses++;
 }
 
-static bool queue_shuffle_due(struct queue *q)
+static bool queue_period_complete(struct queue *q)
 {
 	// FIXME: what if q->nr_elts is *huge* ?
-	return (q->autotune_hits + q->autotune_misses) > max(8192u, q->nr_elts);
+	return (q->autotune_hits + q->autotune_misses) > q->generation_period;
 }
 
-static void queue_shuffle(struct queue *q)
+static void queue_clear_hits(struct queue *q)
+{
+	unsigned level;
+	struct entry *e;
+
+	for (level = 0u; level < q->nr_levels; level++)
+		for (e = head_obj(q->ix, q->qs + level); e; e = next_obj(q->ix, e))
+			e->hit = false;
+}
+
+static void queue_end_period(struct queue *q)
 {
 	queue_redistribute(q);
-	queue_shuffle_ll(q, queue_autotune_adjustment(q));
-	queue_reset_autotune(q);
+	queue_clear_hits(q);
+	queue_adjust_period(q);
 }
 
 /*----------------------------------------------------------------*/
@@ -717,6 +721,7 @@ struct mq_policy {
 	sector_t cache_block_size;
 
 	struct entry_pool pool;
+	unsigned long *hit_bitset;
 
 	/*
 	 * We maintain three queues of entries.  The cache proper,
@@ -1015,15 +1020,15 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 {
 	if (e->dirty) {
 		queue_requeue(&mq->cache_dirty, e);
-		if (queue_shuffle_due(&mq->cache_dirty)) {
+		if (queue_period_complete(&mq->cache_dirty)) {
 			writeback_sentinels_remove(mq);
-			queue_shuffle(&mq->cache_dirty);
+			queue_end_period(&mq->cache_dirty);
 			writeback_sentinels_init(mq);
 		}
 	} else {
 		queue_requeue(&mq->cache_clean, e);
-		if (queue_shuffle_due(&mq->cache_clean))
-			queue_shuffle(&mq->cache_clean);
+		if (queue_period_complete(&mq->cache_clean))
+			queue_end_period(&mq->cache_clean);
 	}
 }
 
@@ -1099,16 +1104,18 @@ static void update_promote_levels(struct mq_policy *mq)
 	 * The higher the confidence, the more levels we want to promote.
 	 */
 	if (confidence > (1u << (FP_SHIFT - 1u))) /* 0.5 */
-		mq->read_promote_level = NR_CACHE_LEVELS - 4u;
+		mq->read_promote_level = NR_CACHE_LEVELS - 1u;
 
-	else if (confidence > (1u << (FP_SHIFT - 3u))) /* 0.125 */
-		mq->read_promote_level = NR_CACHE_LEVELS - 2u;
+#if 0
+	else if (confidence > (1u << (FP_SHIFT - 2u))) /* 0.25 */
+		mq->read_promote_level = NR_CACHE_LEVELS - 1u;
+#endif
 
 	else
+		/* do not promote */
 		mq->read_promote_level = NR_CACHE_LEVELS;
 
-	mq->write_promote_level = mq->read_promote_level - 1u;
-
+	mq->write_promote_level = mq->read_promote_level;
 }
 
 /*
@@ -1124,10 +1131,10 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	hs_e = hotspot_entry(&mq->pool,
 			     to_hotspot_block(mq, bio->bi_iter.bi_sector));
 	queue_requeue(&mq->hotspot, hs_e);
-	if (queue_shuffle_due(&mq->hotspot)) {
+	if (queue_period_complete(&mq->hotspot)) {
 		update_promote_levels(mq);
-		queue_shuffle(&mq->hotspot);
-		display_heatmap(mq);
+		queue_end_period(&mq->hotspot);
+		//display_heatmap(mq);
 	}
 
 	e = hash_lookup(mq, oblock);
@@ -1173,6 +1180,7 @@ static void mq_destroy(struct dm_cache_policy *p)
 		 mq->hotspot.autotune_total_misses);
 
 	vfree(mq->table);
+	free_bitset(mq->hit_bitset);
 	epool_exit(&mq->pool);
 	kfree(mq);
 }
@@ -1528,21 +1536,24 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	if (!mq)
 		return NULL;
 
-	pr_alert("mq_create 1\n");
 	init_policy_functions(mq);
 	mq->cache_size = cache_size;
 	mq->cache_block_size = cache_block_size;
 
-	pr_alert("mq_create 2\n");
 	init_hotspot_fields(mq, origin_size, cache_block_size);
 
-	pr_alert("mq_create 3\n");
 	if (epool_init(&mq->pool, from_cblock(cache_size), mq->nr_hotspot_blocks)) {
 		DMERR("couldn't initialize pool of cache entries");
 		goto bad_pool_init;
 	}
 
-	pr_alert("mq_create 4\n");
+	mq->hit_bitset = alloc_bitset(from_cblock(cache_size));
+	if (!mq->hit_bitset) {
+		DMERR("couldn't allocate hit bitset");
+		goto bad_hit_bitset;
+	}
+	clear_bitset(mq->hit_bitset, from_cblock(cache_size));
+
 	mq->tick_protected = 0;
 	mq->tick = 0;
 	mq->hit_count = 0;
@@ -1553,13 +1564,10 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mutex_init(&mq->lock);
 	spin_lock_init(&mq->tick_lock);
 
-	pr_alert("mq_create 5\n");
 	queue_init(&mq->hotspot, &mq->pool.ix, NR_HOTSPOT_LEVELS);
 
-	pr_alert("mq_create 5.5\n");
 	populate_hotspot_queue(mq);
 
-	pr_alert("mq_create 6\n");
 	queue_init(&mq->cache_clean, &mq->pool.ix, NR_CACHE_LEVELS);
 	queue_init(&mq->cache_dirty, &mq->pool.ix, NR_CACHE_LEVELS);
 
@@ -1577,6 +1585,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	return &mq->policy;
 
 bad_alloc_table:
+	free_bitset(mq->hit_bitset);
+bad_hit_bitset:
 	epool_exit(&mq->pool);
 bad_pool_init:
 	kfree(mq);
