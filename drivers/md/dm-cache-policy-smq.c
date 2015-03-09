@@ -275,7 +275,6 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
 struct queue {
 	struct indexer *ix;
 
-
 	unsigned nr_elts;
 	unsigned nr_levels;
 	struct ilist qs[MAX_LEVELS];
@@ -292,7 +291,7 @@ struct queue {
 	unsigned autotune_total_misses;
 };
 
-static void queue_init(struct queue *q, struct indexer *ix, unsigned nr_levels)
+static void q_init(struct queue *q, struct indexer *ix, unsigned nr_levels)
 {
 	unsigned i;
 
@@ -312,7 +311,7 @@ static void queue_init(struct queue *q, struct indexer *ix, unsigned nr_levels)
 	q->autotune_total_misses = 0u;
 }
 
-static unsigned queue_size(struct queue *q)
+static unsigned q_size(struct queue *q)
 {
 	return q->nr_elts;
 }
@@ -320,14 +319,14 @@ static unsigned queue_size(struct queue *q)
 /*
  * Insert an entry to the back of the given level.
  */
-static void queue_push(struct queue *q, struct entry *elt)
+static void q_push(struct queue *q, struct entry *elt)
 {
 	if (!is_sentinel(q->ix, elt))
 		q->nr_elts++;
 	ilist_add_tail(q->ix, q->qs + elt->level, elt);
 }
 
-static void queue_push_sentinel(struct queue *q, struct entry *elt)
+static void q_push_sentinel(struct queue *q, struct entry *elt)
 {
 	/*
 	 * Sentinels don't count towards the q->nr_elts.
@@ -335,7 +334,7 @@ static void queue_push_sentinel(struct queue *q, struct entry *elt)
 	ilist_add_tail(q->ix, q->qs + elt->level, elt);
 }
 
-static void queue_remove(struct queue *q, struct entry *elt)
+static void q_remove(struct queue *q, struct entry *elt)
 {
 	ilist_del(q->ix, q->qs + elt->level, elt);
 	if (!is_sentinel(q->ix, elt))
@@ -345,7 +344,7 @@ static void queue_remove(struct queue *q, struct entry *elt)
 /*
  * Return the oldest entry of the lowest populated level.
  */
-static struct entry *queue_peek(struct queue *q, bool can_cross_sentry)
+static struct entry *q_peek(struct queue *q, bool can_cross_sentry)
 {
 	unsigned level;
 	struct entry *elt;
@@ -365,12 +364,12 @@ static struct entry *queue_peek(struct queue *q, bool can_cross_sentry)
 	return NULL;
 }
 
-static struct entry *queue_pop(struct queue *q)
+static struct entry *q_pop(struct queue *q)
 {
-	struct entry *elt = queue_peek(q, true);
+	struct entry *elt = q_peek(q, true);
 
 	if (elt)
-		queue_remove(q, elt);
+		q_remove(q, elt);
 
 	return elt;
 }
@@ -378,12 +377,12 @@ static struct entry *queue_pop(struct queue *q)
 /*
  * Pops an entry from a level that is not past a sentinel.
  */
-static struct entry *queue_pop_old(struct queue *q)
+static struct entry *q_pop_old(struct queue *q)
 {
-	struct entry *elt = queue_peek(q, false);
+	struct entry *elt = q_peek(q, false);
 
 	if (elt)
-		queue_remove(q, elt);
+		q_remove(q, elt);
 
 	return elt;
 }
@@ -406,7 +405,7 @@ static bool need_redistribute(struct queue *q)
 }
 
 // FIXME: slow
-static void queue_redistribute(struct queue *q)
+static void q_redistribute(struct queue *q)
 {
 	unsigned level;
 	struct ilist all, *l;
@@ -453,7 +452,7 @@ static void queue_redistribute(struct queue *q)
  */
 #define FP_SHIFT 8
 
-static unsigned queue_autotune_period(struct queue *q)
+static unsigned q_autotune_period(struct queue *q)
 {
 	unsigned min_period = max(q->nr_elts / 4u, 1024u);
 	unsigned max_period = max(q->nr_elts, 8192u);
@@ -481,7 +480,7 @@ static unsigned queue_autotune_period(struct queue *q)
 	}
 }
 
-static void queue_reset_autotune(struct queue *q)
+static void q_reset_autotune(struct queue *q)
 {
 	q->autotune_total_hits += q->autotune_hits;
 	q->autotune_total_misses += q->autotune_misses;
@@ -490,34 +489,34 @@ static void queue_reset_autotune(struct queue *q)
 	q->autotune_misses = 0;
 }
 
-static void queue_adjust_period(struct queue *q)
+static void q_adjust_period(struct queue *q)
 {
-	q->generation_period = queue_autotune_period(q);
+	q->generation_period = q_autotune_period(q);
 	pr_alert("hits = %u, misses = %u, adjustment = %u\n",
 		 q->autotune_hits, q->autotune_misses, q->generation_period);
 
-	queue_reset_autotune(q);
+	q_reset_autotune(q);
 }
 
-static void queue_requeue(struct queue *q, struct entry *e)
+static void q_requeue(struct queue *q, struct entry *e)
 {
 	struct entry *demote_e;
 
 	if (!e->hit) {
-		queue_remove(q, e);
+		q_remove(q, e);
 
 		if (e->level < q->nr_levels - 1u) {
 			demote_e = head_obj(q->ix, q->qs + e->level + 1u);
 			if (demote_e) {
-				queue_remove(q, demote_e);
+				q_remove(q, demote_e);
 				demote_e->level--;
-				queue_push(q, demote_e);
+				q_push(q, demote_e);
 			}
 
 			e->level++;
 		}
 
-		queue_push(q, e);
+		q_push(q, e);
 		e->hit = true;
 	}
 
@@ -527,13 +526,13 @@ static void queue_requeue(struct queue *q, struct entry *e)
 		q->autotune_misses++;
 }
 
-static bool queue_period_complete(struct queue *q)
+static bool q_period_complete(struct queue *q)
 {
 	// FIXME: what if q->nr_elts is *huge* ?
 	return (q->autotune_hits + q->autotune_misses) > q->generation_period;
 }
 
-static void queue_clear_hits(struct queue *q)
+static void q_clear_hits(struct queue *q)
 {
 	unsigned level;
 	struct entry *e;
@@ -543,11 +542,11 @@ static void queue_clear_hits(struct queue *q)
 			e->hit = false;
 }
 
-static void queue_end_period(struct queue *q)
+static void q_end_period(struct queue *q)
 {
-	queue_redistribute(q);
-	queue_clear_hits(q);
-	queue_adjust_period(q);
+	q_redistribute(q);
+	q_clear_hits(q);
+	q_adjust_period(q);
 }
 
 /*----------------------------------------------------------------*/
@@ -817,7 +816,7 @@ static void populate_hotspot_queue(struct mq_policy *mq)
 	for (b = 0; b < mq->nr_hotspot_blocks; b++) {
 		e = hotspot_entry(&mq->pool, b);
 		e->level = 0;
-		queue_push(&mq->hotspot, e);
+		q_push(&mq->hotspot, e);
 	}
 }
 
@@ -919,8 +918,8 @@ static void update_writeback_sentinels(struct mq_policy *mq)
 	if (time_after(jiffies, mq->next_writeback)) {
 		for (level = 0; level < mq->cache_dirty.nr_levels; level++) {
 			sentinel = writeback_sentinel(mq, level);
-			queue_remove(&mq->cache_dirty, sentinel);
-			queue_push_sentinel(&mq->cache_dirty, sentinel);
+			q_remove(&mq->cache_dirty, sentinel);
+			q_push_sentinel(&mq->cache_dirty, sentinel);
 		}
 
 		mq->next_writeback = jiffies + WRITEBACK_PERIOD;
@@ -940,7 +939,7 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
 		sentinel = writeback_sentinel(mq, level);
 		sentinel->level = level;
-		queue_push_sentinel(&mq->cache_dirty, sentinel);
+		q_push_sentinel(&mq->cache_dirty, sentinel);
 	}
 
 	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
@@ -948,7 +947,7 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
 		sentinel = writeback_sentinel(mq, level);
 		sentinel->level = level;
-		queue_push_sentinel(&mq->cache_dirty, sentinel);
+		q_push_sentinel(&mq->cache_dirty, sentinel);
 	}
 }
 
@@ -959,14 +958,14 @@ static void writeback_sentinels_remove(struct mq_policy *mq)
 
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
 		sentinel = writeback_sentinel(mq, level);
-		queue_remove(&mq->cache_dirty, sentinel);
+		q_remove(&mq->cache_dirty, sentinel);
 	}
 
 	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
 
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
 		sentinel = writeback_sentinel(mq, level);
-		queue_remove(&mq->cache_dirty, sentinel);
+		q_remove(&mq->cache_dirty, sentinel);
 	}
 }
 
@@ -980,7 +979,7 @@ static void writeback_sentinels_remove(struct mq_policy *mq)
 static void push(struct mq_policy *mq, struct entry *e)
 {
 	hash_insert(mq, e);
-	queue_push(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+	q_push(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
 }
 
 /*
@@ -988,7 +987,7 @@ static void push(struct mq_policy *mq, struct entry *e)
  */
 static void del(struct mq_policy *mq, struct entry *e)
 {
-	queue_remove(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+	q_remove(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
 	hash_remove(e);
 }
 
@@ -998,7 +997,7 @@ static void del(struct mq_policy *mq, struct entry *e)
  */
 static struct entry *pop(struct mq_policy *mq, struct queue *q)
 {
-	struct entry *e = queue_pop(q);
+	struct entry *e = q_pop(q);
 	if (e)
 		hash_remove(e);
 	return e;
@@ -1006,7 +1005,7 @@ static struct entry *pop(struct mq_policy *mq, struct queue *q)
 
 static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
 {
-	struct entry *e = queue_pop_old(q);
+	struct entry *e = q_pop_old(q);
 	if (e)
 		hash_remove(e);
 	return e;
@@ -1019,16 +1018,16 @@ static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
 static void requeue(struct mq_policy *mq, struct entry *e)
 {
 	if (e->dirty) {
-		queue_requeue(&mq->cache_dirty, e);
-		if (queue_period_complete(&mq->cache_dirty)) {
+		q_requeue(&mq->cache_dirty, e);
+		if (q_period_complete(&mq->cache_dirty)) {
 			writeback_sentinels_remove(mq);
-			queue_end_period(&mq->cache_dirty);
+			q_end_period(&mq->cache_dirty);
 			writeback_sentinels_init(mq);
 		}
 	} else {
-		queue_requeue(&mq->cache_clean, e);
-		if (queue_period_complete(&mq->cache_clean))
-			queue_end_period(&mq->cache_clean);
+		q_requeue(&mq->cache_clean, e);
+		if (q_period_complete(&mq->cache_clean))
+			q_end_period(&mq->cache_clean);
 	}
 }
 
@@ -1130,10 +1129,10 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 
 	hs_e = hotspot_entry(&mq->pool,
 			     to_hotspot_block(mq, bio->bi_iter.bi_sector));
-	queue_requeue(&mq->hotspot, hs_e);
-	if (queue_period_complete(&mq->hotspot)) {
+	q_requeue(&mq->hotspot, hs_e);
+	if (q_period_complete(&mq->hotspot)) {
 		update_promote_levels(mq);
-		queue_end_period(&mq->hotspot);
+		q_end_period(&mq->hotspot);
 		//display_heatmap(mq);
 	}
 
@@ -1383,7 +1382,7 @@ static bool clean_target_met(struct mq_policy *mq)
 	 * Cache entries may not be populated.  So we're cannot rely on the
 	 * size of the clean queue.
 	 */
-	unsigned nr_clean = from_cblock(mq->cache_size) - queue_size(&mq->cache_dirty);
+	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->cache_dirty);
 	unsigned target = from_cblock(mq->cache_size) * CLEAN_TARGET_PERCENTAGE / 100;
 
 	return nr_clean >= target;
@@ -1564,12 +1563,12 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mutex_init(&mq->lock);
 	spin_lock_init(&mq->tick_lock);
 
-	queue_init(&mq->hotspot, &mq->pool.ix, NR_HOTSPOT_LEVELS);
+	q_init(&mq->hotspot, &mq->pool.ix, NR_HOTSPOT_LEVELS);
 
 	populate_hotspot_queue(mq);
 
-	queue_init(&mq->cache_clean, &mq->pool.ix, NR_CACHE_LEVELS);
-	queue_init(&mq->cache_dirty, &mq->pool.ix, NR_CACHE_LEVELS);
+	q_init(&mq->cache_clean, &mq->pool.ix, NR_CACHE_LEVELS);
+	q_init(&mq->cache_dirty, &mq->pool.ix, NR_CACHE_LEVELS);
 
 	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024U);
 
