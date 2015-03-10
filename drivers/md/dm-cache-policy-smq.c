@@ -147,7 +147,8 @@ static void ilist_add_head(struct indexer *ix, struct ilist *l, struct entry *el
 	else
 		l->head = l->tail = to_index(ix, elt);
 
-	l->nr_elts++;
+	if (!is_sentinel(ix, elt))
+		l->nr_elts++;
 }
 
 static void ilist_add_tail(struct indexer *ix, struct ilist *l, struct entry *elt)
@@ -162,7 +163,8 @@ static void ilist_add_tail(struct indexer *ix, struct ilist *l, struct entry *el
 	else
 		l->head = l->tail = to_index(ix, elt);
 
-	l->nr_elts++;
+	if (!is_sentinel(ix, elt))
+		l->nr_elts++;
 }
 
 static void ilist_del(struct indexer *ix, struct ilist *l, struct entry *elt)
@@ -183,40 +185,8 @@ static void ilist_del(struct indexer *ix, struct ilist *l, struct entry *elt)
 	// FIXME: debug only
 	elt->next = elt->prev = INDEXER_NULL;
 
-	l->nr_elts--;
-}
-
-static void ilist_splice_head(struct indexer *ix, struct ilist *l1, struct ilist *l2)
-{
-	if (l1->head == INDEXER_NULL)
-		memcpy(l1, l2, sizeof(*l1));
-
-	else if (l2->head != INDEXER_NULL) {
-		struct entry *head1 = to_obj(ix, l1->head);
-		struct entry *tail2 = to_obj(ix, l2->tail);
-
-		head1->prev = l2->tail;
-		tail2->next = l1->head;
-		l1->head = l2->head;
-
-		l1->nr_elts += l2->nr_elts;
-	}
-}
-
-static void ilist_splice_tail(struct indexer *ix, struct ilist *l1, struct ilist *l2)
-{
-	if (l1->head == INDEXER_NULL)
-		memcpy(l1, l2, sizeof(*l1));
-
-	else if (l2->head != INDEXER_NULL) {
-		struct entry *head2 = head_obj(ix, l2);
-		struct entry *tail1 = tail_obj(ix, l1);
-
-		tail1->next = l2->head;
-		head2->prev = l1->tail;
-		l1->tail = l2->tail;
-		l1->nr_elts += l2->nr_elts;
-	}
+	if (!is_sentinel(ix, elt))
+		l->nr_elts--;
 }
 
 /*
@@ -230,7 +200,7 @@ static void ilist_check(struct indexer *ix, struct ilist *l, unsigned level)
 	index_t prev_index = INDEXER_NULL;
 
 	for (elt = head_obj(ix, l); elt; elt = next_obj(ix, elt)) {
-		// BUG_ON(elt->level != level);
+		BUG_ON(elt->level != level);
 		BUG_ON(elt->prev != prev_index);
 		prev_index = to_index(ix, elt);
 
@@ -388,29 +358,30 @@ static struct entry *q_pop_old(struct queue *q)
 
 /*
  * Both the next two functions assume there is a non-sentinel entry to pop.
- * They're only used by redistribute, so we know this is true.
+ * They're only used by redistribute, so we know this is true.  It also
+ * doesn't adjust the q->nr_elts count.
  */
-static struct entry *pop_from(struct queue *q, unsigned level)
+static struct entry *__redist_pop_from(struct queue *q, unsigned level)
 {
 	struct entry *e;
 
 	for (; level < q->nr_levels; level++)
 		for (e = head_obj(q->ix, q->qs + level); e; e = next_obj(q->ix, e))
 			if (!is_sentinel(q->ix, e)) {
-				q_del(q, e);
+				ilist_del(q->ix, q->qs + e->level, e);
 				return e;
 			}
 
 	BUG();
 }
 
-static struct entry *pop_tail(struct queue *q, unsigned level)
+static struct entry *__redist_pop_tail(struct indexer *ix, struct ilist *l)
 {
 	struct entry *e;
 
-	for (e = tail_obj(q->ix, q->qs + level); e; e = prev_obj(q->ix, e))
-		if (!is_sentinel(q->ix, e)) {
-			q_del(q, e);
+	for (e = tail_obj(ix, l); e; e = prev_obj(ix, e))
+		if (!is_sentinel(ix, e)) {
+			ilist_del(ix, l, e);
 			return e;
 		}
 
@@ -428,13 +399,17 @@ static void q_redistribute(struct queue *q)
 	for (level = 0u; level < q->nr_levels - 1; level++) {
 		l = q->qs + level;
 		l_above = q->qs + level + 1;
+
+		ilist_check(q->ix, l, level);
+		ilist_check(q->ix, l_above, level + 1);
+
 		target = (level < remainder) ? entries_per_level + 1 : entries_per_level;
 
 		/*
 		 * Pull down some entries from the level above.
 		 */
 		while (l->nr_elts < target) {
-			e = pop_from(q, level + 1);
+			e = __redist_pop_from(q, level + 1);
 			e->level = level;
 			ilist_add_tail(q->ix, l, e);
 		}
@@ -443,30 +418,48 @@ static void q_redistribute(struct queue *q)
 		 * Push some entries up.
 		 */
 		while (l->nr_elts > target) {
-			e = pop_tail(q, level);
+			e = __redist_pop_tail(q->ix, l);
 			e->level = level + 1;
 			ilist_add_head(q->ix, l_above, e);
 		}
+
+		ilist_check(q->ix, l, level);
+		ilist_check(q->ix, l_above, level + 1);
 	}
 }
 
 /*
  * We use some fixed point math to calculate the autotune period.
+ * Variables that contain a fixed point number are given the suffix _fp.
  */
 #define FP_SHIFT 8
 
+static unsigned ramp(unsigned low, unsigned high, unsigned alpha_fp)
+{
+	unsigned delta;
+
+	if (alpha_fp > (1 << FP_SHIFT))
+		return high;
+
+	delta = high - low;
+	return low + ((delta * alpha_fp) >> FP_SHIFT);
+}
+
 static unsigned q_autotune_period(struct queue *q)
 {
+	// FIXME: magic numbers
 	unsigned min_period = max(q->nr_elts / 4u, 1024u);
-	unsigned max_period = max(q->nr_elts, 8192u);
+	unsigned max_period = min(q->nr_elts, 8192u);
 
 	unsigned low_hit_ratio = 1u << (FP_SHIFT - 3u); /* 0.125 */
 	unsigned high_hit_ratio = 1u << (FP_SHIFT - 1u); /* 0.5 */
 
-	unsigned hit_ratio, numerator, denominator;
+	unsigned hit_ratio, alpha_fp;
 
-	if (!q->autotune_hits)
+	if (!q->autotune_hits) {
+		pr_alert("min_period = %u\n", min_period);
 		return min_period;
+	}
 
 	else {
 		hit_ratio = (q->autotune_hits << FP_SHIFT) / (q->autotune_hits + q->autotune_misses);
@@ -474,12 +467,11 @@ static unsigned q_autotune_period(struct queue *q)
 		if (hit_ratio < low_hit_ratio)
 			return min_period;
 
-		if (hit_ratio > high_hit_ratio)
-			return max_period;
+		alpha_fp = ((hit_ratio - low_hit_ratio) << FP_SHIFT) / (high_hit_ratio - low_hit_ratio);
 
-		numerator = ((max_period - min_period) * (hit_ratio - low_hit_ratio)) >> FP_SHIFT;
-		denominator = high_hit_ratio - low_hit_ratio;
-		return min_period + (numerator / denominator);
+		pr_alert("hit_ratio = %u, alpha_fp = %u\n", hit_ratio, alpha_fp);
+
+		return ramp(min_period, max_period, alpha_fp);
 	}
 }
 
@@ -1122,7 +1114,7 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 		update_promote_levels(mq);
 		clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
 		q_end_period(&mq->hotspot);
-		//display_heatmap(mq);
+		display_heatmap(mq);
 	}
 
 	e = hash_lookup(mq, oblock);
