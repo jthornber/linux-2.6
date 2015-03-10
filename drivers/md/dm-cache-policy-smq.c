@@ -263,7 +263,7 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
  * sorted queue.
  */
 #define NR_HOTSPOT_LEVELS 16u
-#define NR_CACHE_LEVELS 32u
+#define NR_CACHE_LEVELS 64u
 #define MAX_LEVELS 64u
 
 /* two writeback sentinels per level */
@@ -333,6 +333,7 @@ static void q_push_sentinel(struct queue *q, struct entry *elt)
 	ilist_add_tail(q->ix, q->qs + elt->level, elt);
 }
 
+// FIXME: rename q_del
 static void q_remove(struct queue *q, struct entry *elt)
 {
 	ilist_del(q->ix, q->qs + elt->level, elt);
@@ -386,64 +387,68 @@ static struct entry *q_pop_old(struct queue *q)
 	return elt;
 }
 
-static bool within(unsigned n, unsigned target, unsigned variance)
+/*
+ * Both the next two functions assume there is a non-sentinel entry to pop.
+ * They're only used by redistribute, so we know this is true.
+ */
+static struct entry *pop_from(struct queue *q, unsigned level)
 {
-	return ((n + variance) >= target) && (n <= (target + variance));
+	struct entry *e;
+
+	for (; level < q->nr_levels; level++)
+		for (e = head_obj(q->ix, q->qs + level); e; e = next_obj(q->ix, e))
+			if (!is_sentinel(q->ix, e)) {
+				q_remove(q, e);
+				return e;
+			}
+
+	BUG();
 }
 
-static bool need_redistribute(struct queue *q)
+static struct entry *pop_tail(struct queue *q, unsigned level)
 {
-	unsigned level;
-	unsigned target_per_level = q->nr_elts / q->nr_levels;
+	struct entry *e;
 
-	for (level = 0u; level < q->nr_levels; level++)
-		if (!within(q->qs[level].nr_elts, target_per_level, 4u))
-			return true;
+	for (e = tail_obj(q->ix, q->qs + level); e; e = prev_obj(q->ix, e))
+		if (!is_sentinel(q->ix, e)) {
+			q_remove(q, e);
+			return e;
+		}
 
-	return false;
+	BUG();
 }
 
-// FIXME: slow
 static void q_redistribute(struct queue *q)
 {
-	unsigned level;
-	struct ilist all, *l;
-	struct entry *elt;
-	unsigned entries_per_level, remainder, count;
+	unsigned target, level;
+	unsigned entries_per_level = q->nr_elts / q->nr_levels;
+	unsigned remainder = q->nr_elts % q->nr_levels;
+	struct ilist *l, *l_above;
+	struct entry *e;
 
-	if (q->nr_levels == 1)
-		return;
-
-	if (!need_redistribute(q))
-		return;
-
-	init_ilist(&all);
-	for (level = 0u; level < q->nr_levels; level++) {
+	for (level = 0u; level < q->nr_levels - 1; level++) {
 		l = q->qs + level;
-		ilist_splice_tail(q->ix, &all, l);
-		init_ilist(l);
+		l_above = q->qs + level + 1;
+		target = (level < remainder) ? entries_per_level + 1 : entries_per_level;
+
+		/*
+		 * Pull down some entries from the level above.
+		 */
+		while (l->nr_elts < target) {
+			e = pop_from(q, level + 1);
+			e->level = level;
+			ilist_add_tail(q->ix, l, e);
+		}
+
+		/*
+		 * Push some entries up.
+		 */
+		while (l->nr_elts > target) {
+			e = pop_tail(q, level);
+			e->level = level + 1;
+			ilist_add_head(q->ix, l_above, e);
+		}
 	}
-	BUG_ON(all.nr_elts != q->nr_elts);
-
-	entries_per_level = all.nr_elts / q->nr_levels;
-        remainder = all.nr_elts % q->nr_levels;
-        for (level = 0u; level < q->nr_levels; level++) {
-                count = (level < remainder) ? entries_per_level + 1 : entries_per_level;
-                while (count--) {
-			elt = head_obj(q->ix, &all);
-
-			BUG_ON(!elt);
-			ilist_del(q->ix, &all, elt);
-			elt->level = level;
-                        ilist_add_tail(q->ix, q->qs + level, elt);
-                }
-        }
-
-	if (need_redistribute(q))
-		pr_alert("redistribute didn't, %u\n", q->nr_elts);
-
-	for (level = 0u; level < q->nr_levels; level++)
-		ilist_check(q->ix, q->qs + level, level);
 }
 
 /*
@@ -940,24 +945,6 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 	}
 }
 
-static void writeback_sentinels_remove(struct mq_policy *mq)
-{
-	unsigned level;
-	struct entry *sentinel;
-
-	for (level = 0; level < NR_CACHE_LEVELS; level++) {
-		sentinel = writeback_sentinel(mq, level);
-		q_remove(&mq->cache_dirty, sentinel);
-	}
-
-	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
-
-	for (level = 0; level < NR_CACHE_LEVELS; level++) {
-		sentinel = writeback_sentinel(mq, level);
-		q_remove(&mq->cache_dirty, sentinel);
-	}
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -1018,11 +1005,9 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 		 * FIXME: what if there's no dirty data?  Use counts from both queues.
 		 */
 		if (q_period_complete(&mq->cache_dirty)) {
-			writeback_sentinels_remove(mq);
 			clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 			q_end_period(&mq->cache_dirty);
 			q_end_period(&mq->cache_clean);
-			writeback_sentinels_init(mq); /* FIXME: better to leave these in, otherwise pop_old degrades every time we run this. */
 		}
 	} else {
 		q_update_autotune(&mq->cache_clean, e);
