@@ -726,9 +726,8 @@ struct mq_policy {
 	unsigned nr_hotspot_blocks;
 	struct queue hotspot;
 
-	// FIXME: rename clean and dirty
-	struct queue cache_clean;
-	struct queue cache_dirty;
+	struct queue clean;
+	struct queue dirty;
 
 	/*
 	 * Keeps track of time, incremented by the core.  We use this to
@@ -909,10 +908,10 @@ static void update_writeback_sentinels(struct mq_policy *mq)
 	struct entry *sentinel;
 
 	if (time_after(jiffies, mq->next_writeback)) {
-		for (level = 0; level < mq->cache_dirty.nr_levels; level++) {
+		for (level = 0; level < mq->dirty.nr_levels; level++) {
 			sentinel = writeback_sentinel(mq, level);
-			q_del(&mq->cache_dirty, sentinel);
-			q_push_sentinel(&mq->cache_dirty, sentinel);
+			q_del(&mq->dirty, sentinel);
+			q_push_sentinel(&mq->dirty, sentinel);
 		}
 
 		mq->next_writeback = jiffies + WRITEBACK_PERIOD;
@@ -932,7 +931,7 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
 		sentinel = writeback_sentinel(mq, level);
 		sentinel->level = level;
-		q_push_sentinel(&mq->cache_dirty, sentinel);
+		q_push_sentinel(&mq->dirty, sentinel);
 	}
 
 	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
@@ -940,7 +939,7 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
 		sentinel = writeback_sentinel(mq, level);
 		sentinel->level = level;
-		q_push_sentinel(&mq->cache_dirty, sentinel);
+		q_push_sentinel(&mq->dirty, sentinel);
 	}
 }
 
@@ -954,7 +953,7 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 static void push(struct mq_policy *mq, struct entry *e)
 {
 	hash_insert(mq, e);
-	q_push(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+	q_push(e->dirty ? &mq->dirty : &mq->clean, e);
 }
 
 /*
@@ -962,7 +961,7 @@ static void push(struct mq_policy *mq, struct entry *e)
  */
 static void del(struct mq_policy *mq, struct entry *e)
 {
-	q_del(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+	q_del(e->dirty ? &mq->dirty : &mq->clean, e);
 	hash_remove(e);
 }
 
@@ -993,8 +992,8 @@ static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
 static void requeue(struct mq_policy *mq, struct entry *e)
 {
 	if (e->dirty) {
-		q_update_autotune(&mq->cache_dirty, e);
-		q_requeue(&mq->cache_dirty, e,
+		q_update_autotune(&mq->dirty, e);
+		q_requeue(&mq->dirty, e,
 			  !test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
 					    mq->cache_hit_bits));
 
@@ -1003,14 +1002,14 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 		 * queues.
 		 * FIXME: what if there's no dirty data?  Use counts from both queues.
 		 */
-		if (q_period_complete(&mq->cache_dirty)) {
+		if (q_period_complete(&mq->dirty)) {
 			clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
-			q_end_period(&mq->cache_dirty);
-			q_end_period(&mq->cache_clean);
+			q_end_period(&mq->dirty);
+			q_end_period(&mq->clean);
 		}
 	} else {
-		q_update_autotune(&mq->cache_clean, e);
-		q_requeue(&mq->cache_clean, e,
+		q_update_autotune(&mq->clean, e);
+		q_requeue(&mq->clean, e,
 			  !test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
 					    mq->cache_hit_bits));
 	}
@@ -1018,10 +1017,10 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 
 static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 {
-	struct entry *demoted = pop(mq, &mq->cache_clean);
+	struct entry *demoted = pop(mq, &mq->clean);
 	if (!demoted)
 		/*
-		 * We could get a block from mq->cache_dirty, but that
+		 * We could get a block from mq->dirty, but that
 		 * would add extra latency to the triggering bio as it
 		 * waits for the writeback.  Better to not promote this
 		 * time and hope there's a clean block next time this block
@@ -1311,9 +1310,9 @@ static int mq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 
 	mutex_lock(&mq->lock);
 
-	r = mq_save_hints(mq, &mq->cache_clean, fn, context);
+	r = mq_save_hints(mq, &mq->clean, fn, context);
 	if (!r)
-		r = mq_save_hints(mq, &mq->cache_dirty, fn, context);
+		r = mq_save_hints(mq, &mq->dirty, fn, context);
 
 	mutex_unlock(&mq->lock);
 
@@ -1373,7 +1372,7 @@ static bool clean_target_met(struct mq_policy *mq)
 	 * Cache entries may not be populated.  So we're cannot rely on the
 	 * size of the clean queue.
 	 */
-	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->cache_dirty);
+	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->dirty);
 	unsigned target = from_cblock(mq->cache_size) * CLEAN_TARGET_PERCENTAGE / 100;
 
 	return nr_clean >= target;
@@ -1382,11 +1381,11 @@ static bool clean_target_met(struct mq_policy *mq)
 static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 			      dm_cblock_t *cblock)
 {
-	struct entry *e = pop_old(mq, &mq->cache_dirty);
+	struct entry *e = pop_old(mq, &mq->dirty);
 
 	if (!e && !clean_target_met(mq)) {
 		pr_alert("poping new because clean target not met\n");
-		e = pop(mq, &mq->cache_dirty);
+		e = pop(mq, &mq->dirty);
 	}
 
 	if (!e)
@@ -1565,8 +1564,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 
 	populate_hotspot_queue(mq);
 
-	q_init(&mq->cache_clean, &mq->pool.ix, NR_CACHE_LEVELS);
-	q_init(&mq->cache_dirty, &mq->pool.ix, NR_CACHE_LEVELS);
+	q_init(&mq->clean, &mq->pool.ix, NR_CACHE_LEVELS);
+	q_init(&mq->dirty, &mq->pool.ix, NR_CACHE_LEVELS);
 
 	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024U);
 
