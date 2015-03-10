@@ -189,6 +189,19 @@ static void ilist_del(struct indexer *ix, struct ilist *l, struct entry *elt)
 		l->nr_elts--;
 }
 
+static struct entry *ilist_pop_tail(struct indexer *ix, struct ilist *l)
+{
+	struct entry *e;
+
+	for (e = tail_obj(ix, l); e; e = prev_obj(ix, e))
+		if (!is_sentinel(ix, e)) {
+			ilist_del(ix, l, e);
+			return e;
+		}
+
+	return NULL;
+}
+
 /*
  * Iterates the list to perform a crude sanity check.
  */
@@ -372,20 +385,7 @@ static struct entry *__redist_pop_from(struct queue *q, unsigned level)
 				return e;
 			}
 
-	BUG();
-}
-
-static struct entry *__redist_pop_tail(struct indexer *ix, struct ilist *l)
-{
-	struct entry *e;
-
-	for (e = tail_obj(ix, l); e; e = prev_obj(ix, e))
-		if (!is_sentinel(ix, e)) {
-			ilist_del(ix, l, e);
-			return e;
-		}
-
-	BUG();
+	return NULL;
 }
 
 static void q_redistribute(struct queue *q)
@@ -410,6 +410,7 @@ static void q_redistribute(struct queue *q)
 		 */
 		while (l->nr_elts < target) {
 			e = __redist_pop_from(q, level + 1);
+			BUG_ON(!e);
 			e->level = level;
 			ilist_add_tail(q->ix, l, e);
 		}
@@ -418,7 +419,8 @@ static void q_redistribute(struct queue *q)
 		 * Push some entries up.
 		 */
 		while (l->nr_elts > target) {
-			e = __redist_pop_tail(q->ix, l);
+			e = ilist_pop_tail(q->ix, l);
+			BUG_ON(!e);
 			e->level = level + 1;
 			ilist_add_head(q->ix, l_above, e);
 		}
@@ -1114,7 +1116,7 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 		update_promote_levels(mq);
 		clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
 		q_end_period(&mq->hotspot);
-		display_heatmap(mq);
+		//display_heatmap(mq);
 	}
 
 	e = hash_lookup(mq, oblock);
