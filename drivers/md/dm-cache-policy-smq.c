@@ -333,8 +333,7 @@ static void q_push_sentinel(struct queue *q, struct entry *elt)
 	ilist_add_tail(q->ix, q->qs + elt->level, elt);
 }
 
-// FIXME: rename q_del
-static void q_remove(struct queue *q, struct entry *elt)
+static void q_del(struct queue *q, struct entry *elt)
 {
 	ilist_del(q->ix, q->qs + elt->level, elt);
 	if (!is_sentinel(q->ix, elt))
@@ -369,7 +368,7 @@ static struct entry *q_pop(struct queue *q)
 	struct entry *elt = q_peek(q, true);
 
 	if (elt)
-		q_remove(q, elt);
+		q_del(q, elt);
 
 	return elt;
 }
@@ -382,7 +381,7 @@ static struct entry *q_pop_old(struct queue *q)
 	struct entry *elt = q_peek(q, false);
 
 	if (elt)
-		q_remove(q, elt);
+		q_del(q, elt);
 
 	return elt;
 }
@@ -398,7 +397,7 @@ static struct entry *pop_from(struct queue *q, unsigned level)
 	for (; level < q->nr_levels; level++)
 		for (e = head_obj(q->ix, q->qs + level); e; e = next_obj(q->ix, e))
 			if (!is_sentinel(q->ix, e)) {
-				q_remove(q, e);
+				q_del(q, e);
 				return e;
 			}
 
@@ -411,7 +410,7 @@ static struct entry *pop_tail(struct queue *q, unsigned level)
 
 	for (e = tail_obj(q->ix, q->qs + level); e; e = prev_obj(q->ix, e))
 		if (!is_sentinel(q->ix, e)) {
-			q_remove(q, e);
+			q_del(q, e);
 			return e;
 		}
 
@@ -514,12 +513,12 @@ static void q_requeue(struct queue *q, struct entry *e, bool up_level)
 {
 	struct entry *demote_e;
 
-	q_remove(q, e);
+	q_del(q, e);
 
 	if (up_level && (e->level < q->nr_levels - 1u)) {
 		demote_e = head_obj(q->ix, q->qs + e->level + 1u);
 		if (demote_e) {
-			q_remove(q, demote_e);
+			q_del(q, demote_e);
 			demote_e->level--;
 			q_push(q, demote_e);
 		}
@@ -912,7 +911,7 @@ static void update_writeback_sentinels(struct mq_policy *mq)
 	if (time_after(jiffies, mq->next_writeback)) {
 		for (level = 0; level < mq->cache_dirty.nr_levels; level++) {
 			sentinel = writeback_sentinel(mq, level);
-			q_remove(&mq->cache_dirty, sentinel);
+			q_del(&mq->cache_dirty, sentinel);
 			q_push_sentinel(&mq->cache_dirty, sentinel);
 		}
 
@@ -963,7 +962,7 @@ static void push(struct mq_policy *mq, struct entry *e)
  */
 static void del(struct mq_policy *mq, struct entry *e)
 {
-	q_remove(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
+	q_del(e->dirty ? &mq->cache_dirty : &mq->cache_clean, e);
 	hash_remove(e);
 }
 
