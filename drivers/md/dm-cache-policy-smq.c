@@ -326,7 +326,7 @@ static void q_del(struct queue *q, struct entry *elt)
 /*
  * Return the oldest entry of the lowest populated level.
  */
-static struct entry *q_peek(struct queue *q, bool can_cross_sentry)
+static struct entry *q_peek(struct queue *q, bool can_cross_sentinel)
 {
 	unsigned level;
 	struct entry *elt;
@@ -334,7 +334,7 @@ static struct entry *q_peek(struct queue *q, bool can_cross_sentry)
 	for (level = 0; level < q->nr_levels; level++)
 		for (elt = head_obj(q->ix, q->qs + level); elt; elt = next_obj(q->ix, elt)) {
 			if (is_sentinel(q->ix, elt)) {
-				if (can_cross_sentry)
+				if (can_cross_sentinel)
 					continue;
 				else
 					break;
