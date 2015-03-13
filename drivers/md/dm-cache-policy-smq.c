@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Red Hat. All rights reserved.
+ * Copyright (C) 2015 Red Hat. All rights reserved.
  *
  * This file is released under the GPL.
  */
@@ -11,21 +11,19 @@
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache-policy-mq"
 
 /*----------------------------------------------------------------*/
 
+// FIXME: duplicate code with main target
+
 static unsigned next_power(unsigned n, unsigned min)
 {
 	return roundup_pow_of_two(max(n, min));
 }
 
-/*----------------------------------------------------------------*/
-
-// FIXME: duplicate code with main target
 static size_t bitset_size_in_bytes(unsigned nr_entries)
 {
 	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
@@ -53,9 +51,8 @@ static void free_bitset(unsigned long *bits)
 struct entry {
 	unsigned prev:28;
 	unsigned next:28;
-	unsigned level:6;
+	unsigned level:7;
 	bool dirty:1;
-	bool sentinel:1;
 
 	struct hlist_node hlist; /* FIXME: replace with an index */
 	dm_oblock_t oblock;
@@ -245,14 +242,14 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
  * entries to the back of any of the levels.  Think of it as a partially
  * sorted queue.
  */
-#define NR_HOTSPOT_LEVELS 16u
+#define NR_HOTSPOT_LEVELS 64u
 #define NR_CACHE_LEVELS 64u
 #define MAX_LEVELS 64u
 
-/* two writeback sentinels per level */
-#define NR_SENTINELS (NR_CACHE_LEVELS * 2)
+/* two writeback sentinels per level per cache queue*/
+#define NR_SENTINELS (NR_CACHE_LEVELS * 4u)
 
-#define WRITEBACK_PERIOD (5 * HZ)
+#define WRITEBACK_PERIOD (5 * 60  * HZ)
 
 struct queue {
 	struct indexer *ix;
@@ -458,10 +455,8 @@ static unsigned q_autotune_period(struct queue *q)
 
 	unsigned hit_ratio, alpha_fp;
 
-	if (!q->autotune_hits) {
-		pr_alert("min_period = %u\n", min_period);
+	if (!q->autotune_hits)
 		return min_period;
-	}
 
 	else {
 		hit_ratio = (q->autotune_hits << FP_SHIFT) / (q->autotune_hits + q->autotune_misses);
@@ -470,8 +465,6 @@ static unsigned q_autotune_period(struct queue *q)
 			return min_period;
 
 		alpha_fp = ((hit_ratio - low_hit_ratio) << FP_SHIFT) / (high_hit_ratio - low_hit_ratio);
-
-		pr_alert("hit_ratio = %u, alpha_fp = %u\n", hit_ratio, alpha_fp);
 
 		return ramp(min_period, max_period, alpha_fp);
 	}
@@ -489,8 +482,9 @@ static void q_reset_autotune(struct queue *q)
 static void q_adjust_period(struct queue *q)
 {
 	q->generation_period = q_autotune_period(q);
-	pr_alert("hits = %u, misses = %u, adjustment = %u\n",
-		 q->autotune_hits, q->autotune_misses, q->generation_period);
+
+//	pr_alert("hits = %u, misses = %u, adjustment = %u\n",
+//		 q->autotune_hits, q->autotune_misses, q->generation_period);
 
 	q_reset_autotune(q);
 }
@@ -888,25 +882,33 @@ static void hash_remove(struct entry *e)
 
 /*----------------------------------------------------------------*/
 
-static struct entry *writeback_sentinel(struct mq_policy *mq, unsigned level)
+static struct entry *writeback_sentinel(struct mq_policy *mq, unsigned level, bool dirty)
 {
+	unsigned base = dirty ? NR_CACHE_LEVELS * 2 : 0;
+
 	if (mq->current_writeback_sentinels)
-		return mq->pool.cache_sentinels + level;
+		return mq->pool.cache_sentinels + base + level;
 	else
-		return mq->pool.cache_sentinels + NR_CACHE_LEVELS + level;
+		return mq->pool.cache_sentinels + base + NR_CACHE_LEVELS + level;
 }
 
-static void update_writeback_sentinels(struct mq_policy *mq)
+static void __update_writeback_sentinels(struct mq_policy *mq, struct queue *q, bool dirty)
 {
 	unsigned level;
 	struct entry *sentinel;
 
+	for (level = 0; level < q->nr_levels; level++) {
+		sentinel = writeback_sentinel(mq, level, dirty);
+		q_del(q, sentinel);
+		q_push_sentinel(q, sentinel);
+	}
+}
+
+static void update_writeback_sentinels(struct mq_policy *mq)
+{
 	if (time_after(jiffies, mq->next_writeback)) {
-		for (level = 0; level < mq->dirty.nr_levels; level++) {
-			sentinel = writeback_sentinel(mq, level);
-			q_del(&mq->dirty, sentinel);
-			q_push_sentinel(&mq->dirty, sentinel);
-		}
+		__update_writeback_sentinels(mq, &mq->dirty, true);
+		__update_writeback_sentinels(mq, &mq->clean, false);
 
 		mq->next_writeback = jiffies + WRITEBACK_PERIOD;
 		mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
@@ -923,17 +925,25 @@ static void writeback_sentinels_init(struct mq_policy *mq)
 	mq->next_writeback = jiffies + WRITEBACK_PERIOD;
 
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
-		sentinel = writeback_sentinel(mq, level);
+		sentinel = writeback_sentinel(mq, level, true);
 		sentinel->level = level;
 		q_push_sentinel(&mq->dirty, sentinel);
+
+		sentinel = writeback_sentinel(mq, level, false);
+		sentinel->level = level;
+		q_push_sentinel(&mq->clean, sentinel);
 	}
 
 	mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
 
 	for (level = 0; level < NR_CACHE_LEVELS; level++) {
-		sentinel = writeback_sentinel(mq, level);
+		sentinel = writeback_sentinel(mq, level, true);
 		sentinel->level = level;
 		q_push_sentinel(&mq->dirty, sentinel);
+
+		sentinel = writeback_sentinel(mq, level, false);
+		sentinel->level = level;
+		q_push_sentinel(&mq->clean, sentinel);
 	}
 }
 
@@ -1011,7 +1021,7 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 
 static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 {
-	struct entry *demoted = pop(mq, &mq->clean);
+	struct entry *demoted = pop_old(mq, &mq->clean);
 	if (!demoted)
 		/*
 		 * We could get a block from mq->dirty, but that
@@ -1037,15 +1047,14 @@ static unsigned to_hotspot_block(struct mq_policy *mq, sector_t s)
 static bool should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
 			   bool fast_promote)
 {
-	/* FIXME: hard coded thresholds */
 	if (bio_data_dir(bio) == WRITE) {
-		if (fast_promote && !epool_empty(&mq->pool))
+		if (!epool_empty(&mq->pool) && fast_promote)
 			return true;
 
-		return hs_e->level > mq->write_promote_level;
+		return hs_e->level >= mq->write_promote_level;
 
 	} else
-		return hs_e->level > mq->read_promote_level;
+		return hs_e->level >= mq->read_promote_level;
 }
 
 static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
@@ -1077,22 +1086,39 @@ static void update_promote_levels(struct mq_policy *mq)
 	unsigned confidence = (mq->hotspot.autotune_hits << FP_SHIFT) /
 		(mq->hotspot.autotune_hits + mq->hotspot.autotune_misses);
 
+	unsigned cache_blocks_per_hotspot = mq->hotspot_block_size /
+		(unsigned) mq->cache_block_size;
+
+	unsigned nr_hotspots = ((unsigned) from_cblock(mq->cache_size)) /
+		cache_blocks_per_hotspot;
+
+	unsigned hotspots_per_level, threshold_level;
+
 	/*
-	 * The higher the confidence, the more levels we want to promote.
+	 * We add a little fudge factor because not all of a hotspot will
+	 * be neccessarily be hot/promoted.
 	 */
-	if (confidence > (1u << (FP_SHIFT - 1u))) /* 0.5 */
-		mq->read_promote_level = NR_CACHE_LEVELS - 1u;
+	// FIXME: fix comment
+	nr_hotspots = nr_hotspots / 2u;
 
-#if 0
-	else if (confidence > (1u << (FP_SHIFT - 2u))) /* 0.25 */
-		mq->read_promote_level = NR_CACHE_LEVELS - 1u;
-#endif
+	hotspots_per_level = mq->hotspot.nr_elts / mq->hotspot.nr_levels;
+	threshold_level = max(1u, nr_hotspots / hotspots_per_level);
 
-	else
-		/* do not promote */
-		mq->read_promote_level = NR_CACHE_LEVELS;
+	/*
+	 * If there are unused cache entries then we want to be really
+	 * eager to promote.
+	 */
+	if (!epool_empty(&mq->pool))
+		threshold_level = NR_HOTSPOT_LEVELS;
 
-	mq->write_promote_level = mq->read_promote_level;
+	else if (confidence < (1u << (FP_SHIFT - 3u))) /* 0.125 */
+		threshold_level = 0u;
+
+	else if (confidence < (1u << (FP_SHIFT - 2u))) /* 0.25 */
+		threshold_level /= 2u;
+
+	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
+	mq->write_promote_level = mq->read_promote_level + 2u;
 }
 
 /*
@@ -1358,7 +1384,7 @@ static int mq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
 	return r;
 }
 
-#define CLEAN_TARGET_PERCENTAGE 25
+#define CLEAN_TARGET_PERCENTAGE 25u
 
 static bool clean_target_met(struct mq_policy *mq)
 {
@@ -1367,7 +1393,7 @@ static bool clean_target_met(struct mq_policy *mq)
 	 * size of the clean queue.
 	 */
 	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->dirty);
-	unsigned target = from_cblock(mq->cache_size) * CLEAN_TARGET_PERCENTAGE / 100;
+	unsigned target = from_cblock(mq->cache_size) * CLEAN_TARGET_PERCENTAGE / 100u;
 
 	return nr_clean >= target;
 }
@@ -1377,10 +1403,8 @@ static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 {
 	struct entry *e = pop_old(mq, &mq->dirty);
 
-	if (!e && !clean_target_met(mq)) {
-		pr_alert("poping new because clean target not met\n");
+	if (!e && !clean_target_met(mq))
 		e = pop(mq, &mq->dirty);
-	}
 
 	if (!e)
 		return -ENODATA;
