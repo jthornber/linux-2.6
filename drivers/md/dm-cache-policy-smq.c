@@ -265,7 +265,7 @@ static void ilist_check_present(struct indexer *ix, struct ilist *l, struct entr
 #define NR_SENTINELS (NR_CACHE_LEVELS * 4u)
 
 // FIXME: separate writeback period and demote period?
-#define WRITEBACK_PERIOD (5 * 60  * HZ)
+#define WRITEBACK_PERIOD (60  * HZ)
 
 struct queue {
 	struct indexer *ix;
@@ -319,6 +319,14 @@ static void q_push(struct queue *q, struct entry *elt)
 	if (!is_sentinel(q->ix, elt))
 		q->nr_elts++;
 	ilist_add_tail(q->ix, q->qs + elt->level, elt);
+}
+
+static void q_push_before(struct queue *q, struct entry *old, struct entry *elt)
+{
+	if (!is_sentinel(q->ix, elt))
+		q->nr_elts++;
+
+	ilist_add_before(q->ix, q->qs + elt->level, old, elt);
 }
 
 static void q_push_sentinel(struct queue *q, struct entry *elt)
@@ -520,11 +528,40 @@ static void q_requeue(struct queue *q, struct entry *e, bool up_level)
 	q_del(q, e);
 
 	if (up_level && (e->level < q->nr_levels - 1u)) {
-		demote_e = head_obj(q->ix, q->qs + e->level + 1u);
-		if (demote_e) {
+		for (demote_e = head_obj(q->ix, q->qs + e->level + 1u); demote_e;
+		     demote_e = next_obj(q->ix, demote_e)) {
+			if (is_sentinel(q->ix, demote_e))
+				continue;
+
 			q_del(q, demote_e);
 			demote_e->level--;
 			q_push(q, demote_e);
+			break;
+		}
+
+		e->level++;
+	}
+
+	q_push(q, e);
+}
+
+// FIXME: refactor
+static void q_requeue_before(struct queue *q, struct entry *demote_dest, struct entry *e)
+{
+	struct entry *demote_e;
+
+	q_del(q, e);
+
+	if (e->level < q->nr_levels - 1u) {
+		for (demote_e = head_obj(q->ix, q->qs + e->level + 1u); demote_e;
+		     demote_e = next_obj(q->ix, demote_e)) {
+			if (is_sentinel(q->ix, demote_e))
+				continue;
+
+			q_del(q, demote_e);
+			demote_e->level--;
+			q_push_before(q, demote_dest, demote_e);
+			break;
 		}
 
 		e->level++;
@@ -987,10 +1024,8 @@ static void push_temporary(struct mq_policy *mq, struct entry *e)
 	 * Punch this into the queue just in front of the writeback
 	 * sentinel, to ensure it's cleaned straight away.
 	 */
-	// FIXME: factor out a q_* fn
 	sentinel = writeback_sentinel(mq, 0, e->dirty);
-	ilist_add_before(q->ix, q->qs, sentinel, e);
-	q->nr_elts++;
+	q_push_before(q, sentinel, e);
 }
 
 /*
@@ -1028,11 +1063,19 @@ static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
  */
 static void requeue(struct mq_policy *mq, struct entry *e)
 {
+	struct entry *sentinel;
+
 	if (e->dirty) {
 		q_update_autotune(&mq->dirty, e);
-		q_requeue(&mq->dirty, e,
-			  !test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
-					    mq->cache_hit_bits));
+
+		// FIXME: refactor
+		if (test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
+				     mq->cache_hit_bits))
+			q_requeue(&mq->dirty, e, false);
+		else {
+			sentinel = writeback_sentinel(mq, e->level, true);
+			q_requeue_before(&mq->dirty, sentinel, e);
+		}
 
 		/*
 		 * This completes the period for both clean and dirty
@@ -1046,9 +1089,13 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 		}
 	} else {
 		q_update_autotune(&mq->clean, e);
-		q_requeue(&mq->clean, e,
-			  !test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
-					    mq->cache_hit_bits));
+		if (test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
+				     mq->cache_hit_bits))
+			q_requeue(&mq->clean, e, false);
+		else {
+			sentinel = writeback_sentinel(mq, e->level, false);
+			q_requeue_before(&mq->clean, sentinel, e);
+		}
 	}
 }
 
