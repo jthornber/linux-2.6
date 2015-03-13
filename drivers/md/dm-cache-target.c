@@ -37,30 +37,6 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
 
 /*----------------------------------------------------------------*/
 
-static size_t bitset_size_in_bytes(unsigned nr_entries)
-{
-	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
-}
-
-static unsigned long *alloc_bitset(unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	return vzalloc(s);
-}
-
-static void clear_bitset(void *bitset, unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, 0, s);
-}
-
-static void free_bitset(unsigned long *bits)
-{
-	vfree(bits);
-}
-
-/*----------------------------------------------------------------*/
-
 /*
  * There are a couple of places where we let a bio run, but want to do some
  * work before calling its endio function.  We do this by temporarily

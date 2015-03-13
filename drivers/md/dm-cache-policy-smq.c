@@ -5,6 +5,7 @@
  */
 
 #include "dm-cache-policy.h"
+#include "dm-cache-policy-internal.h"
 #include "dm.h"
 
 #include <linux/hash.h>
@@ -14,37 +15,6 @@
 #include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache-policy-mq"
-
-/*----------------------------------------------------------------*/
-
-// FIXME: duplicate code with main target
-
-static unsigned next_power(unsigned n, unsigned min)
-{
-	return roundup_pow_of_two(max(n, min));
-}
-
-static size_t bitset_size_in_bytes(unsigned nr_entries)
-{
-	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
-}
-
-static unsigned long *alloc_bitset(unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	return vzalloc(s);
-}
-
-static void clear_bitset(void *bitset, unsigned nr_entries)
-{
-	size_t s = bitset_size_in_bytes(nr_entries);
-	memset(bitset, 0, s);
-}
-
-static void free_bitset(unsigned long *bits)
-{
-	vfree(bits);
-}
 
 /*----------------------------------------------------------------*/
 
@@ -249,6 +219,7 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
 /* two writeback sentinels per level per cache queue*/
 #define NR_SENTINELS (NR_CACHE_LEVELS * 4u)
 
+// FIXME: separate writeback period and demote period?
 #define WRITEBACK_PERIOD (5 * 60  * HZ)
 
 struct queue {
@@ -1585,9 +1556,9 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	q_init(&mq->clean, &mq->pool.ix, NR_CACHE_LEVELS);
 	q_init(&mq->dirty, &mq->pool.ix, NR_CACHE_LEVELS);
 
-	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024U);
+	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024u);
 
-	mq->nr_buckets = next_power(from_cblock(cache_size) / 2, 16);
+	mq->nr_buckets = roundup_pow_of_two(max(from_cblock(cache_size) / 2u, 16u));
 	mq->hash_bits = ffs(mq->nr_buckets) - 1;
 	mq->table = vzalloc(sizeof(*mq->table) * mq->nr_buckets);
 	if (!mq->table)
