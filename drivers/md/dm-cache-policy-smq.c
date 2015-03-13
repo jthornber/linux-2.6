@@ -134,6 +134,24 @@ static void ilist_add_tail(struct indexer *ix, struct ilist *l, struct entry *el
 		l->nr_elts++;
 }
 
+static void ilist_add_before(struct indexer *ix, struct ilist *l,
+			     struct entry *old, struct entry *elt)
+{
+	struct entry *prev = prev_obj(ix, old);
+
+	if (!prev)
+		ilist_add_head(ix, l, elt);
+
+	else {
+		elt->prev = old->prev;
+		elt->next = to_index(ix, old);
+		prev->next = old->prev = to_index(ix, elt);
+
+		if (!is_sentinel(ix, elt))
+			l->nr_elts++;
+	}
+}
+
 static void ilist_del(struct indexer *ix, struct ilist *l, struct entry *elt)
 {
 	struct entry *prev = prev_obj(ix, elt);
@@ -184,7 +202,8 @@ static void ilist_check(struct indexer *ix, struct ilist *l, unsigned level)
 		BUG_ON(elt->prev != prev_index);
 		prev_index = to_index(ix, elt);
 
-		count++;
+		if (!is_sentinel(ix, elt))
+			count++;
 	}
 
 	BUG_ON(l->tail != prev_index);
@@ -202,6 +221,32 @@ static void ilist_check_not_present(struct indexer *ix, struct ilist *l, struct 
 
 	for (elt = tail_obj(ix, l); elt; elt = prev_obj(ix, elt))
 		BUG_ON(elt == e);
+#endif
+}
+
+static void ilist_check_present(struct indexer *ix, struct ilist *l, struct entry *e)
+{
+#ifdef ILIST_DEBUG
+	struct entry *elt;
+	bool found;
+
+	found = false;
+	for (elt = head_obj(ix, l); elt; elt = next_obj(ix, elt))
+		if (elt == e) {
+			found = true;
+			break;
+		}
+
+	BUG_ON(!found);
+
+	found = false;
+	for (elt = tail_obj(ix, l); elt; elt = prev_obj(ix, elt))
+		if (elt == e) {
+			found = true;
+			break;
+		}
+
+	BUG_ON(!found);
 #endif
 }
 
@@ -338,9 +383,9 @@ static struct entry *q_pop_old(struct queue *q)
 }
 
 /*
- * Both the next two functions assume there is a non-sentinel entry to pop.
- * They're only used by redistribute, so we know this is true.  It also
- * doesn't adjust the q->nr_elts count.
+ * This function assumes there is a non-sentinel entry to pop.  It's only
+ * used by redistribute, so we know this is true.  It also doesn't adjust
+ * the q->nr_elts count.
  */
 static struct entry *__redist_pop_from(struct queue *q, unsigned level)
 {
@@ -931,6 +976,23 @@ static void push(struct mq_policy *mq, struct entry *e)
 	q_push(e->dirty ? &mq->dirty : &mq->clean, e);
 }
 
+static void push_temporary(struct mq_policy *mq, struct entry *e)
+{
+	struct queue * q = e->dirty ? &mq->dirty : &mq->clean;
+	struct entry *sentinel;
+
+	hash_insert(mq, e);
+
+	/*
+	 * Punch this into the queue just in front of the writeback
+	 * sentinel, to ensure it's cleaned straight away.
+	 */
+	// FIXME: factor out a q_* fn
+	sentinel = writeback_sentinel(mq, 0, e->dirty);
+	ilist_add_before(q->ix, q->qs, sentinel, e);
+	q->nr_elts++;
+}
+
 /*
  * Removes an entry from cache.  Removes from the hash table.
  */
@@ -1015,21 +1077,32 @@ static unsigned to_hotspot_block(struct mq_policy *mq, sector_t s)
 	return (unsigned) s;
 }
 
-static bool should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
-			   bool fast_promote)
+enum promote_result {
+	PROMOTE_NOT,
+	PROMOTE_TEMPORARY,
+	PROMOTE_PERMANENT
+};
+
+static enum promote_result maybe_promote(bool promote)
+{
+	return promote ? PROMOTE_PERMANENT : PROMOTE_NOT;
+}
+
+static enum promote_result should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
+					  bool fast_promote)
 {
 	if (bio_data_dir(bio) == WRITE) {
 		if (!epool_empty(&mq->pool) && fast_promote)
-			return true;
+			return PROMOTE_TEMPORARY;
 
-		return hs_e->level >= mq->write_promote_level;
+		return maybe_promote(hs_e->level >= mq->write_promote_level);
 
 	} else
-		return hs_e->level >= mq->read_promote_level;
+		return maybe_promote(hs_e->level >= mq->read_promote_level);
 }
 
 static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
-			    struct policy_result *result)
+			    struct policy_result *result, enum promote_result pr)
 {
 	int r;
 	struct entry *e;
@@ -1048,7 +1121,12 @@ static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 	e = alloc_entry(&mq->pool);
 	BUG_ON(!e);
 	e->oblock = oblock;
-	push(mq, e);
+
+	if (pr == PROMOTE_TEMPORARY)
+		push_temporary(mq, e);
+	else
+		push(mq, e);
+
 	result->cblock = infer_cblock(&mq->pool, e);
 }
 
@@ -1102,6 +1180,7 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 {
 	struct entry *e, *hs_e;
 	unsigned hs_block = to_hotspot_block(mq, bio->bi_iter.bi_sector);
+	enum promote_result pr;
 
 	hs_e = hotspot_entry(&mq->pool, hs_block);
 
@@ -1124,16 +1203,18 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 		return 0;
 	}
 
-	if (should_promote(mq, hs_e, bio, fast_promote)) {
+	pr = should_promote(mq, hs_e, bio, fast_promote);
+	if (pr == PROMOTE_NOT)
+		result->op = POLICY_MISS;
+
+	else {
 		if (!can_migrate) {
 			result->op = POLICY_MISS;
 			return -EWOULDBLOCK;
 		}
 
-		insert_in_cache(mq, oblock, result);
-
-	} else
-		result->op = POLICY_MISS;
+		insert_in_cache(mq, oblock, result, pr);
+	}
 
 	return 0;
 }
