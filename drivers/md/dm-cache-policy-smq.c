@@ -18,11 +18,14 @@
 
 /*----------------------------------------------------------------*/
 
+#define NR_HIT_BITS 2
+
 struct entry {
 	unsigned hash_next:28;
 	unsigned prev:28;
 	unsigned next:28;
 	unsigned level:7;
+	unsigned hits:NR_HIT_BITS;
 	bool dirty:1;
 	bool allocated:1;
 
@@ -271,7 +274,7 @@ static void ilist_check_present(struct indexer *ix, struct ilist *l, struct entr
 #define NR_SENTINELS (NR_CACHE_LEVELS * 4u)
 
 // FIXME: separate writeback period and demote period?
-#define WRITEBACK_PERIOD (60  * HZ)
+#define WRITEBACK_PERIOD (2 * 60  * HZ)
 
 struct queue {
 	struct indexer *ix;
@@ -585,7 +588,7 @@ static bool q_period_complete(struct queue *q)
 static void q_end_period(struct queue *q)
 {
 	q_redistribute(q);
-	q_adjust_period(q);
+	q_adjust_period(q);	/* FIXME: still needed? */
 }
 
 /*----------------------------------------------------------------*/
@@ -624,6 +627,7 @@ static int epool_init(struct entry_pool *ep, unsigned nr_cache_entries,
 	unsigned i;
 	unsigned nr_entries = nr_cache_entries + nr_hotspot_entries + NR_SENTINELS;
 
+	pr_alert("size of entry = %lu\n", sizeof(struct entry));
 	pr_alert("nr_cache_entries = %u, nr_hotspot_entries = %u, nr_entries = %u\n",
 		 nr_cache_entries, nr_hotspot_entries, nr_entries);
 
@@ -702,6 +706,7 @@ static struct entry *alloc_particular_entry(struct entry_pool *ep, dm_cblock_t c
 static void free_entry(struct entry_pool *ep, struct entry *e)
 {
 	BUG_ON(!ep->nr_allocated);
+	memset(e, 0, sizeof(*e));
 	ep->nr_allocated--;
 	e->hash_next = INDEXER_NULL;
 	e->allocated = false;
@@ -812,6 +817,12 @@ struct mq_policy {
 
 	unsigned write_promote_level;
 	unsigned read_promote_level;
+
+	unsigned nr_demotions;
+	unsigned nr_hit_demotions;
+
+	unsigned long next_hotspot_period;
+	unsigned long next_cache_period;
 };
 
 #define DEFAULT_DISCARD_PROMOTE_ADJUSTMENT 1
@@ -821,17 +832,20 @@ struct mq_policy {
 
 /*----------------------------------------------------------------*/
 
-static bool good_hotspot_block_size(sector_t origin_size, sector_t bs)
+static bool good_hotspot_block_size(sector_t origin_size, sector_t cache_block_size, sector_t bs)
 {
+	if (bs >= cache_block_size * 16u)
+		return true;
+
 	do_div(origin_size, bs);
-	return origin_size <= 8192;
+	return origin_size <= 16384;
 }
 
 static void init_hotspot_fields(struct mq_policy *mq, sector_t origin_size, sector_t cache_block_size)
 {
 	sector_t bs = cache_block_size;
 
-	while (!good_hotspot_block_size(origin_size, bs))
+	while (!good_hotspot_block_size(origin_size, cache_block_size, bs))
 		bs *= 2u;
 
 	mq->hotspot_block_size = bs;
@@ -1107,6 +1121,9 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 {
 	struct entry *sentinel;
 
+	if (e->hits != ((1 << NR_HIT_BITS) - 1u))
+		e->hits++;
+
 	if (e->dirty) {
 		q_update_autotune(&mq->dirty, e);
 
@@ -1118,17 +1135,6 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 			sentinel = writeback_sentinel(mq, e->level, true);
 			q_requeue_before(&mq->dirty, sentinel, e);
 		}
-
-		/*
-		 * This completes the period for both clean and dirty
-		 * queues.
-		 * FIXME: what if there's no dirty data?  Use counts from both queues.
-		 */
-		if (q_period_complete(&mq->dirty)) {
-			clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
-			q_end_period(&mq->dirty);
-			q_end_period(&mq->clean);
-		}
 	} else {
 		q_update_autotune(&mq->clean, e);
 		if (test_and_set_bit(from_cblock(infer_cblock(&mq->pool, e)),
@@ -1138,6 +1144,35 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 			sentinel = writeback_sentinel(mq, e->level, false);
 			q_requeue_before(&mq->clean, sentinel, e);
 		}
+	}
+}
+
+#define HOTSPOT_UPDATE_PERIOD (HZ)
+#define CACHE_UPDATE_PERIOD (10u * HZ)
+
+static void update_promote_levels(struct mq_policy *mq);
+
+static void end_hotspot_period(struct mq_policy *mq)
+{
+	update_promote_levels(mq);
+	clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
+	q_end_period(&mq->hotspot);
+	mq->next_hotspot_period = jiffies + HOTSPOT_UPDATE_PERIOD;
+}
+
+// FIXME: bad name
+static void book_keeping(struct mq_policy *mq)
+{
+	if (time_after(jiffies, mq->next_cache_period)) {
+		pr_alert("hit demotions %u/%u\n", mq->nr_hit_demotions, mq->nr_demotions);
+		//mq->nr_hit_demotions = mq->nr_demotions = 0u;
+		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
+
+		q_end_period(&mq->dirty);
+		q_end_period(&mq->clean);
+
+		mq->next_cache_period = jiffies + CACHE_UPDATE_PERIOD;
+		display_heatmap(mq);
 	}
 }
 
@@ -1155,6 +1190,10 @@ static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 		return -ENOSPC;
 
 	*oblock = demoted->oblock;
+	mq->nr_demotions++;
+	if (demoted->hits == ((1 << NR_HIT_BITS) - 1u))
+		mq->nr_hit_demotions++;
+
 	free_entry(&mq->pool, demoted);
 
 	return 0;
@@ -1221,6 +1260,13 @@ static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 
 static void update_promote_levels(struct mq_policy *mq)
 {
+	/*
+	 * There are times when we don't have any confidence in the hotspot
+	 * queue.  Such as when a fresh cache is created and the blocks
+	 * have been spread out across the levels.  We detect this by
+	 * seeing how often a lookup is in the top levels of the hotspot
+	 * queue.
+	 */
 	unsigned confidence = (mq->hotspot.autotune_hits << FP_SHIFT) /
 		(mq->hotspot.autotune_hits + mq->hotspot.autotune_misses);
 
@@ -1276,13 +1322,6 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	q_update_autotune(&mq->hotspot, hs_e);
 	q_requeue(&mq->hotspot, hs_e,
 		  !test_and_set_bit(hs_block, mq->hotspot_hit_bits));
-
-	if (q_period_complete(&mq->hotspot)) {
-		update_promote_levels(mq);
-		clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
-		q_end_period(&mq->hotspot);
-		//display_heatmap(mq);
-	}
 
 	e = hash_lookup(mq, oblock);
 	if (e) {
@@ -1343,8 +1382,10 @@ static void copy_tick(struct mq_policy *mq)
 	tick = mq->tick_protected;
 	if (tick != mq->tick) {
 		update_writeback_sentinels(mq);
+		end_hotspot_period(mq);
 		mq->tick = tick;
 	}
+	book_keeping(mq);
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
@@ -1525,26 +1566,38 @@ static int mq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
 	return r;
 }
 
-#define CLEAN_TARGET_PERCENTAGE 25u
 
-static bool clean_target_met(struct mq_policy *mq)
+/*
+ * Percentages.
+ */
+#define CLEAN_TARGET_CRITICAL 5u
+#define CLEAN_TARGET 25u
+
+static bool clean_target_met(struct mq_policy *mq, bool critical)
 {
+	unsigned percentage = critical ? CLEAN_TARGET_CRITICAL : CLEAN_TARGET;
+
 	/*
 	 * Cache entries may not be populated.  So we're cannot rely on the
 	 * size of the clean queue.
 	 */
 	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->dirty);
-	unsigned target = from_cblock(mq->cache_size) * CLEAN_TARGET_PERCENTAGE / 100u;
+	unsigned target = from_cblock(mq->cache_size) * percentage / 100u;
 
 	return nr_clean >= target;
 }
 
 static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
-			      dm_cblock_t *cblock)
+			       dm_cblock_t *cblock, bool critical_only)
 {
-	struct entry *e = pop_old(mq, &mq->dirty);
+	struct entry *e;
+	bool target_met = clean_target_met(mq, critical_only);
 
-	if (!e && !clean_target_met(mq))
+	if (critical_only && target_met)
+		return -ENODATA;
+
+	e = pop_old(mq, &mq->dirty);
+	if (!e && !target_met)
 		e = pop(mq, &mq->dirty);
 
 	if (!e)
@@ -1559,13 +1612,13 @@ static int __mq_writeback_work(struct mq_policy *mq, dm_oblock_t *oblock,
 }
 
 static int mq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
-			     dm_cblock_t *cblock)
+			     dm_cblock_t *cblock, bool critical_only)
 {
 	int r;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	mutex_lock(&mq->lock);
-	r = __mq_writeback_work(mq, oblock, cblock);
+	r = __mq_writeback_work(mq, oblock, cblock, critical_only);
 	mutex_unlock(&mq->lock);
 
 	return r;

@@ -37,6 +37,158 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
 
 /*----------------------------------------------------------------*/
 
+#define IOT_RESOLUTION 4
+
+struct io_tracker {
+	spinlock_t lock;
+	unsigned long window;
+
+	/*
+	 * Sectors of in-flight IO.
+	 */
+	sector_t in_flight;
+
+	/*
+	 * The time, in jiffies, when this device became idle (if it is
+	 * indeed idle).
+	 */
+	unsigned long idle_time;
+
+	/*
+	 * In sectors per second.
+	 */
+	sector_t average_io;
+	sector_t peak_io;
+
+	unsigned current_slot;
+	unsigned long last_update_time;
+	sector_t io_completed[IOT_RESOLUTION];
+};
+
+static void iot_init(struct io_tracker *iot, unsigned long window)
+{
+	unsigned i;
+
+	spin_lock_init(&iot->lock);
+	iot->window = window;
+	iot->in_flight = 0ul;
+	iot->idle_time = 0ul;
+	iot->average_io = 0ul;
+	iot->current_slot = 0u;
+	iot->last_update_time = jiffies;
+
+	for (i = 0; i < IOT_RESOLUTION; i++)
+		iot->io_completed[i] = 0ul;
+}
+
+static bool __iot_idle_for(struct io_tracker *iot, unsigned long jifs)
+{
+	if (iot->in_flight)
+		return false;
+
+	return time_after(jiffies, iot->idle_time + jifs);
+}
+
+static bool iot_idle_for(struct io_tracker *iot, unsigned long jifs)
+{
+	bool r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	r = __iot_idle_for(iot, jifs);
+	spin_unlock_irqrestore(&iot->lock, flags);
+
+	return r;
+}
+
+static void __iot_rollover(struct io_tracker *iot)
+{
+	unsigned i;
+	sector_t total;
+
+	/*
+	 * It's possible we've not been called for more than one rollover
+	 * period.
+	 */
+	while (time_after(jiffies, iot->last_update_time + (iot->window / IOT_RESOLUTION))) {
+		total = 0u;
+
+		for (i = 0; i < IOT_RESOLUTION; i++)
+			total += iot->io_completed[i];
+
+		iot->average_io = total / (iot->window / HZ);
+		iot->peak_io = max(iot->average_io, iot->peak_io);
+
+		iot->current_slot++;
+		if (iot->current_slot >= IOT_RESOLUTION)
+			iot->current_slot = 0u;
+
+		iot->io_completed[iot->current_slot] = 0u;
+
+		iot->last_update_time += iot->window / IOT_RESOLUTION;
+
+		pr_alert("average load = %llu, peak load = %llu\n",
+			 (unsigned long long) iot->average_io,
+			 (unsigned long long) iot->peak_io);
+	}
+}
+
+static sector_t iot_average_load(struct io_tracker *iot)
+{
+	sector_t r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	r = iot->average_io;
+	__iot_rollover(iot);
+	spin_unlock_irqrestore(&iot->lock, flags);
+
+	return r;
+}
+
+static sector_t iot_peak_load(struct io_tracker *iot)
+{
+	sector_t r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	r = iot->peak_io;
+	__iot_rollover(iot);
+	spin_unlock_irqrestore(&iot->lock, flags);
+
+	return r;
+}
+
+static void iot_io_begin(struct io_tracker *iot, sector_t len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	iot->in_flight += len;
+	spin_unlock_irqrestore(&iot->lock, flags);
+}
+
+static void __iot_io_end(struct io_tracker *iot, sector_t len)
+{
+	iot->in_flight -= len;
+	if (!iot->in_flight)
+		iot->idle_time = jiffies;
+
+	iot->io_completed[iot->current_slot] += len;
+
+}
+
+static void iot_io_end(struct io_tracker *iot, sector_t len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	__iot_io_end(iot, len);
+	spin_unlock_irqrestore(&iot->lock, flags);
+}
+
+/*----------------------------------------------------------------*/
+
 /*
  * There are a couple of places where we let a bio run, but want to do some
  * work before calling its endio function.  We do this by temporarily
@@ -263,6 +415,8 @@ struct cache {
 	 */
 	spinlock_t invalidation_lock;
 	struct list_head invalidation_requests;
+
+	struct io_tracker origin_tracker;
 };
 
 struct per_bio_data {
@@ -270,6 +424,7 @@ struct per_bio_data {
 	unsigned req_nr:2;
 	struct dm_deferred_entry *all_io_entry;
 	struct dm_hook_info hook_info;
+	sector_t len;
 
 	/*
 	 * writethrough fields.  These MUST remain at the end of this
@@ -676,6 +831,7 @@ static struct per_bio_data *init_per_bio_data(struct bio *bio, size_t data_size)
 	pb->tick = false;
 	pb->req_nr = dm_bio_get_target_bio_nr(bio);
 	pb->all_io_entry = NULL;
+	pb->len = 0;
 
 	return pb;
 }
@@ -778,12 +934,43 @@ static void inc_ds(struct cache *cache, struct bio *bio,
 	pb->all_io_entry = dm_deferred_entry_inc(cache->all_io_ds);
 }
 
+static bool accountable_bio(struct cache *cache, struct bio *bio)
+{
+	return ((bio->bi_bdev == cache->origin_dev->bdev) &&
+		!(bio->bi_rw & REQ_DISCARD));
+}
+
+static void accounted_begin(struct cache *cache, struct bio *bio)
+{
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	if (accountable_bio(cache, bio)) {
+		pb->len = bio_sectors(bio);
+		iot_io_begin(&cache->origin_tracker, pb->len);
+	}
+}
+
+static void accounted_complete(struct cache *cache, struct bio *bio)
+{
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	iot_io_end(&cache->origin_tracker, pb->len);
+}
+
+static void accounted_request(struct cache *cache, struct bio *bio)
+{
+	accounted_begin(cache, bio);
+	generic_make_request(bio);
+}
+
 static void issue(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
 
 	if (!bio_triggers_commit(cache, bio)) {
-		generic_make_request(bio);
+		accounted_request(cache, bio);
 		return;
 	}
 
@@ -903,7 +1090,8 @@ static void migration_failure(struct dm_cache_migration *mg)
 	if (mg->writeback) {
 		DMWARN_LIMIT("writeback failed; couldn't copy block");
 		set_dirty(cache, mg->old_oblock, mg->cblock);
-		cell_defer(cache, mg->old_ocell, false);
+		if (mg->old_ocell)
+			cell_defer(cache, mg->old_ocell, false);
 
 	} else if (mg->demote) {
 		DMWARN_LIMIT("demotion failed; couldn't copy block");
@@ -930,7 +1118,8 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 
 	if (mg->writeback) {
 		clear_dirty(cache, mg->old_oblock, mg->cblock);
-		cell_defer(cache, mg->old_ocell, false);
+		if (mg->old_ocell)
+			cell_defer(cache, mg->old_ocell, false);
 		free_io_migration(mg);
 		return;
 
@@ -1080,7 +1269,7 @@ static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 	 * No need to inc_ds() here, since the cell will be held for the
 	 * duration of the io.
 	 */
-	generic_make_request(bio);
+	accounted_request(mg->cache, bio);
 }
 
 static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
@@ -1414,6 +1603,11 @@ static bool spare_migration_bandwidth(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
+static bool migrations_in_progress(struct cache *cache)
+{
+	return atomic_read(&cache->nr_io_migrations);
+}
+
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
 {
 	atomic_inc(is_write_io(bio) ?
@@ -1620,7 +1814,7 @@ static void process_deferred_flush_bios(struct cache *cache, bool submit_bios)
 	 * These bios have already been through inc_ds()
 	 */
 	while ((bio = bio_list_pop(&bios)))
-		submit_bios ? generic_make_request(bio) : bio_io_error(bio);
+		submit_bios ? accounted_request(cache, bio) : bio_io_error(bio);
 }
 
 static void process_deferred_writethrough_bios(struct cache *cache)
@@ -1640,7 +1834,7 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 	 * These bios have already been through inc_ds()
 	 */
 	while ((bio = bio_list_pop(&bios)))
-		generic_make_request(bio);
+		accounted_request(cache, bio);
 }
 
 static void writeback_some_dirty_blocks(struct cache *cache)
@@ -1650,6 +1844,10 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 	dm_cblock_t cblock;
 	struct prealloc structs;
 	struct dm_bio_prison_cell *old_ocell;
+	bool busy = iot_idle_for(&cache->origin_tracker, HZ);
+	unsigned queued = 0u;
+
+//	iot_average_load(&cache->origin_tracker);
 
 	memset(&structs, 0, sizeof(structs));
 
@@ -1657,10 +1855,11 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 		if (prealloc_data_structs(cache, &structs))
 			break;
 
-		r = policy_writeback_work(cache->policy, &oblock, &cblock);
+		r = policy_writeback_work(cache->policy, &oblock, &cblock, busy);
 		if (r)
 			break;
 
+		/* FIXME: race with quiesce */
 		r = get_cell(cache, oblock, &structs, &old_ocell);
 		if (r) {
 			policy_set_dirty(cache->policy, oblock);
@@ -1668,9 +1867,15 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 		}
 
 		writeback(cache, &structs, oblock, cblock, old_ocell);
+		queued++;
 	}
 
 	prealloc_free_structs(cache, &structs);
+
+#if 0
+	if (queued)
+		pr_alert("queued %u writebacks\n", queued);
+#endif
 }
 
 /*----------------------------------------------------------------
@@ -2501,6 +2706,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	spin_lock_init(&cache->invalidation_lock);
 	INIT_LIST_HEAD(&cache->invalidation_requests);
 
+	iot_init(&cache->origin_tracker, 10 * HZ);
+
 	*result = cache;
 	return 0;
 
@@ -2688,9 +2895,13 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	struct cache *cache = ti->private;
 
 	r = __cache_map(cache, bio, &cell);
-	if (r == DM_MAPIO_REMAPPED && cell) {
-		inc_ds(cache, bio, cell);
-		cell_defer(cache, cell, false);
+	if (r == DM_MAPIO_REMAPPED) {
+		accounted_begin(cache, bio);
+
+		if (cell) {
+			inc_ds(cache, bio, cell);
+			cell_defer(cache, cell, false);
+		}
 	}
 
 	return r;
@@ -2712,6 +2923,7 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 	}
 
 	check_for_quiesced_migrations(cache, pb);
+	accounted_complete(cache, bio);
 
 	return 0;
 }
