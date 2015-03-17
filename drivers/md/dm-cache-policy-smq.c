@@ -19,12 +19,13 @@
 /*----------------------------------------------------------------*/
 
 struct entry {
+	unsigned hash_next:28;
 	unsigned prev:28;
 	unsigned next:28;
 	unsigned level:7;
 	bool dirty:1;
+	bool allocated:1;
 
-	struct hlist_node hlist; /* FIXME: replace with an index */
 	dm_oblock_t oblock;
 };
 
@@ -100,6 +101,11 @@ static struct entry *next_obj(struct indexer *ix, struct entry *elt)
 static struct entry *prev_obj(struct indexer *ix, struct entry *elt)
 {
 	return to_obj(ix, elt->prev);
+}
+
+static bool ilist_empty(struct ilist *l)
+{
+	return l->head == INDEXER_NULL;
 }
 
 static void ilist_add_head(struct indexer *ix, struct ilist *l, struct entry *elt)
@@ -607,7 +613,7 @@ struct entry_pool {
 	 * Just the cache entries get linked onto the free list.
 	 */
 	unsigned nr_allocated;
-	struct list_head free;
+	struct ilist free;
 
 	struct indexer ix;
 };
@@ -638,14 +644,15 @@ static int epool_init(struct entry_pool *ep, unsigned nr_cache_entries,
 	ep->hotspot_entries = ep->entries + NR_SENTINELS + nr_cache_entries;
 
 	ep->nr_allocated = 0;
-	INIT_LIST_HEAD(&ep->free);
-	for (i = 0; i < nr_cache_entries; i++)
-		list_add((struct list_head *) (ep->cache_entries + i), &ep->free);
+	init_ilist(&ep->free);
 
 	ep->ix.elt_size = sizeof(struct entry);
 	ep->ix.nr_sentinels = NR_SENTINELS;
 	ep->ix.base = (char *)ep->entries;
 	ep->ix.end = (char *)ep->entries_end;
+
+	for (i = 0; i < nr_cache_entries; i++)
+		ilist_add_tail(&ep->ix, &ep->free, ep->cache_entries + i);
 
 	return 0;
 }
@@ -658,31 +665,20 @@ static void epool_exit(struct entry_pool *ep)
 static void init_entry(struct entry *e)
 {
 	memset(e, 0, sizeof(*e));
+	e->hash_next = INDEXER_NULL;
 	e->next = INDEXER_NULL;
 	e->prev = INDEXER_NULL;
-	INIT_HLIST_NODE(&e->hlist);
-}
-
-static struct list_head *list_pop(struct list_head *lh)
-{
-	struct list_head *r = lh->next;
-
-	BUG_ON(!r);
-	list_del_init(r);
-
-	return r;
+	e->allocated = true;
 }
 
 static struct entry *alloc_entry(struct entry_pool *ep)
 {
 	struct entry *e;
 
-	if (list_empty(&ep->free)) {
-		pr_alert("alloc_entry returning NULL\n");
+	if (ilist_empty(&ep->free))
 		return NULL;
-	}
 
-	e = (struct entry *) list_pop(&ep->free);
+	e = ilist_pop_tail(&ep->ix, &ep->free);
 	init_entry(e);
 	ep->nr_allocated++;
 
@@ -707,8 +703,9 @@ static void free_entry(struct entry_pool *ep, struct entry *e)
 {
 	BUG_ON(!ep->nr_allocated);
 	ep->nr_allocated--;
-	INIT_HLIST_NODE(&e->hlist);
-	list_add((struct list_head *) e, &ep->free);
+	e->hash_next = INDEXER_NULL;
+	e->allocated = false;
+	ilist_add_tail(&ep->ix, &ep->free, e);
 }
 
 /*
@@ -717,12 +714,12 @@ static void free_entry(struct entry_pool *ep, struct entry *e)
 static struct entry *epool_find(struct entry_pool *ep, dm_cblock_t cblock)
 {
 	struct entry *e = ep->cache_entries + from_cblock(cblock);
-	return !hlist_unhashed(&e->hlist) ? e : NULL;
+	return e->allocated ? e : NULL;
 }
 
 static bool epool_empty(struct entry_pool *ep)
 {
-	return list_empty(&ep->free);
+	return ilist_empty(&ep->free);
 }
 
 static dm_cblock_t infer_cblock(struct entry_pool *ep, struct entry *e)
@@ -808,7 +805,7 @@ struct mq_policy {
 	 */
 	unsigned nr_buckets;
 	dm_block_t hash_bits;
-	struct hlist_head *table;
+	index_t *table;
 
 	bool current_writeback_sentinels;
 	unsigned long next_writeback;
@@ -902,35 +899,80 @@ static void display_heatmap(struct mq_policy *mq)
 /*----------------------------------------------------------------*/
 
 /*
- * Simple hash table implementation.  Should replace with the standard hash
- * table that's making its way upstream.
+ * All cache entries are stored in a chained hash table.  To save space we
+ * use indexing again, and only store indexes to the next entry.
  */
+static index_t *hash_alloc_table(unsigned nr_buckets)
+{
+	unsigned i;
+	index_t *r = vzalloc(sizeof(*r) * nr_buckets);
+
+	if (r)
+		for (i = 0; i < nr_buckets; i++)
+			r[i] = INDEXER_NULL;
+
+	return r;
+}
+
 static void hash_insert(struct mq_policy *mq, struct entry *e)
 {
 	unsigned h = hash_64(from_oblock(e->oblock), mq->hash_bits);
 
-	hlist_add_head(&e->hlist, mq->table + h);
+	e->hash_next = mq->table[h];
+	mq->table[h] = to_index(&mq->pool.ix, e);
 }
 
-static struct entry *hash_lookup(struct mq_policy *mq, dm_oblock_t oblock)
+static struct entry *__hash_lookup(struct mq_policy *mq, unsigned h, dm_oblock_t oblock,
+				   struct entry **prev)
 {
-	unsigned h = hash_64(from_oblock(oblock), mq->hash_bits);
-	struct hlist_head *bucket = mq->table + h;
 	struct entry *e;
 
-	hlist_for_each_entry(e, bucket, hlist)
-		if (e->oblock == oblock) {
-			hlist_del(&e->hlist);
-			hlist_add_head(&e->hlist, bucket);
+	*prev = NULL;
+	for (e = to_obj(&mq->pool.ix, mq->table[h]); e; e = to_obj(&mq->pool.ix, e->hash_next)) {
+		if (e->oblock == oblock)
 			return e;
-		}
+
+		*prev = e;
+	}
 
 	return NULL;
 }
 
-static void hash_remove(struct entry *e)
+static void __hash_unlink(struct mq_policy *mq, unsigned h, struct entry *e, struct entry *prev)
 {
-	hlist_del(&e->hlist);
+	if (prev)
+		prev->hash_next = e->hash_next;
+	else
+		mq->table[h] = e->hash_next;
+}
+
+/*
+ * Also moves each entry to the front of the bucket.
+ */
+static struct entry *hash_lookup(struct mq_policy *mq, dm_oblock_t oblock)
+{
+	unsigned h = hash_64(from_oblock(oblock), mq->hash_bits);
+	struct entry *e, *prev;
+
+	e = __hash_lookup(mq, h, oblock, &prev);
+	if (e) {
+		__hash_unlink(mq, h, e, prev);
+		e->hash_next = mq->table[h];
+		mq->table[h] = to_index(&mq->pool.ix, e);
+		return e;
+	}
+
+	return e;
+}
+
+static void hash_remove(struct mq_policy *mq, struct entry *e)
+{
+	unsigned h = hash_64(from_oblock(e->oblock), mq->hash_bits);
+	struct entry *prev;
+
+	e = __hash_lookup(mq, h, e->oblock, &prev);
+	if (e)
+		__hash_unlink(mq, h, e, prev);
 }
 
 /*----------------------------------------------------------------*/
@@ -1034,7 +1076,7 @@ static void push_temporary(struct mq_policy *mq, struct entry *e)
 static void del(struct mq_policy *mq, struct entry *e)
 {
 	q_del(e->dirty ? &mq->dirty : &mq->clean, e);
-	hash_remove(e);
+	hash_remove(mq, e);
 }
 
 /*
@@ -1045,7 +1087,7 @@ static struct entry *pop(struct mq_policy *mq, struct queue *q)
 {
 	struct entry *e = q_pop(q);
 	if (e)
-		hash_remove(e);
+		hash_remove(mq, e);
 	return e;
 }
 
@@ -1053,7 +1095,7 @@ static struct entry *pop_old(struct mq_policy *mq, struct queue *q)
 {
 	struct entry *e = q_pop_old(q);
 	if (e)
-		hash_remove(e);
+		hash_remove(mq, e);
 	return e;
 }
 
@@ -1688,7 +1730,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 
 	mq->nr_buckets = roundup_pow_of_two(max(from_cblock(cache_size) / 2u, 16u));
 	mq->hash_bits = ffs(mq->nr_buckets) - 1;
-	mq->table = vzalloc(sizeof(*mq->table) * mq->nr_buckets);
+	mq->table = hash_alloc_table(mq->nr_buckets);
 	if (!mq->table)
 		goto bad_alloc_table;
 
