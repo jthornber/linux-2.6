@@ -293,7 +293,7 @@ static void l_check_present(struct entry_space *es, struct ilist *l, struct entr
  * entries to the back of any of the levels.  Think of it as a partially
  * sorted queue.
  */
-#define NR_HOTSPOT_LEVELS 16u
+#define NR_HOTSPOT_LEVELS 64u
 #define NR_CACHE_LEVELS 64u
 #define MAX_LEVELS 64u
 
@@ -301,7 +301,7 @@ static void l_check_present(struct entry_space *es, struct ilist *l, struct entr
 #define NR_SENTINELS (NR_CACHE_LEVELS * 4u)
 
 // FIXME: separate writeback period and demote period
-#define WRITEBACK_PERIOD (2 * 60  * HZ)
+#define WRITEBACK_PERIOD (5 * 60  * HZ)
 
 // FIXME: why do we pass the es into the list functions, but store it in
 // the queue?
@@ -1159,7 +1159,8 @@ static void book_keeping(struct mq_policy *mq)
 
 static int demote_cblock(struct mq_policy *mq, dm_oblock_t *oblock)
 {
-	struct entry *demoted = pop_old(mq, &mq->clean);
+//	struct entry *demoted = pop_old(mq, &mq->clean);
+	struct entry *demoted = pop(mq, &mq->clean);
 	if (!demoted)
 		/*
 		 * We could get a block from mq->dirty, but that
@@ -1191,8 +1192,8 @@ static enum promote_result maybe_promote(bool promote)
 	return promote ? PROMOTE_PERMANENT : PROMOTE_NOT;
 }
 
-static enum promote_result should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
-					  bool fast_promote)
+static enum promote_result should_promote_from_precache(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
+							bool fast_promote)
 {
 	if (bio_data_dir(bio) == WRITE) {
 		if (!allocator_empty(&mq->cache_alloc) && fast_promote)
@@ -1202,6 +1203,15 @@ static enum promote_result should_promote(struct mq_policy *mq, struct entry *hs
 
 	} else
 		return maybe_promote(hs_e->level >= mq->read_promote_level);
+}
+
+static enum promote_result should_promote_direct(struct mq_policy *mq, struct bio *bio,
+						 bool fast_promote)
+{
+	if (bio_data_dir(bio) == WRITE && !allocator_empty(&mq->cache_alloc) && fast_promote)
+		return PROMOTE_TEMPORARY;
+
+	return PROMOTE_NOT;
 }
 
 static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
@@ -1233,9 +1243,13 @@ static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 	result->cblock = infer_cblock(mq, e);
 }
 
+static unsigned safe_div(unsigned n, unsigned d)
+{
+	return d ? n / d : 0u;
+}
+
 static void update_promote_levels(struct mq_policy *mq)
 {
-#if 0
 	/*
 	 * There are times when we don't have any confidence in the hotspot
 	 * queue.  Such as when a fresh cache is created and the blocks
@@ -1243,25 +1257,10 @@ static void update_promote_levels(struct mq_policy *mq)
 	 * seeing how often a lookup is in the top levels of the hotspot
 	 * queue.
 	 */
-	unsigned confidence = (mq->hotspot.autotune_hits << FP_SHIFT) /
-		(mq->hotspot.autotune_hits + mq->hotspot.autotune_misses);
+	unsigned confidence = safe_div(mq->hotspot.autotune_hits << FP_SHIFT,
+				       mq->hotspot.autotune_hits + mq->hotspot.autotune_misses);
 
-	unsigned cache_blocks_per_hotspot = 1u; //  mq->hotspot_block_size / (unsigned) mq->cache_block_size;
-
-	unsigned nr_hotspots = ((unsigned) from_cblock(mq->cache_size)) /
-		cache_blocks_per_hotspot;
-
-	unsigned hotspots_per_level, threshold_level;
-
-	/*
-	 * We add a little fudge factor because not all of a hotspot will
-	 * be neccessarily be hot/promoted.
-	 */
-	// FIXME: fix comment
-	nr_hotspots = nr_hotspots / 2u;
-
-	hotspots_per_level = mq->hotspot.nr_elts / mq->hotspot.nr_levels;
-	threshold_level = max(1u, nr_hotspots / hotspots_per_level);
+	unsigned threshold_level = NR_HOTSPOT_LEVELS / 16u;
 
 	/*
 	 * If there are unused cache entries then we want to be really
@@ -1278,10 +1277,6 @@ static void update_promote_levels(struct mq_policy *mq)
 
 	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
 	mq->write_promote_level = mq->read_promote_level + 2u;
-#else
-	mq->read_promote_level = (NR_HOTSPOT_LEVELS * 1u) / 2u;
-	mq->write_promote_level = mq->read_promote_level + 2u;
-#endif
 }
 
 /*
@@ -1303,7 +1298,7 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 				  !test_and_set_bit(get_index(&mq->hotspot_alloc, e),
 						    mq->hotspot_hit_bits));
 
-			pr = should_promote(mq, e, bio, fast_promote);
+			pr = should_promote_from_precache(mq, e, bio, fast_promote);
 			if (pr == PROMOTE_NOT) {
 				result->op = POLICY_MISS;
 
@@ -1315,12 +1310,6 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 
 				del(mq, &mq->hotspot, e);
 				free_entry(&mq->hotspot_alloc, e);
-
-				if (fast_promote)
-					pr_alert("fast promoting %llu\n", (unsigned long long) oblock);
-				else
-					pr_alert("promoting %llu\n", (unsigned long long) oblock);
-
 				insert_in_cache(mq, oblock, result, pr);
 			}
 
@@ -1331,15 +1320,25 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 		}
 
 	} else {
-		if (allocator_empty(&mq->hotspot_alloc))
-			e = pop(mq, &mq->hotspot);
-		else
-			e = alloc_entry(&mq->hotspot_alloc);
+		pr = should_promote_direct(mq, bio, fast_promote);
+		if (pr == PROMOTE_NOT) {
+			if (allocator_empty(&mq->hotspot_alloc))
+				e = pop(mq, &mq->hotspot);
+			else
+				e = alloc_entry(&mq->hotspot_alloc);
 
-		init_entry(e);
-		e->hotspot = true;
-		e->oblock = oblock;
-		push(mq, &mq->hotspot, e);
+			init_entry(e);
+			e->hotspot = true;
+			e->oblock = oblock;
+			push(mq, &mq->hotspot, e);
+		} else {
+			if (!can_migrate) {
+				result->op = POLICY_MISS;
+				return -EWOULDBLOCK;
+			}
+
+			insert_in_cache(mq, oblock, result, pr);
+		}
 	}
 
 	return 0;
