@@ -1419,6 +1419,48 @@ int dm_thin_find_block(struct dm_thin_device *td, dm_block_t block,
 	return r;
 }
 
+/* FIXME: write a more efficient one in btree */
+int dm_thin_find_mapped_range(struct dm_thin_device *td,
+			      dm_block_t begin, dm_block_t end,
+			      dm_block_t *thin_begin, dm_block_t *thin_end,
+			      dm_block_t *pool_begin, bool *maybe_shared)
+{
+	int r;
+	dm_block_t pool_end;
+	struct dm_thin_lookup_result lookup;
+
+	/*
+	 * Find first mapped block.
+	 */
+	do {
+		r = dm_thin_find_block(td, begin, 1, &lookup);
+		*thin_begin = begin;
+		*pool_begin = lookup.block;
+
+		begin++;
+
+	} while (begin < end && r == -ENODATA);
+
+	if (r)
+		return r;
+	*maybe_shared = lookup.shared;
+	pool_end = *pool_begin;
+
+	/*
+	 * Find last mapped block with same shared status.
+	 */
+	do {
+		r = dm_thin_find_block(td, begin, 1, &lookup);
+		*thin_end = begin++;
+		pool_end++;
+
+	} while (begin < end && !r &&
+		 lookup.block == pool_end &&
+		 lookup.shared == *maybe_shared);
+
+	return (r == -ENODATA) ? 0 : r;
+}
+
 static int __insert(struct dm_thin_device *td, dm_block_t block,
 		    dm_block_t data_block)
 {
