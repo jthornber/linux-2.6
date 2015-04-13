@@ -1581,12 +1581,13 @@ int dm_thin_remove_range(struct dm_thin_device *td,
 
 int dm_pool_block_is_used(struct dm_pool_metadata *pmd, dm_block_t b, bool *result)
 {
-	int r, ir;
+	int r;
+	uint32_t ref_count;
 
 	down_read(&pmd->root_lock);
-	r = dm_sm_count_is_more_than_one(pmd->data_sm, b, &ir);
+	r = dm_sm_get_count(pmd->data_sm, b, &ref_count);
 	if (!r)
-		*result = ir;
+		*result = (ref_count != 0);
 	up_read(&pmd->root_lock);
 
 	return r;
