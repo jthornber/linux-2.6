@@ -1429,36 +1429,51 @@ int dm_thin_find_mapped_range(struct dm_thin_device *td,
 	dm_block_t pool_end;
 	struct dm_thin_lookup_result lookup;
 
+	if (end < begin)
+		return -ENODATA;
+
 	/*
 	 * Find first mapped block.
 	 */
-	do {
-		r = dm_thin_find_block(td, begin, 1, &lookup);
-		*thin_begin = begin;
-		*pool_begin = lookup.block;
+	while (begin < end) {
+		r = dm_thin_find_block(td, begin, true, &lookup);
+		if (r) {
+			if (r != -ENODATA)
+				return r;
+		} else
+			break;
 
 		begin++;
+	}
 
-	} while (begin < end && r == -ENODATA);
+	if (begin == end)
+		return -ENODATA;
 
-	if (r)
-		return r;
+	*thin_begin = begin;
+	*pool_begin = lookup.block;
 	*maybe_shared = lookup.shared;
-	pool_end = *pool_begin;
 
-	/*
-	 * Find last mapped block with same shared status.
-	 */
-	do {
-		r = dm_thin_find_block(td, begin, 1, &lookup);
-		*thin_end = begin++;
+	begin++;
+	pool_end = *pool_begin + 1;
+	while (begin != end) {
+		r = dm_thin_find_block(td, begin, true, &lookup);
+		if (r) {
+			if (r == -ENODATA)
+				break;
+			else
+				return r;
+		}
+
+		if ((lookup.block != pool_end) ||
+		    (lookup.shared != *maybe_shared))
+			break;
+
 		pool_end++;
+		begin++;
+	}
 
-	} while (begin < end && !r &&
-		 lookup.block == pool_end &&
-		 lookup.shared == *maybe_shared);
-
-	return (r == -ENODATA) ? 0 : r;
+	*thin_end = begin;
+	return 0;
 }
 
 static int __insert(struct dm_thin_device *td, dm_block_t block,
