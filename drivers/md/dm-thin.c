@@ -107,22 +107,6 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
 
 /*----------------------------------------------------------------*/
 
-static void discard_end_io(struct bio *bio, int err)
-{
-	struct bio *parent_bio = bio->bi_private;
-	bio_endio(parent_bio, err);
-	bio_put(bio);
-}
-
-static int issue_discard(struct block_device *bdev, sector_t sector,
-			 sector_t nr_sects, gfp_t gfp_mask, struct bio *parent_bio)
-{
-	return blkdev_issue_discard_ll(bdev, sector, nr_sects, gfp_mask, 0,
-				       discard_end_io, parent_bio, &parent_bio->bi_remaining);
-}
-
-/*----------------------------------------------------------------*/
-
 /*
  * Key building.
  */
@@ -332,6 +316,38 @@ struct thin_c {
 	atomic_t refcount;
 	struct completion can_destroy;
 };
+
+/*----------------------------------------------------------------*/
+
+static bool block_size_is_power_of_two(struct pool *pool)
+{
+	return pool->sectors_per_block_shift >= 0;
+}
+
+static sector_t block_to_sectors(struct pool *pool, dm_block_t b)
+{
+	return block_size_is_power_of_two(pool) ?
+		(b << pool->sectors_per_block_shift) :
+		(b * pool->sectors_per_block);
+}
+
+static void discard_end_io(struct bio *bio, int err)
+{
+	struct bio *parent_bio = bio->bi_private;
+	bio_put(bio);
+	bio_endio(parent_bio, err);
+}
+
+static int issue_discard(struct thin_c *tc, dm_block_t data_b, dm_block_t data_e,
+			 struct bio *parent_bio)
+{
+	struct block_device *bdev = tc->pool_dev->bdev;
+	sector_t s = block_to_sectors(tc->pool, data_b);
+	sector_t len = block_to_sectors(tc->pool, data_e - data_b);
+
+	return blkdev_issue_discard_ll(bdev, s, len, GFP_NOWAIT, 0,
+				       discard_end_io, parent_bio, &parent_bio->bi_remaining);
+}
 
 /*----------------------------------------------------------------*/
 
@@ -565,18 +581,6 @@ static void error_retry_list(struct pool *pool)
  * target.
  */
 
-static bool block_size_is_power_of_two(struct pool *pool)
-{
-	return pool->sectors_per_block_shift >= 0;
-}
-
-static sector_t block_to_sectors(struct pool *pool, dm_block_t b)
-{
-	return block_size_is_power_of_two(pool) ?
-		(b << pool->sectors_per_block_shift) :
-		(b * pool->sectors_per_block);
-}
-
 static dm_block_t get_bio_block(struct thin_c *tc, struct bio *bio)
 {
 	struct pool *pool = tc->pool;
@@ -609,6 +613,12 @@ static void get_bio_block_range(struct thin_c *tc, struct bio *bio,
 		(void) sector_div(b, pool->sectors_per_block);
 		(void) sector_div(e, pool->sectors_per_block);
 	}
+
+	if (e < b)
+		/*
+		 * This can happen if the bio is within a single block.
+		 */
+		e = b;
 
 	*begin = b;
 	*end = e;
@@ -981,8 +991,7 @@ static int passdown_double_checking_shared_status(struct dm_thin_new_mapping *m)
 				break;
 		}
 
-		r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, b),
-				  block_to_sectors(pool, e - b), GFP_NOWAIT, m->bio);
+		r = issue_discard(tc, b, e, m->bio);
 		if (r)
 			return r;
 
@@ -1005,9 +1014,7 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 	else if (m->maybe_shared)
 		r = passdown_double_checking_shared_status(m);
 	else
-		r = issue_discard(tc->pool_dev->bdev, block_to_sectors(pool, m->data_block),
-				  block_to_sectors(pool, m->virt_end - m->virt_begin),
-				  GFP_NOWAIT, m->bio);
+		r = issue_discard(tc, m->data_block, m->data_block + (m->virt_end - m->virt_begin), m->bio);
 
 	/*
 	 * Even if r is set, there could be sub discards in flight that we
@@ -2649,7 +2656,6 @@ static void disable_passdown_if_not_supported(struct pool_c *pt)
 	struct pool *pool = pt->pool;
 	struct block_device *data_bdev = pt->data_dev->bdev;
 	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
-	sector_t block_size = pool->sectors_per_block << SECTOR_SHIFT;
 	const char *reason = NULL;
 	char buf[BDEVNAME_SIZE];
 
@@ -2661,12 +2667,6 @@ static void disable_passdown_if_not_supported(struct pool_c *pt)
 
 	else if (data_limits->max_discard_sectors < pool->sectors_per_block)
 		reason = "max discard sectors smaller than a block";
-
-	else if (data_limits->discard_granularity > block_size)
-		reason = "discard granularity larger than a block";
-
-	else if (!is_factor(block_size, data_limits->discard_granularity))
-		reason = "discard granularity not a factor of block size";
 
 	if (reason) {
 		DMWARN("Data device (%s) %s: Disabling discard passdown.", bdevname(data_bdev, buf), reason);
@@ -3849,24 +3849,6 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-static void set_discard_limits(struct pool_c *pt, struct queue_limits *limits)
-{
-	struct pool *pool = pt->pool;
-	struct queue_limits *data_limits;
-
-	limits->max_discard_sectors = 2048 * 1024 * 16; /* 16 G */
-	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-
-	/*
-	 * discard_granularity is just a hint, and not enforced.
-	 */
-	if (pt->adjusted_pf.discard_passdown) {
-		data_limits = &bdev_get_queue(pt->data_dev->bdev)->limits;
-		limits->discard_granularity = max(data_limits->discard_granularity,
-						  limits->discard_granularity);
-	}
-}
-
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct pool_c *pt = ti->private;
@@ -3921,7 +3903,10 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	disable_passdown_if_not_supported(pt);
 
-	set_discard_limits(pt, limits);
+	/*
+	 * The pool uses the same discard limits as the underlying data
+	 * device.  DM core has already set this up.
+	 */
 }
 
 static struct target_type pool_target = {
@@ -4313,6 +4298,15 @@ static int thin_iterate_devices(struct dm_target *ti,
 	return 0;
 }
 
+static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	struct thin_c *tc = ti->private;
+	struct pool *pool = tc->pool;
+
+	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+	limits->max_discard_sectors = 2048 * 1024 * 16; /* 16G */
+}
+
 static struct target_type thin_target = {
 	.name = "thin",
 	.version = {1, 14, 0},
@@ -4327,6 +4321,7 @@ static struct target_type thin_target = {
 	.status = thin_status,
 	.merge = thin_merge,
 	.iterate_devices = thin_iterate_devices,
+	.io_hints = thin_io_hints,
 };
 
 /*----------------------------------------------------------------*/
