@@ -1322,6 +1322,7 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	} else {
 		pr = should_promote_direct(mq, bio, fast_promote);
 		if (pr == PROMOTE_NOT) {
+			result->op = POLICY_MISS;
 			if (allocator_empty(&mq->hotspot_alloc))
 				e = pop(mq, &mq->hotspot);
 			else
