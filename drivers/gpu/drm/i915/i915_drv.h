@@ -1756,8 +1756,6 @@ struct drm_i915_private {
 	 */
 	struct workqueue_struct *dp_wq;
 
-	uint32_t bios_vgacntr;
-
 	/* Abstract the submission mechanism (legacy ringbuffer or execlists) away */
 	struct {
 		int (*do_execbuf)(struct drm_device *dev, struct drm_file *file,
@@ -2161,8 +2159,7 @@ struct drm_i915_cmd_table {
 #define IS_HSW_EARLY_SDV(dev)	(IS_HASWELL(dev) && \
 				 (INTEL_DEVID(dev) & 0xFF00) == 0x0C00)
 #define IS_BDW_ULT(dev)		(IS_BROADWELL(dev) && \
-				 ((INTEL_DEVID(dev) & 0xf) == 0x2  || \
-				 (INTEL_DEVID(dev) & 0xf) == 0x6 || \
+				 ((INTEL_DEVID(dev) & 0xf) == 0x6 ||	\
 				 (INTEL_DEVID(dev) & 0xf) == 0xe))
 #define IS_BDW_GT3(dev)		(IS_BROADWELL(dev) && \
 				 (INTEL_DEVID(dev) & 0x00F0) == 0x0020)
@@ -2501,9 +2498,8 @@ void i915_vma_move_to_active(struct i915_vma *vma,
 int i915_gem_dumb_create(struct drm_file *file_priv,
 			 struct drm_device *dev,
 			 struct drm_mode_create_dumb *args);
-int i915_gem_dumb_map_offset(struct drm_file *file_priv,
-			     struct drm_device *dev, uint32_t handle,
-			     uint64_t *offset);
+int i915_gem_mmap_gtt(struct drm_file *file_priv, struct drm_device *dev,
+		      uint32_t handle, uint64_t *offset);
 /**
  * Returns true if seq1 is later than seq2.
  */

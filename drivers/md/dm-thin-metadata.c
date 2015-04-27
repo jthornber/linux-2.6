@@ -1419,6 +1419,63 @@ int dm_thin_find_block(struct dm_thin_device *td, dm_block_t block,
 	return r;
 }
 
+/* FIXME: write a more efficient one in btree */
+int dm_thin_find_mapped_range(struct dm_thin_device *td,
+			      dm_block_t begin, dm_block_t end,
+			      dm_block_t *thin_begin, dm_block_t *thin_end,
+			      dm_block_t *pool_begin, bool *maybe_shared)
+{
+	int r;
+	dm_block_t pool_end;
+	struct dm_thin_lookup_result lookup;
+
+	if (end < begin)
+		return -ENODATA;
+
+	/*
+	 * Find first mapped block.
+	 */
+	while (begin < end) {
+		r = dm_thin_find_block(td, begin, true, &lookup);
+		if (r) {
+			if (r != -ENODATA)
+				return r;
+		} else
+			break;
+
+		begin++;
+	}
+
+	if (begin == end)
+		return -ENODATA;
+
+	*thin_begin = begin;
+	*pool_begin = lookup.block;
+	*maybe_shared = lookup.shared;
+
+	begin++;
+	pool_end = *pool_begin + 1;
+	while (begin != end) {
+		r = dm_thin_find_block(td, begin, true, &lookup);
+		if (r) {
+			if (r == -ENODATA)
+				break;
+			else
+				return r;
+		}
+
+		if ((lookup.block != pool_end) ||
+		    (lookup.shared != *maybe_shared))
+			break;
+
+		pool_end++;
+		begin++;
+	}
+
+	*thin_end = begin;
+	return 0;
+}
+
 static int __insert(struct dm_thin_device *td, dm_block_t block,
 		    dm_block_t data_block)
 {
@@ -1471,6 +1528,47 @@ static int __remove(struct dm_thin_device *td, dm_block_t block)
 	return 0;
 }
 
+static int __remove_range(struct dm_thin_device *td, dm_block_t begin, dm_block_t end)
+{
+	int r;
+	unsigned count;
+	struct dm_pool_metadata *pmd = td->pmd;
+	dm_block_t keys[1] = { td->id };
+	__le64 value;
+	dm_block_t mapping_root;
+
+	/*
+	 * Find the mapping tree
+	 */
+	r = dm_btree_lookup(&pmd->tl_info, pmd->root, keys, &value);
+	if (r)
+		return r;
+
+	/*
+	 * Remove from the mapping tree, taking care to inc the
+	 * ref count so it doesn't get deleted.
+	 */
+	mapping_root = le64_to_cpu(value);
+	dm_tm_inc(pmd->tm, mapping_root);
+	r = dm_btree_remove(&pmd->tl_info, pmd->root, keys, &pmd->root);
+	if (r)
+		return r;
+
+	r = dm_btree_remove_leaves(&pmd->bl_info, mapping_root, &begin, end, &mapping_root, &count);
+	if (r)
+		return r;
+
+	td->mapped_blocks -= count;
+	td->changed = 1;
+
+	/*
+	 * Reinsert the mapping tree.
+	 */
+	value = cpu_to_le64(mapping_root);
+	__dm_bless_for_disk(&value);
+	return dm_btree_insert(&pmd->tl_info, pmd->root, keys, &value, &pmd->root);
+}
+
 int dm_thin_remove_block(struct dm_thin_device *td, dm_block_t block)
 {
 	int r = -EINVAL;
@@ -1478,6 +1576,19 @@ int dm_thin_remove_block(struct dm_thin_device *td, dm_block_t block)
 	down_write(&td->pmd->root_lock);
 	if (!td->pmd->fail_io)
 		r = __remove(td, block);
+	up_write(&td->pmd->root_lock);
+
+	return r;
+}
+
+int dm_thin_remove_range(struct dm_thin_device *td,
+			 dm_block_t begin, dm_block_t end)
+{
+	int r = -EINVAL;
+
+	down_write(&td->pmd->root_lock);
+	if (!td->pmd->fail_io)
+		r = __remove_range(td, begin, end);
 	up_write(&td->pmd->root_lock);
 
 	return r;

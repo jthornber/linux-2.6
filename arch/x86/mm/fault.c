@@ -898,6 +898,8 @@ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
 		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON|
 			     VM_FAULT_HWPOISON_LARGE))
 			do_sigbus(regs, error_code, address, fault);
+		else if (fault & VM_FAULT_SIGSEGV)
+			bad_area_nosemaphore(regs, error_code, address);
 		else
 			BUG();
 	}
@@ -1247,7 +1249,7 @@ good_area:
 		}
 
 		/* User mode? Just return to handle the fatal exception */
-		if (fault & FAULT_FLAG_USER)
+		if (flags & FAULT_FLAG_USER)
 			return;
 
 		/* Not returning to user mode? Handle exceptions or die: */

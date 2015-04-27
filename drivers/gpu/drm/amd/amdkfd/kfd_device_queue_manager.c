@@ -161,6 +161,9 @@ static void deallocate_vmid(struct device_queue_manager *dqm,
 {
 	int bit = qpd->vmid - KFD_VMID_START_OFFSET;
 
+	/* Release the vmid mapping */
+	set_pasid_vmid_mapping(dqm, 0, qpd->vmid);
+
 	set_bit(bit, (unsigned long *)&dqm->vmid_bitmap);
 	qpd->vmid = 0;
 	q->properties.vmid = 0;
@@ -179,6 +182,13 @@ static int create_queue_nocpsch(struct device_queue_manager *dqm,
 	print_queue(q);
 
 	mutex_lock(&dqm->lock);
+
+	if (dqm->total_queue_count >= max_num_of_queues_per_device) {
+		pr_warn("amdkfd: Can't create new usermode queue because %d queues were already created\n",
+				dqm->total_queue_count);
+		mutex_unlock(&dqm->lock);
+		return -EPERM;
+	}
 
 	if (list_empty(&qpd->queues_list)) {
 		retval = allocate_vmid(dqm, qpd, q);
@@ -203,6 +213,14 @@ static int create_queue_nocpsch(struct device_queue_manager *dqm,
 
 	list_add(&q->list, &qpd->queues_list);
 	dqm->queue_count++;
+
+	/*
+	 * Unconditionally increment this counter, regardless of the queue's
+	 * type or whether the queue is active.
+	 */
+	dqm->total_queue_count++;
+	pr_debug("Total of %d queues are accountable so far\n",
+			dqm->total_queue_count);
 
 	mutex_unlock(&dqm->lock);
 	return 0;
@@ -272,6 +290,18 @@ static int create_compute_queue_nocpsch(struct device_queue_manager *dqm,
 		return retval;
 	}
 
+	pr_debug("kfd: loading mqd to hqd on pipe (%d) queue (%d)\n",
+			q->pipe,
+			q->queue);
+
+	retval = mqd->load_mqd(mqd, q->mqd, q->pipe,
+			q->queue, (uint32_t __user *) q->properties.write_ptr);
+	if (retval != 0) {
+		deallocate_hqd(dqm, q);
+		mqd->uninit_mqd(mqd, q->mqd, q->mqd_mem_obj);
+		return retval;
+	}
+
 	return 0;
 }
 
@@ -311,6 +341,15 @@ static int destroy_queue_nocpsch(struct device_queue_manager *dqm,
 	if (list_empty(&qpd->queues_list))
 		deallocate_vmid(dqm, qpd, q);
 	dqm->queue_count--;
+
+	/*
+	 * Unconditionally decrement this counter, regardless of the queue's
+	 * type
+	 */
+	dqm->total_queue_count--;
+	pr_debug("Total of %d queues are accountable so far\n",
+			dqm->total_queue_count);
+
 out:
 	mutex_unlock(&dqm->lock);
 	return retval;
@@ -320,6 +359,7 @@ static int update_queue(struct device_queue_manager *dqm, struct queue *q)
 {
 	int retval;
 	struct mqd_manager *mqd;
+	bool prev_active = false;
 
 	BUG_ON(!dqm || !q || !q->mqd);
 
@@ -330,10 +370,18 @@ static int update_queue(struct device_queue_manager *dqm, struct queue *q)
 		return -ENOMEM;
 	}
 
-	retval = mqd->update_mqd(mqd, q->mqd, &q->properties);
 	if (q->properties.is_active == true)
+		prev_active = true;
+
+	/*
+	 *
+	 * check active state vs. the previous state
+	 * and modify counter accordingly
+	 */
+	retval = mqd->update_mqd(mqd, q->mqd, &q->properties);
+	if ((q->properties.is_active == true) && (prev_active == false))
 		dqm->queue_count++;
-	else
+	else if ((q->properties.is_active == false) && (prev_active == true))
 		dqm->queue_count--;
 
 	if (sched_policy != KFD_SCHED_POLICY_NO_HWS)
@@ -517,10 +565,14 @@ static int init_pipelines(struct device_queue_manager *dqm,
 
 	for (i = 0; i < pipes_num; i++) {
 		inx = i + first_pipe;
+		/*
+		 * HPD buffer on GTT is allocated by amdkfd, no need to waste
+		 * space in GTT for pipelines we don't initialize
+		 */
 		pipe_hpd_addr = dqm->pipelines_addr + i * CIK_HPD_EOP_BYTES;
 		pr_debug("kfd: pipeline address %llX\n", pipe_hpd_addr);
 		/* = log2(bytes/4)-1 */
-		kfd2kgd->init_pipeline(dqm->dev->kgd, i,
+		kfd2kgd->init_pipeline(dqm->dev->kgd, inx,
 				CIK_HPD_EOP_BYTES_LOG2 - 3, pipe_hpd_addr);
 	}
 
@@ -536,7 +588,7 @@ static int init_scheduler(struct device_queue_manager *dqm)
 
 	pr_debug("kfd: In %s\n", __func__);
 
-	retval = init_pipelines(dqm, get_pipes_num(dqm), KFD_DQM_FIRST_PIPE);
+	retval = init_pipelines(dqm, get_pipes_num(dqm), get_first_pipe(dqm));
 	if (retval != 0)
 		return retval;
 
@@ -728,6 +780,21 @@ static int create_kernel_queue_cpsch(struct device_queue_manager *dqm,
 	pr_debug("kfd: In func %s\n", __func__);
 
 	mutex_lock(&dqm->lock);
+	if (dqm->total_queue_count >= max_num_of_queues_per_device) {
+		pr_warn("amdkfd: Can't create new kernel queue because %d queues were already created\n",
+				dqm->total_queue_count);
+		mutex_unlock(&dqm->lock);
+		return -EPERM;
+	}
+
+	/*
+	 * Unconditionally increment this counter, regardless of the queue's
+	 * type or whether the queue is active.
+	 */
+	dqm->total_queue_count++;
+	pr_debug("Total of %d queues are accountable so far\n",
+			dqm->total_queue_count);
+
 	list_add(&kq->list, &qpd->priv_queue_list);
 	dqm->queue_count++;
 	qpd->is_debug = true;
@@ -751,6 +818,13 @@ static void destroy_kernel_queue_cpsch(struct device_queue_manager *dqm,
 	dqm->queue_count--;
 	qpd->is_debug = false;
 	execute_queues_cpsch(dqm, false);
+	/*
+	 * Unconditionally decrement this counter, regardless of the queue's
+	 * type.
+	 */
+	dqm->total_queue_count--;
+	pr_debug("Total of %d queues are accountable so far\n",
+			dqm->total_queue_count);
 	mutex_unlock(&dqm->lock);
 }
 
@@ -769,6 +843,13 @@ static int create_queue_cpsch(struct device_queue_manager *dqm, struct queue *q,
 
 	mutex_lock(&dqm->lock);
 
+	if (dqm->total_queue_count >= max_num_of_queues_per_device) {
+		pr_warn("amdkfd: Can't create new usermode queue because %d queues were already created\n",
+				dqm->total_queue_count);
+		retval = -EPERM;
+		goto out;
+	}
+
 	mqd = dqm->get_mqd_manager(dqm, KFD_MQD_TYPE_CIK_CP);
 	if (mqd == NULL) {
 		mutex_unlock(&dqm->lock);
@@ -785,6 +866,15 @@ static int create_queue_cpsch(struct device_queue_manager *dqm, struct queue *q,
 		dqm->queue_count++;
 		retval = execute_queues_cpsch(dqm, false);
 	}
+
+	/*
+	 * Unconditionally increment this counter, regardless of the queue's
+	 * type or whether the queue is active.
+	 */
+	dqm->total_queue_count++;
+
+	pr_debug("Total of %d queues are accountable so far\n",
+			dqm->total_queue_count);
 
 out:
 	mutex_unlock(&dqm->lock);
@@ -905,6 +995,14 @@ static int destroy_queue_cpsch(struct device_queue_manager *dqm,
 	execute_queues_cpsch(dqm, false);
 
 	mqd->uninit_mqd(mqd, q->mqd, q->mqd_mem_obj);
+
+	/*
+	 * Unconditionally decrement this counter, regardless of the queue's
+	 * type
+	 */
+	dqm->total_queue_count--;
+	pr_debug("Total of %d queues are accountable so far\n",
+			dqm->total_queue_count);
 
 	mutex_unlock(&dqm->lock);
 

@@ -206,6 +206,9 @@ struct mapped_device {
 	/* zero-length flush that will be cloned and submitted to targets */
 	struct bio flush_bio;
 
+	/* the number of internal suspends */
+	unsigned internal_suspend_count;
+
 	struct dm_stats stats;
 };
 
@@ -2930,7 +2933,7 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 {
 	struct dm_table *map = NULL;
 
-	if (dm_suspended_internally_md(md))
+	if (md->internal_suspend_count++)
 		return; /* nested internal suspend */
 
 	if (dm_suspended_md(md)) {
@@ -2955,7 +2958,9 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 
 static void __dm_internal_resume(struct mapped_device *md)
 {
-	if (!dm_suspended_internally_md(md))
+	BUG_ON(!md->internal_suspend_count);
+
+	if (--md->internal_suspend_count)
 		return; /* resume from nested internal suspend */
 
 	if (dm_suspended_md(md))

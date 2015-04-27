@@ -143,10 +143,10 @@ static void queue_init(struct queue *q)
 	q->current_writeback_sentinels = false;
 	q->next_writeback = 0;
 	for (i = 0; i < NR_QUEUE_LEVELS; i++) {
+		INIT_LIST_HEAD(q->qs + i);
 		INIT_LIST_HEAD(q->sentinels + i);
 		INIT_LIST_HEAD(q->sentinels + NR_QUEUE_LEVELS + i);
 		INIT_LIST_HEAD(q->sentinels + (2 * NR_QUEUE_LEVELS) + i);
-		INIT_LIST_HEAD(q->qs + i);
 	}
 }
 
@@ -178,7 +178,7 @@ static void queue_remove(struct queue *q, struct list_head *elt)
 static bool is_sentinel(struct queue *q, struct list_head *h)
 {
 	return (h >= q->sentinels) &&
-		(h < (q->sentinels + sizeof(q->sentinels)));
+		(h < (q->sentinels + (sizeof(q->sentinels) / sizeof(q->sentinels[0]))));
 }
 
 /*
@@ -191,31 +191,23 @@ static struct list_head *queue_peek(struct queue *q)
 	struct list_head *h;
 
 	for (level = 0; level < NR_QUEUE_LEVELS; level++)
-		if (!list_empty(q->qs + level))
-			list_for_each(h, q->qs + level)
-				if (!is_sentinel(q, h))
-					return h;
+		list_for_each(h, q->qs + level)
+			if (!is_sentinel(q, h))
+				return h;
 
 	return NULL;
 }
 
 static struct list_head *queue_pop(struct queue *q)
 {
-	unsigned level;
-	struct list_head *h, *tmp;
+	struct list_head *r = queue_peek(q);
 
-	for (level = 0; level < NR_QUEUE_LEVELS; level++) {
-		list_for_each_safe(h, tmp, q->qs + level) {
-			if (is_sentinel(q, h))
-				continue;
-
-			q->nr_elts--;
-			list_del(h);
-			return h;
-		}
+	if (r) {
+		q->nr_elts--;
+		list_del(r);
 	}
 
-	return NULL;
+	return r;
 }
 
 /*
@@ -224,18 +216,17 @@ static struct list_head *queue_pop(struct queue *q)
 static struct list_head *queue_pop_old(struct queue *q)
 {
 	unsigned level;
-	struct list_head *h, *tmp;
+	struct list_head *h;
 
-	for (level = 0; level < NR_QUEUE_LEVELS; level++) {
-		list_for_each_safe(h, tmp, q->qs + level) {
+	for (level = 0; level < NR_QUEUE_LEVELS; level++)
+		list_for_each(h, q->qs + level) {
 			if (is_sentinel(q, h))
-				continue;
+				break;
 
 			q->nr_elts--;
 			list_del(h);
 			return h;
 		}
-	}
 
 	return NULL;
 }
@@ -258,12 +249,7 @@ static struct list_head *writeback_sentinel(struct queue *q, unsigned level)
 		return q->sentinels + 2 * NR_QUEUE_LEVELS + level;
 }
 
-/*
- * Sometimes we want to iterate through entries that have been pushed since
- * a certain event.  We use sentinel entries on the queues to delimit these
- * 'tick' events.
- */
-static void queue_tick(struct queue *q)
+static void queue_update_writeback_sentinels(struct queue *q)
 {
 	unsigned i;
 	struct list_head *h;
@@ -278,6 +264,16 @@ static void queue_tick(struct queue *q)
 		q->next_writeback = jiffies + WRITEBACK_PERIOD;
 		q->current_writeback_sentinels = !q->current_writeback_sentinels;
 	}
+}
+
+/*
+ * Sometimes we want to iterate through entries that have been pushed since
+ * a certain event.  We use sentinel entries on the queues to delimit these
+ * 'tick' events.
+ */
+static void queue_tick(struct queue *q)
+{
+	unsigned i;
 
 	for (i = 0; i < NR_QUEUE_LEVELS; i++) {
 		list_del(q->sentinels + i);
@@ -289,14 +285,14 @@ typedef void (*iter_fn)(struct list_head *, void *);
 static void queue_iterate_tick(struct queue *q, iter_fn fn, void *context)
 {
 	unsigned i;
-	struct list_head *tmp;
+	struct list_head *h;
 
 	for (i = 0; i < NR_QUEUE_LEVELS; i++) {
-		list_for_each_prev(tmp, q->qs + i) {
-			if (is_sentinel(q, tmp))
+		list_for_each_prev(h, q->qs + i) {
+			if (is_sentinel(q, h))
 				break;
 
-			fn(tmp, context);
+			fn(h, context);
 		}
 	}
 }
@@ -1000,8 +996,6 @@ static void copy_tick(struct mq_policy *mq)
 
 	spin_lock_irqsave(&mq->tick_lock, flags);
 	tick = mq->tick_protected;
-	spin_unlock_irqrestore(&mq->tick_lock, flags);
-
 	if (tick != mq->tick) {
 		queue_iterate_tick(&mq->pre_cache, update_pre_cache_hits, mq);
 		queue_iterate_tick(&mq->cache_dirty, update_cache_hits, mq);
@@ -1012,6 +1006,8 @@ static void copy_tick(struct mq_policy *mq)
 	queue_tick(&mq->pre_cache);
 	queue_tick(&mq->cache_dirty);
 	queue_tick(&mq->cache_clean);
+	queue_update_writeback_sentinels(&mq->cache_dirty);
+	spin_unlock_irqrestore(&mq->tick_lock, flags);
 }
 
 static int mq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
@@ -1116,13 +1112,14 @@ static int mq_save_hints(struct mq_policy *mq, struct queue *q,
 
 	for (level = 0; level < NR_QUEUE_LEVELS; level++)
 		list_for_each(h, q->qs + level) {
-			if (!is_sentinel(q, h)) {
-				e = container_of(h, struct entry, list);
-				r = fn(context, infer_cblock(&mq->cache_pool, e),
-				       e->oblock, e->hit_count);
-				if (r)
-					return r;
-			}
+			if (is_sentinel(q, h))
+				continue;
+
+			e = container_of(h, struct entry, list);
+			r = fn(context, infer_cblock(&mq->cache_pool, e),
+			       e->oblock, e->hit_count);
+			if (r)
+				return r;
 		}
 
 	return 0;

@@ -79,11 +79,6 @@ struct perf_branch_stack {
 	struct perf_branch_entry	entries[0];
 };
 
-struct perf_regs {
-	__u64		abi;
-	struct pt_regs	*regs;
-};
-
 struct task_struct;
 
 /*
@@ -455,11 +450,6 @@ struct perf_event {
 #endif /* CONFIG_PERF_EVENTS */
 };
 
-enum perf_event_context_type {
-	task_context,
-	cpu_context,
-};
-
 /**
  * struct perf_event_context - event context structure
  *
@@ -467,7 +457,6 @@ enum perf_event_context_type {
  */
 struct perf_event_context {
 	struct pmu			*pmu;
-	enum perf_event_context_type	type;
 	/*
 	 * Protect the states of the events in the list,
 	 * nr_active, and the list:
@@ -610,7 +599,14 @@ struct perf_sample_data {
 		u32	reserved;
 	}				cpu_entry;
 	struct perf_callchain_entry	*callchain;
+
+	/*
+	 * regs_user may point to task_pt_regs or to regs_user_copy, depending
+	 * on arch details.
+	 */
 	struct perf_regs		regs_user;
+	struct pt_regs			regs_user_copy;
+
 	struct perf_regs		regs_intr;
 	u64				stack_user_size;
 } ____cacheline_aligned;
