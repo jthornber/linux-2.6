@@ -28,7 +28,6 @@ struct entry {
 	unsigned hits:NR_HIT_BITS;
 	bool dirty:1;
 	bool allocated:1;
-	bool hotspot:1;
 	bool sentinel:1;
 
 	dm_oblock_t oblock;
@@ -301,7 +300,7 @@ static void l_check_present(struct entry_space *es, struct ilist *l, struct entr
 #define NR_SENTINELS (NR_CACHE_LEVELS * 4u)
 
 // FIXME: separate writeback period and demote period
-#define WRITEBACK_PERIOD (5 * 60  * HZ)
+#define WRITEBACK_PERIOD (60  * HZ)
 
 // FIXME: why do we pass the es into the list functions, but store it in
 // the queue?
@@ -830,6 +829,8 @@ struct mq_policy {
 	struct mutex lock;
 	dm_cblock_t cache_size;
 	sector_t cache_block_size;
+
+	sector_t hotspot_block_size;
 	unsigned nr_hotspot_blocks;
 
 	struct entry_space es;
@@ -909,7 +910,7 @@ struct mq_policy {
 
 /*----------------------------------------------------------------*/
 
-#if 0
+#if 1
 static char density_char(unsigned n, unsigned maximum)
 {
 	static char density[] = ".:-=+*#%@";
@@ -941,7 +942,7 @@ static void display_heatmap(struct mq_policy *mq)
 				if (base + i >= mq->nr_hotspot_blocks)
 					break;
 
-				e = get_entry(&mq->hotspot_allocator, base + i);
+				e = get_entry(&mq->hotspot_alloc, base + i);
 				m = max((unsigned) e->level, m);
 				tot += e->level;
 				thresh += (e->level >= mq->hotspot.hit_threshold_level) ? 1u : 0u;
@@ -1129,7 +1130,7 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 }
 
 #define HOTSPOT_UPDATE_PERIOD (HZ)
-#define CACHE_UPDATE_PERIOD (10u * HZ)
+#define CACHE_UPDATE_PERIOD (1u * HZ)
 
 static void update_promote_levels(struct mq_policy *mq);
 
@@ -1137,8 +1138,8 @@ static void end_hotspot_period(struct mq_policy *mq)
 {
 	update_promote_levels(mq);
 	clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
-	q_end_period(&mq->hotspot);
-	mq->next_hotspot_period = jiffies + HOTSPOT_UPDATE_PERIOD;
+	q_end_period(&mq->hotspot); /* FIXME: I don't think this is necc for hotspot */
+	mq->next_hotspot_period = jiffies + HOTSPOT_UPDATE_PERIOD; /* FIXME: unused */
 }
 
 // FIXME: bad name
@@ -1153,7 +1154,7 @@ static void book_keeping(struct mq_policy *mq)
 		q_end_period(&mq->clean);
 
 		mq->next_cache_period = jiffies + CACHE_UPDATE_PERIOD;
-		//display_heatmap(mq);
+		display_heatmap(mq);
 	}
 }
 
@@ -1192,9 +1193,12 @@ static enum promote_result maybe_promote(bool promote)
 	return promote ? PROMOTE_PERMANENT : PROMOTE_NOT;
 }
 
-static enum promote_result should_promote_from_precache(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
-							bool fast_promote)
+static enum promote_result should_promote(struct mq_policy *mq, struct entry *hs_e, struct bio *bio,
+					  bool fast_promote)
 {
+	if (bio_data_dir(bio) == WRITE && !allocator_empty(&mq->cache_alloc) && fast_promote)
+		return PROMOTE_TEMPORARY;
+
 	if (bio_data_dir(bio) == WRITE) {
 		if (!allocator_empty(&mq->cache_alloc) && fast_promote)
 			return PROMOTE_TEMPORARY;
@@ -1203,15 +1207,6 @@ static enum promote_result should_promote_from_precache(struct mq_policy *mq, st
 
 	} else
 		return maybe_promote(hs_e->level >= mq->read_promote_level);
-}
-
-static enum promote_result should_promote_direct(struct mq_policy *mq, struct bio *bio,
-						 bool fast_promote)
-{
-	if (bio_data_dir(bio) == WRITE && !allocator_empty(&mq->cache_alloc) && fast_promote)
-		return PROMOTE_TEMPORARY;
-
-	return PROMOTE_NOT;
 }
 
 static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
@@ -1279,6 +1274,27 @@ static void update_promote_levels(struct mq_policy *mq)
 	mq->write_promote_level = mq->read_promote_level + 2u;
 }
 
+static struct entry *update_hotspot_queue(struct mq_policy *mq, struct bio *bio)
+{
+	struct entry *e;
+	sector_t hb = bio->bi_iter.bi_sector;
+
+	// FIXME: optimise for power of two block size
+	(void) sector_div(hb, mq->hotspot_block_size);
+
+	e = get_entry(&mq->hotspot_alloc, hb);
+	if (!e->allocated) {
+		e = alloc_particular_entry(&mq->hotspot_alloc, hb);
+		q_push(&mq->hotspot, e);
+	}
+
+	q_update_autotune(&mq->hotspot, e);
+	q_requeue(&mq->hotspot, e,
+		  !test_and_set_bit(hb, mq->hotspot_hit_bits));
+
+	return e;
+}
+
 /*
  * Looks the oblock up in the hash table, then decides whether to put in
  * pre_cache, or cache etc.
@@ -1287,52 +1303,23 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	       bool can_migrate, bool fast_promote,
 	       struct policy_result *result)
 {
-	struct entry *e;
+	struct entry *e, *hs_e;
 	enum promote_result pr;
+
+	hs_e = update_hotspot_queue(mq, bio);
 
 	e = h_lookup(&mq->table, oblock);
 	if (e) {
-		if (e->hotspot) {
-			q_update_autotune(&mq->hotspot, e);
-			q_requeue(&mq->hotspot, e,
-				  !test_and_set_bit(get_index(&mq->hotspot_alloc, e),
-						    mq->hotspot_hit_bits));
-
-			pr = should_promote_from_precache(mq, e, bio, fast_promote);
-			if (pr == PROMOTE_NOT) {
-				result->op = POLICY_MISS;
-
-			} else {
-				if (!can_migrate) {
-					result->op = POLICY_MISS;
-					return -EWOULDBLOCK;
-				}
-
-				del(mq, &mq->hotspot, e);
-				free_entry(&mq->hotspot_alloc, e);
-				insert_in_cache(mq, oblock, result, pr);
-			}
-
-		} else {
-			requeue(mq, e);
-			result->op = POLICY_HIT;
-			result->cblock = infer_cblock(mq, e);
-		}
+		requeue(mq, e);
+		result->op = POLICY_HIT;
+		result->cblock = infer_cblock(mq, e);
 
 	} else {
-		pr = should_promote_direct(mq, bio, fast_promote);
-		if (pr == PROMOTE_NOT) {
+		pr = should_promote(mq, hs_e, bio, fast_promote);
+		if (pr == PROMOTE_NOT)
 			result->op = POLICY_MISS;
-			if (allocator_empty(&mq->hotspot_alloc))
-				e = pop(mq, &mq->hotspot);
-			else
-				e = alloc_entry(&mq->hotspot_alloc);
 
-			init_entry(e);
-			e->hotspot = true;
-			e->oblock = oblock;
-			push(mq, &mq->hotspot, e);
-		} else {
+		else {
 			if (!can_migrate) {
 				result->op = POLICY_MISS;
 				return -EWOULDBLOCK;
@@ -1726,6 +1713,31 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.set_config_value = mq_set_config_value;
 }
 
+static bool good_hotspot_size(sector_t origin_size,
+			      sector_t cache_block_size,
+			      sector_t s)
+{
+	if (s < cache_block_size)
+		return false;
+
+	(void) sector_div(origin_size, s);
+	if (origin_size < 1024u * 16u) /* FIXME: magic nr */
+		return false;
+
+	return true;
+}
+
+static unsigned calc_hotspot_block_size(sector_t origin_size,
+					sector_t cache_block_size)
+{
+	sector_t s = 16u;
+
+	while (!good_hotspot_size(origin_size, cache_block_size, s))
+		s <<= 1u;
+
+	return (unsigned)s;
+}
+
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
 					 sector_t cache_block_size)
@@ -1740,7 +1752,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->cache_size = cache_size;
 	mq->cache_block_size = cache_block_size;
 
-	mq->nr_hotspot_blocks = from_cblock(cache_size);
+	mq->hotspot_block_size = calc_hotspot_block_size(origin_size, cache_block_size);
+	mq->nr_hotspot_blocks = dm_sector_div_up(origin_size, mq->hotspot_block_size);
 	if (space_init(&mq->es, NR_SENTINELS + mq->nr_hotspot_blocks + from_cblock(cache_size))) {
 		DMERR("couldn't initialize entry space");
 		goto bad_pool_init;
@@ -1752,8 +1765,6 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 
 	init_allocator(&mq->hotspot_alloc, &mq->es, NR_SENTINELS,
 		       NR_SENTINELS + mq->nr_hotspot_blocks);
-	for (i = 0; i < mq->nr_hotspot_blocks; i++)
-		get_entry(&mq->hotspot_alloc, i)->hotspot = true;
 
 	init_allocator(&mq->cache_alloc, &mq->es,
 		       NR_SENTINELS + mq->nr_hotspot_blocks,
