@@ -1839,15 +1839,22 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 
 static void writeback_some_dirty_blocks(struct cache *cache)
 {
+	static bool busy_state = false;
+
 	int r = 0;
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;
 	struct prealloc structs;
 	struct dm_bio_prison_cell *old_ocell;
-	bool busy = iot_idle_for(&cache->origin_tracker, HZ);
+	bool busy = !iot_idle_for(&cache->origin_tracker, HZ);
 	unsigned queued = 0u;
 
-//	iot_average_load(&cache->origin_tracker);
+	if (busy != busy_state) {
+		pr_alert("%s\n", busy ? "busy" : "idle");
+		busy_state = busy;
+	}
+
+	iot_average_load(&cache->origin_tracker);
 
 	memset(&structs, 0, sizeof(structs));
 
