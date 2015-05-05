@@ -850,6 +850,7 @@ struct mq_policy {
 
 	sector_t hotspot_block_size;
 	unsigned nr_hotspot_blocks;
+	unsigned cache_blocks_per_hotspot_block;
 	unsigned hotspot_level_jump;
 
 	struct entry_space es;
@@ -905,10 +906,11 @@ struct mq_policy {
 	unsigned write_promote_adjustment;
 
 	/*
-	 * The hash table allows us to quickly find an entry by origin
+	 * The hash tables allows us to quickly find an entry by origin
 	 * block.
 	 */
 	struct hash_table table;
+	struct hash_table hotspot_table;
 
 	bool current_writeback_sentinels;
 	unsigned long next_writeback_period;
@@ -1195,14 +1197,17 @@ static void requeue(struct mq_policy *mq, struct entry *e)
 
 static unsigned default_threshold_level(struct mq_policy *mq)
 {
-	unsigned cblocks_per_hb = mq->hotspot_block_size / mq->cache_block_size;
-	unsigned hb_per_level = mq->nr_hotspot_blocks / NR_HOTSPOT_LEVELS;
-	unsigned cblocks_per_level = hb_per_level * cblocks_per_hb;
+	static unsigned table[] = {1, 2, 3, 3, 4, 4, 5, 5, 4, 3, 2, 1, 1, 1, 1, 1, 1};
 
-	unsigned fudge = 1u;
-	unsigned levels_to_fill_cache = from_cblock(mq->cache_size) * fudge / cblocks_per_level;
+	unsigned nr_hits = mq->clean.autotune_hits + mq->dirty.autotune_hits;
+	unsigned nr_misses = mq->clean.autotune_misses + mq->dirty.autotune_misses;
 
-	return max(1u, levels_to_fill_cache);
+	if (nr_misses) {
+		unsigned index = (nr_hits << 4u) / (nr_hits + nr_misses);
+		BUG_ON(index > 16);
+		return table[index];
+	} else
+		return 1u;
 }
 
 static void update_promote_levels(struct mq_policy *mq)
@@ -1217,7 +1222,7 @@ static void update_promote_levels(struct mq_policy *mq)
 	 */
 	if (!allocator_empty(&mq->cache_alloc))
 		threshold_level = NR_HOTSPOT_LEVELS;
-#if 1
+
 	else {
 		switch (q_assess(&mq->hotspot)) {
 		case Q_POOR:
@@ -1232,11 +1237,11 @@ static void update_promote_levels(struct mq_policy *mq)
 			break;
 		}
 	}
-#endif
-	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
-	mq->write_promote_level = NR_HOTSPOT_LEVELS; // FIXME: write promotion disabled for now - max(1u, threshold_level / 2u);
 
-#if 0
+	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
+	mq->write_promote_level = NR_HOTSPOT_LEVELS - threshold_level; // (threshold_level / 2u);
+
+#if 1
 	if (mq->read_promote_level != old_r) {
 		old_r = mq->read_promote_level;
 		pr_alert("read threshold = %u\n", old_r);
@@ -1269,7 +1274,10 @@ static void update_level_jump(struct mq_policy *mq)
 		break;
 	}
 
-	pr_alert("level jump = %u\n", mq->hotspot_level_jump);
+	pr_alert("hs hit ratio = %u/%u, level jump = %u\n",
+		 mq->hotspot.autotune_hits,
+		 mq->hotspot.autotune_misses,
+		 mq->hotspot_level_jump);
 }
 
 static void end_hotspot_period(struct mq_policy *mq)
@@ -1279,7 +1287,7 @@ static void end_hotspot_period(struct mq_policy *mq)
 
 	if (time_after(jiffies, mq->next_hotspot_period)) {
 		update_level_jump(mq);
-		q_end_period(&mq->hotspot); /* FIXME: I don't think this is necc for hotspot */
+		q_end_period(&mq->hotspot);
 		mq->next_hotspot_period = jiffies + HOTSPOT_UPDATE_PERIOD;
 	}
 }
@@ -1288,7 +1296,7 @@ static void end_hotspot_period(struct mq_policy *mq)
 static void book_keeping(struct mq_policy *mq)
 {
 	if (time_after(jiffies, mq->next_cache_period)) {
-		pr_alert("hit demotions %u/%u\n", mq->nr_hit_demotions, mq->nr_demotions);
+		//pr_alert("hit demotions %u/%u\n", mq->nr_hit_demotions, mq->nr_demotions);
 		//mq->nr_hit_demotions = mq->nr_demotions = 0u;
 		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 
@@ -1386,23 +1394,50 @@ static void insert_in_cache(struct mq_policy *mq, dm_oblock_t oblock,
 	result->cblock = infer_cblock(mq, e);
 }
 
-static struct entry *update_hotspot_queue(struct mq_policy *mq, struct bio *bio)
+static dm_oblock_t to_hblock(struct mq_policy *mq, dm_oblock_t b)
 {
-	struct entry *e;
-	sector_t hb = bio->bi_iter.bi_sector;
+	sector_t r = from_oblock(b);
+	(void) sector_div(r, mq->cache_blocks_per_hotspot_block);
+	return to_oblock(r);
+}
 
-	// FIXME: optimise for power of two block size
-	(void) sector_div(hb, mq->hotspot_block_size);
+static struct entry *update_hotspot_queue(struct mq_policy *mq, dm_oblock_t b, struct bio *bio)
+{
+	unsigned hi;
+	dm_oblock_t hb = to_hblock(mq, b);
+	struct entry *e = h_lookup(&mq->hotspot_table, hb);
 
-	e = get_entry(&mq->hotspot_alloc, hb);
-	if (!e->allocated) {
-		e = alloc_particular_entry(&mq->hotspot_alloc, hb);
-		q_push(&mq->hotspot, e);
+	if (e) {
+		//pr_alert("hs: found %llu\n", (unsigned long long) hb);
+		hi = get_index(&mq->hotspot_alloc, e);
+
+		q_update_autotune(&mq->hotspot, e);
+		q_requeue(&mq->hotspot, e,
+			  test_and_set_bit(hi, mq->hotspot_hit_bits) ?
+			  0u : mq->hotspot_level_jump);
+
+	} else {
+		e = alloc_entry(&mq->hotspot_alloc);
+		if (!e) {
+			e = q_pop(&mq->hotspot);
+			if (e) {
+				//pr_alert("hs: %llu -> %llu\n", (unsigned long long) e->oblock, (unsigned long long) hb);
+				h_remove(&mq->hotspot_table, e);
+				hi = get_index(&mq->hotspot_alloc, e);
+				clear_bit(hi, mq->hotspot_hit_bits);
+			} else {
+				//pr_alert("hs: pop failed\n");
+			}
+		} else {
+			//pr_alert("hs: alloc %llu\n", (unsigned long long) hb);
+		}
+
+		if (e) {
+			e->oblock = hb;
+			q_push(&mq->hotspot, e);
+			h_insert(&mq->hotspot_table, e);
+		}
 	}
-
-	q_update_autotune(&mq->hotspot, e);
-	q_requeue(&mq->hotspot, e,
-		  test_and_set_bit(hb, mq->hotspot_hit_bits) ? 0u : mq->hotspot_level_jump);
 
 	return e;
 }
@@ -1418,14 +1453,13 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	struct entry *e, *hs_e;
 	enum promote_result pr;
 
-	hs_e = update_hotspot_queue(mq, bio);
+	hs_e = update_hotspot_queue(mq, oblock, bio);
 
 	e = h_lookup(&mq->table, oblock);
 	if (e) {
 		requeue(mq, e);
 		result->op = POLICY_HIT;
 		result->cblock = infer_cblock(mq, e);
-
 	} else {
 		pr = should_promote(mq, hs_e, bio, fast_promote);
 		if (pr == PROMOTE_NOT)
@@ -1464,6 +1498,7 @@ static void mq_destroy(struct dm_cache_policy *p)
 		 mq->hotspot.autotune_total_hits,
 		 mq->hotspot.autotune_total_misses);
 
+	h_exit(&mq->hotspot_table);
 	h_exit(&mq->table);
 	free_bitset(mq->hotspot_hit_bits);
 	free_bitset(mq->cache_hit_bits);
@@ -1828,8 +1863,8 @@ static bool good_hotspot_size(sector_t origin_size,
 			      sector_t cache_block_size,
 			      sector_t s)
 {
-	if (s < cache_block_size)
-		return false;
+	if (s == cache_block_size)
+		return true;
 
 	(void) sector_div(origin_size, s);
 	if (origin_size < 1024u * 16u) /* FIXME: magic nr */
@@ -1841,10 +1876,10 @@ static bool good_hotspot_size(sector_t origin_size,
 static unsigned calc_hotspot_block_size(sector_t origin_size,
 					sector_t cache_block_size)
 {
-	sector_t s = 16u;
+	sector_t s = cache_block_size * 4u;
 
 	while (!good_hotspot_size(origin_size, cache_block_size, s))
-		s <<= 1u;
+		s >>= 1;
 
 	return (unsigned)s;
 }
@@ -1866,7 +1901,13 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->cache_block_size = cache_block_size;
 
 	mq->hotspot_block_size = calc_hotspot_block_size(origin_size, cache_block_size);
-	mq->nr_hotspot_blocks = dm_sector_div_up(origin_size, mq->hotspot_block_size);
+	mq->nr_hotspot_blocks = min((unsigned long long) dm_sector_div_up(origin_size, mq->hotspot_block_size),
+				    16ull * 1024ull); /* FIXME: magic nr */
+	pr_alert("hs size = %llu, nr hs blocks = %llu\n",
+		 (unsigned long long) mq->hotspot_block_size,
+		 (unsigned long long) mq->nr_hotspot_blocks);
+
+	mq->cache_blocks_per_hotspot_block = mq->hotspot_block_size / mq->cache_block_size;
 	mq->hotspot_level_jump = 1u;
 	if (space_init(&mq->es, total_sentinels + mq->nr_hotspot_blocks + from_cblock(cache_size))) {
 		DMERR("couldn't initialize entry space");
@@ -1917,8 +1958,11 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	q_init(&mq->dirty, &mq->es, NR_CACHE_LEVELS);
 
 	mq->generation_period = max((unsigned) from_cblock(cache_size), 1024u);
-	if (h_init(&mq->table, &mq->es, from_cblock(cache_size) + mq->nr_hotspot_blocks))
+	if (h_init(&mq->table, &mq->es, from_cblock(cache_size)))
 		goto bad_alloc_table;
+
+	if (h_init(&mq->hotspot_table, &mq->es, mq->nr_hotspot_blocks))
+		goto bad_alloc_hotspot_table;
 
 	sentinels_init(mq);
 	mq->write_promote_level = mq->read_promote_level = NR_HOTSPOT_LEVELS;
@@ -1928,6 +1972,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 
 	return &mq->policy;
 
+bad_alloc_hotspot_table:
+	h_exit(&mq->table);
 bad_alloc_table:
 	free_bitset(mq->cache_hit_bits);
 bad_cache_hit_bits:
