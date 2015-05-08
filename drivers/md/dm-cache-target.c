@@ -127,9 +127,11 @@ static void __iot_rollover(struct io_tracker *iot)
 
 		iot->last_update_time += iot->window / IOT_RESOLUTION;
 
+#if 0
 		pr_alert("average load = %llu, peak load = %llu\n",
 			 (unsigned long long) iot->average_io,
 			 (unsigned long long) iot->peak_io);
+#endif
 	}
 }
 
