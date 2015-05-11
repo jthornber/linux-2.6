@@ -343,6 +343,7 @@ struct cache {
 	int sectors_per_block_shift;
 
 	spinlock_t lock;
+	struct list_head deferred_cells;
 	struct bio_list deferred_bios;
 	struct bio_list deferred_flush_bios;
 	struct bio_list deferred_writethrough_bios;
@@ -1059,24 +1060,40 @@ static void dec_io_migrations(struct cache *cache)
 	atomic_dec(&cache->nr_io_migrations);
 }
 
-static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
-			 bool holder)
+static void __cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
+			   bool holder, struct bio_list *bios)
 {
 	(holder ? dm_cell_release : dm_cell_release_no_holder)
-		(cache->prison, cell, &cache->deferred_bios);
+		(cache->prison, cell, bios);
 	free_prison_cell(cache, cell);
 }
 
-static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
-		       bool holder)
+static void cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
+			 bool holder, struct bio_list *bios)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	__cell_defer(cache, cell, holder);
+	__cell_release(cache, cell, holder, bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	wake_worker(cache);
+}
+
+static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
+{
+	cell_release(cache, cell, holder, &cache->deferred_bios);
+}
+
+static void cell_error_with_code(struct cache *cache, struct dm_bio_prison_cell *cell, int err)
+{
+	dm_cell_error(cache->prison, cell, err);
+	dm_bio_prison_free_cell(cache->prison, cell);
+}
+
+static void cell_requeue(struct cache *cache, struct dm_bio_prison_cell *cell)
+{
+	cell_error_with_code(cache, cell, DM_ENDIO_REQUEUE);
 }
 
 static void free_io_migration(struct dm_cache_migration *mg)
@@ -1983,7 +2000,22 @@ static void stop_worker(struct cache *cache)
 	flush_workqueue(cache->wq);
 }
 
-static void requeue_deferred_io(struct cache *cache)
+static void requeue_deferred_cells(struct cache *cache)
+{
+	unsigned long flags;
+	struct list_head cells;
+	struct dm_bio_prison_cell *cell, *tmp;
+
+	INIT_LIST_HEAD(&cells);
+	spin_lock_irqsave(&cache->lock, flags);
+	list_splice_init(&cache->deferred_cells, &cells);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	list_for_each_entry_safe(cell, tmp, &cells, user_list)
+		cell_requeue(cache, cell);
+}
+
+static void requeue_deferred_bios(struct cache *cache)
 {
 	struct bio *bio;
 	struct bio_list bios;
@@ -2626,6 +2658,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	}
 
 	spin_lock_init(&cache->lock);
+	INIT_LIST_HEAD(&cache->deferred_cells);
 	bio_list_init(&cache->deferred_bios);
 	bio_list_init(&cache->deferred_flush_bios);
 	bio_list_init(&cache->deferred_writethrough_bios);
@@ -3012,7 +3045,8 @@ static void cache_postsuspend(struct dm_target *ti)
 	start_quiescing(cache);
 	wait_for_migrations(cache);
 	stop_worker(cache);
-	requeue_deferred_io(cache);
+	requeue_deferred_bios(cache);
+	requeue_deferred_cells(cache);
 	stop_quiescing(cache);
 
 	(void) sync_metadata(cache);
