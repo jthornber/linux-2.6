@@ -1348,15 +1348,11 @@ static struct entry *update_hotspot_queue(struct mq_policy *mq, dm_oblock_t b, s
 		if (!e) {
 			e = q_pop(&mq->hotspot);
 			if (e) {
-				//pr_alert("hs: %llu -> %llu\n", (unsigned long long) e->oblock, (unsigned long long) hb);
 				h_remove(&mq->hotspot_table, e);
 				hi = get_index(&mq->hotspot_alloc, e);
 				clear_bit(hi, mq->hotspot_hit_bits);
-			} else {
-				//pr_alert("hs: pop failed\n");
 			}
-		} else {
-			//pr_alert("hs: alloc %llu\n", (unsigned long long) hb);
+
 		}
 
 		if (e) {
@@ -1403,7 +1399,6 @@ static int map(struct mq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 				return -EWOULDBLOCK;
 			}
 
-			// pr_alert("promoting %llu, hs_e->level = %u\n", oblock, hs_e->level);
 			insert_in_cache(mq, oblock, result, pr);
 		}
 	}
@@ -1805,7 +1800,7 @@ static bool good_hotspot_size(sector_t origin_size,
 static unsigned calc_hotspot_block_size(sector_t origin_size,
 					sector_t cache_block_size)
 {
-	sector_t s = cache_block_size * 4u;
+	sector_t s = cache_block_size * 16u;
 
 	while (!good_hotspot_size(origin_size, cache_block_size, s))
 		s >>= 1;
@@ -1830,7 +1825,7 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->cache_block_size = cache_block_size;
 
 	mq->hotspot_block_size = calc_hotspot_block_size(origin_size, cache_block_size);
-	mq->nr_hotspot_blocks = from_cblock(cache_size); // FIXME: >> 2;
+	mq->nr_hotspot_blocks = from_cblock(cache_size) / 4u;
 	pr_alert("hs size = %llu, nr hs blocks = %llu\n",
 		 (unsigned long long) mq->hotspot_block_size,
 		 (unsigned long long) mq->nr_hotspot_blocks);
@@ -1883,7 +1878,6 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->hotspot.nr_top_levels = 8;
 	mq->hotspot.nr_in_top_levels = min(mq->nr_hotspot_blocks / NR_HOTSPOT_LEVELS,
 					   from_cblock(mq->cache_size) / mq->cache_blocks_per_hotspot_block);
-	pr_alert("nr_in_top_levels = %u\n", mq->hotspot.nr_in_top_levels);
 
 	q_init(&mq->clean, &mq->es, NR_CACHE_LEVELS);
 	q_init(&mq->dirty, &mq->es, NR_CACHE_LEVELS);
