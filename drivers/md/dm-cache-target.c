@@ -1639,6 +1639,100 @@ static void inc_miss_counter(struct cache *cache, struct bio *bio)
 		   &cache->stats.read_miss : &cache->stats.write_miss);
 }
 
+/*----------------------------------------------------------------*/
+
+struct inc_detail {
+	struct cache *cache;
+	struct bio_list bios;
+	bool any_writes;
+};
+
+static void inc_fn(void *context, struct dm_bio_prison_cell *cell)
+{
+	struct bio *bio;
+	struct inc_detail *detail = context;
+	struct cache *cache = detail->cache;
+
+	inc_ds(cache, cell->holder, cell);
+	if (bio_data_dir(cell->holder) == WRITE)
+		detail->any_writes = true;
+
+	while ((bio = bio_list_pop(&cell->bios))) {
+		if (bio_data_dir(bio) == WRITE)
+			detail->any_writes = true;
+
+		bio_list_add(&detail->bios, bio);
+		inc_ds(cache, bio, cell);
+	}
+}
+
+static void remap_cell_to_origin_clear_discard(struct cache *cache,
+					       struct dm_bio_prison_cell *cell,
+					       dm_oblock_t oblock, bool issue_holder)
+{
+	struct bio *bio;
+	unsigned long flags;
+	struct inc_detail detail;
+
+	detail.cache = cache;
+	bio_list_init(&detail.bios);
+	detail.any_writes = false;
+
+	// FIXME: do we need to lock?
+	spin_lock_irqsave(&cache->lock, flags);
+	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	remap_to_origin(cache, cell->holder);
+	if (issue_holder)
+		issue(cache, cell->holder);
+	else
+		accounted_begin(cache, cell->holder);
+
+	if (detail.any_writes)
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
+
+	while ((bio = bio_list_pop(&detail.bios))) {
+		remap_to_origin(cache, bio);
+		issue(cache, bio);
+	}
+}
+
+static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_cell *cell,
+				      dm_oblock_t oblock, dm_cblock_t cblock, bool issue_holder)
+{
+	struct bio *bio;
+	unsigned long flags;
+	struct inc_detail detail;
+
+	detail.cache = cache;
+	bio_list_init(&detail.bios);
+	detail.any_writes = false;
+
+	// FIXME: do we need to lock?
+	spin_lock_irqsave(&cache->lock, flags);
+	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	remap_to_cache(cache, cell->holder, cblock);
+	if (issue_holder)
+		issue(cache, cell->holder);
+	else
+		accounted_begin(cache, cell->holder);
+
+	if (detail.any_writes) {
+		set_dirty(cache, oblock, cblock);
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
+	}
+
+	while ((bio = bio_list_pop(&detail.bios))) {
+		remap_to_cache(cache, bio, cblock);
+		issue(cache, bio);
+	}
+}
+
+/*----------------------------------------------------------------*/
+
 static void process_bio(struct cache *cache, struct prealloc *structs,
 			struct bio *bio)
 {
@@ -1699,9 +1793,9 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
 				inc_and_issue(cache, bio, new_ocell);
 
-			} else  {
-				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
-				inc_and_issue(cache, bio, new_ocell);
+			} else {
+				remap_cell_to_cache_dirty(cache, new_ocell, block, lookup_result.cblock, true);
+				release_cell = false;
 			}
 		}
 
@@ -1709,8 +1803,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 
 	case POLICY_MISS:
 		inc_miss_counter(cache, bio);
-		remap_to_origin_clear_discard(cache, bio, block);
-		inc_and_issue(cache, bio, new_ocell);
+		remap_cell_to_origin_clear_discard(cache, new_ocell, block, true);
+		release_cell = false;
 		break;
 
 	case POLICY_NEW:
@@ -2824,94 +2918,6 @@ static void defer_whole_cell(struct cache *cache, struct dm_bio_prison_cell *cel
 
 /*----------------------------------------------------------------*/
 
-struct inc_detail {
-	struct cache *cache;
-	struct bio_list bios;
-	bool any_writes;
-};
-
-static void inc_fn(void *context, struct dm_bio_prison_cell *cell)
-{
-	struct bio *bio;
-	struct inc_detail *detail = context;
-	struct cache *cache = detail->cache;
-
-	inc_ds(cache, cell->holder, cell);
-	if (bio_data_dir(cell->holder) == WRITE)
-		detail->any_writes = true;
-
-	while ((bio = bio_list_pop(&cell->bios))) {
-		if (bio_data_dir(bio) == WRITE)
-			detail->any_writes = true;
-
-		bio_list_add(&detail->bios, bio);
-		inc_ds(cache, bio, cell);
-	}
-}
-
-static void remap_cell_to_origin_clear_discard(struct cache *cache,
-					       struct dm_bio_prison_cell *cell,
-					       dm_oblock_t oblock)
-{
-	struct bio *bio;
-	unsigned long flags;
-	struct inc_detail detail;
-
-	detail.cache = cache;
-	bio_list_init(&detail.bios);
-	detail.any_writes = false;
-
-	// FIXME: do we need to lock?
-	spin_lock_irqsave(&cache->lock, flags);
-	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	remap_to_origin(cache, cell->holder);
-	accounted_begin(cache, cell->holder);
-
-	if (detail.any_writes)
-		clear_discard(cache, oblock_to_dblock(cache, oblock));
-
-	while ((bio = bio_list_pop(&detail.bios))) {
-		remap_to_origin(cache, bio);
-		issue(cache, bio);
-	}
-}
-
-/*----------------------------------------------------------------*/
-
-static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_cell *cell,
-				      dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	struct bio *bio;
-	unsigned long flags;
-	struct inc_detail detail;
-
-	detail.cache = cache;
-	bio_list_init(&detail.bios);
-	detail.any_writes = false;
-
-	// FIXME: do we need to lock?
-	spin_lock_irqsave(&cache->lock, flags);
-	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	remap_to_cache(cache, cell->holder, cblock);
-	accounted_begin(cache, cell->holder);
-
-	if (detail.any_writes) {
-		set_dirty(cache, oblock, cblock);
-		clear_discard(cache, oblock_to_dblock(cache, oblock));
-	}
-
-	while ((bio = bio_list_pop(&detail.bios))) {
-		remap_to_cache(cache, bio, cblock);
-		issue(cache, bio);
-	}
-}
-
-/*----------------------------------------------------------------*/
-
 static int cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache *cache = ti->private;
@@ -3008,7 +3014,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 				cell_defer(cache, cell, false);
 
 			} else
-				remap_cell_to_cache_dirty(cache, cell, block, lookup_result.cblock);
+				remap_cell_to_cache_dirty(cache, cell, block, lookup_result.cblock, false);
 		}
 		break;
 
@@ -3025,7 +3031,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 			r = DM_MAPIO_SUBMITTED;
 
 		} else
-			remap_cell_to_origin_clear_discard(cache, cell, block);
+			remap_cell_to_origin_clear_discard(cache, cell, block, false);
 		break;
 
 	default:
