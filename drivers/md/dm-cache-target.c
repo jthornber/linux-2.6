@@ -885,7 +885,7 @@ static bool is_write_io(struct bio *bio)
 }
 
 static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
-				  dm_oblock_t oblock)
+					  dm_oblock_t oblock)
 {
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_origin(cache, bio);
@@ -2816,9 +2816,108 @@ out:
 	return r;
 }
 
-static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_prison_cell **cell)
+static void defer_whole_cell(struct cache *cache, struct dm_bio_prison_cell *cell)
 {
+	// FIXME: add to deferred_cells list
+	cell_defer(cache, cell, true);
+}
+
+/*----------------------------------------------------------------*/
+
+struct inc_detail {
+	struct cache *cache;
+	struct bio_list bios;
+	bool any_writes;
+};
+
+static void inc_fn(void *context, struct dm_bio_prison_cell *cell)
+{
+	struct bio *bio;
+	struct inc_detail *detail = context;
+	struct cache *cache = detail->cache;
+
+	inc_ds(cache, cell->holder, cell);
+	if (bio_data_dir(cell->holder) == WRITE)
+		detail->any_writes = true;
+
+	while ((bio = bio_list_pop(&cell->bios))) {
+		if (bio_data_dir(bio) == WRITE)
+			detail->any_writes = true;
+
+		bio_list_add(&detail->bios, bio);
+		inc_ds(cache, bio, cell);
+	}
+}
+
+static void remap_cell_to_origin_clear_discard(struct cache *cache,
+					       struct dm_bio_prison_cell *cell,
+					       dm_oblock_t oblock)
+{
+	struct bio *bio;
+	unsigned long flags;
+	struct inc_detail detail;
+
+	detail.cache = cache;
+	bio_list_init(&detail.bios);
+	detail.any_writes = false;
+
+	// FIXME: do we need to lock?
+	spin_lock_irqsave(&cache->lock, flags);
+	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	remap_to_origin(cache, cell->holder);
+	accounted_begin(cache, cell->holder);
+
+	if (detail.any_writes)
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
+
+	while ((bio = bio_list_pop(&detail.bios))) {
+		remap_to_origin(cache, bio);
+		issue(cache, bio);
+	}
+}
+
+/*----------------------------------------------------------------*/
+
+static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_cell *cell,
+				      dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct bio *bio;
+	unsigned long flags;
+	struct inc_detail detail;
+
+	detail.cache = cache;
+	bio_list_init(&detail.bios);
+	detail.any_writes = false;
+
+	// FIXME: do we need to lock?
+	spin_lock_irqsave(&cache->lock, flags);
+	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	remap_to_cache(cache, cell->holder, cblock);
+	accounted_begin(cache, cell->holder);
+
+	if (detail.any_writes) {
+		set_dirty(cache, oblock, cblock);
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
+	}
+
+	while ((bio = bio_list_pop(&detail.bios))) {
+		remap_to_cache(cache, bio, cblock);
+		issue(cache, bio);
+	}
+}
+
+/*----------------------------------------------------------------*/
+
+static int cache_map(struct dm_target *ti, struct bio *bio)
+{
+	struct cache *cache = ti->private;
+
 	int r;
+	struct dm_bio_prison_cell *cell = NULL;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	bool can_migrate = false;
@@ -2833,9 +2932,11 @@ static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_priso
 		 * Just remap to the origin and carry on.
 		 */
 		remap_to_origin(cache, bio);
+		accounted_begin(cache, bio);
 		return DM_MAPIO_REMAPPED;
 	}
 
+	// FIXME: do these really trigger a commit?
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD)) {
 		defer_bio(cache, bio);
 		return DM_MAPIO_SUBMITTED;
@@ -2844,15 +2945,15 @@ static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_priso
 	/*
 	 * Check to see if that block is currently migrating.
 	 */
-	*cell = alloc_prison_cell(cache);
-	if (!*cell) {
+	cell = alloc_prison_cell(cache);
+	if (!cell) {
 		defer_bio(cache, bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	r = bio_detain(cache, block, bio, *cell,
+	r = bio_detain(cache, block, bio, cell,
 		       (cell_free_fn) free_prison_cell,
-		       cache, cell);
+		       cache, &cell);
 	if (r) {
 		if (r < 0)
 			defer_bio(cache, bio);
@@ -2865,12 +2966,12 @@ static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_priso
 	r = policy_map(cache->policy, block, false, can_migrate, fast_promotion,
 		       bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
-		cell_defer(cache, *cell, true);
+		defer_whole_cell(cache, cell);
 		return DM_MAPIO_SUBMITTED;
 
 	} else if (r) {
 		DMERR_LIMIT("Unexpected return from cache replacement policy: %d", r);
-		cell_defer(cache, *cell, false);
+		cell_defer(cache, cell, false);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -2884,22 +2985,30 @@ static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_priso
 				 * We need to invalidate this block, so
 				 * defer for the worker thread.
 				 */
-				cell_defer(cache, *cell, true);
+				defer_whole_cell(cache, cell);
 				r = DM_MAPIO_SUBMITTED;
 
 			} else {
 				inc_miss_counter(cache, bio);
 				remap_to_origin_clear_discard(cache, bio, block);
+				accounted_begin(cache, bio);
+				inc_ds(cache, bio, cell);
+				// FIXME: we want to remap hits or misses straight
+				// away rather than passing over to the worker.
+				cell_defer(cache, cell, false);
 			}
 
 		} else {
 			inc_hit_counter(cache, bio);
 			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
-			    !is_dirty(cache, lookup_result.cblock))
+			    !is_dirty(cache, lookup_result.cblock)) {
 				remap_to_origin_then_cache(cache, bio, block, lookup_result.cblock);
+				accounted_begin(cache, bio);
+				inc_ds(cache, bio, cell);
+				cell_defer(cache, cell, false);
 
-			else
-				remap_to_cache_dirty(cache, bio, block, lookup_result.cblock);
+			} else
+				remap_cell_to_cache_dirty(cache, cell, block, lookup_result.cblock);
 		}
 		break;
 
@@ -2911,39 +3020,20 @@ static int __cache_map(struct cache *cache, struct bio *bio, struct dm_bio_priso
 			 * longer needed because the block has been demoted.
 			 */
 			bio_endio(bio, 0);
-			cell_defer(cache, *cell, false);
+			// FIXME: remap everything as a miss
+			cell_defer(cache, cell, false);
 			r = DM_MAPIO_SUBMITTED;
 
 		} else
-			remap_to_origin_clear_discard(cache, bio, block);
-
+			remap_cell_to_origin_clear_discard(cache, cell, block);
 		break;
 
 	default:
 		DMERR_LIMIT("%s: erroring bio: unknown policy op: %u", __func__,
 			    (unsigned) lookup_result.op);
-		cell_defer(cache, *cell, false);
+		cell_defer(cache, cell, false);
 		bio_io_error(bio);
 		r = DM_MAPIO_SUBMITTED;
-	}
-
-	return r;
-}
-
-static int cache_map(struct dm_target *ti, struct bio *bio)
-{
-	int r;
-	struct dm_bio_prison_cell *cell = NULL;
-	struct cache *cache = ti->private;
-
-	r = __cache_map(cache, bio, &cell);
-	if (r == DM_MAPIO_REMAPPED) {
-		accounted_begin(cache, bio);
-
-		if (cell) {
-			inc_ds(cache, bio, cell);
-			cell_defer(cache, cell, false);
-		}
 	}
 
 	return r;
