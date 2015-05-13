@@ -1783,29 +1783,25 @@ static void init_policy_functions(struct mq_policy *mq)
 	mq->policy.set_config_value = mq_set_config_value;
 }
 
-static bool good_hotspot_size(sector_t origin_size,
-			      sector_t cache_block_size,
-			      sector_t s)
+static bool too_many_hotspot_blocks(sector_t origin_size,
+				    sector_t hotspot_block_size,
+				    unsigned nr_hotspot_blocks)
 {
-	if (s == cache_block_size)
-		return true;
-
-	(void) sector_div(origin_size, s);
-	if (origin_size < 1024u * 16u) /* FIXME: magic nr */
-		return false;
-
-	return true;
+	return (hotspot_block_size * nr_hotspot_blocks) > origin_size;
 }
 
-static unsigned calc_hotspot_block_size(sector_t origin_size,
-					sector_t cache_block_size)
+static void calc_hotspot_params(sector_t origin_size,
+				sector_t cache_block_size,
+				unsigned nr_cache_blocks,
+				sector_t *hotspot_block_size,
+				unsigned *nr_hotspot_blocks)
 {
-	sector_t s = cache_block_size * 16u;
+	*hotspot_block_size = cache_block_size * 16u;
+	*nr_hotspot_blocks = nr_cache_blocks / 4u;
 
-	while (!good_hotspot_size(origin_size, cache_block_size, s))
-		s >>= 1;
-
-	return (unsigned)s;
+	while ((*hotspot_block_size > cache_block_size) &&
+	       too_many_hotspot_blocks(origin_size, *hotspot_block_size, *nr_hotspot_blocks))
+		*hotspot_block_size /= 2u;
 }
 
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
@@ -1824,8 +1820,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	mq->cache_size = cache_size;
 	mq->cache_block_size = cache_block_size;
 
-	mq->hotspot_block_size = calc_hotspot_block_size(origin_size, cache_block_size);
-	mq->nr_hotspot_blocks = from_cblock(cache_size) / 4u;
+	calc_hotspot_params(origin_size, cache_block_size, from_cblock(cache_size),
+			    &mq->hotspot_block_size, &mq->nr_hotspot_blocks);
 	pr_alert("hs size = %llu, nr hs blocks = %llu\n",
 		 (unsigned long long) mq->hotspot_block_size,
 		 (unsigned long long) mq->nr_hotspot_blocks);
