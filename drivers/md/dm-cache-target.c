@@ -1068,18 +1068,6 @@ static void __cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
 	free_prison_cell(cache, cell);
 }
 
-static void cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
-			 bool holder, struct bio_list *bios)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	__cell_release(cache, cell, holder, bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
-}
-
 static bool discard_or_flush(struct bio *bio)
 {
 	return bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD);
