@@ -1080,9 +1080,42 @@ static void cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
 	wake_worker(cache);
 }
 
+static bool discard_or_flush(struct bio *bio)
+{
+	return bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD);
+}
+
+static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell)
+{
+	if (discard_or_flush(cell->holder))
+		/*
+		 * We have to handle these bios
+		 * individually.
+		 */
+		__cell_release(cache, cell, true, &cache->deferred_bios);
+
+	else
+		list_add_tail(&cell->user_list, &cache->deferred_cells);
+}
+
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
-	cell_release(cache, cell, holder, &cache->deferred_bios);
+	unsigned long flags;
+
+	if (!holder && dm_cell_promote_or_release(cache->prison, cell)) {
+		/*
+		 * There was no prisoner to promote to holder, the
+		 * cell has been released.
+		 */
+		free_prison_cell(cache, cell);
+		return;
+	}
+
+	spin_lock_irqsave(&cache->lock, flags);
+	__cell_defer(cache, cell);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
 }
 
 static void cell_error_with_code(struct cache *cache, struct dm_bio_prison_cell *cell, int err)
@@ -1573,17 +1606,6 @@ static void defer_bio(struct cache *cache, struct bio *bio)
 	wake_worker(cache);
 }
 
-static void defer_whole_cell(struct cache *cache, struct dm_bio_prison_cell *cell)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	list_add_tail(&cell->user_list, &cache->deferred_cells);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
-}
-
 static void process_flush_bio(struct cache *cache, struct bio *bio)
 {
 	size_t pb_data_size = get_per_bio_data_size(cache);
@@ -1658,11 +1680,6 @@ struct inc_detail {
 	struct bio_list unhandled_bios;
 	bool any_writes;
 };
-
-static bool discard_or_flush(struct bio *bio)
-{
-	return bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD);
-}
 
 static void inc_fn(void *context, struct dm_bio_prison_cell *cell)
 {
@@ -3037,7 +3054,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	r = policy_map(cache->policy, block, false, can_migrate, fast_promotion,
 		       bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
-		defer_whole_cell(cache, cell);
+		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
 
 	} else if (r) {
@@ -3056,7 +3073,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 				 * We need to invalidate this block, so
 				 * defer for the worker thread.
 				 */
-				defer_whole_cell(cache, cell);
+				cell_defer(cache, cell, true);
 				r = DM_MAPIO_SUBMITTED;
 
 			} else {
