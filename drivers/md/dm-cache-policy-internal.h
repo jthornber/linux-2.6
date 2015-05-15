@@ -106,6 +106,33 @@ static inline int policy_set_config_value(struct dm_cache_policy *p,
 /*----------------------------------------------------------------*/
 
 /*
+ * Some utility functions commonly used by policies and the core target.
+ */
+static inline size_t bitset_size_in_bytes(unsigned nr_entries)
+{
+	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
+}
+
+static inline unsigned long *alloc_bitset(unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	return vzalloc(s);
+}
+
+static inline void clear_bitset(void *bitset, unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	memset(bitset, 0, s);
+}
+
+static inline void free_bitset(unsigned long *bits)
+{
+	vfree(bits);
+}
+
+/*----------------------------------------------------------------*/
+
+/*
  * Creates a new cache policy given a policy name, a cache size, an origin size and the block size.
  */
 struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
