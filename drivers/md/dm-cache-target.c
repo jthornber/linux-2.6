@@ -1756,6 +1756,29 @@ static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_
 
 /*----------------------------------------------------------------*/
 
+struct old_oblock_lock {
+	struct policy_locker locker;
+	struct cache *cache;
+	struct prealloc *structs;
+	struct dm_bio_prison_cell *cell;
+};
+
+static int null_locker(struct policy_locker *locker, dm_oblock_t b)
+{
+	/* This should never be called */
+	BUG();
+}
+
+static int cell_locker(struct policy_locker *locker, dm_oblock_t b)
+{
+	struct old_oblock_lock *l = container_of(locker, struct old_oblock_lock, locker);
+	struct dm_bio_prison_cell *cell_prealloc = prealloc_get_cell(l->structs);
+
+	return bio_detain(l->cache, b, NULL, cell_prealloc,
+			  (cell_free_fn) prealloc_put_cell,
+			  l->structs, &l->cell);
+}
+
 static void process_cell(struct cache *cache, struct prealloc *structs,
 			 struct dm_bio_prison_cell *new_ocell)
 {
@@ -1763,16 +1786,20 @@ static void process_cell(struct cache *cache, struct prealloc *structs,
 	bool release_cell = true;
 	struct bio *bio = new_ocell->holder;
 	dm_oblock_t block = get_bio_block(cache, bio);
-	struct dm_bio_prison_cell *cell_prealloc, *old_ocell;
 	struct policy_result lookup_result;
 	bool passthrough = passthrough_mode(&cache->features);
 	bool fast_promotion, can_migrate;
+	struct old_oblock_lock ool;
 
 	fast_promotion = is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio);
 	can_migrate = !passthrough && (fast_promotion || spare_migration_bandwidth(cache));
 
+	ool.locker.fn = cell_locker;
+	ool.cache = cache;
+	ool.structs = structs;
+	ool.cell = NULL;
 	r = policy_map(cache->policy, block, true, can_migrate, fast_promotion,
-		       bio, &lookup_result);
+		       bio, &ool.locker, &lookup_result);
 
 	if (r == -EWOULDBLOCK)
 		/* migration has been denied */
@@ -1829,27 +1856,11 @@ static void process_cell(struct cache *cache, struct prealloc *structs,
 		break;
 
 	case POLICY_REPLACE:
-		cell_prealloc = prealloc_get_cell(structs);
-		r = bio_detain(cache, lookup_result.old_oblock, bio, cell_prealloc,
-			       (cell_free_fn) prealloc_put_cell,
-			       structs, &old_ocell);
-		if (r > 0) {
-			/*
-			 * We have to be careful to avoid lock inversion of
-			 * the cells.  So we back off, and wait for the
-			 * old_ocell to become free.
-			 */
-			policy_force_mapping(cache->policy, block,
-					     lookup_result.old_oblock);
-			atomic_inc(&cache->stats.cache_cell_clash);
-			break;
-		}
 		atomic_inc(&cache->stats.demotion);
 		atomic_inc(&cache->stats.promotion);
-
 		demote_then_promote(cache, structs, lookup_result.old_oblock,
 				    block, lookup_result.cblock,
-				    old_ocell, new_ocell);
+				    ool.cell, new_ocell);
 		release_cell = false;
 		break;
 
@@ -2992,6 +3003,9 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	bool fast_promotion;
 	struct policy_result lookup_result;
 	struct per_bio_data *pb = init_per_bio_data(bio, pb_data_size);
+	struct old_oblock_lock ool;
+
+	ool.locker.fn = null_locker;
 
 	if (unlikely(from_oblock(block) >= from_oblock(cache->origin_blocks))) {
 		/*
@@ -3031,7 +3045,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	fast_promotion = is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio);
 
 	r = policy_map(cache->policy, block, false, can_migrate, fast_promotion,
-		       bio, &lookup_result);
+		       bio, &ool.locker, &lookup_result);
 	if (r == -EWOULDBLOCK) {
 		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
