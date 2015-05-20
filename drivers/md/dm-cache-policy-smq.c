@@ -1096,9 +1096,11 @@ static void end_cache_period(struct smq_policy *mq)
 	}
 }
 
-static int demote_cblock(struct smq_policy *mq, dm_oblock_t *oblock)
+static int demote_cblock(struct smq_policy *mq,
+			 struct policy_locker *locker,
+			 dm_oblock_t *oblock)
 {
-	struct entry *demoted = pop_old(mq, &mq->clean, mq->clean.nr_levels);
+	struct entry *demoted = q_peek(&mq->clean, mq->clean.nr_levels, false);
 	if (!demoted)
 		/*
 		 * We could get a block from mq->dirty, but that
@@ -1109,6 +1111,13 @@ static int demote_cblock(struct smq_policy *mq, dm_oblock_t *oblock)
 		 */
 		return -ENOSPC;
 
+	if (locker->fn(locker, demoted->oblock))
+		/*
+		 * We couldn't lock this block.
+		 */
+		return -EBUSY;
+
+	del(mq, demoted);
 	*oblock = demoted->oblock;
 	free_entry(&mq->cache_alloc, demoted);
 
@@ -1144,6 +1153,7 @@ static enum promote_result should_promote(struct smq_policy *mq, struct entry *h
 }
 
 static void insert_in_cache(struct smq_policy *mq, dm_oblock_t oblock,
+			    struct policy_locker *locker,
 			    struct policy_result *result, enum promote_result pr)
 {
 	int r;
@@ -1151,7 +1161,7 @@ static void insert_in_cache(struct smq_policy *mq, dm_oblock_t oblock,
 
 	if (allocator_empty(&mq->cache_alloc)) {
 		result->op = POLICY_REPLACE;
-		r = demote_cblock(mq, &result->old_oblock);
+		r = demote_cblock(mq, locker, &result->old_oblock);
 		if (r) {
 			result->op = POLICY_MISS;
 			return;
@@ -1223,7 +1233,7 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
  */
 static int map(struct smq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 	       bool can_migrate, bool fast_promote,
-	       struct policy_result *result)
+	       struct policy_locker *locker, struct policy_result *result)
 {
 	struct entry *e, *hs_e;
 	enum promote_result pr;
@@ -1251,7 +1261,7 @@ static int map(struct smq_policy *mq, struct bio *bio, dm_oblock_t oblock,
 				return -EWOULDBLOCK;
 			}
 
-			insert_in_cache(mq, oblock, result, pr);
+			insert_in_cache(mq, oblock, locker, result, pr);
 		}
 	}
 
@@ -1308,7 +1318,8 @@ static bool maybe_lock(struct smq_policy *mq, bool can_block)
 
 static int smq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 		   bool can_block, bool can_migrate, bool fast_promote,
-		   struct bio *bio, struct policy_result *result)
+		   struct bio *bio, struct policy_locker *locker,
+		   struct policy_result *result)
 {
 	int r;
 	struct smq_policy *mq = to_smq_policy(p);
@@ -1319,7 +1330,7 @@ static int smq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 		return -EWOULDBLOCK;
 
 	copy_tick(mq);
-	r = map(mq, bio, oblock, can_migrate, fast_promote, result);
+	r = map(mq, bio, oblock, can_migrate, fast_promote, locker, result);
 	mutex_unlock(&mq->lock);
 
 	return r;
