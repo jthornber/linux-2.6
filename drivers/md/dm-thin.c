@@ -878,7 +878,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	 * Any I/O for this block arriving after this point will get
 	 * remapped to it directly.
 	 */
-	r = dm_thin_insert_block(tc->td, m->cell->key.block_begin, m->data_block);
+	r = dm_thin_insert_block(tc->td, m->virt_begin, m->data_block);
 	if (r) {
 		metadata_operation_failed(pool, "dm_thin_insert_block", r);
 		cell_error(pool, m->cell);
@@ -1121,6 +1121,8 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	struct dm_thin_new_mapping *m = get_next_mapping(pool);
 
 	m->tc = tc;
+	m->virt_begin = virt_block;
+	m->virt_end = virt_block + 1u;
 	m->data_block = data_dest;
 	m->cell = cell;
 
