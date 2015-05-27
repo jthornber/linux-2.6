@@ -1515,7 +1515,7 @@ static int __smq_writeback_work(struct smq_policy *mq, dm_oblock_t *oblock,
 		 */
 		e = pop_old(mq, &mq->dirty, target_met ? 1u : mq->dirty.nr_levels);
 
-	else if (!target_met)
+	else
 		e = pop_old(mq, &mq->dirty, mq->dirty.nr_levels);
 
 	if (!e)
