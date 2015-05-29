@@ -1292,6 +1292,13 @@ static void smq_destroy(struct dm_cache_policy *p)
 	kfree(mq);
 }
 
+static void __new_tick(struct smq_policy *mq)
+{
+	update_sentinels(mq);
+	end_hotspot_period(mq);
+	end_cache_period(mq);
+}
+
 static void copy_tick(struct smq_policy *mq)
 {
 	unsigned long flags, tick;
@@ -1299,9 +1306,7 @@ static void copy_tick(struct smq_policy *mq)
 	spin_lock_irqsave(&mq->tick_lock, flags);
 	tick = mq->tick_protected;
 	if (tick != mq->tick) {
-		update_sentinels(mq);
-		end_hotspot_period(mq);
-		end_cache_period(mq);
+		__new_tick(mq);
 		mq->tick = tick;
 	}
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
@@ -1577,7 +1582,7 @@ static dm_cblock_t smq_residency(struct dm_cache_policy *p)
 	return r;
 }
 
-static void smq_tick(struct dm_cache_policy *p)
+static void smq_tick(struct dm_cache_policy *p, bool can_block)
 {
 	struct smq_policy *mq = to_smq_policy(p);
 	unsigned long flags;
@@ -1585,6 +1590,12 @@ static void smq_tick(struct dm_cache_policy *p)
 	spin_lock_irqsave(&mq->tick_lock, flags);
 	mq->tick_protected++;
 	spin_unlock_irqrestore(&mq->tick_lock, flags);
+
+	if (can_block) {
+		mutex_lock(&mq->lock);
+		copy_tick(mq);
+		mutex_unlock(&mq->lock);
+	}
 }
 
 static int smq_set_config_value(struct dm_cache_policy *p,
