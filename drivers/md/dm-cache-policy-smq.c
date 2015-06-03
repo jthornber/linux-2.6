@@ -62,6 +62,11 @@ struct entry_space {
 
 static int space_init(struct entry_space *es, unsigned nr_entries)
 {
+	if (!nr_entries) {
+		es->begin = es->end = NULL;
+		return 0;
+	}
+
 	es->begin = vzalloc(sizeof(struct entry) * nr_entries);
 	if (!es->begin)
 		return -ENOMEM;
@@ -1147,7 +1152,6 @@ static enum promote_result should_promote(struct smq_policy *mq, struct entry *h
 
 		else
 			return maybe_promote(hs_e->level >= mq->write_promote_level);
-
 	} else
 		return maybe_promote(hs_e->level >= mq->read_promote_level);
 }
@@ -1645,7 +1649,7 @@ static void calc_hotspot_params(sector_t origin_size,
 				unsigned *nr_hotspot_blocks)
 {
 	*hotspot_block_size = cache_block_size * 16u;
-	*nr_hotspot_blocks = nr_cache_blocks / 4u;
+	*nr_hotspot_blocks = max(nr_cache_blocks / 4u, 1024u);
 
 	while ((*hotspot_block_size > cache_block_size) &&
 	       too_many_hotspot_blocks(origin_size, *hotspot_block_size, *nr_hotspot_blocks))
@@ -1700,12 +1704,15 @@ static struct dm_cache_policy *smq_create(dm_cblock_t cache_size,
 	}
 	clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
 
-	mq->cache_hit_bits = alloc_bitset(from_cblock(cache_size));
-	if (!mq->cache_hit_bits) {
-		DMERR("couldn't allocate cache hit bitset");
-		goto bad_cache_hit_bits;
-	}
-	clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
+	if (from_cblock(cache_size)) {
+		mq->cache_hit_bits = alloc_bitset(from_cblock(cache_size));
+		if (!mq->cache_hit_bits && mq->cache_hit_bits) {
+			DMERR("couldn't allocate cache hit bitset");
+			goto bad_cache_hit_bits;
+		}
+		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
+	} else
+		mq->cache_hit_bits = NULL;
 
 	mq->tick_protected = 0;
 	mq->tick = 0;
