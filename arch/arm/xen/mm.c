@@ -4,6 +4,7 @@
 #include <linux/gfp.h>
 #include <linux/highmem.h>
 #include <linux/export.h>
+#include <linux/memblock.h>
 #include <linux/of_address.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -20,6 +21,20 @@
 #include <asm/xen/page.h>
 #include <asm/xen/hypercall.h>
 #include <asm/xen/interface.h>
+
+unsigned long xen_get_swiotlb_free_pages(unsigned int order)
+{
+	struct memblock_region *reg;
+	gfp_t flags = __GFP_NOWARN;
+
+	for_each_memblock(memory, reg) {
+		if (reg->base < (phys_addr_t)0xffffffff) {
+			flags |= __GFP_DMA;
+			break;
+		}
+	}
+	return __get_free_pages(flags, order);
+}
 
 enum dma_cache_op {
        DMA_UNMAP,
@@ -149,7 +164,7 @@ void xen_destroy_contiguous_region(phys_addr_t pstart, unsigned int order)
 EXPORT_SYMBOL_GPL(xen_destroy_contiguous_region);
 
 struct dma_map_ops *xen_dma_ops;
-EXPORT_SYMBOL_GPL(xen_dma_ops);
+EXPORT_SYMBOL(xen_dma_ops);
 
 static struct dma_map_ops xen_swiotlb_dma_ops = {
 	.mapping_error = xen_swiotlb_dma_mapping_error,

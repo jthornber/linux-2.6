@@ -11,6 +11,7 @@
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
+#include <linux/jiffies.h>
 #include <linux/log2.h>
 #include <linux/list.h>
 #include <linux/rculist.h>
@@ -319,6 +320,117 @@ struct thin_c {
 
 /*----------------------------------------------------------------*/
 
+<<<<<<< HEAD
+=======
+/**
+ * __blkdev_issue_discard_async - queue a discard with async completion
+ * @bdev:	blockdev to issue discard for
+ * @sector:	start sector
+ * @nr_sects:	number of sectors to discard
+ * @gfp_mask:	memory allocation flags (for bio_alloc)
+ * @flags:	BLKDEV_IFL_* flags to control behaviour
+ * @parent_bio: parent discard bio that all sub discards get chained to
+ *
+ * Description:
+ *    Asynchronously issue a discard request for the sectors in question.
+ *    NOTE: this variant of blk-core's blkdev_issue_discard() is a stop-gap
+ *    that is being kept local to DM thinp until the block changes to allow
+ *    late bio splitting land upstream.
+ */
+static int __blkdev_issue_discard_async(struct block_device *bdev, sector_t sector,
+					sector_t nr_sects, gfp_t gfp_mask, unsigned long flags,
+					struct bio *parent_bio)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+	int type = REQ_WRITE | REQ_DISCARD;
+	unsigned int max_discard_sectors, granularity;
+	int alignment;
+	struct bio *bio;
+	int ret = 0;
+	struct blk_plug plug;
+
+	if (!q)
+		return -ENXIO;
+
+	if (!blk_queue_discard(q))
+		return -EOPNOTSUPP;
+
+	/* Zero-sector (unknown) and one-sector granularities are the same.  */
+	granularity = max(q->limits.discard_granularity >> 9, 1U);
+	alignment = (bdev_discard_alignment(bdev) >> 9) % granularity;
+
+	/*
+	 * Ensure that max_discard_sectors is of the proper
+	 * granularity, so that requests stay aligned after a split.
+	 */
+	max_discard_sectors = min(q->limits.max_discard_sectors, UINT_MAX >> 9);
+	max_discard_sectors -= max_discard_sectors % granularity;
+	if (unlikely(!max_discard_sectors)) {
+		/* Avoid infinite loop below. Being cautious never hurts. */
+		return -EOPNOTSUPP;
+	}
+
+	if (flags & BLKDEV_DISCARD_SECURE) {
+		if (!blk_queue_secdiscard(q))
+			return -EOPNOTSUPP;
+		type |= REQ_SECURE;
+	}
+
+	blk_start_plug(&plug);
+	while (nr_sects) {
+		unsigned int req_sects;
+		sector_t end_sect, tmp;
+
+		/*
+		 * Required bio_put occurs in bio_endio thanks to bio_chain below
+		 */
+		bio = bio_alloc(gfp_mask, 1);
+		if (!bio) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		req_sects = min_t(sector_t, nr_sects, max_discard_sectors);
+
+		/*
+		 * If splitting a request, and the next starting sector would be
+		 * misaligned, stop the discard at the previous aligned sector.
+		 */
+		end_sect = sector + req_sects;
+		tmp = end_sect;
+		if (req_sects < nr_sects &&
+		    sector_div(tmp, granularity) != alignment) {
+			end_sect = end_sect - alignment;
+			sector_div(end_sect, granularity);
+			end_sect = end_sect * granularity + alignment;
+			req_sects = end_sect - sector;
+		}
+
+		bio_chain(bio, parent_bio);
+
+		bio->bi_iter.bi_sector = sector;
+		bio->bi_bdev = bdev;
+
+		bio->bi_iter.bi_size = req_sects << 9;
+		nr_sects -= req_sects;
+		sector = end_sect;
+
+		submit_bio(type, bio);
+
+		/*
+		 * We can loop for a long time in here, if someone does
+		 * full device discards (like mkfs). Be nice and allow
+		 * us to schedule out to avoid softlocking if preempt
+		 * is disabled.
+		 */
+		cond_resched();
+	}
+	blk_finish_plug(&plug);
+
+	return ret;
+}
+
+>>>>>>> cache-writeback-issues
 static bool block_size_is_power_of_two(struct pool *pool)
 {
 	return pool->sectors_per_block_shift >= 0;
@@ -331,6 +443,7 @@ static sector_t block_to_sectors(struct pool *pool, dm_block_t b)
 		(b * pool->sectors_per_block);
 }
 
+<<<<<<< HEAD
 static void discard_end_io(struct bio *bio, int err)
 {
 	struct bio *parent_bio = bio->bi_private;
@@ -347,6 +460,16 @@ static int issue_discard(struct thin_c *tc, dm_block_t data_b, dm_block_t data_e
 
 	return blkdev_issue_discard_ll(bdev, s, len, GFP_NOWAIT, 0,
 				       discard_end_io, parent_bio, &parent_bio->bi_remaining);
+=======
+static int issue_discard(struct thin_c *tc, dm_block_t data_b, dm_block_t data_e,
+			 struct bio *parent_bio)
+{
+	sector_t s = block_to_sectors(tc->pool, data_b);
+	sector_t len = block_to_sectors(tc->pool, data_e - data_b);
+
+	return __blkdev_issue_discard_async(tc->pool_dev->bdev, s, len,
+					    GFP_NOWAIT, 0, parent_bio);
+>>>>>>> cache-writeback-issues
 }
 
 /*----------------------------------------------------------------*/
@@ -615,9 +738,13 @@ static void get_bio_block_range(struct thin_c *tc, struct bio *bio,
 	}
 
 	if (e < b)
+<<<<<<< HEAD
 		/*
 		 * This can happen if the bio is within a single block.
 		 */
+=======
+		/* Can happen if the bio is within a single block. */
+>>>>>>> cache-writeback-issues
 		e = b;
 
 	*begin = b;
@@ -770,6 +897,8 @@ static void overwrite_endio(struct bio *bio, int err)
 	struct dm_thin_endio_hook *h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
 	struct dm_thin_new_mapping *m = h->overwrite_mapping;
 
+	bio->bi_end_io = m->saved_bi_end_io;
+
 	m->err = err;
 	complete_mapping_preparation(m);
 }
@@ -858,10 +987,6 @@ static void inc_remap_and_issue_cell(struct thin_c *tc,
 
 static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 {
-	if (m->bio) {
-		m->bio->bi_end_io = m->saved_bi_end_io;
-		atomic_inc(&m->bio->bi_remaining);
-	}
 	cell_error(m->tc->pool, m->cell);
 	list_del(&m->list);
 	mempool_free(m, m->tc->pool->mapping_pool);
@@ -871,14 +996,8 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 {
 	struct thin_c *tc = m->tc;
 	struct pool *pool = tc->pool;
-	struct bio *bio;
+	struct bio *bio = m->bio;
 	int r;
-
-	bio = m->bio;
-	if (bio) {
-		bio->bi_end_io = m->saved_bi_end_io;
-		atomic_inc(&bio->bi_remaining);
-	}
 
 	if (m->err) {
 		cell_error(pool, m->cell);
@@ -890,7 +1009,11 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 	 * Any I/O for this block arriving after this point will get
 	 * remapped to it directly.
 	 */
+<<<<<<< HEAD
 	r = dm_thin_insert_block(tc->td, m->cell->key.block_begin, m->data_block);
+=======
+	r = dm_thin_insert_block(tc->td, m->virt_begin, m->data_block);
+>>>>>>> cache-writeback-issues
 	if (r) {
 		metadata_operation_failed(pool, "dm_thin_insert_block", r);
 		cell_error(pool, m->cell);
@@ -931,6 +1054,7 @@ static void process_prepared_discard_fail(struct dm_thin_new_mapping *m)
 {
 	bio_io_error(m->bio);
 	free_discard_mapping(m);
+<<<<<<< HEAD
 }
 
 static void process_prepared_discard_success(struct dm_thin_new_mapping *m)
@@ -952,6 +1076,32 @@ static void process_prepared_discard_no_passdown(struct dm_thin_new_mapping *m)
 		bio_endio(m->bio, 0);
 
  	cell_defer_no_holder(tc, m->cell);
+	mempool_free(m, tc->pool->mapping_pool);
+}
+
+static int passdown_double_checking_shared_status(struct dm_thin_new_mapping *m)
+=======
+}
+
+static void process_prepared_discard_success(struct dm_thin_new_mapping *m)
+{
+	bio_endio(m->bio, 0);
+	free_discard_mapping(m);
+}
+
+static void process_prepared_discard_no_passdown(struct dm_thin_new_mapping *m)
+{
+	int r;
+	struct thin_c *tc = m->tc;
+
+	r = dm_thin_remove_range(tc->td, m->cell->key.block_begin, m->cell->key.block_end);
+	if (r) {
+		metadata_operation_failed(tc->pool, "dm_thin_remove_range", r);
+		bio_io_error(m->bio);
+	} else
+		bio_endio(m->bio, 0);
+
+	cell_defer_no_holder(tc, m->cell);
 	mempool_free(m, tc->pool->mapping_pool);
 }
 
@@ -1002,6 +1152,54 @@ static int passdown_double_checking_shared_status(struct dm_thin_new_mapping *m)
 }
 
 static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
+>>>>>>> cache-writeback-issues
+{
+	/*
+	 * We've already unmapped this range of blocks, but before we
+	 * passdown we have to check that these blocks are now unused.
+	 */
+	int r;
+	bool used = true;
+	struct thin_c *tc = m->tc;
+	struct pool *pool = tc->pool;
+<<<<<<< HEAD
+	dm_block_t b = m->data_block, e, end = m->data_block + m->virt_end - m->virt_begin;
+
+	while (b != end) {
+		/* find start of unmapped run */
+		for (; b < end; b++) {
+			r = dm_pool_block_is_used(pool->pmd, b, &used);
+			if (r)
+				return r;
+
+			if (!used)
+				break;
+		}
+
+		if (b == end)
+			break;
+
+		/* find end of run */
+		for (e = b + 1; e != end; e++) {
+			r = dm_pool_block_is_used(pool->pmd, e, &used);
+			if (r)
+				return r;
+
+			if (used)
+				break;
+		}
+
+		r = issue_discard(tc, b, e, m->bio);
+		if (r)
+			return r;
+
+		b = e;
+	}
+
+	return 0;
+}
+
+static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 {
 	int r;
  	struct thin_c *tc = m->tc;
@@ -1009,6 +1207,11 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 
 	r = dm_thin_remove_range(tc->td, m->virt_begin, m->virt_end);
  	if (r)
+=======
+
+	r = dm_thin_remove_range(tc->td, m->virt_begin, m->virt_end);
+	if (r)
+>>>>>>> cache-writeback-issues
 		metadata_operation_failed(pool, "dm_thin_remove_range", r);
 
 	else if (m->maybe_shared)
@@ -1133,6 +1336,11 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	struct dm_thin_new_mapping *m = get_next_mapping(pool);
 
 	m->tc = tc;
+<<<<<<< HEAD
+=======
+	m->virt_begin = virt_block;
+	m->virt_end = virt_block + 1u;
+>>>>>>> cache-writeback-issues
 	m->data_block = data_dest;
 	m->cell = cell;
 
@@ -1221,16 +1429,14 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	 * zeroing pre-existing data, we can issue the bio immediately.
 	 * Otherwise we use kcopyd to zero the data first.
 	 */
-	if (!pool->pf.zero_new_blocks)
+	if (pool->pf.zero_new_blocks) {
+		if (io_overwrites_block(pool, bio))
+			remap_and_issue_overwrite(tc, bio, data_block, m);
+		else
+			ll_zero(tc, m, data_block * pool->sectors_per_block,
+				(data_block + 1) * pool->sectors_per_block);
+	} else
 		process_prepared_mapping(m);
-
-	else if (io_overwrites_block(pool, bio))
-		remap_and_issue_overwrite(tc, bio, data_block, m);
-
-	else
-		ll_zero(tc, m,
-			data_block * pool->sectors_per_block,
-			(data_block + 1) * pool->sectors_per_block);
 }
 
 static void schedule_external_copy(struct thin_c *tc, dm_block_t virt_block,
@@ -1441,17 +1647,38 @@ static void process_discard_cell_no_passdown(struct thin_c *tc,
 		pool->process_prepared_discard(m);
 }
 
+<<<<<<< HEAD
 static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t end,
 				 struct bio *bio)
 {
 	struct pool *pool = tc->pool;
 
+=======
+/*
+ * FIXME: DM local hack to defer parent bios's end_io until we
+ * _know_ all chained sub range discard bios have completed.
+ * Will go away once late bio splitting lands upstream!
+ */
+static inline void __bio_inc_remaining(struct bio *bio)
+{
+	bio->bi_flags |= (1 << BIO_CHAIN);
+	smp_mb__before_atomic();
+	atomic_inc(&bio->__bi_remaining);
+}
+
+static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t end,
+				 struct bio *bio)
+{
+	struct pool *pool = tc->pool;
+
+>>>>>>> cache-writeback-issues
 	int r;
 	bool maybe_shared;
 	struct dm_cell_key data_key;
 	struct dm_bio_prison_cell *data_cell;
 	struct dm_thin_new_mapping *m;
 	dm_block_t virt_begin, virt_end, data_begin;
+<<<<<<< HEAD
 
 	while (begin != end) {
 		r = ensure_next_mapping(pool);
@@ -1459,6 +1686,15 @@ static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t
 			/* we did our best */
 			return;
 
+=======
+
+	while (begin != end) {
+		r = ensure_next_mapping(pool);
+		if (r)
+			/* we did our best */
+			return;
+
+>>>>>>> cache-writeback-issues
 		r = dm_thin_find_mapped_range(tc->td, begin, end, &virt_begin, &virt_end,
 					      &data_begin, &maybe_shared);
 		if (r)
@@ -1466,7 +1702,11 @@ static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t
 			 * Silently fail, letting any mappings we've
 			 * created complete.
 			 */
+<<<<<<< HEAD
  			break;
+=======
+			break;
+>>>>>>> cache-writeback-issues
 
 		build_key(tc->td, PHYSICAL, data_begin, data_begin + (virt_end - virt_begin), &data_key);
 		if (bio_detain(tc->pool, &data_key, NULL, &data_cell)) {
@@ -1475,10 +1715,17 @@ static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t
 			continue;
 		}
 
+<<<<<<< HEAD
  		/*
 		 * IO may still be going to the destination block.  We must
 		 * quiesce before we can do the removal.
  		 */
+=======
+		/*
+		 * IO may still be going to the destination block.  We must
+		 * quiesce before we can do the removal.
+		 */
+>>>>>>> cache-writeback-issues
 		m = get_next_mapping(pool);
 		m->tc = tc;
 		m->maybe_shared = maybe_shared;
@@ -1488,7 +1735,19 @@ static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t
 		m->cell = data_cell;
 		m->bio = bio;
 
+<<<<<<< HEAD
 		atomic_inc(&bio->bi_remaining);
+=======
+		/*
+		 * The parent bio must not complete before sub discard bios are
+		 * chained to it (see __blkdev_issue_discard_async's bio_chain)!
+		 *
+		 * This per-mapping bi_remaining increment is paired with
+		 * the implicit decrement that occurs via bio_endio() in
+		 * process_prepared_discard_{passdown,no_passdown}.
+		 */
+		__bio_inc_remaining(bio);
+>>>>>>> cache-writeback-issues
 		if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
 			pool->process_prepared_discard(m);
 
@@ -1858,8 +2117,8 @@ static void process_cell_fail(struct thin_c *tc, struct dm_bio_prison_cell *cell
  */
 static bool need_commit_due_to_time_(struct pool *pool)
 {
-	return jiffies < pool->last_commit_jiffies ||
-	       jiffies > pool->last_commit_jiffies + COMMIT_PERIOD;
+	return !time_in_range(jiffies, pool->last_commit_jiffies,
+			      pool->last_commit_jiffies + COMMIT_PERIOD);
 }
 
 static bool need_commit_due_to_time(struct pool *pool)
@@ -3913,7 +4172,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 14, 0},
+	.version = {1, 15, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -4309,7 +4568,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 14, 0},
+	.version = {1, 15, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,

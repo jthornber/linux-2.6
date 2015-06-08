@@ -109,7 +109,11 @@ void dm_cell_visit_release(struct dm_bio_prison *prison,
  *
  * This function can have two outcomes:
  * i) An inmate is promoted to be the holder of the cell (return value of 0).
+<<<<<<< HEAD
  * ii) The cell had no holder and is released (return value of 1).
+=======
+ * ii) The cell has no inmate for promotion and is released (return value of 1).
+>>>>>>> cache-writeback-issues
  */
 int dm_cell_promote_or_release(struct dm_bio_prison *prison,
 			       struct dm_bio_prison_cell *cell);

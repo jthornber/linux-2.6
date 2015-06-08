@@ -7,6 +7,7 @@
 #ifndef DM_CACHE_POLICY_INTERNAL_H
 #define DM_CACHE_POLICY_INTERNAL_H
 
+#include <linux/vmalloc.h>
 #include "dm-cache-policy.h"
 
 /*----------------------------------------------------------------*/
@@ -16,9 +17,10 @@
  */
 static inline int policy_map(struct dm_cache_policy *p, dm_oblock_t oblock,
 			     bool can_block, bool can_migrate, bool discarded_oblock,
-			     struct bio *bio, struct policy_result *result)
+			     struct bio *bio, struct policy_locker *locker,
+			     struct policy_result *result)
 {
-	return p->map(p, oblock, can_block, can_migrate, discarded_oblock, bio, result);
+	return p->map(p, oblock, can_block, can_migrate, discarded_oblock, bio, locker, result);
 }
 
 static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
@@ -81,10 +83,10 @@ static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)
 	return p->residency(p);
 }
 
-static inline void policy_tick(struct dm_cache_policy *p)
+static inline void policy_tick(struct dm_cache_policy *p, bool can_block)
 {
 	if (p->tick)
-		return p->tick(p);
+		return p->tick(p, can_block);
 }
 
 static inline int policy_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
