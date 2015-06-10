@@ -1028,14 +1028,14 @@ static void abort_transaction(struct cache *cache)
 	if (get_cache_mode(cache) >= CM_READ_ONLY)
 		return;
 
-	DMERR_LIMIT("%s: aborting current metadata transaction", dev_name);
-	if (dm_cache_metadata_abort(cache->cmd)) {
-		DMERR("%s: failed to abort metadata transaction", dev_name);
+	if (dm_cache_metadata_set_needs_check(cache->cmd)) {
+		DMERR("%s: failed to set 'needs_check' flag in metadata", dev_name);
 		set_cache_mode(cache, CM_FAIL);
 	}
 
-	if (dm_cache_metadata_set_needs_check(cache->cmd)) {
-		DMERR("%s: failed to set 'needs_check' flag in metadata", dev_name);
+	DMERR_LIMIT("%s: aborting current metadata transaction", dev_name);
+	if (dm_cache_metadata_abort(cache->cmd)) {
+		DMERR("%s: failed to abort metadata transaction", dev_name);
 		set_cache_mode(cache, CM_FAIL);
 	}
 }
@@ -2825,7 +2825,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 	cache->cmd = cmd;
-	set_cache_mode(cache, get_cache_mode(cache));
+	set_cache_mode(cache, CM_WRITE);
 	if (get_cache_mode(cache) != CM_WRITE) {
 		*error = "Unable to get write access to metadata, please check/repair metadata.";
 		r = -EINVAL;
@@ -3267,7 +3267,8 @@ static void cache_postsuspend(struct dm_target *ti)
 	requeue_deferred_cells(cache);
 	stop_quiescing(cache);
 
-	(void) sync_metadata(cache);
+	if (get_cache_mode(cache) == CM_WRITE)
+		(void) sync_metadata(cache);
 }
 
 static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,

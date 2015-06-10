@@ -1436,7 +1436,10 @@ int dm_cache_metadata_set_needs_check(struct dm_cache_metadata *cmd)
 	struct dm_block *sblock;
 	struct cache_disk_superblock *disk_super;
 
-	WRITE_LOCK(cmd);
+	/*
+	 * We ignore fail_io for this function.
+	 */
+	down_write(&cmd->root_lock);
 	set_bit(NEEDS_CHECK, &cmd->flags);
 
 	r = superblock_lock(cmd, &sblock);
@@ -1451,7 +1454,7 @@ int dm_cache_metadata_set_needs_check(struct dm_cache_metadata *cmd)
 	dm_bm_unlock(sblock);
 
 out:
-	WRITE_UNLOCK(cmd);
+	up_write(&cmd->root_lock);
 	return r;
 }
 
