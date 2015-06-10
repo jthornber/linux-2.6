@@ -1468,18 +1468,14 @@ bool dm_cache_metadata_needs_check(struct dm_cache_metadata *cmd)
 
 int dm_cache_metadata_abort(struct dm_cache_metadata *cmd)
 {
-	int r = -EINVAL;
+	int r;
 
 	WRITE_LOCK(cmd);
-	if (cmd->fail_io)
-		goto out;
-
 	__destroy_persistent_data_objects(cmd);
 	r = __create_persistent_data_objects(cmd, false);
 	if (r)
 		cmd->fail_io = true;
-
-out:
 	WRITE_UNLOCK(cmd);
+
 	return r;
 }
