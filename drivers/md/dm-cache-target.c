@@ -51,153 +51,6 @@ static void iot_init(struct io_tracker *iot)
 	iot->last_update_time = jiffies;
 }
 
-<<<<<<< HEAD
-#define IOT_RESOLUTION 4
-
-struct io_tracker {
-	spinlock_t lock;
-	unsigned long window;
-
-	/*
-	 * Sectors of in-flight IO.
-	 */
-	sector_t in_flight;
-
-	/*
-	 * The time, in jiffies, when this device became idle (if it is
-	 * indeed idle).
-	 */
-	unsigned long idle_time;
-
-	/*
-	 * In sectors per second.
-	 */
-	sector_t average_io;
-	sector_t peak_io;
-
-	unsigned current_slot;
-	unsigned long last_update_time;
-	sector_t io_completed[IOT_RESOLUTION];
-};
-
-static void iot_init(struct io_tracker *iot, unsigned long window)
-{
-	unsigned i;
-
-	spin_lock_init(&iot->lock);
-	iot->window = window;
-	iot->in_flight = 0ul;
-	iot->idle_time = 0ul;
-	iot->average_io = 0ul;
-	iot->current_slot = 0u;
-	iot->last_update_time = jiffies;
-
-	for (i = 0; i < IOT_RESOLUTION; i++)
-		iot->io_completed[i] = 0ul;
-}
-
-static bool __iot_idle_for(struct io_tracker *iot, unsigned long jifs)
-{
-	if (iot->in_flight)
-		return false;
-
-	return time_after(jiffies, iot->idle_time + jifs);
-}
-
-static bool iot_idle_for(struct io_tracker *iot, unsigned long jifs)
-{
-	bool r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iot->lock, flags);
-	r = __iot_idle_for(iot, jifs);
-	spin_unlock_irqrestore(&iot->lock, flags);
-
-	return r;
-}
-
-static void __iot_rollover(struct io_tracker *iot)
-{
-	unsigned i;
-	sector_t total;
-
-	/*
-	 * It's possible we've not been called for more than one rollover
-	 * period.
-	 */
-	while (time_after(jiffies, iot->last_update_time + (iot->window / IOT_RESOLUTION))) {
-		total = 0u;
-
-		for (i = 0; i < IOT_RESOLUTION; i++)
-			total += iot->io_completed[i];
-
-		iot->average_io = total / (iot->window / HZ);
-		iot->peak_io = max(iot->average_io, iot->peak_io);
-
-		iot->current_slot++;
-		if (iot->current_slot >= IOT_RESOLUTION)
-			iot->current_slot = 0u;
-
-		iot->io_completed[iot->current_slot] = 0u;
-
-		iot->last_update_time += iot->window / IOT_RESOLUTION;
-
-#if 0
-		pr_alert("average load = %llu, peak load = %llu\n",
-			 (unsigned long long) iot->average_io,
-			 (unsigned long long) iot->peak_io);
-#endif
-	}
-}
-
-static sector_t iot_average_load(struct io_tracker *iot)
-{
-	sector_t r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iot->lock, flags);
-	r = iot->average_io;
-	__iot_rollover(iot);
-	spin_unlock_irqrestore(&iot->lock, flags);
-
-	return r;
-}
-
-static sector_t iot_peak_load(struct io_tracker *iot)
-{
-	sector_t r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iot->lock, flags);
-	r = iot->peak_io;
-	__iot_rollover(iot);
-	spin_unlock_irqrestore(&iot->lock, flags);
-
-	return r;
-}
-
-static void iot_io_begin(struct io_tracker *iot, sector_t len)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&iot->lock, flags);
-	iot->in_flight += len;
-	spin_unlock_irqrestore(&iot->lock, flags);
-}
-
-static void __iot_io_end(struct io_tracker *iot, sector_t len)
-{
-	iot->in_flight -= len;
-	if (!iot->in_flight)
-		iot->idle_time = jiffies;
-
-	iot->io_completed[iot->current_slot] += len;
-
-}
-
-static void iot_io_end(struct io_tracker *iot, sector_t len)
-{
-=======
 static bool __iot_idle_for(struct io_tracker *iot, unsigned long jifs)
 {
 	if (iot->in_flight)
@@ -236,7 +89,6 @@ static void __iot_io_end(struct io_tracker *iot, sector_t len)
 
 static void iot_io_end(struct io_tracker *iot, sector_t len)
 {
->>>>>>> cache-writeback-issues
 	unsigned long flags;
 
 	spin_lock_irqsave(&iot->lock, flags);
@@ -531,6 +383,8 @@ struct prealloc {
 	struct dm_bio_prison_cell *cell2;
 };
 
+static enum cache_metadata_mode get_cache_mode(struct cache *cache);
+
 static void wake_worker(struct cache *cache)
 {
 	queue_work(cache->wq, &cache->worker);
@@ -736,7 +590,7 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 {
 	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		policy_clear_dirty(cache->policy, oblock);
-		if (atomic_dec_and_test(&cache->nr_dirty))
+		if (atomic_dec_return(&cache->nr_dirty) == 0)
 			dm_table_event(cache->ti->table);
 	}
 }
@@ -845,6 +699,9 @@ static void save_stats(struct cache *cache)
 {
 	struct dm_cache_statistics stats;
 
+	if (get_cache_mode(cache) >= CM_READ_ONLY)
+		return;
+
 	stats.read_hits = atomic_read(&cache->stats.read_hit);
 	stats.read_misses = atomic_read(&cache->stats.read_miss);
 	stats.write_hits = atomic_read(&cache->stats.write_hit);
@@ -942,13 +799,8 @@ static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 	spin_unlock_irqrestore(&cache->lock, flags);
 }
 
-static bool is_write_io(struct bio *bio)
-{
-	return bio_data_dir(bio) == WRITE;
-}
-
 static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
-					  dm_oblock_t oblock)
+				  dm_oblock_t oblock)
 {
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_origin(cache, bio);
@@ -961,7 +813,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 {
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_cache(cache, bio, cblock);
-	if (is_write_io(bio)) {
+	if (bio_data_dir(bio) == WRITE) {
 		set_dirty(cache, oblock, cblock);
 		clear_discard(cache, oblock_to_dblock(cache, oblock));
 	}
@@ -1070,6 +922,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 static void writethrough_endio(struct bio *bio, int err)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio, PB_DATA_SIZE_WT);
+
 	dm_unhook_bio(&pb->hook_info, bio);
 
 	if (err) {
@@ -1172,14 +1025,17 @@ static void abort_transaction(struct cache *cache)
 {
 	const char *dev_name = cache_device_name(cache);
 
-	DMERR_LIMIT("%s: aborting current metadata transaction", dev_name);
-	if (dm_cache_metadata_abort(cache->cmd)) {
-		DMERR("%s: failed to abort metadata transaction", dev_name);
-		set_cache_mode(cache, CM_FAIL);
-	}
+	if (get_cache_mode(cache) >= CM_READ_ONLY)
+		return;
 
 	if (dm_cache_metadata_set_needs_check(cache->cmd)) {
 		DMERR("%s: failed to set 'needs_check' flag in metadata", dev_name);
+		set_cache_mode(cache, CM_FAIL);
+	}
+
+	DMERR_LIMIT("%s: aborting current metadata transaction", dev_name);
+	if (dm_cache_metadata_abort(cache->cmd)) {
+		DMERR("%s: failed to abort metadata transaction", dev_name);
 		set_cache_mode(cache, CM_FAIL);
 	}
 }
@@ -1279,8 +1135,7 @@ static void migration_failure(struct dm_cache_migration *mg)
 	if (mg->writeback) {
 		DMERR_LIMIT("%s: writeback failed; couldn't copy block", dev_name);
 		set_dirty(cache, mg->old_oblock, mg->cblock);
-		if (mg->old_ocell)
-			cell_defer(cache, mg->old_ocell, false);
+		cell_defer(cache, mg->old_ocell, false);
 
 	} else if (mg->demote) {
 		DMERR_LIMIT("%s: demotion failed; couldn't copy block", dev_name);
@@ -1304,12 +1159,9 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 	unsigned long flags;
 	struct cache *cache = mg->cache;
 
-	/* FIXME: what if mg->err? */
-
 	if (mg->writeback) {
 		clear_dirty(cache, mg->old_oblock, mg->cblock);
-		if (mg->old_ocell)
-			cell_defer(cache, mg->old_ocell, false);
+		cell_defer(cache, mg->old_ocell, false);
 		free_io_migration(mg);
 		return;
 
@@ -1800,15 +1652,10 @@ static bool spare_migration_bandwidth(struct cache *cache)
 	return current_volume < cache->migration_threshold;
 }
 
-static bool migrations_in_progress(struct cache *cache)
-{
-	return atomic_read(&cache->nr_io_migrations);
-}
-
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
 {
-	atomic_inc(is_write_io(bio) ?
-		   &cache->stats.write_hit : &cache->stats.read_hit);
+	atomic_inc(bio_data_dir(bio) == READ ?
+		   &cache->stats.read_hit : &cache->stats.write_hit);
 }
 
 static void inc_miss_counter(struct cache *cache, struct bio *bio)
@@ -1920,8 +1767,6 @@ static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_
 
 /*----------------------------------------------------------------*/
 
-<<<<<<< HEAD
-=======
 struct old_oblock_lock {
 	struct policy_locker locker;
 	struct cache *cache;
@@ -1946,7 +1791,6 @@ static int cell_locker(struct policy_locker *locker, dm_oblock_t b)
 			  l->structs, &l->cell);
 }
 
->>>>>>> cache-writeback-issues
 static void process_cell(struct cache *cache, struct prealloc *structs,
 			 struct dm_bio_prison_cell *new_ocell)
 {
@@ -1954,32 +1798,20 @@ static void process_cell(struct cache *cache, struct prealloc *structs,
 	bool release_cell = true;
 	struct bio *bio = new_ocell->holder;
 	dm_oblock_t block = get_bio_block(cache, bio);
-<<<<<<< HEAD
-	struct dm_bio_prison_cell *cell_prealloc, *old_ocell;
-	struct policy_result lookup_result;
-	bool passthrough = passthrough_mode(&cache->features);
-	bool fast_promotion, can_migrate;
-=======
 	struct policy_result lookup_result;
 	bool passthrough = passthrough_mode(&cache->features);
 	bool fast_promotion, can_migrate;
 	struct old_oblock_lock ool;
->>>>>>> cache-writeback-issues
 
 	fast_promotion = is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio);
 	can_migrate = !passthrough && (fast_promotion || spare_migration_bandwidth(cache));
 
-<<<<<<< HEAD
-	r = policy_map(cache->policy, block, true, can_migrate, fast_promotion,
-		       bio, &lookup_result);
-=======
 	ool.locker.fn = cell_locker;
 	ool.cache = cache;
 	ool.structs = structs;
 	ool.cell = NULL;
 	r = policy_map(cache->policy, block, true, can_migrate, fast_promotion,
 		       bio, &ool.locker, &lookup_result);
->>>>>>> cache-writeback-issues
 
 	if (r == -EWOULDBLOCK)
 		/* migration has been denied */
@@ -1995,6 +1827,7 @@ static void process_cell(struct cache *cache, struct prealloc *structs,
 			 * invalidating any cache blocks that are written
 			 * to.
 			 */
+
 			if (bio_data_dir(bio) == WRITE) {
 				atomic_inc(&cache->stats.demotion);
 				invalidate(cache, structs, block, lookup_result.cblock, new_ocell);
@@ -2229,25 +2062,12 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 
 static void writeback_some_dirty_blocks(struct cache *cache)
 {
-	static bool busy_state = false;
-
 	int r = 0;
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;
 	struct prealloc structs;
 	struct dm_bio_prison_cell *old_ocell;
 	bool busy = !iot_idle_for(&cache->origin_tracker, HZ);
-<<<<<<< HEAD
-	unsigned queued = 0u;
-
-	if (busy != busy_state) {
-		pr_alert("%s\n", busy ? "busy" : "idle");
-		busy_state = busy;
-	}
-
-	iot_average_load(&cache->origin_tracker);
-=======
->>>>>>> cache-writeback-issues
 
 	memset(&structs, 0, sizeof(structs));
 
@@ -2259,7 +2079,6 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 		if (r)
 			break;
 
-		/* FIXME: race with quiesce */
 		r = get_cell(cache, oblock, &structs, &old_ocell);
 		if (r) {
 			policy_set_dirty(cache->policy, oblock);
@@ -2267,15 +2086,9 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 		}
 
 		writeback(cache, &structs, oblock, cblock, old_ocell);
-		queued++;
 	}
 
 	prealloc_free_structs(cache, &structs);
-
-#if 0
-	if (queued)
-		pr_alert("queued %u writebacks\n", queued);
-#endif
 }
 
 /*----------------------------------------------------------------
@@ -2440,15 +2253,6 @@ static void do_worker(struct work_struct *ws)
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
 			process_migrations(cache, &cache->need_commit_migrations, migration_failure);
-<<<<<<< HEAD
-
-			/*
-			 * FIXME: rollback metadata or just go into a
-			 * failure mode and error everything
-			 */
-
-=======
->>>>>>> cache-writeback-issues
 		} else {
 			process_deferred_flush_bios(cache, true);
 			process_migrations(cache, &cache->need_commit_migrations,
@@ -3021,6 +2825,12 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 	cache->cmd = cmd;
+	set_cache_mode(cache, CM_WRITE);
+	if (get_cache_mode(cache) != CM_WRITE) {
+		*error = "Unable to get write access to metadata, please check/repair metadata.";
+		r = -EINVAL;
+		goto bad;
+	}
 
 	if (passthrough_mode(&cache->features)) {
 		bool all_clean;
@@ -3129,11 +2939,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	spin_lock_init(&cache->invalidation_lock);
 	INIT_LIST_HEAD(&cache->invalidation_requests);
 
-<<<<<<< HEAD
-	iot_init(&cache->origin_tracker, 10 * HZ);
-=======
 	iot_init(&cache->origin_tracker);
->>>>>>> cache-writeback-issues
 
 	*result = cache;
 	return 0;
@@ -3257,22 +3063,14 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	fast_promotion = is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio);
 
 	r = policy_map(cache->policy, block, false, can_migrate, fast_promotion,
-<<<<<<< HEAD
-		       bio, &lookup_result);
-=======
 		       bio, &ool.locker, &lookup_result);
->>>>>>> cache-writeback-issues
 	if (r == -EWOULDBLOCK) {
 		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
 
 	} else if (r) {
-<<<<<<< HEAD
-		DMERR_LIMIT("Unexpected return from cache replacement policy: %d", r);
-=======
 		DMERR_LIMIT("%s: Unexpected return from cache replacement policy: %d",
 			    cache_device_name(cache), r);
->>>>>>> cache-writeback-issues
 		cell_defer(cache, cell, false);
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
@@ -3367,6 +3165,9 @@ static int write_dirty_bitset(struct cache *cache)
 {
 	unsigned i, r;
 
+	if (get_cache_mode(cache) >= CM_READ_ONLY)
+		return -EINVAL;
+
 	for (i = 0; i < from_cblock(cache->cache_size); i++) {
 		r = dm_cache_set_dirty(cache->cmd, to_cblock(i),
 				       is_dirty(cache, to_cblock(i)));
@@ -3383,6 +3184,9 @@ static int write_discard_bitset(struct cache *cache)
 {
 	unsigned i, r;
 
+	if (get_cache_mode(cache) >= CM_READ_ONLY)
+		return -EINVAL;
+
 	r = dm_cache_discard_bitset_resize(cache->cmd, cache->discard_block_size,
 					   cache->discard_nr_blocks);
 	if (r) {
@@ -3398,6 +3202,22 @@ static int write_discard_bitset(struct cache *cache)
 			metadata_operation_failed(cache, "dm_cache_set_discard", r);
 			return r;
 		}
+	}
+
+	return 0;
+}
+
+static int write_hints(struct cache *cache)
+{
+	int r;
+
+	if (get_cache_mode(cache) >= CM_READ_ONLY)
+		return -EINVAL;
+
+	r = dm_cache_write_hints(cache->cmd, cache->policy);
+	if (r) {
+		metadata_operation_failed(cache, "dm_cache_write_hints", r);
+		return r;
 	}
 
 	return 0;
@@ -3420,11 +3240,9 @@ static bool sync_metadata(struct cache *cache)
 
 	save_stats(cache);
 
-	r3 = dm_cache_write_hints(cache->cmd, cache->policy);
-	if (r3) {
+	r3 = write_hints(cache);
+	if (r3)
 		DMERR("%s: could not write hints", cache_device_name(cache));
-		metadata_operation_failed(cache, "dm_cache_write_hints", r3);
-	}
 
 	/*
 	 * If writing the above metadata failed, we still commit, but don't
@@ -3433,8 +3251,7 @@ static bool sync_metadata(struct cache *cache)
 	 */
 	r4 = commit(cache, !r1 && !r2 && !r3);
 	if (r4)
-		DMERR("%s: could not write cache metadata.  Data loss may occur.",
-		      cache_device_name(cache));
+		DMERR("%s: could not write cache metadata", cache_device_name(cache));
 
 	return !r1 && !r2 && !r3 && !r4;
 }
@@ -3450,7 +3267,8 @@ static void cache_postsuspend(struct dm_target *ti)
 	requeue_deferred_cells(cache);
 	stop_quiescing(cache);
 
-	(void) sync_metadata(cache);
+	if (get_cache_mode(cache) == CM_WRITE)
+		(void) sync_metadata(cache);
 }
 
 static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
@@ -3678,7 +3496,7 @@ static void cache_resume(struct dm_target *ti)
  * <#demotions> <#promotions> <#dirty>
  * <#features> <features>*
  * <#core args> <core args>
- * <policy name> <#policy args> <policy args>*
+ * <policy name> <#policy args> <policy args>* <cache metadata mode>
  */
 static void cache_status(struct dm_target *ti, status_type_t type,
 			 unsigned status_flags, char *result, unsigned maxlen)
@@ -3700,11 +3518,8 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		}
 
 		/* Commit to ensure statistics aren't out-of-date */
-		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti)) {
-			r = commit(cache, false);
-			if (r)
-				goto err;
-		}
+		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti))
+			(void) commit(cache, false);
 
 		r = dm_cache_get_free_metadata_block_count(cache->cmd, &nr_free_blocks_metadata);
 		if (r) {
@@ -3756,11 +3571,16 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 
 		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
 		if (sz < maxlen) {
-			r = policy_emit_config_values(cache->policy, result + sz, maxlen - sz);
+			r = policy_emit_config_values(cache->policy, result, maxlen, &sz);
 			if (r)
 				DMERR("%s: policy_emit_config_values returned %d",
 				      cache_device_name(cache), r);
 		}
+
+		if (get_cache_mode(cache) == CM_READ_ONLY)
+			DMEMIT("ro ");
+		else
+			DMEMIT("rw ");
 
 		break;
 
@@ -3920,6 +3740,12 @@ static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 
 	if (!argc)
 		return -EINVAL;
+
+	if (get_cache_mode(cache) >= CM_READ_ONLY) {
+		DMERR("%s: unable to service cache target messages in READ_ONLY or FAIL mode",
+		      cache_device_name(cache));
+		return -EOPNOTSUPP;
+	}
 
 	if (!strcasecmp(argv[0], "invalidate_cblocks"))
 		return process_invalidate_cblocks_message(cache, argc - 1, (const char **) argv + 1);

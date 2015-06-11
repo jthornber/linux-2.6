@@ -125,11 +125,8 @@ static void iot_examine_bio(struct io_tracker *t, struct bio *bio)
  * sorted queue.
  */
 #define NR_QUEUE_LEVELS 16u
-<<<<<<< HEAD
-=======
 #define NR_SENTINELS NR_QUEUE_LEVELS * 3
 
->>>>>>> cache-writeback-issues
 #define WRITEBACK_PERIOD HZ
 
 struct queue {
@@ -137,11 +134,7 @@ struct queue {
 	bool current_writeback_sentinels;
 	unsigned long next_writeback;
 	struct list_head qs[NR_QUEUE_LEVELS];
-<<<<<<< HEAD
-	struct list_head sentinels[NR_QUEUE_LEVELS * 3];
-=======
 	struct list_head sentinels[NR_SENTINELS];
->>>>>>> cache-writeback-issues
 };
 
 static void queue_init(struct queue *q)
@@ -186,12 +179,7 @@ static void queue_remove(struct queue *q, struct list_head *elt)
 
 static bool is_sentinel(struct queue *q, struct list_head *h)
 {
-<<<<<<< HEAD
-	return (h >= q->sentinels) &&
-		(h < (q->sentinels + (sizeof(q->sentinels) / sizeof(q->sentinels[0]))));
-=======
 	return (h >= q->sentinels) && (h < (q->sentinels + NR_SENTINELS));
->>>>>>> cache-writeback-issues
 }
 
 /*
@@ -321,11 +309,7 @@ struct entry {
 	dm_oblock_t oblock;
 
 	bool dirty:1;
-<<<<<<< HEAD
 	unsigned hit_count:31;
-=======
-	unsigned hit_count;
->>>>>>> cache-writeback-issues
 };
 
 #define MAX_HIT_COUNT (1U << 31U)
@@ -870,11 +854,7 @@ static int pre_cache_entry_found(struct mq_policy *mq, struct entry *e,
 
 	else {
 		requeue(mq, e);
-<<<<<<< HEAD
-		r = pre_cache_to_cache(mq, e, result);
-=======
 		r = pre_cache_to_cache(mq, e, locker, result);
->>>>>>> cache-writeback-issues
 	}
 
 	return r;
@@ -1350,22 +1330,24 @@ static int mq_set_config_value(struct dm_cache_policy *p,
 	return 0;
 }
 
-static int mq_emit_config_values(struct dm_cache_policy *p, char *result, unsigned maxlen)
+static int mq_emit_config_values(struct dm_cache_policy *p, char *result,
+				 unsigned maxlen, ssize_t *sz_ptr)
 {
-	ssize_t sz = 0;
+	ssize_t sz = *sz_ptr;
 	struct mq_policy *mq = to_mq_policy(p);
 
 	DMEMIT("10 random_threshold %u "
 	       "sequential_threshold %u "
 	       "discard_promote_adjustment %u "
 	       "read_promote_adjustment %u "
-	       "write_promote_adjustment %u",
+	       "write_promote_adjustment %u ",
 	       mq->tracker.thresholds[PATTERN_RANDOM],
 	       mq->tracker.thresholds[PATTERN_SEQUENTIAL],
 	       mq->discard_promote_adjustment,
 	       mq->read_promote_adjustment,
 	       mq->write_promote_adjustment);
 
+	*sz_ptr = sz;
 	return 0;
 }
 

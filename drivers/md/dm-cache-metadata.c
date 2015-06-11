@@ -39,6 +39,8 @@
 enum superblock_flag_bits {
 	/* for spotting crashes that would invalidate the dirty bitset */
 	CLEAN_SHUTDOWN,
+	/* metadata must be checked using the tools */
+	NEEDS_CHECK,
 };
 
 /*
@@ -107,7 +109,7 @@ struct dm_cache_metadata {
 	struct dm_disk_bitset discard_info;
 
 	struct rw_semaphore root_lock;
-	uint32_t flags;
+	unsigned long flags;
 	dm_block_t root;
 	dm_block_t hint_root;
 	dm_block_t discard_root;
@@ -862,12 +864,12 @@ static int blocks_are_unmapped_or_clean(struct dm_cache_metadata *cmd,
 }
 
 #define WRITE_LOCK(cmd) \
-	if (cmd->fail_io) \
+	if (cmd->fail_io || dm_bm_is_read_only(cmd->bm)) \
 		return -EINVAL; \
 	down_write(&cmd->root_lock)
 
 #define WRITE_LOCK_VOID(cmd) \
-	if (cmd->fail_io) \
+	if (cmd->fail_io || dm_bm_is_read_only(cmd->bm)) \
 		return; \
 	down_write(&cmd->root_lock)
 
@@ -1435,8 +1437,11 @@ int dm_cache_metadata_set_needs_check(struct dm_cache_metadata *cmd)
 	struct dm_block *sblock;
 	struct cache_disk_superblock *disk_super;
 
-	WRITE_LOCK(cmd);
-	cmd->flags |= CACHE_METADATA_NEEDS_CHECK_FLAG;
+	/*
+	 * We ignore fail_io for this function.
+	 */
+	down_write(&cmd->root_lock);
+	set_bit(NEEDS_CHECK, &cmd->flags);
 
 	r = superblock_lock(cmd, &sblock);
 	if (r) {
@@ -1450,7 +1455,7 @@ int dm_cache_metadata_set_needs_check(struct dm_cache_metadata *cmd)
 	dm_bm_unlock(sblock);
 
 out:
-	WRITE_UNLOCK(cmd);
+	up_write(&cmd->root_lock);
 	return r;
 }
 
@@ -1459,7 +1464,7 @@ bool dm_cache_metadata_needs_check(struct dm_cache_metadata *cmd)
 	bool needs_check;
 
 	down_read(&cmd->root_lock);
-	needs_check = cmd->flags & CACHE_METADATA_NEEDS_CHECK_FLAG;
+	needs_check = !!test_bit(NEEDS_CHECK, &cmd->flags);
 	up_read(&cmd->root_lock);
 
 	return needs_check;
@@ -1467,18 +1472,14 @@ bool dm_cache_metadata_needs_check(struct dm_cache_metadata *cmd)
 
 int dm_cache_metadata_abort(struct dm_cache_metadata *cmd)
 {
-	int r = -EINVAL;
+	int r;
 
 	WRITE_LOCK(cmd);
-	if (cmd->fail_io)
-		goto out;
-
 	__destroy_persistent_data_objects(cmd);
 	r = __create_persistent_data_objects(cmd, false);
 	if (r)
 		cmd->fail_io = true;
-
-out:
 	WRITE_UNLOCK(cmd);
+
 	return r;
 }
