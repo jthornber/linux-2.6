@@ -461,7 +461,6 @@ config DM_SWITCH
 
 	  If unsure, say N.
 
-<<<<<<< HEAD
 config DM_TEST_TARGETS
        bool "DM test targets"
        depends on BLK_DEV_DM
@@ -489,7 +488,7 @@ config DM_FAKE_DISCARD
        default y
        ---help---
        A target that pretends to support discard, with various parameters.
-=======
+
 config DM_LOG_WRITES
 	tristate "Log writes target support"
 	depends on BLK_DEV_DM
@@ -505,6 +504,5 @@ config DM_LOG_WRITES
 	  be called dm-log-writes.
 
 	  If unsure, say N.
->>>>>>> cache-writeback-issues
 
 endif # MD

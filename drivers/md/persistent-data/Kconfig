@@ -8,20 +8,9 @@ config DM_PERSISTENT_DATA
 	 for device-mapper targets such as the thin provisioning and
 	 caching targets.
 
-<<<<<<< HEAD
 config DM_DEBUG_BLOCK_LOCKING
        boolean "Use locking to restrict concurrent access to blocks"
        depends on DM_PERSISTENT_DATA
-=======
-config DM_DEBUG_BLOCK_STACK_TRACING
-       bool "Keep stack trace of persistent data block lock holders"
-       depends on STACKTRACE_SUPPORT && DM_PERSISTENT_DATA
-       select STACKTRACE
->>>>>>> cache-writeback-issues
-       ---help---
-         Enable this to help debug code that uses DM_PERSISTENT_DATA.
-
-         If unsure, say N.
 
 config DM_DEBUG_BLOCK_STACK_TRACING
 	boolean "Keep stack trace of thin provisioning block lock holders"
