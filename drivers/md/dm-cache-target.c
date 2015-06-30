@@ -1109,7 +1109,7 @@ static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, boo
 	struct bio *new_holder;
 
 	if (!holder) {
-		if (dm_cell_promote_or_release(cache->prison, cell, &new_holder)) {
+		if (dm_cell_promote_or_put(cache->prison, cell, &new_holder)) {
 			/*
 			 * There was no prisoner to promote to holder, the
 			 * cell has been released.

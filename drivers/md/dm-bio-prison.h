@@ -110,9 +110,9 @@ void dm_cell_visit_put(struct dm_bio_prison *prison,
  * i) An inmate is promoted to be the holder of the cell (return value of 0).
  * ii) The cell has no inmate for promotion and is released (return value of 1).
  */
-int dm_cell_promote_or_release(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell,
-			       struct bio **new_holder);
+int dm_cell_promote_or_put(struct dm_bio_prison *prison,
+			   struct dm_bio_prison_cell *cell,
+			   struct bio **new_holder);
 
 /*----------------------------------------------------------------*/
 

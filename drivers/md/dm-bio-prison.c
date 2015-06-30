@@ -211,9 +211,9 @@ void dm_cell_visit_put(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_cell_visit_put);
 
-static int __promote_or_release(struct dm_bio_prison *prison,
-					struct dm_bio_prison_cell *cell,
-					struct bio **new_holder)
+static int __promote_or_put(struct dm_bio_prison *prison,
+			    struct dm_bio_prison_cell *cell,
+			    struct bio **new_holder)
 {
 	if (bio_list_empty(&cell->bios)) {
 		rb_erase(&cell->node, &prison->cells);
@@ -224,20 +224,20 @@ static int __promote_or_release(struct dm_bio_prison *prison,
 	return 0;
 }
 
-int dm_cell_promote_or_release(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell,
-			       struct bio **new_holder)
+int dm_cell_promote_or_put(struct dm_bio_prison *prison,
+			   struct dm_bio_prison_cell *cell,
+			   struct bio **new_holder)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __promote_or_release(prison, cell, new_holder);
+	r = __promote_or_put(prison, cell, new_holder);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_cell_promote_or_release);
+EXPORT_SYMBOL_GPL(dm_cell_promote_or_put);
 
 /*----------------------------------------------------------------*/
 
