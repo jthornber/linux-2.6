@@ -197,10 +197,10 @@ void dm_cell_put(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_cell_put);
 
-void dm_cell_visit_release(struct dm_bio_prison *prison,
-			   void (*visit_fn)(void *, struct dm_bio_prison_cell *),
-			   void *context,
-			   struct dm_bio_prison_cell *cell)
+void dm_cell_visit_put(struct dm_bio_prison *prison,
+		       void (*visit_fn)(void *, struct dm_bio_prison_cell *),
+		       void *context,
+		       struct dm_bio_prison_cell *cell)
 {
 	unsigned long flags;
 
@@ -209,7 +209,7 @@ void dm_cell_visit_release(struct dm_bio_prison *prison,
 	rb_erase(&cell->node, &prison->cells);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
-EXPORT_SYMBOL_GPL(dm_cell_visit_release);
+EXPORT_SYMBOL_GPL(dm_cell_visit_put);
 
 static int __promote_or_release(struct dm_bio_prison *prison,
 					struct dm_bio_prison_cell *cell,

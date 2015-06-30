@@ -96,9 +96,9 @@ void dm_cell_put(struct dm_bio_prison *prison,
  * Visits the cell and then releases.  Guarantees no new inmates are
  * inserted between the visit and release.
  */
-void dm_cell_visit_release(struct dm_bio_prison *prison,
-			   void (*visit_fn)(void *, struct dm_bio_prison_cell *),
-			   void *context, struct dm_bio_prison_cell *cell);
+void dm_cell_visit_put(struct dm_bio_prison *prison,
+		       void (*visit_fn)(void *, struct dm_bio_prison_cell *),
+		       void *context, struct dm_bio_prison_cell *cell);
 
 /*
  * Rather than always releasing the prisoners in a cell, the client may

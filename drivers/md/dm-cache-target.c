@@ -1741,7 +1741,7 @@ static void remap_cell_to_origin_clear_discard(struct cache *cache,
 	detail.any_writes = false;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	dm_cell_visit_put(cache->prison, inc_fn, &detail, cell);
 	bio_list_merge(&cache->deferred_bios, &detail.unhandled_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
@@ -1773,7 +1773,7 @@ static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_
 	detail.any_writes = false;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	dm_cell_visit_put(cache->prison, inc_fn, &detail, cell);
 	bio_list_merge(&cache->deferred_bios, &detail.unhandled_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 

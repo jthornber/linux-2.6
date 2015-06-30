@@ -493,7 +493,7 @@ static void cell_visit_release(struct pool *pool,
 			       void *context,
 			       struct dm_bio_prison_cell *cell)
 {
-	dm_cell_visit_release(pool->prison, fn, context, cell);
+	dm_cell_visit_put(pool->prison, fn, context, cell);
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
