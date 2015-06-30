@@ -76,7 +76,8 @@ static void __setup_new_cell(struct dm_cell_key *key,
 			     struct dm_bio_prison_cell *cell)
 {
        memcpy(&cell->key, key, sizeof(cell->key));
-       cell->holder = holder;
+       cell->user_ptr = NULL;
+       INIT_LIST_HEAD(&cell->user_list);
        bio_list_init(&cell->bios);
 }
 
@@ -176,37 +177,6 @@ int dm_get_cell(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_get_cell);
 
-/*
- * @inmates must have been initialised prior to this call
- */
-static void __cell_release(struct dm_bio_prison *prison,
-			   struct dm_bio_prison_cell *cell,
-			   struct bio_list *inmates)
-{
-	rb_erase(&cell->node, &prison->cells);
-
-	if (inmates) {
-		if (cell->holder)
-			bio_list_add(inmates, cell->holder);
-		bio_list_merge(inmates, &cell->bios);
-	}
-}
-
-void dm_cell_release(struct dm_bio_prison *prison,
-		     struct dm_bio_prison_cell *cell,
-		     struct bio_list *bios)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&prison->lock, flags);
-	__cell_release(prison, cell, bios);
-	spin_unlock_irqrestore(&prison->lock, flags);
-}
-EXPORT_SYMBOL_GPL(dm_cell_release);
-
-/*
- * Sometimes we don't want the holder, just the additional bios.
- */
 static void __cell_release_no_holder(struct dm_bio_prison *prison,
 				     struct dm_bio_prison_cell *cell,
 				     struct bio_list *inmates)
@@ -234,7 +204,7 @@ void dm_cell_error(struct dm_bio_prison *prison,
 	struct bio *bio;
 
 	bio_list_init(&bios);
-	dm_cell_release(prison, cell, &bios);
+	dm_cell_release_no_holder(prison, cell, &bios);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_endio(bio, error);
@@ -256,25 +226,27 @@ void dm_cell_visit_release(struct dm_bio_prison *prison,
 EXPORT_SYMBOL_GPL(dm_cell_visit_release);
 
 static int __promote_or_release(struct dm_bio_prison *prison,
-				struct dm_bio_prison_cell *cell)
+					struct dm_bio_prison_cell *cell,
+					struct bio **new_holder)
 {
 	if (bio_list_empty(&cell->bios)) {
 		rb_erase(&cell->node, &prison->cells);
 		return 1;
 	}
 
-	cell->holder = bio_list_pop(&cell->bios);
+	*new_holder = bio_list_pop(&cell->bios);
 	return 0;
 }
 
 int dm_cell_promote_or_release(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell)
+			       struct dm_bio_prison_cell *cell,
+			       struct bio **new_holder)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __promote_or_release(prison, cell);
+	r = __promote_or_release(prison, cell, new_holder);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;

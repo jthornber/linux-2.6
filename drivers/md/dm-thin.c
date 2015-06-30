@@ -482,16 +482,10 @@ static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bi
 		 * the new one.
 		 */
 		dm_bio_prison_free_cell(pool->prison, cell_prealloc);
+	else
+		(*cell_result)->user_ptr = bio;
 
 	return r;
-}
-
-static void cell_release(struct pool *pool,
-			 struct dm_bio_prison_cell *cell,
-			 struct bio_list *bios)
-{
-	dm_cell_release(pool->prison, cell, bios);
-	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
 static void cell_visit_release(struct pool *pool,
@@ -511,9 +505,19 @@ static void cell_release_no_holder(struct pool *pool,
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
+static struct bio *cell_holder(struct dm_bio_prison_cell *cell)
+{
+	return (struct bio *) cell->user_ptr;
+}
+
 static void cell_error_with_code(struct pool *pool,
 				 struct dm_bio_prison_cell *cell, int error_code)
 {
+	struct bio *bio = cell_holder(cell);
+
+	if (bio)
+		bio_endio(cell_holder(cell), error_code);
+
 	dm_cell_error(pool->prison, cell, error_code);
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
@@ -998,8 +1002,8 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		inc_remap_and_issue_cell(tc, m->cell, m->data_block);
 		bio_endio(bio, 0);
 	} else {
-		inc_all_io_entry(tc->pool, m->cell->holder);
-		remap_and_issue(tc, m->cell->holder, m->data_block);
+		inc_all_io_entry(tc->pool, cell_holder(m->cell));
+		remap_and_issue(tc, cell_holder(m->cell), m->data_block);
 		inc_remap_and_issue_cell(tc, m->cell, m->data_block);
 	}
 
@@ -1495,7 +1499,7 @@ static void handle_unserviceable_bio(struct pool *pool, struct bio *bio)
 
 static void retry_bios_on_resume(struct pool *pool, struct dm_bio_prison_cell *cell)
 {
-	struct bio *bio;
+	struct bio *bio = cell_holder(cell);
 	struct bio_list bios;
 	int error;
 
@@ -1506,7 +1510,11 @@ static void retry_bios_on_resume(struct pool *pool, struct dm_bio_prison_cell *c
 	}
 
 	bio_list_init(&bios);
-	cell_release(pool, cell, &bios);
+	cell_release_no_holder(pool, cell, &bios);
+
+	// FIXME: retry... spin locks each time
+	if (bio)
+		retry_on_resume(bio);
 
 	while ((bio = bio_list_pop(&bios)))
 		retry_on_resume(bio);
@@ -1526,7 +1534,7 @@ static void process_discard_cell_no_passdown(struct thin_c *tc,
 	m->virt_begin = virt_cell->key.block_begin;
 	m->virt_end = virt_cell->key.block_end;
 	m->cell = virt_cell;
-	m->bio = virt_cell->holder;
+	m->bio = cell_holder(virt_cell);
 
 	if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
 		pool->process_prepared_discard(m);
@@ -1609,7 +1617,7 @@ static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t
 
 static void process_discard_cell_passdown(struct thin_c *tc, struct dm_bio_prison_cell *virt_cell)
 {
-	struct bio *bio = virt_cell->holder;
+	struct bio *bio = cell_holder(virt_cell);
 	struct dm_thin_endio_hook *h = dm_per_bio_data(bio, sizeof(struct dm_thin_endio_hook));
 
 	/*
@@ -1813,7 +1821,7 @@ static void process_cell(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	int r;
 	struct pool *pool = tc->pool;
-	struct bio *bio = cell->holder;
+	struct bio *bio = cell_holder(cell);
 	dm_block_t block = get_bio_block(tc, bio);
 	struct dm_thin_lookup_result lookup_result;
 
@@ -1940,7 +1948,7 @@ static void process_bio_read_only(struct thin_c *tc, struct bio *bio)
 
 static void process_cell_read_only(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
-	__process_bio_read_only(tc, cell->holder, cell);
+	__process_bio_read_only(tc, cell_holder(cell), cell);
 }
 
 static void process_bio_success(struct thin_c *tc, struct bio *bio)
@@ -2095,18 +2103,21 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 	blk_finish_plug(&plug);
 }
 
+// FIXME: why don't we compare keys, rather than the bio destination
 static int cmp_cells(const void *lhs, const void *rhs)
 {
 	struct dm_bio_prison_cell *lhs_cell = *((struct dm_bio_prison_cell **) lhs);
 	struct dm_bio_prison_cell *rhs_cell = *((struct dm_bio_prison_cell **) rhs);
+	struct bio *lhs_bio = cell_holder(lhs_cell);
+	struct bio *rhs_bio = cell_holder(rhs_cell);
 
-	BUG_ON(!lhs_cell->holder);
-	BUG_ON(!rhs_cell->holder);
+	BUG_ON(!lhs_bio);
+	BUG_ON(!rhs_bio);
 
-	if (lhs_cell->holder->bi_iter.bi_sector < rhs_cell->holder->bi_iter.bi_sector)
+	if (lhs_bio->bi_iter.bi_sector < rhs_bio->bi_iter.bi_sector)
 		return -1;
 
-	if (lhs_cell->holder->bi_iter.bi_sector > rhs_cell->holder->bi_iter.bi_sector)
+	if (lhs_bio->bi_iter.bi_sector > rhs_bio->bi_iter.bi_sector)
 		return 1;
 
 	return 0;
@@ -2152,7 +2163,7 @@ static void process_thin_deferred_cells(struct thin_c *tc)
 
 		for (i = 0; i < count; i++) {
 			cell = pool->cell_sort_array[i];
-			BUG_ON(!cell->holder);
+			BUG_ON(!cell_holder(cell));
 
 			/*
 			 * If we've got no free new_mapping structs, and processing
@@ -2169,7 +2180,7 @@ static void process_thin_deferred_cells(struct thin_c *tc)
 				return;
 			}
 
-			if (cell->holder->bi_rw & REQ_DISCARD)
+			if (cell_holder(cell)->bi_rw & REQ_DISCARD)
 				pool->process_discard_cell(tc, cell);
 			else
 				pool->process_cell(tc, cell);

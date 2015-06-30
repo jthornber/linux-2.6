@@ -38,11 +38,15 @@ struct dm_cell_key {
  * themselves.
  */
 struct dm_bio_prison_cell {
-	struct list_head user_list;	/* for client use */
-	struct rb_node node;
+	/*
+	 * For client use.  Only use these if you've been granted an
+	 * exclusive lock on the cell.
+	 */
+	void *user_ptr;
+	struct list_head user_list;
 
+	struct rb_node node;
 	struct dm_cell_key key;
-	struct bio *holder;
 	struct bio_list bios;
 };
 
@@ -84,12 +88,12 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_bio_prison_cell *cell_prealloc,
 		  struct dm_bio_prison_cell **cell_result);
 
-void dm_cell_release(struct dm_bio_prison *prison,
-		     struct dm_bio_prison_cell *cell,
-		     struct bio_list *bios);
+// FIXME: rename
 void dm_cell_release_no_holder(struct dm_bio_prison *prison,
 			       struct dm_bio_prison_cell *cell,
-			       struct bio_list *inmates);
+			       struct bio_list *bios);
+
+// FIXME: get rid of this
 void dm_cell_error(struct dm_bio_prison *prison,
 		   struct dm_bio_prison_cell *cell, int error);
 
@@ -112,7 +116,8 @@ void dm_cell_visit_release(struct dm_bio_prison *prison,
  * ii) The cell has no inmate for promotion and is released (return value of 1).
  */
 int dm_cell_promote_or_release(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell);
+			       struct dm_bio_prison_cell *cell,
+			       struct bio **new_holder);
 
 /*----------------------------------------------------------------*/
 
