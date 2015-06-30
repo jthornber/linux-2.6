@@ -2103,21 +2103,15 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 	blk_finish_plug(&plug);
 }
 
-// FIXME: why don't we compare keys, rather than the bio destination
 static int cmp_cells(const void *lhs, const void *rhs)
 {
 	struct dm_bio_prison_cell *lhs_cell = *((struct dm_bio_prison_cell **) lhs);
 	struct dm_bio_prison_cell *rhs_cell = *((struct dm_bio_prison_cell **) rhs);
-	struct bio *lhs_bio = cell_holder(lhs_cell);
-	struct bio *rhs_bio = cell_holder(rhs_cell);
 
-	BUG_ON(!lhs_bio);
-	BUG_ON(!rhs_bio);
-
-	if (lhs_bio->bi_iter.bi_sector < rhs_bio->bi_iter.bi_sector)
+	if (lhs_cell->key.block_begin < rhs_cell->key.block_begin)
 		return -1;
 
-	if (lhs_bio->bi_iter.bi_sector > rhs_bio->bi_iter.bi_sector)
+	if (lhs_cell->key.block_begin > rhs_cell->key.block_begin)
 		return 1;
 
 	return 0;
