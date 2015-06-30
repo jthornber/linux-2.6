@@ -160,15 +160,6 @@ int dm_cell_get(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_cell_get);
 
-// FIXME: remove reference to 'no_holder'
-static void __cell_release_no_holder(struct dm_bio_prison *prison,
-				     struct dm_bio_prison_cell *cell,
-				     struct bio_list *inmates)
-{
-	rb_erase(&cell->node, &prison->cells);
-	bio_list_merge(inmates, &cell->bios);
-}
-
 void dm_cell_put(struct dm_bio_prison *prison,
 		 struct dm_bio_prison_cell *cell,
 		 struct bio_list *inmates)
@@ -176,7 +167,8 @@ void dm_cell_put(struct dm_bio_prison *prison,
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	__cell_release_no_holder(prison, cell, inmates);
+	rb_erase(&cell->node, &prison->cells);
+	bio_list_merge(inmates, &cell->bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
 EXPORT_SYMBOL_GPL(dm_cell_put);
