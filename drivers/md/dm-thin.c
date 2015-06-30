@@ -511,14 +511,20 @@ static struct bio *cell_holder(struct dm_bio_prison_cell *cell)
 }
 
 static void cell_error_with_code(struct pool *pool,
-				 struct dm_bio_prison_cell *cell, int error_code)
+				 struct dm_bio_prison_cell *cell, int err)
 {
+	struct bio_list bios;
 	struct bio *bio = cell_holder(cell);
 
 	if (bio)
-		bio_endio(cell_holder(cell), error_code);
+		bio_endio(cell_holder(cell), err);
 
-	dm_cell_error(pool->prison, cell, error_code);
+	bio_list_init(&bios);
+	dm_cell_put(pool->prison, cell, &bios);
+
+	while ((bio = bio_list_pop(&bios)))
+		bio_endio(bio, err);
+
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 

@@ -197,20 +197,6 @@ void dm_cell_put(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_cell_put);
 
-void dm_cell_error(struct dm_bio_prison *prison,
-		   struct dm_bio_prison_cell *cell, int error)
-{
-	struct bio_list bios;
-	struct bio *bio;
-
-	bio_list_init(&bios);
-	dm_cell_put(prison, cell, &bios);
-
-	while ((bio = bio_list_pop(&bios)))
-		bio_endio(bio, error);
-}
-EXPORT_SYMBOL_GPL(dm_cell_error);
-
 void dm_cell_visit_release(struct dm_bio_prison *prison,
 			   void (*visit_fn)(void *, struct dm_bio_prison_cell *),
 			   void *context,

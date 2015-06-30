@@ -1130,11 +1130,18 @@ static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, boo
 
 static void cell_error_with_code(struct cache *cache, struct dm_bio_prison_cell *cell, int err)
 {
+	struct bio_list bios;
 	struct bio *bio = cell_holder(cell);
 
 	if (bio)
 		bio_endio(cell_holder(cell), err);
-	dm_cell_error(cache->prison, cell, err);
+
+	bio_list_init(&bios);
+	dm_cell_put(cache->prison, cell, &bios);
+
+	while ((bio = bio_list_pop(&bios)))
+		bio_endio(bio, err);
+
 	dm_bio_prison_free_cell(cache->prison, cell);
 }
 

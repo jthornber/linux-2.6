@@ -92,10 +92,6 @@ void dm_cell_put(struct dm_bio_prison *prison,
 		 struct dm_bio_prison_cell *cell,
 		 struct bio_list *bios);
 
-// FIXME: get rid of this
-void dm_cell_error(struct dm_bio_prison *prison,
-		   struct dm_bio_prison_cell *cell, int error);
-
 /*
  * Visits the cell and then releases.  Guarantees no new inmates are
  * inserted between the visit and release.
