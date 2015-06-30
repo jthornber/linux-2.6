@@ -144,6 +144,7 @@ static int __get(struct dm_bio_prison *prison,
 
 int dm_cell_get(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
+		enum dm_lock_mode lm,
 		struct bio *inmate,
 		struct dm_bio_prison_cell *cell_prealloc,
 		struct dm_bio_prison_cell **cell_result)

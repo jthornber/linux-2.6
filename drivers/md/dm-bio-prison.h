@@ -33,6 +33,11 @@ struct dm_cell_key {
 	dm_block_t block_begin, block_end;
 };
 
+enum dm_lock_mode {
+	LM_EXCLUSIVE,
+	LM_SHARED
+};
+
 /*
  * Treat this as opaque, only in header so callers can manage allocation
  * themselves.
@@ -74,6 +79,7 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
  */
 int dm_cell_get(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
+		enum dm_lock_mode lm,
 		struct bio *inmate,
 		struct dm_bio_prison_cell *cell_prealloc,
 		struct dm_bio_prison_cell **cell_result);

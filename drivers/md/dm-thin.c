@@ -475,7 +475,7 @@ static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bi
 	 */
 	cell_prealloc = dm_bio_prison_alloc_cell(pool->prison, GFP_NOIO);
 
-	r = dm_cell_get(pool->prison, key, bio, cell_prealloc, cell_result);
+	r = dm_cell_get(pool->prison, key, LM_EXCLUSIVE, bio, cell_prealloc, cell_result);
 	if (r)
 		/*
 		 * We reused an old cell; we can get rid of
