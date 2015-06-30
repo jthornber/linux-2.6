@@ -66,27 +66,17 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 			     struct dm_bio_prison_cell *cell);
 
 /*
- * Creates, or retrieves a cell that overlaps the given key.
+ * An atomic op that either retrieves an existing cell and adds an inmate
+ * bio to it, or creates a new cell with the caller as holder (inmate not
+ * added).  inmate may be safely set to NULL.
  *
- * Returns 1 if pre-existing cell returned, zero if new cell created using
- * @cell_prealloc.
+ * Returns 1 if the cell was already held, 0 a new cell was created.
  */
-int dm_get_cell(struct dm_bio_prison *prison,
+int dm_cell_get(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
+		struct bio *inmate,
 		struct dm_bio_prison_cell *cell_prealloc,
 		struct dm_bio_prison_cell **cell_result);
-
-/*
- * An atomic op that combines retrieving or creating a cell, and adding a
- * bio to it.
- *
- * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
- */
-int dm_bio_detain(struct dm_bio_prison *prison,
-		  struct dm_cell_key *key,
-		  struct bio *inmate,
-		  struct dm_bio_prison_cell *cell_prealloc,
-		  struct dm_bio_prison_cell **cell_result);
 
 void dm_cell_put(struct dm_bio_prison *prison,
 		 struct dm_bio_prison_cell *cell,

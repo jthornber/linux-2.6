@@ -105,11 +105,11 @@ static int cmp_keys(struct dm_cell_key *lhs,
 	return 0;
 }
 
-static int __bio_detain(struct dm_bio_prison *prison,
-			struct dm_cell_key *key,
-			struct bio *inmate,
-			struct dm_bio_prison_cell *cell_prealloc,
-			struct dm_bio_prison_cell **cell_result)
+static int __get(struct dm_bio_prison *prison,
+		 struct dm_cell_key *key,
+		 struct bio *inmate,
+		 struct dm_bio_prison_cell *cell_prealloc,
+		 struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	struct rb_node **new = &prison->cells.rb_node, *parent = NULL;
@@ -142,41 +142,24 @@ static int __bio_detain(struct dm_bio_prison *prison,
 	return 0;
 }
 
-static int bio_detain(struct dm_bio_prison *prison,
-		      struct dm_cell_key *key,
-		      struct bio *inmate,
-		      struct dm_bio_prison_cell *cell_prealloc,
-		      struct dm_bio_prison_cell **cell_result)
+int dm_cell_get(struct dm_bio_prison *prison,
+		struct dm_cell_key *key,
+		struct bio *inmate,
+		struct dm_bio_prison_cell *cell_prealloc,
+		struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __bio_detain(prison, key, inmate, cell_prealloc, cell_result);
+	r = __get(prison, key, inmate, cell_prealloc, cell_result);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
+EXPORT_SYMBOL_GPL(dm_cell_get);
 
-int dm_bio_detain(struct dm_bio_prison *prison,
-		  struct dm_cell_key *key,
-		  struct bio *inmate,
-		  struct dm_bio_prison_cell *cell_prealloc,
-		  struct dm_bio_prison_cell **cell_result)
-{
-	return bio_detain(prison, key, inmate, cell_prealloc, cell_result);
-}
-EXPORT_SYMBOL_GPL(dm_bio_detain);
-
-int dm_get_cell(struct dm_bio_prison *prison,
-		struct dm_cell_key *key,
-		struct dm_bio_prison_cell *cell_prealloc,
-		struct dm_bio_prison_cell **cell_result)
-{
-	return bio_detain(prison, key, NULL, cell_prealloc, cell_result);
-}
-EXPORT_SYMBOL_GPL(dm_get_cell);
-
+// FIXME: remove reference to 'no_holder'
 static void __cell_release_no_holder(struct dm_bio_prison *prison,
 				     struct dm_bio_prison_cell *cell,
 				     struct bio_list *inmates)

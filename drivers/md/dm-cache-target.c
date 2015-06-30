@@ -535,7 +535,7 @@ static int bio_detain_range(struct cache *cache, dm_oblock_t oblock_begin, dm_ob
 	struct dm_cell_key key;
 
 	build_key(oblock_begin, oblock_end, &key);
-	r = dm_bio_detain(cache->prison, &key, bio, cell_prealloc, cell_result);
+	r = dm_cell_get(cache->prison, &key, bio, cell_prealloc, cell_result);
 	if (r)
 		free_fn(free_context, cell_prealloc);
 	else
@@ -566,7 +566,7 @@ static int get_cell(struct cache *cache,
 	cell_prealloc = prealloc_get_cell(structs);
 
 	build_key(oblock, to_oblock(from_oblock(oblock) + 1ULL), &key);
-	r = dm_get_cell(cache->prison, &key, cell_prealloc, cell_result);
+	r = dm_cell_get(cache->prison, &key, NULL, cell_prealloc, cell_result);
 	if (r)
 		prealloc_put_cell(structs, cell_prealloc);
 	else
