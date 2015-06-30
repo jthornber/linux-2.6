@@ -185,9 +185,9 @@ static void __cell_release_no_holder(struct dm_bio_prison *prison,
 	bio_list_merge(inmates, &cell->bios);
 }
 
-void dm_cell_release_no_holder(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell,
-			       struct bio_list *inmates)
+void dm_cell_put(struct dm_bio_prison *prison,
+		 struct dm_bio_prison_cell *cell,
+		 struct bio_list *inmates)
 {
 	unsigned long flags;
 
@@ -195,7 +195,7 @@ void dm_cell_release_no_holder(struct dm_bio_prison *prison,
 	__cell_release_no_holder(prison, cell, inmates);
 	spin_unlock_irqrestore(&prison->lock, flags);
 }
-EXPORT_SYMBOL_GPL(dm_cell_release_no_holder);
+EXPORT_SYMBOL_GPL(dm_cell_put);
 
 void dm_cell_error(struct dm_bio_prison *prison,
 		   struct dm_bio_prison_cell *cell, int error)
@@ -204,7 +204,7 @@ void dm_cell_error(struct dm_bio_prison *prison,
 	struct bio *bio;
 
 	bio_list_init(&bios);
-	dm_cell_release_no_holder(prison, cell, &bios);
+	dm_cell_put(prison, cell, &bios);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_endio(bio, error);

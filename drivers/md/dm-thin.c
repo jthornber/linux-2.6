@@ -501,7 +501,7 @@ static void cell_release_no_holder(struct pool *pool,
 				   struct dm_bio_prison_cell *cell,
 				   struct bio_list *bios)
 {
-	dm_cell_release_no_holder(pool->prison, cell, bios);
+	dm_cell_put(pool->prison, cell, bios);
 	dm_bio_prison_free_cell(pool->prison, cell);
 }
 

@@ -1078,7 +1078,7 @@ static void __cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
 {
 	struct bio *bio = cell_holder(cell);
 
-	dm_cell_release_no_holder(cache->prison, cell, bios);
+	dm_cell_put(cache->prison, cell, bios);
 	if (bio)
 		bio_list_add(bios, bio);
 

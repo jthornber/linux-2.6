@@ -88,10 +88,9 @@ int dm_bio_detain(struct dm_bio_prison *prison,
 		  struct dm_bio_prison_cell *cell_prealloc,
 		  struct dm_bio_prison_cell **cell_result);
 
-// FIXME: rename
-void dm_cell_release_no_holder(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell,
-			       struct bio_list *bios);
+void dm_cell_put(struct dm_bio_prison *prison,
+		 struct dm_bio_prison_cell *cell,
+		 struct bio_list *bios);
 
 // FIXME: get rid of this
 void dm_cell_error(struct dm_bio_prison *prison,
