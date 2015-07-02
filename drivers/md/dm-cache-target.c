@@ -538,8 +538,10 @@ static int bio_detain_range(struct cache *cache, dm_oblock_t oblock_begin, dm_ob
 	r = dm_cell_get(cache->prison, &key, LM_EXCLUSIVE, bio, cell_prealloc, cell_result);
 	if (r)
 		free_fn(free_context, cell_prealloc);
-	else
+	else {
+		BUG_ON(*cell_result != cell_prealloc);
 		(*cell_result)->user_ptr = bio;
+	}
 
 	return r;
 }
@@ -569,8 +571,10 @@ static int get_cell(struct cache *cache,
 	r = dm_cell_get(cache->prison, &key, LM_EXCLUSIVE, NULL, cell_prealloc, cell_result);
 	if (r)
 		prealloc_put_cell(structs, cell_prealloc);
-	else
+	else {
+		BUG_ON(*cell_result != cell_prealloc);
 		(*cell_result)->user_ptr = NULL;
+	}
 
 	return r;
 }
@@ -1078,11 +1082,11 @@ static void __cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
 {
 	struct bio *bio = cell_holder(cell);
 
-	dm_cell_put(cache->prison, cell, bios);
+	if (dm_cell_put(cache->prison, cell, bios))
+		free_prison_cell(cache, cell);
+
 	if (bio)
 		bio_list_add(bios, bio);
-
-	free_prison_cell(cache, cell);
 }
 
 static bool discard_or_flush(struct bio *bio)
@@ -1137,12 +1141,11 @@ static void cell_error_with_code(struct cache *cache, struct dm_bio_prison_cell 
 		bio_endio(cell_holder(cell), err);
 
 	bio_list_init(&bios);
-	dm_cell_put(cache->prison, cell, &bios);
+	if (dm_cell_put(cache->prison, cell, &bios))
+		dm_bio_prison_free_cell(cache->prison, cell);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_endio(bio, err);
-
-	dm_bio_prison_free_cell(cache->prison, cell);
 }
 
 static void cell_requeue(struct cache *cache, struct dm_bio_prison_cell *cell)

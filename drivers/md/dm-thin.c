@@ -482,8 +482,10 @@ static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bi
 		 * the new one.
 		 */
 		dm_bio_prison_free_cell(pool->prison, cell_prealloc);
-	else
+	else {
+		BUG_ON(*cell_result != cell_prealloc);
 		(*cell_result)->user_ptr = bio;
+	}
 
 	return r;
 }
@@ -501,8 +503,8 @@ static void cell_release_no_holder(struct pool *pool,
 				   struct dm_bio_prison_cell *cell,
 				   struct bio_list *bios)
 {
-	dm_cell_put(pool->prison, cell, bios);
-	dm_bio_prison_free_cell(pool->prison, cell);
+	if (dm_cell_put(pool->prison, cell, bios))
+		dm_bio_prison_free_cell(pool->prison, cell);
 }
 
 static struct bio *cell_holder(struct dm_bio_prison_cell *cell)
@@ -520,12 +522,11 @@ static void cell_error_with_code(struct pool *pool,
 		bio_endio(cell_holder(cell), err);
 
 	bio_list_init(&bios);
-	dm_cell_put(pool->prison, cell, &bios);
+	if (dm_cell_put(pool->prison, cell, &bios))
+		dm_bio_prison_free_cell(pool->prison, cell);
 
 	while ((bio = bio_list_pop(&bios)))
 		bio_endio(bio, err);
-
-	dm_bio_prison_free_cell(pool->prison, cell);
 }
 
 static void cell_error(struct pool *pool, struct dm_bio_prison_cell *cell)

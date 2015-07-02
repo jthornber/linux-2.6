@@ -107,6 +107,7 @@ static int cmp_keys(struct dm_cell_key *lhs,
 
 static int __get(struct dm_bio_prison *prison,
 		 struct dm_cell_key *key,
+		 enum dm_lock_mode lm,
 		 struct bio *inmate,
 		 struct dm_bio_prison_cell *cell_prealloc,
 		 struct dm_bio_prison_cell **cell_result)
@@ -126,14 +127,27 @@ static int __get(struct dm_bio_prison *prison,
 		else if (r > 0)
 			new = &((*new)->rb_right);
 		else {
-			if (inmate)
-				bio_list_add(&cell->bios, inmate);
-			*cell_result = cell;
-			return 1;
+			if (lm == LM_SHARED && cell->count > 0) {
+				cell->count++;
+				*cell_result = cell;
+
+				// FIXME: how do we indicate we haven't used the prealloc cell?
+				return 0;
+			} else {
+				if (inmate)
+					bio_list_add(&cell->bios, inmate);
+				*cell_result = cell;
+				return 1;
+			}
 		}
 	}
 
 	__setup_new_cell(key, inmate, cell_prealloc);
+	if (lm == LM_SHARED)
+		cell_prealloc->count = 1;
+	else
+		cell_prealloc->count = -1;
+
 	*cell_result = cell_prealloc;
 
 	rb_link_node(&cell_prealloc->node, parent, new);
@@ -153,23 +167,31 @@ int dm_cell_get(struct dm_bio_prison *prison,
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __get(prison, key, inmate, cell_prealloc, cell_result);
+	r = __get(prison, key, lm, inmate, cell_prealloc, cell_result);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_cell_get);
 
-void dm_cell_put(struct dm_bio_prison *prison,
+bool dm_cell_put(struct dm_bio_prison *prison,
 		 struct dm_bio_prison_cell *cell,
 		 struct bio_list *inmates)
 {
+	bool r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
 	rb_erase(&cell->node, &prison->cells);
 	bio_list_merge(inmates, &cell->bios);
+	if (cell->count > 0)
+		cell->count--;
+	else
+		cell->count++;
+	r = !cell->count;
 	spin_unlock_irqrestore(&prison->lock, flags);
+
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_cell_put);
 

@@ -34,8 +34,8 @@ struct dm_cell_key {
 };
 
 enum dm_lock_mode {
-	LM_EXCLUSIVE,
-	LM_SHARED
+	LM_SHARED,
+	LM_EXCLUSIVE
 };
 
 /*
@@ -50,6 +50,11 @@ struct dm_bio_prison_cell {
 	void *user_ptr;
 	struct list_head user_list;
 
+	/*
+	 * count is positive for a shared lock, negative for an exclusive
+	 * lock.
+	 */
+	int count;
 	struct rb_node node;
 	struct dm_cell_key key;
 	struct bio_list bios;
@@ -75,7 +80,9 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
  * bio to it, or creates a new cell with the caller as holder (inmate not
  * added).  inmate may be safely set to NULL.
  *
- * Returns 1 if the cell was already held, 0 a new cell was created.
+ * Returns 1 if the cell was not granted, 0 the cell was granted.  Check
+ * whether *cell_result == cell_prealloc to ascertain whether you need to
+ * free prealloc.
  */
 int dm_cell_get(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
@@ -84,7 +91,11 @@ int dm_cell_get(struct dm_bio_prison *prison,
 		struct dm_bio_prison_cell *cell_prealloc,
 		struct dm_bio_prison_cell **cell_result);
 
-void dm_cell_put(struct dm_bio_prison *prison,
+/*
+ * dm_cell_put always succeeds.  The return value indicates whether the
+ * caller was the final holder (true == final).
+ */
+bool dm_cell_put(struct dm_bio_prison *prison,
 		 struct dm_bio_prison_cell *cell,
 		 struct bio_list *bios);
 
