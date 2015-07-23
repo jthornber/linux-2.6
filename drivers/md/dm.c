@@ -597,6 +597,38 @@ out:
 	return r;
 }
 
+static enum blk_nospace_strategy dm_blk_get_nospace_strategy(struct block_device *bdev)
+{
+	struct mapped_device *md = bdev->bd_disk->private_data;
+	int srcu_idx;
+	struct dm_table *map;
+	struct dm_target *tgt;
+	enum blk_nospace_strategy nospace_strategy = FAST_FAILS_IF_NOSPACE;
+
+	map = dm_get_live_table(md, &srcu_idx);
+
+	if (!map || !dm_table_get_size(map))
+		goto out;
+
+	/* We only support devices that have a single target */
+	if (dm_table_get_num_targets(map) != 1)
+		goto out;
+
+	tgt = dm_table_get_target(map, 0);
+	if (!tgt->type->get_nospace_strategy)
+		goto out;
+
+	if (dm_suspended_md(md))
+		goto out;
+
+	nospace_strategy = tgt->type->get_nospace_strategy(tgt);
+
+out:
+	dm_put_live_table(md, srcu_idx);
+
+	return nospace_strategy;
+}
+
 static struct dm_io *alloc_io(struct mapped_device *md)
 {
 	return mempool_alloc(md->io_pool, GFP_NOIO);
@@ -3647,6 +3679,7 @@ static const struct block_device_operations dm_blk_dops = {
 	.release = dm_blk_close,
 	.ioctl = dm_blk_ioctl,
 	.getgeo = dm_blk_getgeo,
+	.get_nospace_strategy = dm_blk_get_nospace_strategy,
 	.owner = THIS_MODULE
 };
 

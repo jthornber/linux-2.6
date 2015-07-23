@@ -1549,6 +1549,12 @@ static inline bool blk_integrity_is_initialized(struct gendisk *g)
 
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
 
+enum blk_nospace_strategy {
+	FAST_FAILS_IF_NOSPACE,	      /* immediate ENOSPC (no special handling) */
+	SLOW_FAILS_IF_NOSPACE,	      /* queue IO for some time, then ENOSPC */
+	NEVER_FAILS_IF_NOSPACE,	      /* queue IO forever */
+};
+
 struct block_device_operations {
 	int (*open) (struct block_device *, fmode_t);
 	void (*release) (struct gendisk *, fmode_t);
@@ -1566,6 +1572,7 @@ struct block_device_operations {
 	int (*getgeo)(struct block_device *, struct hd_geometry *);
 	/* this callback is with swap_lock and sometimes page table lock held */
 	void (*swap_slot_free_notify) (struct block_device *, unsigned long);
+	enum blk_nospace_strategy (*get_nospace_strategy) (struct block_device *);
 	struct module *owner;
 };
 
@@ -1576,6 +1583,8 @@ extern int bdev_write_page(struct block_device *, sector_t, struct page *,
 						struct writeback_control *);
 extern long bdev_direct_access(struct block_device *, sector_t, void **addr,
 						unsigned long *pfn, long size);
+extern enum blk_nospace_strategy bdev_get_nospace_strategy(struct block_device *);
+
 #else /* CONFIG_BLOCK */
 
 struct block_device;

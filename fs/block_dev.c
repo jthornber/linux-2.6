@@ -469,6 +469,16 @@ long bdev_direct_access(struct block_device *bdev, sector_t sector,
 }
 EXPORT_SYMBOL_GPL(bdev_direct_access);
 
+enum blk_nospace_strategy bdev_get_nospace_strategy(struct block_device *bdev)
+{
+	const struct block_device_operations *ops = bdev->bd_disk->fops;
+
+	if (!ops->get_nospace_strategy)
+		return FAST_FAILS_IF_NOSPACE;
+	return ops->get_nospace_strategy(bdev);
+}
+EXPORT_SYMBOL_GPL(bdev_get_nospace_strategy);
+
 /*
  * pseudo-fs
  */

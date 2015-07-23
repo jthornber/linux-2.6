@@ -119,6 +119,11 @@ typedef void (*dm_io_hints_fn) (struct dm_target *ti,
  */
 typedef int (*dm_busy_fn) (struct dm_target *ti);
 
+/*
+ * Returns how the target handles -ENOSPC from lower layers.
+ */
+typedef enum blk_nospace_strategy (*dm_get_nospace_strategy_fn) (struct dm_target *ti);
+
 void dm_error(const char *message);
 
 struct dm_dev {
@@ -164,6 +169,7 @@ struct target_type {
 	dm_busy_fn busy;
 	dm_iterate_devices_fn iterate_devices;
 	dm_io_hints_fn io_hints;
+	dm_get_nospace_strategy_fn get_nospace_strategy;
 
 	/* For internal device-mapper use. */
 	struct list_head list;

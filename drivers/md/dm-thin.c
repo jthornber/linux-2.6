@@ -3953,7 +3953,7 @@ static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
 		    DM_TARGET_IMMUTABLE,
-	.version = {1, 16, 0},
+	.version = {1, 17, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -4338,9 +4338,23 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	limits->max_discard_sectors = 2048 * 1024 * 16; /* 16G */
 }
 
+static enum blk_nospace_strategy thin_get_nospace_strategy(struct dm_target *ti)
+{
+	struct thin_c *tc = ti->private;
+	struct pool *pool = tc->pool;
+
+	if (pool->pf.error_if_no_space)
+		return FAST_FAILS_IF_NOSPACE;
+
+	else if (!ACCESS_ONCE(no_space_timeout_secs))
+		return NEVER_FAILS_IF_NOSPACE;
+
+	return SLOW_FAILS_IF_NOSPACE;
+}
+
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 16, 0},
+	.version = {1, 17, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
@@ -4353,6 +4367,7 @@ static struct target_type thin_target = {
 	.merge = thin_merge,
 	.iterate_devices = thin_iterate_devices,
 	.io_hints = thin_io_hints,
+	.get_nospace_strategy = thin_get_nospace_strategy,
 };
 
 /*----------------------------------------------------------------*/
