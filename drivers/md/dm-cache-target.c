@@ -1154,9 +1154,11 @@ static void cell_requeue(struct cache *cache, struct dm_bio_prison_cell *cell)
 
 static void free_io_migration(struct dm_cache_migration *mg)
 {
+	struct cache *cache = mg->cache;
+
 	dec_io_migrations(mg->cache);
 	free_migration(mg);
-	wake_worker(mg->cache);
+	wake_worker(cache);
 }
 
 static void migration_failure(struct dm_cache_migration *mg)
@@ -1383,6 +1385,7 @@ static void issue_discard(struct dm_cache_migration *mg)
 {
 	dm_dblock_t b, e;
 	struct bio *bio = cell_holder(mg->new_ocell);
+	struct cache *cache = mg->cache;
 
 	calc_discard_block_range(mg->cache, bio, &b, &e);
 	while (b != e) {
@@ -1393,7 +1396,7 @@ static void issue_discard(struct dm_cache_migration *mg)
 	bio_endio(bio, 0);
 	cell_defer(mg->cache, mg->new_ocell, false);
 	free_migration(mg);
-	wake_worker(mg->cache);
+	wake_worker(cache);
 }
 
 static void issue_copy_or_discard(struct dm_cache_migration *mg)
