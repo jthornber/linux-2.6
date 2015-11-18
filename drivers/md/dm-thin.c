@@ -555,14 +555,18 @@ static void __merge_bio_list(struct bio_list *bios, struct bio_list *master)
 	bio_list_init(master);
 }
 
+static void bio_complete(struct bio *bio, int err)
+{
+	bio->bi_error = err;
+	bio_endio(bio);
+}
+
 static void error_bio_list(struct bio_list *bios, int error)
 {
 	struct bio *bio;
 
-	while ((bio = bio_list_pop(bios))) {
-		bio->bi_error = error;
-		bio_endio(bio);
-	}
+	while ((bio = bio_list_pop(bios)))
+		bio_complete(bio, error);
 }
 
 static void error_thin_bio_list(struct thin_c *tc, struct bio_list *master, int error)
@@ -1522,10 +1526,9 @@ static void handle_unserviceable_bio(struct pool *pool, struct bio *bio)
 {
 	int error = should_error_unserviceable_bio(pool);
 
-	if (error) {
-		bio->bi_error = error;
-		bio_endio(bio);
-	} else
+	if (error)
+		bio_complete(bio, error);
+	else
 		retry_on_resume(bio);
 }
 
@@ -2625,8 +2628,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	thin_hook_bio(tc, bio);
 
 	if (tc->requeue_mode) {
-		bio->bi_error = DM_ENDIO_REQUEUE;
-		bio_endio(bio);
+		bio_complete(bio, DM_ENDIO_REQUEUE);
 		return DM_MAPIO_SUBMITTED;
 	}
 
