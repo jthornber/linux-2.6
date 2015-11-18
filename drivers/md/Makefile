@@ -58,6 +58,7 @@ obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
 obj-$(CONFIG_DM_CACHE_SMQ)	+= dm-cache-smq.o
 obj-$(CONFIG_DM_CACHE_CLEANER)	+= dm-cache-cleaner.o
 obj-$(CONFIG_DM_ERA)		+= dm-era.o
+obj-$(CONFIG_DM_FAKE_DISCARD)	+= dm-fake-discard.o
 obj-$(CONFIG_DM_LOG_WRITES)	+= dm-log-writes.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)

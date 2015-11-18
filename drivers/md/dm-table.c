@@ -1349,6 +1349,9 @@ static bool dm_table_discard_zeroes_data(struct dm_table *t)
 	while (i < dm_table_get_num_targets(t)) {
 		ti = dm_table_get_target(t, i++);
 
+		if (ti->pretend_discard_zeroes_data)
+			return 1;
+
 		if (ti->discard_zeroes_data_unsupported)
 			return false;
 	}
