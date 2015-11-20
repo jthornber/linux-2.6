@@ -534,9 +534,13 @@ static int bio_detain_range(struct cache *cache, dm_oblock_t oblock_begin, dm_ob
 	struct dm_cell_key key;
 
 	build_key(oblock_begin, oblock_end, &key);
-	r = dm_bio_detain(cache->prison, &key, bio, cell_prealloc, cell_result);
+	r = dm_cell_get(cache->prison, &key, LM_EXCLUSIVE, bio, cell_prealloc, cell_result);
 	if (r)
 		free_fn(free_context, cell_prealloc);
+	else {
+		BUG_ON(*cell_result != cell_prealloc);
+		(*cell_result)->user_ptr = bio;
+	}
 
 	return r;
 }
@@ -563,9 +567,13 @@ static int get_cell(struct cache *cache,
 	cell_prealloc = prealloc_get_cell(structs);
 
 	build_key(oblock, to_oblock(from_oblock(oblock) + 1ULL), &key);
-	r = dm_get_cell(cache->prison, &key, cell_prealloc, cell_result);
+	r = dm_cell_get(cache->prison, &key, LM_EXCLUSIVE, NULL, cell_prealloc, cell_result);
 	if (r)
 		prealloc_put_cell(structs, cell_prealloc);
+	else {
+		BUG_ON(*cell_result != cell_prealloc);
+		(*cell_result)->user_ptr = NULL;
+	}
 
 	return r;
 }
@@ -1063,6 +1071,23 @@ static void dec_io_migrations(struct cache *cache)
 	atomic_dec(&cache->nr_io_migrations);
 }
 
+static struct bio *cell_holder(struct dm_bio_prison_cell *cell)
+{
+	return (struct bio *) cell->user_ptr;
+}
+
+static void __cell_release(struct cache *cache, struct dm_bio_prison_cell *cell,
+			   bool holder, struct bio_list *bios)
+{
+	struct bio *bio = cell_holder(cell);
+
+	if (dm_cell_put(cache->prison, cell, bios))
+		free_prison_cell(cache, cell);
+
+	if (bio)
+		bio_list_add(bios, bio);
+}
+
 static bool discard_or_flush(struct bio *bio)
 {
 	return bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD);
@@ -1070,27 +1095,32 @@ static bool discard_or_flush(struct bio *bio)
 
 static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell)
 {
-	if (discard_or_flush(cell->holder)) {
+	if (discard_or_flush(cell_holder(cell)))
 		/*
 		 * We have to handle these bios individually.
 		 */
-		dm_cell_release(cache->prison, cell, &cache->deferred_bios);
-		free_prison_cell(cache, cell);
-	} else
+		__cell_release(cache, cell, true, &cache->deferred_bios);
+
+	else
 		list_add_tail(&cell->user_list, &cache->deferred_cells);
 }
 
 static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, bool holder)
 {
 	unsigned long flags;
+	struct bio *new_holder;
 
-	if (!holder && dm_cell_promote_or_release(cache->prison, cell)) {
-		/*
-		 * There was no prisoner to promote to holder, the
-		 * cell has been released.
-		 */
-		free_prison_cell(cache, cell);
-		return;
+	if (!holder) {
+		if (dm_cell_promote_or_put(cache->prison, cell, &new_holder)) {
+			/*
+			 * There was no prisoner to promote to holder, the
+			 * cell has been released.
+			 */
+			free_prison_cell(cache, cell);
+			return;
+		}
+
+		cell->user_ptr = new_holder;
 	}
 
 	spin_lock_irqsave(&cache->lock, flags);
@@ -1100,10 +1130,26 @@ static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell, boo
 	wake_worker(cache);
 }
 
+static void bio_complete(struct bio *bio, int err)
+{
+	bio->bi_error = err;
+	bio_endio(bio);
+}
+
 static void cell_error_with_code(struct cache *cache, struct dm_bio_prison_cell *cell, int err)
 {
-	dm_cell_error(cache->prison, cell, err);
-	free_prison_cell(cache, cell);
+	struct bio_list bios;
+	struct bio *bio = cell_holder(cell);
+
+	if (bio)
+		bio_complete(cell_holder(cell), err);
+
+	bio_list_init(&bios);
+	if (dm_cell_put(cache->prison, cell, &bios))
+		dm_bio_prison_free_cell(cache->prison, cell);
+
+	while ((bio = bio_list_pop(&bios)))
+		bio_complete(bio, err);
 }
 
 static void cell_requeue(struct cache *cache, struct dm_bio_prison_cell *cell)
@@ -1224,7 +1270,7 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			 * The block was promoted via an overwrite, so it's dirty.
 			 */
 			set_dirty(cache, mg->new_oblock, mg->cblock);
-			bio_endio(mg->new_ocell->holder);
+			bio_endio(cell_holder(mg->new_ocell));
 			cell_defer(cache, mg->new_ocell, false);
 		}
 		free_io_migration(mg);
@@ -1343,7 +1389,7 @@ static void calc_discard_block_range(struct cache *cache, struct bio *bio,
 static void issue_discard(struct dm_cache_migration *mg)
 {
 	dm_dblock_t b, e;
-	struct bio *bio = mg->new_ocell->holder;
+	struct bio *bio = cell_holder(mg->new_ocell);
 	struct cache *cache = mg->cache;
 
 	calc_discard_block_range(cache, bio, &b, &e);
@@ -1372,7 +1418,7 @@ static void issue_copy_or_discard(struct dm_cache_migration *mg)
 		avoid = !is_dirty(cache, mg->cblock) ||
 			is_discarded_oblock(cache, mg->old_oblock);
 	else {
-		struct bio *bio = mg->new_ocell->holder;
+		struct bio *bio = cell_holder(mg->new_ocell);
 
 		avoid = is_discarded_oblock(cache, mg->new_oblock);
 
@@ -1674,8 +1720,8 @@ static void inc_fn(void *context, struct dm_bio_prison_cell *cell)
 	struct inc_detail *detail = context;
 	struct cache *cache = detail->cache;
 
-	inc_ds(cache, cell->holder, cell);
-	if (bio_data_dir(cell->holder) == WRITE)
+	inc_ds(cache, cell_holder(cell), cell);
+	if (bio_data_dir(cell_holder(cell)) == WRITE)
 		detail->any_writes = true;
 
 	while ((bio = bio_list_pop(&cell->bios))) {
@@ -1707,15 +1753,15 @@ static void remap_cell_to_origin_clear_discard(struct cache *cache,
 	detail.any_writes = false;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	dm_cell_visit_put(cache->prison, inc_fn, &detail, cell);
 	bio_list_merge(&cache->deferred_bios, &detail.unhandled_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	remap_to_origin(cache, cell->holder);
+	remap_to_origin(cache, cell_holder(cell));
 	if (issue_holder)
-		issue(cache, cell->holder);
+		issue(cache, cell_holder(cell));
 	else
-		accounted_begin(cache, cell->holder);
+		accounted_begin(cache, cell_holder(cell));
 
 	if (detail.any_writes)
 		clear_discard(cache, oblock_to_dblock(cache, oblock));
@@ -1741,15 +1787,15 @@ static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_
 	detail.any_writes = false;
 
 	spin_lock_irqsave(&cache->lock, flags);
-	dm_cell_visit_release(cache->prison, inc_fn, &detail, cell);
+	dm_cell_visit_put(cache->prison, inc_fn, &detail, cell);
 	bio_list_merge(&cache->deferred_bios, &detail.unhandled_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	remap_to_cache(cache, cell->holder, cblock);
+	remap_to_cache(cache, cell_holder(cell), cblock);
 	if (issue_holder)
-		issue(cache, cell->holder);
+		issue(cache, cell_holder(cell));
 	else
-		accounted_begin(cache, cell->holder);
+		accounted_begin(cache, cell_holder(cell));
 
 	if (detail.any_writes) {
 		set_dirty(cache, oblock, cblock);
@@ -1795,7 +1841,7 @@ static void process_cell(struct cache *cache, struct prealloc *structs,
 {
 	int r;
 	bool release_cell = true;
-	struct bio *bio = new_ocell->holder;
+	struct bio *bio = cell_holder(new_ocell);
 	dm_oblock_t block = get_bio_block(cache, bio);
 	struct policy_result lookup_result;
 	bool passthrough = passthrough_mode(&cache->features);
@@ -2216,10 +2262,8 @@ static void requeue_deferred_bios(struct cache *cache)
 	bio_list_merge(&bios, &cache->deferred_bios);
 	bio_list_init(&cache->deferred_bios);
 
-	while ((bio = bio_list_pop(&bios))) {
-		bio->bi_error = DM_ENDIO_REQUEUE;
-		bio_endio(bio);
-	}
+	while ((bio = bio_list_pop(&bios)))
+		bio_complete(bio, DM_ENDIO_REQUEUE);
 }
 
 static int more_work(struct cache *cache)
