@@ -33,16 +33,30 @@ struct dm_cell_key {
 	dm_block_t block_begin, block_end;
 };
 
+enum dm_lock_mode {
+	LM_SHARED,
+	LM_EXCLUSIVE
+};
+
 /*
  * Treat this as opaque, only in header so callers can manage allocation
  * themselves.
  */
 struct dm_bio_prison_cell {
-	struct list_head user_list;	/* for client use */
-	struct rb_node node;
+	/*
+	 * For client use.  Only use these if you've been granted an
+	 * exclusive lock on the cell.
+	 */
+	void *user_ptr;
+	struct list_head user_list;
 
+	/*
+	 * count is positive for a shared lock, negative for an exclusive
+	 * lock.
+	 */
+	int count;
+	struct rb_node node;
 	struct dm_cell_key key;
-	struct bio *holder;
 	struct bio_list bios;
 };
 
@@ -62,44 +76,36 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 			     struct dm_bio_prison_cell *cell);
 
 /*
- * Creates, or retrieves a cell that overlaps the given key.
+ * An atomic op that either retrieves an existing cell and adds an inmate
+ * bio to it, or creates a new cell with the caller as holder (inmate not
+ * added).  inmate may be safely set to NULL.
  *
- * Returns 1 if pre-existing cell returned, zero if new cell created using
- * @cell_prealloc.
+ * Returns 1 if the cell was not granted, 0 the cell was granted.  Check
+ * whether *cell_result == cell_prealloc to ascertain whether you need to
+ * free prealloc.
  */
-int dm_get_cell(struct dm_bio_prison *prison,
+int dm_cell_get(struct dm_bio_prison *prison,
 		struct dm_cell_key *key,
+		enum dm_lock_mode lm,
+		struct bio *inmate,
 		struct dm_bio_prison_cell *cell_prealloc,
 		struct dm_bio_prison_cell **cell_result);
 
 /*
- * An atomic op that combines retrieving or creating a cell, and adding a
- * bio to it.
- *
- * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
+ * dm_cell_put always succeeds.  The return value indicates whether the
+ * caller was the final holder (true == final).
  */
-int dm_bio_detain(struct dm_bio_prison *prison,
-		  struct dm_cell_key *key,
-		  struct bio *inmate,
-		  struct dm_bio_prison_cell *cell_prealloc,
-		  struct dm_bio_prison_cell **cell_result);
-
-void dm_cell_release(struct dm_bio_prison *prison,
-		     struct dm_bio_prison_cell *cell,
-		     struct bio_list *bios);
-void dm_cell_release_no_holder(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell,
-			       struct bio_list *inmates);
-void dm_cell_error(struct dm_bio_prison *prison,
-		   struct dm_bio_prison_cell *cell, int error);
+bool dm_cell_put(struct dm_bio_prison *prison,
+		 struct dm_bio_prison_cell *cell,
+		 struct bio_list *bios);
 
 /*
  * Visits the cell and then releases.  Guarantees no new inmates are
  * inserted between the visit and release.
  */
-void dm_cell_visit_release(struct dm_bio_prison *prison,
-			   void (*visit_fn)(void *, struct dm_bio_prison_cell *),
-			   void *context, struct dm_bio_prison_cell *cell);
+void dm_cell_visit_put(struct dm_bio_prison *prison,
+		       void (*visit_fn)(void *, struct dm_bio_prison_cell *),
+		       void *context, struct dm_bio_prison_cell *cell);
 
 /*
  * Rather than always releasing the prisoners in a cell, the client may
@@ -111,8 +117,9 @@ void dm_cell_visit_release(struct dm_bio_prison *prison,
  * i) An inmate is promoted to be the holder of the cell (return value of 0).
  * ii) The cell has no inmate for promotion and is released (return value of 1).
  */
-int dm_cell_promote_or_release(struct dm_bio_prison *prison,
-			       struct dm_bio_prison_cell *cell);
+int dm_cell_promote_or_put(struct dm_bio_prison *prison,
+			   struct dm_bio_prison_cell *cell,
+			   struct bio **new_holder);
 
 /*----------------------------------------------------------------*/
 
