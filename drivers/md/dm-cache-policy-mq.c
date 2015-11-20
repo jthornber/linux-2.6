@@ -308,11 +308,8 @@ struct entry {
 	struct list_head list;
 	dm_oblock_t oblock;
 
-	/*
-	 * FIXME: pack these better
-	 */
 	bool dirty:1;
-	unsigned hit_count;
+	unsigned hit_count:31;
 };
 
 /*
@@ -545,7 +542,9 @@ static bool any_clean_cblocks(struct mq_policy *mq)
  */
 static unsigned queue_level(struct entry *e)
 {
-	return min((unsigned) ilog2(e->hit_count), NR_QUEUE_LEVELS - 1u);
+	/* we can't call ilog2 on a bitfield */
+	unsigned hits = e->hit_count;
+	return min((unsigned) ilog2(hits), NR_QUEUE_LEVELS - 1u);
 }
 
 static bool in_cache(struct mq_policy *mq, struct entry *e)
