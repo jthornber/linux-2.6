@@ -324,6 +324,14 @@ config DM_CACHE_CLEANER
          A simple cache policy that writes back all data to the
          origin.  Used when decommissioning a dm-cache.
 
+config DM_CACHE_ALWAYS_PROMOTE
+       tristate "Always Promote Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         A simple cache policy that always promotes hit blocks.
+         Useful when debugging.
+
 config DM_ERA
        tristate "Era target (EXPERIMENTAL)"
        depends on BLK_DEV_DM
