@@ -130,7 +130,7 @@ static int discard_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad;
 
 	if (dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &fd->dev)) {
-		ti->error = "dm-linear: Device lookup failed";
+		ti->error = "dm-fake-discard: Device lookup failed";
 		goto bad;
 	}
 
@@ -142,6 +142,7 @@ static int discard_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		pr_alert("fake_discard: discards unsupported\n");
 		ti->discards_supported = false;
 		ti->num_discard_bios = 0;
+		fd->max_discard_sectors = 0;
 	}
 
 	if (fd->discard_zeroes_data) {
