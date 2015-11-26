@@ -1561,6 +1561,9 @@ static bool dm_table_supports_discards(struct dm_table *t)
 		if (!ti->num_discard_bios)
 			continue;
 
+		if (ti->discards_unsupported)
+			return false;
+
 		if (ti->discards_supported)
 			return true;
 
