@@ -142,9 +142,10 @@ int dm_btree_remove(struct dm_btree_info *info, dm_block_t root,
 		    uint64_t *keys, dm_block_t *new_root);
 
 /*
- * Removes values between 'keys' and keys2, where keys2 is keys with the
- * final key replaced with 'end_key'.  'end_key' is the one-past-the-end
- * value.  'keys' may be altered.
+ * Removes a _contiguous_ run of values starting from 'keys' and not
+ * reaching keys2 (where keys2 is keys with the final key replaced with
+ * 'end_key').  'end_key' is the one-past-the-end value.  'keys' may be
+ * altered.
  */
 int dm_btree_remove_leaves(struct dm_btree_info *info, dm_block_t root,
 			   uint64_t *keys, uint64_t end_key,
