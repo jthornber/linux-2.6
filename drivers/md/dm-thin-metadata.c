@@ -1669,9 +1669,9 @@ bool dm_thin_changed_this_transaction(struct dm_thin_device *td)
 {
 	int r;
 
-	down_read(&td->pmd->root_lock);
+	down_write(&td->pmd->root_lock);
 	r = td->changed;
-	up_read(&td->pmd->root_lock);
+	up_write(&td->pmd->root_lock);
 
 	return r;
 }
