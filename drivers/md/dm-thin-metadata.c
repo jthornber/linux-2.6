@@ -1697,9 +1697,9 @@ bool dm_thin_aborted_changes(struct dm_thin_device *td)
 {
 	bool r;
 
-	down_read(&td->pmd->root_lock);
+	down_write(&td->pmd->root_lock);
 	r = td->aborted_with_changes;
-	up_read(&td->pmd->root_lock);
+	up_write(&td->pmd->root_lock);
 
 	return r;
 }
