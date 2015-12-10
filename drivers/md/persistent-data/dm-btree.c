@@ -424,7 +424,7 @@ static int dm_btree_lookup_next_single(struct dm_btree_info *info, dm_block_t ro
 		}
 
 		r = dm_btree_lookup_next_single(info, value64(n, i), key, rkey, value_le);
-		if (r == -ENODATA && i < nr_entries) {
+		if (r == -ENODATA && i < (nr_entries - 1)) {
 			i++;
 			r = dm_btree_lookup_next_single(info, value64(n, i), key, rkey, value_le);
 		}
