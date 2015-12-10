@@ -696,7 +696,6 @@ static struct dm_space_map bootstrap_ops = {
 static int sm_metadata_extend(struct dm_space_map *sm, dm_block_t extra_blocks)
 {
 	int r, i;
-	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 	dm_block_t old_len = smm->ll.nr_blocks;
 
@@ -768,7 +767,6 @@ int dm_sm_metadata_create(struct dm_space_map *sm,
 {
 	int r;
 	dm_block_t i;
-	enum allocation_event ev;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	smm->begin = superblock + 1;
