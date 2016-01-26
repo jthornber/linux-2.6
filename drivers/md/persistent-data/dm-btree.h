@@ -100,6 +100,12 @@ int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root);
 int dm_btree_del(struct dm_btree_info *info, dm_block_t root);
 
 /*
+ * root_lock should not be held when called.
+ */
+int dm_btree_del_background(struct dm_btree_info *info, dm_block_t root,
+			    struct rw_semaphore *root_lock);
+
+/*
  * All the lookup functions return -ENODATA if the key cannot be found.
  */
 
