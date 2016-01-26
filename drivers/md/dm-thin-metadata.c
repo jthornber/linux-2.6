@@ -1117,6 +1117,8 @@ static int __delete_device(struct dm_pool_metadata *pmd, dm_thin_id dev)
 	int r;
 	uint64_t key = dev;
 	struct dm_thin_device *td;
+	__le64 root_le;
+	uint64_t dev_root;
 
 	/* TODO: failure should mark the transaction invalid */
 	r = __open_device(pmd, dev, 0, &td);
@@ -1130,16 +1132,36 @@ static int __delete_device(struct dm_pool_metadata *pmd, dm_thin_id dev)
 
 	list_del(&td->list);
 	kfree(td);
+
 	r = dm_btree_remove(&pmd->details_info, pmd->details_root,
 			    &key, &pmd->details_root);
 	if (r)
 		return r;
 
+	/*
+	 * We want to delete the mapping tree in the background.  So we
+	 * increment the root of the tree to prevent the btree_remove from
+	 * calling the sync btree_del, and then issue the background del.
+	 */
+	r = dm_btree_lookup(&pmd->tl_info, pmd->root, &key, &root_le);
+	if (r)
+		return r;
+
+	dev_root = le64_to_cpu(root_le);
+	dm_tm_inc(pmd->tm, dev_root);
+
 	r = dm_btree_remove(&pmd->tl_info, pmd->root, &key, &pmd->root);
 	if (r)
 		return r;
 
-	return 0;
+	/*
+	 * The background delete expects the root lock to be dropped.
+	 */
+	up_write(&pmd->root_lock);
+	r = dm_btree_del_background(&pmd->bl_info, dev_root, &pmd->root_lock);
+	down_write(&pmd->root_lock);
+
+	return r;
 }
 
 int dm_pool_delete_thin_device(struct dm_pool_metadata *pmd,

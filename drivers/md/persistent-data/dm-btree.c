@@ -157,6 +157,8 @@ EXPORT_SYMBOL_GPL(dm_btree_empty);
  * we explicitly manage our own stack on the heap.
  */
 #define MAX_SPINE_DEPTH 64
+#define MAX_DECS 256
+
 struct frame {
 	struct dm_block *b;
 	struct btree_node *n;
@@ -166,11 +168,42 @@ struct frame {
 };
 
 struct del_stack {
+	struct rw_semaphore *lock;
 	struct dm_btree_info *info;
 	struct dm_transaction_manager *tm;
 	int top;
 	struct frame spine[MAX_SPINE_DEPTH];
+
+	unsigned nr_decs;
+	dm_block_t decs[MAX_DECS];
 };
+
+static void commit_decs(struct del_stack *s)
+{
+	unsigned i;
+
+	if (s->lock) {
+		up_read(s->lock);
+		down_write(s->lock);
+	}
+
+	for (i = 0; i < s->nr_decs; i++)
+		dm_tm_dec(s->tm, s->decs[i]);
+	s->nr_decs = 0;
+
+	if (s->lock) {
+		up_write(s->lock);
+		down_read(s->lock);
+	}
+}
+
+static void push_dec(struct del_stack *s, dm_block_t b)
+{
+	if (s->nr_decs >= MAX_DECS)
+		commit_decs(s);
+
+	s->decs[s->nr_decs++] = b;
+}
 
 static int top_frame(struct del_stack *s, struct frame **f)
 {
@@ -222,7 +255,7 @@ static int push_frame(struct del_stack *s, dm_block_t b, unsigned level)
 		 * This is a shared node, so we can just decrement it's
 		 * reference counter and leave the children.
 		 */
-		dm_tm_dec(s->tm, b);
+		push_dec(s, b);
 
 	else {
 		uint32_t flags;
@@ -251,7 +284,7 @@ static void pop_frame(struct del_stack *s)
 {
 	struct frame *f = s->spine + s->top--;
 
-	dm_tm_dec(s->tm, dm_block_location(f->b));
+	push_dec(s, dm_block_location(f->b));
 	dm_tm_unlock(s->tm, f->b);
 }
 
@@ -265,7 +298,8 @@ static void unlock_all_frames(struct del_stack *s)
 	}
 }
 
-int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
+static int dm_btree_del_background_(struct dm_btree_info *info, dm_block_t root,
+				    struct rw_semaphore *root_lock)
 {
 	int r;
 	struct del_stack *s;
@@ -278,9 +312,11 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 	s = kmalloc(sizeof(*s), GFP_NOFS);
 	if (!s)
 		return -ENOMEM;
+	s->lock = root_lock;
 	s->info = info;
 	s->tm = info->tm;
 	s->top = -1;
+	s->nr_decs = 0;
 
 	r = push_frame(s, root, 0);
 	if (r)
@@ -329,8 +365,26 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 
 out:
 	unlock_all_frames(s);	/* in case of error */
+	commit_decs(s);
 	kfree(s);
 	return r;
+}
+
+int dm_btree_del_background(struct dm_btree_info *info, dm_block_t root, struct rw_semaphore *root_lock)
+{
+	int r;
+
+	down_read(root_lock);
+	r = dm_btree_del_background_(info, root, root_lock);
+	up_read(root_lock);
+
+	return r;
+}
+EXPORT_SYMBOL_GPL(dm_btree_del_background);
+
+int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
+{
+	return dm_btree_del_background_(info, root, NULL);
 }
 EXPORT_SYMBOL_GPL(dm_btree_del);
 
