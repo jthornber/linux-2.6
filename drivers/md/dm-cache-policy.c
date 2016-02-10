@@ -62,7 +62,11 @@ static struct dm_cache_policy_type *get_policy(const char *name)
 	if (t)
 		return t;
 
-	request_module("dm-cache-%s", name);
+	/* hack; mq is in the smq module */
+	if (!strcmp(name, "mq"))
+		request_module("dm-cache-smq");
+	else
+		request_module("dm-cache-%s", name);
 
 	t = get_policy_once(name);
 	if (IS_ERR(t))
