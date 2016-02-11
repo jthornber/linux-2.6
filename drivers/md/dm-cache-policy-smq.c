@@ -1783,11 +1783,11 @@ static struct dm_cache_policy_type smq_policy_type = {
 
 static struct dm_cache_policy_type mq_policy_type = {
 	.name = "mq",
-	.version = {1, 4, 0},
+	.version = {2, 0, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create,
-	.real = &mq_policy_type
+	.real = &smq_policy_type
 };
 
 static struct dm_cache_policy_type default_policy_type = {
@@ -1841,4 +1841,5 @@ MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("smq cache policy");
 
+MODULE_ALIAS("dm-cache-mq");
 MODULE_ALIAS("dm-cache-default");
