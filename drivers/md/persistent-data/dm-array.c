@@ -840,4 +840,63 @@ int dm_array_walk(struct dm_array_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_array_walk);
 
+struct mutate_info {
+	struct dm_array_info *info;
+	int (*fn)(void *context, uint64_t key, void *leaf);
+	void *context;
+	dm_block_t *root;
+};
+
+static int mutate_ablock(void *context, uint64_t *keys, void *leaf)
+{
+	struct mutate_info *mi = context;
+
+	int r;
+	unsigned i;
+	__le64 block_le;
+	unsigned nr_entries, max_entries;
+	dm_block_t b;
+	struct dm_block *block;
+	struct array_block *ab;
+
+	/* Shadow */
+	memcpy(&block_le, leaf, sizeof(block_le));
+	b = le64_to_cpu(block_le);
+	r = shadow__(mi->info, b, &block, &ab);
+	if (r)
+		return r;
+
+	/* Mutate */
+	max_entries = le32_to_cpu(ab->max_entries);
+	nr_entries = le32_to_cpu(ab->nr_entries);
+	for (i = 0; i < nr_entries; i++) {
+		r = mi->fn(mi->context, keys[0] * max_entries + i,
+			   element_at(mi->info, ab, i));
+
+		if (r)
+			break;
+	}
+
+	r = reinsert__(mi->info, keys[0], block, b, mi->root);
+	unlock_ablock(mi->info, block);
+	return r;
+}
+
+int dm_array_mutate(struct dm_array_info *info, dm_block_t root,
+		    int (*fn)(void *, uint64_t key, void *leaf),
+		    void *context,
+		    dm_block_t *new_root)
+{
+	struct mutate_info mi;
+
+	*new_root = root;
+	mi.info = info;
+	mi.fn = fn;
+	mi.context = context;
+	mi.root = new_root;
+
+	return dm_btree_walk(&info->btree_info, root, mutate_ablock, &mi);
+}
+EXPORT_SYMBOL_GPL(dm_array_mutate);
+
 /*----------------------------------------------------------------*/
