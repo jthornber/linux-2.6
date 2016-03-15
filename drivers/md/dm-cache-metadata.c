@@ -1250,43 +1250,62 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 	return r;
 }
 
-static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty)
+/*--------------------------------*/
+
+struct dirty_context {
+	unsigned nr_bits;
+	unsigned long *bits;
+};
+
+static int mutate_dirty_bit(void *context, uint64_t key, void *leaf)
 {
-	int r;
+	struct dirty_context *dc = context;
+
+	__le64 value_le;
+	dm_oblock_t block;
 	unsigned flags;
-	dm_oblock_t oblock;
-	__le64 value;
 
-	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(cblock), &value);
-	if (r)
-		return r;
-
-	unpack_value(value, &oblock, &flags);
-
-	if (((flags & M_DIRTY) && dirty) || (!(flags & M_DIRTY) && !dirty))
-		/* nothing to be done */
+	if (dc->nr_bits < key)
 		return 0;
 
-	value = pack_value(oblock, (flags & ~M_DIRTY) | (dirty ? M_DIRTY : 0));
-	__dm_bless_for_disk(&value);
+	memcpy(&value_le, leaf, sizeof(value_le));
+	unpack_value(value_le, &block, &flags);
 
-	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
-			       &value, &cmd->root);
-	if (r)
-		return r;
+	if (flags & M_DIRTY) {
+		if (!test_bit(key, dc->bits)) {
+			flags |= M_DIRTY;
+			value_le = pack_value(block, flags);
+			memcpy(leaf, &value_le, sizeof(value_le));
+		}
+	} else {
+		if (test_bit(key, dc->bits)) {
+			flags &= ~M_DIRTY;
+			value_le = pack_value(block, flags);
+			memcpy(leaf, &value_le, sizeof(value_le));
+		}
+	}
 
-	cmd->changed = true;
 	return 0;
-
 }
 
-int dm_cache_set_dirty(struct dm_cache_metadata *cmd,
-		       dm_cblock_t cblock, bool dirty)
+static int __dirty(struct dm_cache_metadata *cmd, unsigned nr_bits, unsigned long *bits)
+{
+	struct dirty_context dc;
+
+	dc.nr_bits = nr_bits;
+	dc.bits = bits;
+
+	return dm_array_mutate(&cmd->info, cmd->root, mutate_dirty_bit, &dc, &cmd->root);
+}
+
+int dm_cache_set_dirty_bits(struct dm_cache_metadata *cmd,
+			    unsigned nr_bits,
+			    unsigned long *bits)
 {
 	int r;
 
 	WRITE_LOCK(cmd);
-	r = __dirty(cmd, cblock, dirty);
+	r = __dirty(cmd, nr_bits, bits);
 	WRITE_UNLOCK(cmd);
 
 	return r;
