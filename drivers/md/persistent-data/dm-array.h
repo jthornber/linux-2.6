@@ -161,6 +161,19 @@ int dm_array_walk(struct dm_array_info *info, dm_block_t root,
 		  int (*fn)(void *context, uint64_t key, void *leaf),
 		  void *context);
 
+/*
+ * Mutate the entries in an array.
+ *
+ * info - describes the array
+ * root - root block of the array
+ * fn - called back for every element
+ * context - passed to the callback
+ */
+int dm_array_mutate(struct dm_array_info *info, dm_block_t root,
+		    int (*fn)(void *, uint64_t key, void *leaf),
+		    void *context,
+		    dm_block_t *new_root);
+
 /*----------------------------------------------------------------*/
 
 #endif	/* _LINUX_DM_ARRAY_H */
