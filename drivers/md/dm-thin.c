@@ -1030,8 +1030,8 @@ static void process_prepared_discard_passdown(struct dm_thin_new_mapping *m)
 	 * Even if r is set, there could be sub discards in flight that we
 	 * need to wait for.
 	 */
-	m->bio->bi_error = r;
-	bio_endio(m->bio);
+	if (r)
+		m->bio->bi_error = r;
 	cell_defer_no_holder(tc, m->cell);
 	mempool_free(m, pool->mapping_pool);
 }
@@ -1453,17 +1453,6 @@ static void process_discard_cell_no_passdown(struct thin_c *tc,
 		pool->process_prepared_discard(m);
 }
 
-/*
- * __bio_inc_remaining() is used to defer parent bios's end_io until
- * we _know_ all chained sub range discard bios have completed.
- */
-static inline void __bio_inc_remaining(struct bio *bio)
-{
-	bio->bi_flags |= (1 << BIO_CHAIN);
-	smp_mb__before_atomic();
-	atomic_inc(&bio->__bi_remaining);
-}
-
 static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t end,
 				 struct bio *bio)
 {
@@ -1514,13 +1503,7 @@ static void break_up_discard_bio(struct thin_c *tc, dm_block_t begin, dm_block_t
 		/*
 		 * The parent bio must not complete before sub discard bios are
 		 * chained to it (see issue_discard's bio_chain)!
-		 *
-		 * This per-mapping bi_remaining increment is paired with
-		 * the implicit decrement that occurs via bio_endio() in
-		 * process_prepared_discard_{passdown,no_passdown}.
 		 */
-		// FIXME: get away from needing this... how can discard m->bio complete before sub-discards?
-		__bio_inc_remaining(bio);
 		if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list))
 			pool->process_prepared_discard(m);
 
@@ -1542,11 +1525,11 @@ static void process_discard_cell_passdown(struct thin_c *tc, struct dm_bio_priso
 	break_up_discard_bio(tc, virt_cell->key.block_begin, virt_cell->key.block_end, bio);
 
 	/*
-	 * We complete the bio now, knowing that the bi_remaining field
-	 * will prevent completion until the sub range discards have
-	 * completed.
+	 * This discard bio isn't completed until the associated discard mappings
+	 * are prepared and issue_discard() is called for each.  Once the end of
+	 * prepared discard bio chain is reached bio_chain_endio() will complete
+	 * this discard bio via bio_endio().
 	 */
-	bio_endio(bio);
 }
 
 static void process_discard_bio(struct thin_c *tc, struct bio *bio)
