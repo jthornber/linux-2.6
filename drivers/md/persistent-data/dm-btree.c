@@ -68,6 +68,12 @@ static int upper_bound(struct btree_node *n, uint64_t key)
 	return bsearch(n, key, 1);
 }
 
+static int zlower_bound(struct btree_node *n, uint64_t key)
+{
+	int r = bsearch(n, key, 0);
+	return r < 0 ? 0 : r;
+}
+
 void inc_children(struct dm_transaction_manager *tm, struct btree_node *n,
 		  struct dm_btree_value_type *vt)
 {
@@ -433,8 +439,8 @@ static int dm_btree_lookup_next_single(struct dm_btree_info *info, dm_block_t ro
 	nr_entries = le32_to_cpu(n->header.nr_entries);
 
 	if (flags & INTERNAL_NODE) {
-		i = lower_bound(n, key);
-		if (i < 0 || i >= nr_entries) {
+		i = zlower_bound(n, key);
+		if (i >= nr_entries) {
 			r = -ENODATA;
 			goto out;
 		}
