@@ -1171,6 +1171,11 @@ static bool hints_array_available(struct dm_cache_metadata *cmd,
 		hints_array_initialized(cmd);
 }
 
+/*
+ * Loading can take some time, so we do a cond_resched periodically.
+ */
+#define RESCHED_INTERVAL (1024ull * 64ull)
+
 static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 {
 	int r = 0;
@@ -1197,6 +1202,9 @@ static int __load_mapping(void *context, uint64_t cblock, void *leaf)
 		r = thunk->fn(thunk->context, oblock, to_cblock(cblock),
 			      dirty, le32_to_cpu(hint_value), thunk->hints_valid);
 	}
+
+	if (!(cblock & (RESCHED_INTERVAL - 1ull)))
+		cond_resched();
 
 	return r;
 }
