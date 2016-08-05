@@ -1171,40 +1171,40 @@ static bool hints_array_available(struct dm_cache_metadata *cmd,
 		hints_array_initialized(cmd);
 }
 
-/*
- * Loading can take some time, so we do a cond_resched periodically.
- */
-#define RESCHED_INTERVAL (1024ull * 64ull)
-
-static int __load_mapping(void *context, uint64_t cblock, void *leaf)
+static int __load_mapping(struct dm_cache_metadata *cmd,
+			  uint64_t cb, bool hints_valid,
+			  struct dm_array_cursor *mapping_cursor,
+			  struct dm_array_cursor *hint_cursor,
+			  load_mapping_fn fn, void *context)
 {
 	int r = 0;
-	bool dirty;
-	__le64 value;
-	__le32 hint_value = 0;
+
+	__le64 mapping;
+	__le32 hint = 0;
+
+	__le64 *mapping_value_le;
+	__le32 *hint_value_le;
+
 	dm_oblock_t oblock;
 	unsigned flags;
-	struct thunk *thunk = context;
-	struct dm_cache_metadata *cmd = thunk->cmd;
+	bool dirty;
 
-	memcpy(&value, leaf, sizeof(value));
-	unpack_value(value, &oblock, &flags);
+	dm_array_cursor_get_value(mapping_cursor, (void **) &mapping_value_le);
+	memcpy(&mapping, mapping_value_le, sizeof(mapping));
+	unpack_value(mapping, &oblock, &flags);
 
 	if (flags & M_VALID) {
-		if (thunk->hints_valid) {
-			r = dm_array_get_value(&cmd->hint_info, cmd->hint_root,
-					       cblock, &hint_value);
-			if (r && r != -ENODATA)
-				return r;
+		if (hints_valid) {
+			dm_array_cursor_get_value(hint_cursor, (void **) &hint_value_le);
+			memcpy(&hint, hint_value_le, sizeof(hint));
 		}
 
-		dirty = thunk->respect_dirty_flags ? (flags & M_DIRTY) : true;
-		r = thunk->fn(thunk->context, oblock, to_cblock(cblock),
-			      dirty, le32_to_cpu(hint_value), thunk->hints_valid);
+		dirty = flags & M_DIRTY;
+		r = fn(context, oblock, to_cblock(cb), dirty,
+		       le32_to_cpu(hint), hints_valid);
+		if (r)
+			DMERR("policy couldn't load cblock\n");
 	}
-
-	if (!(cblock & (RESCHED_INTERVAL - 1ull)))
-		cond_resched();
 
 	return r;
 }
@@ -1213,16 +1213,55 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 			   struct dm_cache_policy *policy,
 			   load_mapping_fn fn, void *context)
 {
-	struct thunk thunk;
+	int r;
+	uint64_t cb;
 
-	thunk.fn = fn;
-	thunk.context = context;
+	bool hints_valid = hints_array_available(cmd, policy);
+	struct dm_array_cursor mapping_cursor;
+	struct dm_array_cursor hint_cursor;
 
-	thunk.cmd = cmd;
-	thunk.respect_dirty_flags = cmd->clean_when_opened;
-	thunk.hints_valid = hints_array_available(cmd, policy);
+	r = dm_array_cursor_begin(&cmd->info, from_cblock(cmd->cache_blocks),
+				  cmd->root, &mapping_cursor);
+	if (r)
+		return r;
 
-	return dm_array_walk(&cmd->info, cmd->root, __load_mapping, &thunk);
+	if (hints_valid) {
+		r = dm_array_cursor_begin(&cmd->hint_info, from_cblock(cmd->cache_blocks),
+					  cmd->hint_root, &hint_cursor);
+		if (r) {
+			dm_array_cursor_end(&mapping_cursor);
+			return r;
+		}
+	}
+
+	for (cb = 0; cb < from_cblock(cmd->cache_blocks); cb++) {
+		r = __load_mapping(cmd, cb, hints_valid,
+				   &mapping_cursor, &hint_cursor,
+				   fn, context);
+		if (r)
+			goto out;
+
+		r = dm_array_cursor_next(&mapping_cursor);
+		if (r) {
+			DMERR("dm_array_cursor_next failed\n");
+			goto out;
+		}
+
+		if (hints_valid) {
+			r = dm_array_cursor_next(&hint_cursor);
+			if (r) {
+				DMERR("dm_array_cursor_next failed\n");
+				goto out;
+			}
+		}
+	}
+
+out:
+	dm_array_cursor_end(&mapping_cursor);
+	if (hints_valid)
+		dm_array_cursor_end(&hint_cursor);
+
+	return r;
 }
 
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,

@@ -149,17 +149,43 @@ int dm_array_set_value(struct dm_array_info *info, dm_block_t root,
 		       uint32_t index, const void *value, dm_block_t *new_root)
 	__dm_written_to_disk(value);
 
-/*
- * Walk through all the entries in an array.
- *
- * info - describes the array
- * root - root block of the array
- * fn - called back for every element
- * context - passed to the callback
- */
 int dm_array_walk(struct dm_array_info *info, dm_block_t root,
-		  int (*fn)(void *context, uint64_t key, void *leaf),
+		  int (*fn)(void *, uint64_t key, void *leaf),
 		  void *context);
+
+
+/*
+ * A cursor lets you iterate through all the entries in an array efficiently
+ * (it will preload metadata).
+ *
+ * I'm using a cursor, rather than a walk function with a callback because
+ * the cache target needs to iterate both the mapping and hint arrays in
+ * unison.
+ */
+struct dm_array_cursor {
+	struct dm_array_info *info;
+	dm_block_t root;
+	unsigned nr_entries;
+	unsigned entries_per_block;
+
+	unsigned index;
+	unsigned ablock_index;
+	struct dm_block *block;
+	struct array_block *ab;
+	unsigned sub_index;
+};
+
+int dm_array_cursor_begin(struct dm_array_info *info, unsigned nr_entries,
+			  dm_block_t root, struct dm_array_cursor *c);
+void dm_array_cursor_end(struct dm_array_cursor *c);
+
+uint32_t dm_array_cursor_index(struct dm_array_cursor *c);
+int dm_array_cursor_next(struct dm_array_cursor *c);
+
+/*
+ * value_le is only valid while the cursor points at the current value.
+ */
+void dm_array_cursor_get_value(struct dm_array_cursor *c, void **value_le);
 
 /*----------------------------------------------------------------*/
 

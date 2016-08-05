@@ -819,3 +819,56 @@ int dm_array_walk(struct dm_array_info *info, dm_block_t root,
 EXPORT_SYMBOL_GPL(dm_array_walk);
 
 /*----------------------------------------------------------------*/
+
+int dm_array_cursor_begin(struct dm_array_info *info, unsigned nr_entries,
+			  dm_block_t root, struct dm_array_cursor *c)
+{
+	size_t size_of_block = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
+
+	c->info = info;
+	c->root = root;
+	c->nr_entries = nr_entries;
+	c->entries_per_block = calc_max_entries(info->value_type.size, size_of_block);
+	c->index = 0;
+	c->ablock_index = 0;
+
+	if (nr_entries)
+		return lookup_ablock(c->info, c->root,
+				     c->index / c->entries_per_block,
+				     &c->block, &c->ab);
+	else
+		return 0;
+}
+
+void dm_array_cursor_end(struct dm_array_cursor *c)
+{
+	if (c->nr_entries)
+		unlock_ablock(c->info, c->block);
+}
+
+int dm_array_cursor_next(struct dm_array_cursor *c)
+{
+	if (c->index == c->nr_entries)
+		return -ENODATA;
+
+	c->index++;
+	c->ablock_index++;
+
+	if ((c->index == c->nr_entries) ||
+	    (c->ablock_index < c->entries_per_block))
+		return 0;
+
+	unlock_ablock(c->info, c->block);
+	c->ablock_index = 0;
+
+	return lookup_ablock(c->info, c->root,
+			     c->index / c->entries_per_block,
+			     &c->block, &c->ab);
+}
+
+void dm_array_cursor_get_value(struct dm_array_cursor *c, void **value_le)
+{
+	*value_le = element_at(c->info, c->ab, c->ablock_index);
+}
+
+/*----------------------------------------------------------------*/
