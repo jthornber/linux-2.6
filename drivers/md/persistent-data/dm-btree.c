@@ -998,3 +998,88 @@ int dm_btree_walk(struct dm_btree_info *info, dm_block_t root,
 	return walk_node(info, root, fn, context);
 }
 EXPORT_SYMBOL_GPL(dm_btree_walk);
+
+/*----------------------------------------------------------------*/
+
+static int push_node(struct dm_btree_cursor *c, dm_block_t b)
+{
+	int r;
+	struct cursor_node *n = c->nodes + c->depth;
+
+	r = bn_read_lock(c->info, c->root, &n->b);
+	if (r)
+		return r;
+
+	n->index = 0;
+	c->depth++;
+	return 0;
+}
+
+static void pop_node(struct dm_btree_cursor *c)
+{
+	c->depth--;
+	unlock_block(c->info, c->nodes[c->depth].b);
+}
+
+int dm_btree_cursor_begin(struct dm_btree_info *info, dm_block_t root,
+			  struct dm_btree_cursor *c)
+{
+	c->info = info;
+	c->root = root;
+	c->depth = 0;
+
+	return push_node(c, root);
+}
+
+void dm_btree_cursor_end(struct dm_btree_cursor *c)
+{
+	while (c->depth)
+		pop_node(c);
+}
+
+int dm_btree_cursor_next(struct dm_btree_cursor *c)
+{
+	int r;
+	struct cursor_node *n;
+	struct btree_node *bn;
+
+loop:
+	if (!c->depth)
+		return -ENODATA;
+
+	n = c->nodes + c->depth - 1;
+	bn = dm_block_data(n->b);
+
+	n->index++;
+	if (n->index >= le32_to_cpu(bn->header.nr_entries)) {
+		pop_node(c);
+		goto loop;
+	}
+
+	if (le32_to_cpu(bn->header.flags) & INTERNAL_NODE) {
+		dm_block_t loc;
+		__le64 *value_le = value_ptr(bn, n->index);
+
+		// FIXME: memcpy?
+		//memcpy(&value_le, value_ptr(bn, n->index), c->info->value_type.size);
+		loc = le64_to_cpu(*value_le);
+		r = push_node(c, loc);
+		if (r)
+			return r;
+		goto loop;
+	}
+
+	return 0;
+}
+
+void dm_btree_cursor_get_value(struct dm_btree_cursor *c, uint64_t *key, void *value_le)
+{
+	struct cursor_node *n = c->nodes + c->depth - 1;
+	struct btree_node *bn = dm_block_data(n->b);
+
+	if (le32_to_cpu(bn->header.flags) & INTERNAL_NODE)
+		return;
+
+	*key = le64_to_cpu(*key_ptr(bn, n->index));
+	memcpy(value_le, value_ptr(bn, n->index), c->info->value_type.size);
+}

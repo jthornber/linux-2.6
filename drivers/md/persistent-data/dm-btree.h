@@ -176,4 +176,30 @@ int dm_btree_walk(struct dm_btree_info *info, dm_block_t root,
 		  int (*fn)(void *context, uint64_t *keys, void *leaf),
 		  void *context);
 
+
+/*
+ * Cursor does not follow the rolling lock convention.  Issues prefetches
+ * to speed up iteration.  Use on a single level btree only.
+ */
+#define DM_BTREE_CURSOR_MAX_DEPTH 16
+
+struct cursor_node {
+	struct dm_block *b;
+	unsigned index;
+};
+
+struct dm_btree_cursor {
+	struct dm_btree_info *info;
+	dm_block_t root;
+
+	unsigned depth;
+	struct cursor_node nodes[DM_BTREE_CURSOR_MAX_DEPTH];
+};
+
+int dm_btree_cursor_begin(struct dm_btree_info *info, dm_block_t root,
+			  struct dm_btree_cursor *c);
+void dm_btree_cursor_end(struct dm_btree_cursor *c);
+int dm_btree_cursor_next(struct dm_btree_cursor *c);
+void dm_btree_cursor_get_value(struct dm_btree_cursor *c, uint64_t *key, void *value_le);
+
 #endif	/* _LINUX_DM_BTREE_H */
