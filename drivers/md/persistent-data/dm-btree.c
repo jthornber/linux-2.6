@@ -1001,6 +1001,23 @@ EXPORT_SYMBOL_GPL(dm_btree_walk);
 
 /*----------------------------------------------------------------*/
 
+static void prefetch_leaves(struct dm_btree_cursor *c)
+{
+	unsigned i, nr;
+	__le64 value_le;
+	struct cursor_node *n = c->nodes + c->depth - 1;
+	struct btree_node *bn = dm_block_data(n->b);
+	struct dm_block_manager *bm = dm_tm_get_bm(c->info->tm);
+
+	BUG_ON(c->info->value_type.size != sizeof(value_le));
+
+	nr = le32_to_cpu(bn->header.nr_entries);
+	for (i = 0; i < nr; i++) {
+		memcpy(&value_le, value_ptr(bn, i), sizeof(value_le));
+		dm_bm_prefetch(bm, le64_to_cpu(value_le));
+	}
+}
+
 static int push_node(struct dm_btree_cursor *c, dm_block_t b)
 {
 	int r;
@@ -1012,6 +1029,10 @@ static int push_node(struct dm_btree_cursor *c, dm_block_t b)
 
 	n->index = 0;
 	c->depth++;
+
+	if (c->prefetch_leaves)
+		prefetch_leaves(c);
+
 	return 0;
 }
 
@@ -1022,11 +1043,12 @@ static void pop_node(struct dm_btree_cursor *c)
 }
 
 int dm_btree_cursor_begin(struct dm_btree_info *info, dm_block_t root,
-			  struct dm_btree_cursor *c)
+			  bool prefetch_leaves, struct dm_btree_cursor *c)
 {
 	c->info = info;
 	c->root = root;
 	c->depth = 0;
+	c->prefetch_leaves = prefetch_leaves;
 
 	return push_node(c, root);
 }

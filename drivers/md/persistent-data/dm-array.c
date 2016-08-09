@@ -856,7 +856,7 @@ int dm_array_cursor_begin(struct dm_array_info *info, dm_block_t root,
 
 	memset(c, 0, sizeof(*c));
 	c->info = info;
-	r = dm_btree_cursor_begin(&info->btree_info, root, &c->cursor);
+	r = dm_btree_cursor_begin(&info->btree_info, root, true, &c->cursor);
 	if (r)
 		return r;
 

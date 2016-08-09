@@ -192,12 +192,13 @@ struct dm_btree_cursor {
 	struct dm_btree_info *info;
 	dm_block_t root;
 
+	bool prefetch_leaves;
 	unsigned depth;
 	struct cursor_node nodes[DM_BTREE_CURSOR_MAX_DEPTH];
 };
 
 int dm_btree_cursor_begin(struct dm_btree_info *info, dm_block_t root,
-			  struct dm_btree_cursor *c);
+			  bool prefetch_leaves, struct dm_btree_cursor *c);
 void dm_btree_cursor_end(struct dm_btree_cursor *c);
 int dm_btree_cursor_next(struct dm_btree_cursor *c);
 int dm_btree_cursor_get_value(struct dm_btree_cursor *c, uint64_t *key, void *value_le);
