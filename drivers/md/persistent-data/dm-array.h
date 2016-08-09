@@ -164,18 +164,14 @@ int dm_array_walk(struct dm_array_info *info, dm_block_t root,
  */
 struct dm_array_cursor {
 	struct dm_array_info *info;
-	dm_block_t root;
-	unsigned nr_entries;
-	unsigned entries_per_block;
+	struct dm_btree_cursor cursor;
 
-	unsigned index;
-	unsigned ablock_index;
 	struct dm_block *block;
 	struct array_block *ab;
-	unsigned sub_index;
+	unsigned index;
 };
 
-int dm_array_cursor_begin(struct dm_array_info *info, unsigned nr_entries,
+int dm_array_cursor_begin(struct dm_array_info *info,
 			  dm_block_t root, struct dm_array_cursor *c);
 void dm_array_cursor_end(struct dm_array_cursor *c);
 

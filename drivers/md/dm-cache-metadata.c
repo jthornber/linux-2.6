@@ -1220,14 +1220,12 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	struct dm_array_cursor mapping_cursor;
 	struct dm_array_cursor hint_cursor;
 
-	r = dm_array_cursor_begin(&cmd->info, from_cblock(cmd->cache_blocks),
-				  cmd->root, &mapping_cursor);
+	r = dm_array_cursor_begin(&cmd->info, cmd->root, &mapping_cursor);
 	if (r)
 		return r;
 
 	if (hints_valid) {
-		r = dm_array_cursor_begin(&cmd->hint_info, from_cblock(cmd->cache_blocks),
-					  cmd->hint_root, &hint_cursor);
+		r = dm_array_cursor_begin(&cmd->hint_info, cmd->hint_root, &hint_cursor);
 		if (r) {
 			dm_array_cursor_end(&mapping_cursor);
 			return r;

@@ -1072,14 +1072,19 @@ loop:
 	return 0;
 }
 
-void dm_btree_cursor_get_value(struct dm_btree_cursor *c, uint64_t *key, void *value_le)
+int dm_btree_cursor_get_value(struct dm_btree_cursor *c, uint64_t *key, void *value_le)
 {
-	struct cursor_node *n = c->nodes + c->depth - 1;
-	struct btree_node *bn = dm_block_data(n->b);
+	if (c->depth) {
+		struct cursor_node *n = c->nodes + c->depth - 1;
+		struct btree_node *bn = dm_block_data(n->b);
 
-	if (le32_to_cpu(bn->header.flags) & INTERNAL_NODE)
-		return;
+		if (le32_to_cpu(bn->header.flags) & INTERNAL_NODE)
+			return -EINVAL;
 
-	*key = le64_to_cpu(*key_ptr(bn, n->index));
-	memcpy(value_le, value_ptr(bn, n->index), c->info->value_type.size);
+		*key = le64_to_cpu(*key_ptr(bn, n->index));
+		memcpy(value_le, value_ptr(bn, n->index), c->info->value_type.size);
+		return 0;
+
+	} else
+		return -ENODATA;
 }

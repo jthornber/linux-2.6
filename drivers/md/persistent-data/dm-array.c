@@ -820,55 +820,78 @@ EXPORT_SYMBOL_GPL(dm_array_walk);
 
 /*----------------------------------------------------------------*/
 
-int dm_array_cursor_begin(struct dm_array_info *info, unsigned nr_entries,
-			  dm_block_t root, struct dm_array_cursor *c)
+static int next_ablock(struct dm_array_cursor *c)
 {
-	size_t size_of_block = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
+	int r;
+	__le64 value_le;
+	uint64_t key;
 
-	c->info = info;
-	c->root = root;
-	c->nr_entries = nr_entries;
-	c->entries_per_block = calc_max_entries(info->value_type.size, size_of_block);
+	if (c->block)
+		unlock_ablock(c->info, c->block);
+
+	c->block = NULL;
+	c->ab = NULL;
 	c->index = 0;
-	c->ablock_index = 0;
 
-	if (nr_entries)
-		return lookup_ablock(c->info, c->root,
-				     c->index / c->entries_per_block,
-				     &c->block, &c->ab);
-	else
-		return 0;
+	r = dm_btree_cursor_get_value(&c->cursor, &key, &value_le);
+	if (r) {
+		dm_btree_cursor_end(&c->cursor);
+		return r;
+
+	} else {
+		r = get_ablock(c->info, le64_to_cpu(value_le), &c->block, &c->ab);
+		if (r) {
+			dm_btree_cursor_end(&c->cursor);
+			return r;
+		}
+	}
+
+	return r;
+}
+
+int dm_array_cursor_begin(struct dm_array_info *info, dm_block_t root,
+			  struct dm_array_cursor *c)
+{
+	int r;
+
+	memset(c, 0, sizeof(*c));
+	c->info = info;
+	r = dm_btree_cursor_begin(&info->btree_info, root, &c->cursor);
+	if (r)
+		return r;
+
+	return next_ablock(c);
 }
 
 void dm_array_cursor_end(struct dm_array_cursor *c)
 {
-	if (c->nr_entries)
+	if (c->block) {
 		unlock_ablock(c->info, c->block);
+		dm_btree_cursor_end(&c->cursor);
+	}
 }
 
 int dm_array_cursor_next(struct dm_array_cursor *c)
 {
-	if (c->index == c->nr_entries)
+	int r;
+
+	if (!c->block)
 		return -ENODATA;
 
 	c->index++;
-	c->ablock_index++;
 
-	if ((c->index == c->nr_entries) ||
-	    (c->ablock_index < c->entries_per_block))
-		return 0;
+	if (c->index >= le32_to_cpu(c->ab->nr_entries)) {
+		r = next_ablock(c);
+		if (r)
+			return r;
+	}
 
-	unlock_ablock(c->info, c->block);
-	c->ablock_index = 0;
-
-	return lookup_ablock(c->info, c->root,
-			     c->index / c->entries_per_block,
-			     &c->block, &c->ab);
+	return 0;
 }
 
 void dm_array_cursor_get_value(struct dm_array_cursor *c, void **value_le)
 {
-	*value_le = element_at(c->info, c->ab, c->ablock_index);
+	*value_le = element_at(c->info, c->ab, c->index);
 }
 
 /*----------------------------------------------------------------*/
