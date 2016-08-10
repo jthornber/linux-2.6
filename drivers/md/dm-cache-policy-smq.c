@@ -408,9 +408,11 @@ static void q_set_targets(struct queue *q)
 	}
 }
 
-static void q_redistribute(struct queue *q)
+#define RESCHED_INTERVAL (1024 * 64)
+
+static void q_redistribute(struct queue *q, spinlock_t *lock, unsigned long *flags)
 {
-	unsigned target, level;
+	unsigned target, level, count = 0;
 	struct ilist *l, *l_above;
 	struct entry *e;
 
@@ -432,6 +434,7 @@ static void q_redistribute(struct queue *q)
 
 			e->level = level;
 			l_add_tail(q->es, l, e);
+			count++;
 		}
 
 		/*
@@ -447,6 +450,13 @@ static void q_redistribute(struct queue *q)
 
 			e->level = level + 1u;
 			l_add_head(q->es, l_above, e);
+			count++;
+		}
+
+		if (count >= RESCHED_INTERVAL) {
+			spin_unlock_irqrestore(lock, *flags);
+			count = 0;
+			spin_lock_irqsave(lock, *flags);
 		}
 	}
 }
@@ -1069,26 +1079,26 @@ static void update_level_jump(struct smq_policy *mq)
 	}
 }
 
-static void end_hotspot_period(struct smq_policy *mq)
+static void end_hotspot_period(struct smq_policy *mq, unsigned long *flags)
 {
 	clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
 	update_promote_levels(mq);
 
 	if (time_after(jiffies, mq->next_hotspot_period)) {
 		update_level_jump(mq);
-		q_redistribute(&mq->hotspot);
+		q_redistribute(&mq->hotspot, &mq->lock, flags);
 		stats_reset(&mq->hotspot_stats);
 		mq->next_hotspot_period = jiffies + HOTSPOT_UPDATE_PERIOD;
 	}
 }
 
-static void end_cache_period(struct smq_policy *mq)
+static void end_cache_period(struct smq_policy *mq, unsigned long *flags)
 {
 	if (time_after(jiffies, mq->next_cache_period)) {
 		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 
-		q_redistribute(&mq->dirty);
-		q_redistribute(&mq->clean);
+		q_redistribute(&mq->dirty, &mq->lock, flags);
+		q_redistribute(&mq->clean, &mq->lock, flags);
 		stats_reset(&mq->cache_stats);
 
 		mq->next_cache_period = jiffies + CACHE_UPDATE_PERIOD;
@@ -1567,8 +1577,8 @@ static void smq_tick(struct dm_cache_policy *p, bool can_block)
 	spin_lock_irqsave(&mq->lock, flags);
 	mq->tick++;
 	update_sentinels(mq);
-	end_hotspot_period(mq);
-	end_cache_period(mq);
+	end_hotspot_period(mq, &flags);
+	end_cache_period(mq, &flags);
 	spin_unlock_irqrestore(&mq->lock, flags);
 }
 
