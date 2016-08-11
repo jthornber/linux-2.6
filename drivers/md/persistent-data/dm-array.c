@@ -835,14 +835,14 @@ static int next_ablock(struct dm_array_cursor *c)
 
 	r = dm_btree_cursor_get_value(&c->cursor, &key, &value_le);
 	if (r) {
+		DMERR("dm_btree_cursor_get_value failed\n");
 		dm_btree_cursor_end(&c->cursor);
-		return r;
 
 	} else {
 		r = get_ablock(c->info, le64_to_cpu(value_le), &c->block, &c->ab);
 		if (r) {
+			DMERR("get_ablock failed\n");
 			dm_btree_cursor_end(&c->cursor);
-			return r;
 		}
 	}
 
@@ -857,8 +857,10 @@ int dm_array_cursor_begin(struct dm_array_info *info, dm_block_t root,
 	memset(c, 0, sizeof(*c));
 	c->info = info;
 	r = dm_btree_cursor_begin(&info->btree_info, root, true, &c->cursor);
-	if (r)
+	if (r) {
+		DMERR("couldn't create btree cursor\n");
 		return r;
+	}
 
 	return next_ablock(c);
 }

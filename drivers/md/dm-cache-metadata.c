@@ -1221,12 +1221,15 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	struct dm_array_cursor hint_cursor;
 
 	r = dm_array_cursor_begin(&cmd->info, cmd->root, &mapping_cursor);
-	if (r)
+	if (r) {
+		pr_alert("lm 1\n");
 		return r;
+	}
 
 	if (hints_valid) {
 		r = dm_array_cursor_begin(&cmd->hint_info, cmd->hint_root, &hint_cursor);
 		if (r) {
+			pr_alert("lm 2\n");
 			dm_array_cursor_end(&mapping_cursor);
 			return r;
 		}
@@ -1236,11 +1239,14 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 		r = __load_mapping(cmd, cb, hints_valid,
 				   &mapping_cursor, &hint_cursor,
 				   fn, context);
-		if (r)
+		if (r) {
+			pr_alert("lm 3\n");
 			goto out;
+		}
 
 		r = dm_array_cursor_next(&mapping_cursor);
 		if (r) {
+			pr_alert("lm 4\n");
 			DMERR("dm_array_cursor_next failed\n");
 			goto out;
 		}
@@ -1248,6 +1254,7 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 		if (hints_valid) {
 			r = dm_array_cursor_next(&hint_cursor);
 			if (r) {
+				pr_alert("lm 5\n");
 				DMERR("dm_array_cursor_next failed\n");
 				goto out;
 			}
@@ -1255,6 +1262,7 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	}
 
 out:
+	pr_alert("lm 6\n");
 	dm_array_cursor_end(&mapping_cursor);
 	if (hints_valid)
 		dm_array_cursor_end(&hint_cursor);
