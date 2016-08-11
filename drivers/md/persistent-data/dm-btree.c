@@ -1014,7 +1014,6 @@ static void prefetch_leaves(struct dm_btree_cursor *c)
 	nr = le32_to_cpu(bn->header.nr_entries);
 	for (i = 0; i < nr; i++) {
 		memcpy(&value_le, value_ptr(bn, i), sizeof(value_le));
-		pr_alert("prefetching %llu\n", (unsigned long long) le64_to_cpu(value_le));
 		dm_bm_prefetch(bm, le64_to_cpu(value_le));
 	}
 }
@@ -1032,18 +1031,14 @@ static int push_node(struct dm_btree_cursor *c, dm_block_t b)
 	int r;
 	struct cursor_node *n = c->nodes + c->depth;
 
-	pr_alert("pushing node %llu\n", (unsigned long long) b);
-
 	if (c->depth >= DM_BTREE_CURSOR_MAX_DEPTH - 1) {
 		DMERR("couldn't push cursor node, stack depth too high");
 		return -EINVAL;
 	}
 
 	r = bn_read_lock(c->info, b, &n->b);
-	if (r) {
-		pr_alert("push_node failed\n");
+	if (r)
 		return r;
-	}
 
 	n->index = 0;
 	c->depth++;
@@ -1064,8 +1059,6 @@ static int inc_or_backtrack(struct dm_btree_cursor *c)
 {
 	struct cursor_node *n;
 	struct btree_node *bn;
-
-	pr_alert("pop node\n");
 
 	for (;;) {
 		if (!c->depth)
@@ -1094,9 +1087,6 @@ static int find_leaf(struct dm_btree_cursor *c)
 	for (;;) {
 		n = c->nodes + c->depth - 1;
 		bn = dm_block_data(n->b);
-
-		pr_alert("bn location = %llu\n",
-			 (unsigned long long) dm_block_location(n->b));
 
 		if (le32_to_cpu(bn->header.flags) & LEAF_NODE)
 			break;
