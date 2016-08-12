@@ -277,33 +277,25 @@ static int insert_ablock(struct dm_array_info *info, uint64_t index,
 	return dm_btree_insert(&info->btree_info, *root, &index, &block_le, root);
 }
 
+/*----------------------------------------------------------------*/
+
 /*
  * Looks up an array block in the btree.  Then shadows it, and updates the
  * btree to point to this new shadow.  'root' is an input/output parameter
  * for both the current root block, and the new one.
  */
-static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
-			 unsigned index, struct dm_block **block,
-			 struct array_block **ab)
+
+/*
+ * Shadow.
+ */
+static int shadow__(struct dm_array_info *info,
+		    dm_block_t b,
+		    struct dm_block **block,
+		    struct array_block **ab)
 {
-	int r, inc;
-	uint64_t key = index;
-	dm_block_t b;
-	__le64 block_le;
-
-	/*
-	 * lookup
-	 */
-	r = dm_btree_lookup(&info->btree_info, *root, &key, &block_le);
-	if (r)
-		return r;
-	b = le64_to_cpu(block_le);
-
-	/*
-	 * shadow
-	 */
-	r = dm_tm_shadow_block(info->btree_info.tm, b,
-			       &array_validator, block, &inc);
+	int inc;
+	int r = dm_tm_shadow_block(info->btree_info.tm, b,
+				   &array_validator, block, &inc);
 	if (r)
 		return r;
 
@@ -311,13 +303,22 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 	if (inc)
 		inc_ablock_entries(info, *ab);
 
-	/*
-	 * Reinsert.
-	 *
-	 * The shadow op will often be a noop.  Only insert if it really
-	 * copied data.
-	 */
-	if (dm_block_location(*block) != b) {
+	return 0;
+}
+
+/*
+ * Reinsert.
+ *
+ * The shadow op will often be a noop.  Only insert if it really
+ * copied data.
+ */
+static int reinsert__(struct dm_array_info *info,
+		      unsigned index, struct dm_block *block, dm_block_t b,
+		      dm_block_t *root)
+{
+	int r = 0;
+
+	if (dm_block_location(block) != b) {
 		/*
 		 * dm_tm_shadow_block will have already decremented the old
 		 * block, but it is still referenced by the btree.  We
@@ -325,10 +326,31 @@ static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
 		 * when overwriting the old value.
 		 */
 		dm_tm_inc(info->btree_info.tm, b);
-		r = insert_ablock(info, index, *block, root);
+		r = insert_ablock(info, index, block, root);
 	}
 
 	return r;
+}
+
+static int shadow_ablock(struct dm_array_info *info, dm_block_t *root,
+			 unsigned index, struct dm_block **block,
+			 struct array_block **ab)
+{
+	int r;
+	uint64_t key = index;
+	dm_block_t b;
+	__le64 block_le;
+
+	r = dm_btree_lookup(&info->btree_info, *root, &key, &block_le);
+	if (r)
+		return r;
+	b = le64_to_cpu(block_le);
+
+	r = shadow__(info, b, block, ab);
+	if (r)
+		return r;
+
+	return reinsert__(info, index, *block, b, root);
 }
 
 /*
@@ -817,6 +839,65 @@ int dm_array_walk(struct dm_array_info *info, dm_block_t root,
 	return dm_btree_walk(&info->btree_info, root, walk_ablock, &wi);
 }
 EXPORT_SYMBOL_GPL(dm_array_walk);
+
+struct mutate_info {
+	struct dm_array_info *info;
+	int (*fn)(void *context, uint64_t key, void *leaf);
+	void *context;
+	dm_block_t *root;
+};
+
+static int mutate_ablock(void *context, uint64_t *keys, void *leaf)
+{
+	struct mutate_info *mi = context;
+
+	int r;
+	unsigned i;
+	__le64 block_le;
+	unsigned nr_entries, max_entries;
+	dm_block_t b;
+	struct dm_block *block;
+	struct array_block *ab;
+
+	/* Shadow */
+	memcpy(&block_le, leaf, sizeof(block_le));
+	b = le64_to_cpu(block_le);
+	r = shadow__(mi->info, b, &block, &ab);
+	if (r)
+		return r;
+
+	/* Mutate */
+	max_entries = le32_to_cpu(ab->max_entries);
+	nr_entries = le32_to_cpu(ab->nr_entries);
+	for (i = 0; i < nr_entries; i++) {
+		r = mi->fn(mi->context, keys[0] * max_entries + i,
+			   element_at(mi->info, ab, i));
+
+		if (r)
+			break;
+	}
+
+	r = reinsert__(mi->info, keys[0], block, b, mi->root);
+	unlock_ablock(mi->info, block);
+	return r;
+}
+
+int dm_array_mutate(struct dm_array_info *info, dm_block_t root,
+		    int (*fn)(void *, uint64_t key, void *leaf),
+		    void *context,
+		    dm_block_t *new_root)
+{
+	struct mutate_info mi;
+
+	*new_root = root;
+	mi.info = info;
+	mi.fn = fn;
+	mi.context = context;
+	mi.root = new_root;
+
+	return dm_btree_walk(&info->btree_info, root, mutate_ablock, &mi);
+}
+EXPORT_SYMBOL_GPL(dm_array_mutate);
 
 /*----------------------------------------------------------------*/
 

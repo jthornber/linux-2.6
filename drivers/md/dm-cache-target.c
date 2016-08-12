@@ -3211,23 +3211,29 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 	return 0;
 }
 
-static int write_dirty_bitset(struct cache *cache)
+static int write_dirty_bitset_(struct cache *cache)
 {
-	unsigned i, r;
+	int r;
 
 	if (get_cache_mode(cache) >= CM_READ_ONLY)
 		return -EINVAL;
 
-	for (i = 0; i < from_cblock(cache->cache_size); i++) {
-		r = dm_cache_set_dirty(cache->cmd, to_cblock(i),
-				       is_dirty(cache, to_cblock(i)));
-		if (r) {
-			metadata_operation_failed(cache, "dm_cache_set_dirty", r);
-			return r;
-		}
-	}
+	r = dm_cache_set_dirty_bits(cache->cmd, from_cblock(cache->cache_size), cache->dirty_bitset);
+	if (r)
+		metadata_operation_failed(cache, "dm_cache_set_dirty", r);
 
-	return 0;
+	return r;
+}
+
+static int write_dirty_bitset(struct cache *cache)
+{
+	int r;
+
+	pr_alert(">>> write_dirty_bitset\n");
+	r = write_dirty_bitset_(cache);
+	pr_alert("<<< write_dirty_bitset\n");
+
+	return r;
 }
 
 static int write_discard_bitset(struct cache *cache)
