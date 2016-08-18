@@ -1596,10 +1596,16 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *policy)
+static int get_hint(uint32_t index, uint32_t *value, void *context)
+{
+	struct dm_cache_policy *policy = context;
+	*value = policy_get_hint(policy, to_cblock(index));
+	return 0;
+}
+
+static int write_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *policy)
 {
 	int r;
-	__le32 value;
 	size_t hint_size;
 	const char *policy_name = dm_cache_policy_get_name(policy);
 	const unsigned *policy_version = dm_cache_policy_get_version(policy);
@@ -1623,48 +1629,13 @@ static int begin_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *po
 				return r;
 		}
 
-		r = dm_array_empty(&cmd->hint_info, &cmd->hint_root);
-		if (r)
-			return r;
-
-		value = cpu_to_le32(0);
-		__dm_bless_for_disk(&value);
-		r = dm_array_resize(&cmd->hint_info, cmd->hint_root, 0,
-				    from_cblock(cmd->cache_blocks),
-				    &value, &cmd->hint_root);
-		if (r)
-			return r;
-	}
-
-	return 0;
-}
-
-static int save_hint(void *context, dm_cblock_t cblock, dm_oblock_t oblock, uint32_t hint)
-{
-	struct dm_cache_metadata *cmd = context;
-	__le32 value = cpu_to_le32(hint);
-	int r;
-
-	__dm_bless_for_disk(&value);
-
-	r = dm_array_set_value(&cmd->hint_info, cmd->hint_root,
-			       from_cblock(cblock), &value, &cmd->hint_root);
-	cmd->changed = true;
-
-	return r;
-}
-
-static int write_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *policy)
-{
-	int r;
-
-	r = begin_hints(cmd, policy);
-	if (r) {
-		DMERR("begin_hints failed");
+		r = dm_array_new(&cmd->hint_info, &cmd->hint_root,
+				 from_cblock(cmd->cache_blocks),
+				 get_hint, policy);
 		return r;
 	}
 
-	return policy_walk_mappings(policy, save_hint, cmd);
+	return 0;
 }
 
 int dm_cache_write_hints(struct dm_cache_metadata *cmd, struct dm_cache_policy *policy)
