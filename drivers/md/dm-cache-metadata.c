@@ -392,6 +392,13 @@ static int __format_metadata(struct dm_cache_metadata *cmd)
 	if (r < 0)
 		goto bad;
 
+	if (cmd->version == 2) {
+		dm_disk_bitset_init(cmd->tm, &cmd->dirty_info);
+		r = dm_bitset_empty(&cmd->dirty_info, &cmd->dirty_root);
+		if (r)
+			goto bad;
+	}
+
 	dm_disk_bitset_init(cmd->tm, &cmd->discard_info);
 	r = dm_bitset_empty(&cmd->discard_info, &cmd->discard_root);
 	if (r < 0)
@@ -480,6 +487,7 @@ static int __open_metadata(struct dm_cache_metadata *cmd)
 	}
 
 	__setup_mapping_info(cmd);
+	dm_disk_bitset_init(cmd->tm, &cmd->dirty_info);
 	dm_disk_bitset_init(cmd->tm, &cmd->discard_info);
 	sb_flags = le32_to_cpu(disk_super->flags);
 	cmd->clean_when_opened = test_bit(CLEAN_SHUTDOWN, &sb_flags);
@@ -1339,15 +1347,12 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	struct dm_array_cursor hint_cursor;
 
 	r = dm_array_cursor_begin(&cmd->info, cmd->root, &mapping_cursor);
-	if (r) {
-		pr_alert("lm 1\n");
+	if (r)
 		return r;
-	}
 
 	if (hints_valid) {
 		r = dm_array_cursor_begin(&cmd->hint_info, cmd->hint_root, &hint_cursor);
 		if (r) {
-			pr_alert("lm 2\n");
 			dm_array_cursor_end(&mapping_cursor);
 			return r;
 		}
@@ -1362,14 +1367,11 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 			r = __load_mapping_v1(cmd, cb, hints_valid,
 					      &mapping_cursor, &hint_cursor,
 					      fn, context);
-		if (r) {
-			pr_alert("lm 3\n");
+		if (r)
 			goto out;
-		}
 
 		r = dm_array_cursor_next(&mapping_cursor);
 		if (r) {
-			pr_alert("lm 4\n");
 			DMERR("dm_array_cursor_next failed\n");
 			goto out;
 		}
@@ -1377,7 +1379,6 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 		if (hints_valid) {
 			r = dm_array_cursor_next(&hint_cursor);
 			if (r) {
-				pr_alert("lm 5\n");
 				DMERR("dm_array_cursor_next failed\n");
 				goto out;
 			}
@@ -1385,7 +1386,6 @@ static int __load_mappings(struct dm_cache_metadata *cmd,
 	}
 
 out:
-	pr_alert("lm 6\n");
 	dm_array_cursor_end(&mapping_cursor);
 	if (hints_valid)
 		dm_array_cursor_end(&hint_cursor);
