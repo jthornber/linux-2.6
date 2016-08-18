@@ -703,6 +703,82 @@ int dm_array_resize(struct dm_array_info *info, dm_block_t root,
 }
 EXPORT_SYMBOL_GPL(dm_array_resize);
 
+static int populate_ablock_with_values(struct dm_array_info *info, struct array_block *ab,
+				       value_fn fn, void *context, unsigned base, unsigned new_nr)
+{
+	int r;
+	unsigned i;
+	uint32_t nr_entries;
+	struct dm_btree_value_type *vt = &info->value_type;
+	uint32_t value;
+	__le32 value_le;
+
+	BUG_ON(vt->size != sizeof(value));
+	BUG_ON(le32_to_cpu(ab->nr_entries));
+	BUG_ON(new_nr > le32_to_cpu(ab->max_entries));
+
+	nr_entries = le32_to_cpu(ab->nr_entries);
+	for (i = 0; i < new_nr; i++) {
+		r = fn(base + i, &value, context);
+		if (r)
+			return r;
+
+		value_le = cpu_to_le32(value);
+
+		// FIXME: bless for disk?
+
+		if (vt->inc)
+			vt->inc(vt->context, &value_le);
+
+		memcpy(element_at(info, ab, i), &value_le, vt->size);
+	}
+
+	ab->nr_entries = cpu_to_le32(new_nr);
+	return 0;
+}
+
+
+int dm_array_new(struct dm_array_info *info, dm_block_t *root,
+		 uint32_t size, value_fn fn, void *context)
+{
+	int r;
+	struct dm_block *block;
+	struct array_block *ab;
+	unsigned block_index, end_block, size_of_block, max_entries;
+
+	r = dm_array_empty(info, root);
+	if (r)
+		return r;
+
+	size_of_block = dm_bm_block_size(dm_tm_get_bm(info->btree_info.tm));
+	max_entries = calc_max_entries(info->value_type.size, size_of_block);
+	end_block = dm_div_up(size, max_entries);
+
+	for (block_index = 0; block_index != end_block; block_index++) {
+		r = alloc_ablock(info, size_of_block, max_entries, &block, &ab);
+		if (r)
+			break;
+
+		r = populate_ablock_with_values(info, ab, fn, context,
+						block_index * max_entries,
+						min(max_entries, size));
+		if (r) {
+			unlock_ablock(info, block);
+			break;
+		}
+
+		r = insert_ablock(info, block_index, block, root);
+		unlock_ablock(info, block);
+		if (r)
+			break;
+
+		size -= max_entries;
+	}
+
+	return r;
+}
+EXPORT_SYMBOL_GPL(dm_array_new);
+
 int dm_array_del(struct dm_array_info *info, dm_block_t root)
 {
 	return dm_btree_del(&info->btree_info, root);
