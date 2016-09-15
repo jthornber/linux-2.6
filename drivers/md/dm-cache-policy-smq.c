@@ -408,9 +408,11 @@ static void q_set_targets(struct queue *q)
 	}
 }
 
-static void q_redistribute(struct queue *q)
+#define RESCHED_INTERVAL (1024 * 64)
+
+static void q_redistribute(struct queue *q, spinlock_t *lock)
 {
-	unsigned target, level;
+	unsigned target, level, count = 0;
 	struct ilist *l, *l_above;
 	struct entry *e;
 
@@ -432,6 +434,7 @@ static void q_redistribute(struct queue *q)
 
 			e->level = level;
 			l_add_tail(q->es, l, e);
+			count++;
 		}
 
 		/*
@@ -447,6 +450,12 @@ static void q_redistribute(struct queue *q)
 
 			e->level = level + 1u;
 			l_add_head(q->es, l_above, e);
+			count++;
+		}
+
+		if (count >= RESCHED_INTERVAL) {
+			cond_resched_lock(lock);
+			count = 0;
 		}
 	}
 }
@@ -1076,7 +1085,7 @@ static void end_hotspot_period(struct smq_policy *mq)
 
 	if (time_after(jiffies, mq->next_hotspot_period)) {
 		update_level_jump(mq);
-		q_redistribute(&mq->hotspot);
+		q_redistribute(&mq->hotspot, &mq->lock);
 		stats_reset(&mq->hotspot_stats);
 		mq->next_hotspot_period = jiffies + HOTSPOT_UPDATE_PERIOD;
 	}
@@ -1087,8 +1096,8 @@ static void end_cache_period(struct smq_policy *mq)
 	if (time_after(jiffies, mq->next_cache_period)) {
 		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 
-		q_redistribute(&mq->dirty);
-		q_redistribute(&mq->clean);
+		q_redistribute(&mq->dirty, &mq->lock);
+		q_redistribute(&mq->clean, &mq->lock);
 		stats_reset(&mq->cache_stats);
 
 		mq->next_cache_period = jiffies + CACHE_UPDATE_PERIOD;
