@@ -918,7 +918,7 @@ EXPORT_SYMBOL_GPL(dm_array_walk);
 
 /*----------------------------------------------------------------*/
 
-static int next_ablock(struct dm_array_cursor *c)
+static int load_ablock(struct dm_array_cursor *c)
 {
 	int r;
 	__le64 value_le;
@@ -960,7 +960,7 @@ int dm_array_cursor_begin(struct dm_array_info *info, dm_block_t root,
 		return r;
 	}
 
-	return next_ablock(c);
+	return load_ablock(c);
 }
 EXPORT_SYMBOL_GPL(dm_array_cursor_begin);
 
@@ -983,7 +983,11 @@ int dm_array_cursor_next(struct dm_array_cursor *c)
 	c->index++;
 
 	if (c->index >= le32_to_cpu(c->ab->nr_entries)) {
-		r = next_ablock(c);
+		r = dm_btree_cursor_next(&c->cursor);
+		if (r)
+			return r;
+
+		r = load_ablock(c);
 		if (r)
 			return r;
 	}
