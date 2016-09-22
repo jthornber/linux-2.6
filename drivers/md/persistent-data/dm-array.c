@@ -710,27 +710,18 @@ static int populate_ablock_with_values(struct dm_array_info *info, struct array_
 	unsigned i;
 	uint32_t nr_entries;
 	struct dm_btree_value_type *vt = &info->value_type;
-	uint32_t value;
-	__le32 value_le;
 
-	BUG_ON(vt->size != sizeof(value));
 	BUG_ON(le32_to_cpu(ab->nr_entries));
 	BUG_ON(new_nr > le32_to_cpu(ab->max_entries));
 
 	nr_entries = le32_to_cpu(ab->nr_entries);
 	for (i = 0; i < new_nr; i++) {
-		r = fn(base + i, &value, context);
+		r = fn(base + i, element_at(info, ab, i), context);
 		if (r)
 			return r;
 
-		value_le = cpu_to_le32(value);
-
-		// FIXME: bless for disk?
-
 		if (vt->inc)
-			vt->inc(vt->context, &value_le);
-
-		memcpy(element_at(info, ab, i), &value_le, vt->size);
+			vt->inc(vt->context, element_at(info, ab, i));
 	}
 
 	ab->nr_entries = cpu_to_le32(new_nr);

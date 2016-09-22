@@ -1654,10 +1654,13 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
 
 /*----------------------------------------------------------------*/
 
-static int get_hint(uint32_t index, uint32_t *value, void *context)
+static int get_hint(uint32_t index, void *value_le, void *context)
 {
+	uint32_t value;
+
 	struct dm_cache_policy *policy = context;
-	*value = policy_get_hint(policy, to_cblock(index));
+	value = policy_get_hint(policy, to_cblock(index));
+	*((__le32 *) value_le) = cpu_to_le32(value);
 	return 0;
 }
 

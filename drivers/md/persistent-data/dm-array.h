@@ -126,7 +126,7 @@ int dm_array_resize(struct dm_array_info *info, dm_block_t root,
  * fn - the callback
  * context - passed to the callback
  */
-typedef int (*value_fn)(uint32_t index, uint32_t *value, void *context);
+typedef int (*value_fn)(uint32_t index, void *value_le, void *context);
 int dm_array_new(struct dm_array_info *info, dm_block_t *root,
 		 uint32_t size, value_fn fn, void *context);
 
