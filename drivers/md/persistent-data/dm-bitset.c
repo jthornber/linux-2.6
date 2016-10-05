@@ -262,6 +262,10 @@ int dm_bitset_cursor_next(struct dm_bitset_cursor *c)
 {
 	int r = 0;
 
+	if (!c->entries_remaining)
+		return -ENODATA;
+
+	c->entries_remaining--;
 	if (++c->bit_index > 63)
 		r = cursor_next_array_entry(c);
 
