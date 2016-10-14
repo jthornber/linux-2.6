@@ -175,7 +175,7 @@ static int discard_map(struct dm_target *ti, struct bio *bio)
 {
 	struct fake_discard *fd = ti->private;
 
-	if (bio->bi_rw & REQ_DISCARD) {
+	if (bio_op(bio) == REQ_OP_DISCARD) {
 		if (fd->supports_discard) {
 			bio_endio(bio);
 			return DM_MAPIO_SUBMITTED;
