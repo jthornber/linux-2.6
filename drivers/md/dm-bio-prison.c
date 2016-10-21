@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Red Hat, Inc.
+ * Copyright (C) 2012-2016 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -17,6 +17,8 @@
 #define MIN_CELLS 1024
 
 struct dm_bio_prison {
+	struct workqueue_struct *wq;
+
 	spinlock_t lock;
 	mempool_t *cell_pool;
 	struct rb_root cells;
@@ -30,13 +32,14 @@ static struct kmem_cache *_cell_cache;
  * @nr_cells should be the number of cells you want in use _concurrently_.
  * Don't confuse it with the number of distinct keys.
  */
-struct dm_bio_prison *dm_bio_prison_create(void)
+struct dm_bio_prison *dm_bio_prison_create(struct workqueue_struct *wq)
 {
 	struct dm_bio_prison *prison = kmalloc(sizeof(*prison), GFP_KERNEL);
 
 	if (!prison)
 		return NULL;
 
+	prison->wq = wq;
 	spin_lock_init(&prison->lock);
 
 	prison->cell_pool = mempool_create_slab_pool(MIN_CELLS, _cell_cache);
@@ -72,12 +75,9 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 EXPORT_SYMBOL_GPL(dm_bio_prison_free_cell);
 
 static void __setup_new_cell(struct dm_cell_key *key,
-			     struct bio *holder,
 			     struct dm_bio_prison_cell *cell)
 {
        memcpy(&cell->key, key, sizeof(cell->key));
-       cell->user_ptr = NULL;
-       INIT_LIST_HEAD(&cell->user_list);
        bio_list_init(&cell->bios);
 }
 
@@ -105,12 +105,13 @@ static int cmp_keys(struct dm_cell_key *lhs,
 	return 0;
 }
 
-static int __get(struct dm_bio_prison *prison,
-		 struct dm_cell_key *key,
-		 enum dm_lock_mode lm,
-		 struct bio *inmate,
-		 struct dm_bio_prison_cell *cell_prealloc,
-		 struct dm_bio_prison_cell **cell_result)
+/*
+ * Returns true if node found, otherwise it inserts a new one.
+ */
+static bool __find_or_insert(struct dm_bio_prison *prison,
+			     struct dm_cell_key *key,
+			     struct dm_bio_prison_cell *cell_prealloc,
+			     struct dm_bio_prison_cell **result)
 {
 	int r;
 	struct rb_node **new = &prison->cells.rb_node, *parent = NULL;
@@ -124,231 +125,220 @@ static int __get(struct dm_bio_prison *prison,
 		parent = *new;
 		if (r < 0)
 			new = &((*new)->rb_left);
+
 		else if (r > 0)
 			new = &((*new)->rb_right);
-		else {
-			if (lm == LM_SHARED && cell->count > 0) {
-				cell->count++;
-				*cell_result = cell;
 
-				// FIXME: how do we indicate we haven't used the prealloc cell?
-				return 0;
-			} else {
-				if (inmate)
-					bio_list_add(&cell->bios, inmate);
-				*cell_result = cell;
-				return 1;
-			}
+		else {
+			*result = cell;
+			return true;
 		}
 	}
 
-	__setup_new_cell(key, inmate, cell_prealloc);
-	if (lm == LM_SHARED)
-		cell_prealloc->count = 1;
-	else
-		cell_prealloc->count = -1;
-
-	*cell_result = cell_prealloc;
-
+	__setup_new_cell(key, cell_prealloc);
+	*result = cell_prealloc;
 	rb_link_node(&cell_prealloc->node, parent, new);
 	rb_insert_color(&cell_prealloc->node, &prison->cells);
 
-	return 0;
+	return false;
 }
 
-int dm_cell_get(struct dm_bio_prison *prison,
-		struct dm_cell_key *key,
-		enum dm_lock_mode lm,
-		struct bio *inmate,
-		struct dm_bio_prison_cell *cell_prealloc,
-		struct dm_bio_prison_cell **cell_result)
+static bool __get(struct dm_bio_prison *prison,
+		  struct dm_cell_key *key,
+		  unsigned lock_level,
+		  struct bio *inmate,
+		  struct dm_bio_prison_cell *cell_prealloc,
+		  struct dm_bio_prison_cell **cell_result)
+{
+	struct dm_bio_prison_cell *cell;
+
+	if (__find_or_insert(prison, key, cell_prealloc, &cell)) {
+		if (cell->exclusive_lock && lock_level <= cell->exclusive_level) {
+			bio_list_add(&cell->bios, inmate);
+			*cell_result = cell;
+			return false;
+		}
+
+		cell->shared_count++;
+		*cell_result = cell;
+
+	} else {
+		cell = cell_prealloc;
+		__setup_new_cell(key, cell);
+		cell->shared_count = 1;
+		*cell_result = cell;
+	}
+
+	return true;
+}
+
+bool dm_cell_get(struct dm_bio_prison *prison,
+		 struct dm_cell_key *key,
+		 unsigned lock_level,
+		 struct bio *inmate,
+		 struct dm_bio_prison_cell *cell_prealloc,
+		 struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __get(prison, key, lm, inmate, cell_prealloc, cell_result);
+	r = __get(prison, key, lock_level, inmate, cell_prealloc, cell_result);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_cell_get);
 
+static bool __put(struct dm_bio_prison *prison,
+		  struct dm_bio_prison_cell *cell)
+{
+	BUG_ON(!cell->shared_count);
+	cell->shared_count--;
+
+	if (!cell->shared_count) {
+		if (cell->exclusive_lock) {
+			queue_work(prison->wq, cell->quiesce_continuation);
+			cell->quiesce_continuation = NULL;
+
+		} else {
+			rb_erase(&cell->node, &prison->cells);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 bool dm_cell_put(struct dm_bio_prison *prison,
-		 struct dm_bio_prison_cell *cell,
-		 struct bio_list *inmates)
+		 struct dm_bio_prison_cell *cell)
 {
 	bool r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	rb_erase(&cell->node, &prison->cells);
-	bio_list_merge(inmates, &cell->bios);
-	if (cell->count > 0)
-		cell->count--;
-	else
-		cell->count++;
-	r = !cell->count;
+	r = __put(prison, cell);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_cell_put);
 
-void dm_cell_visit_put(struct dm_bio_prison *prison,
-		       void (*visit_fn)(void *, struct dm_bio_prison_cell *),
-		       void *context,
-		       struct dm_bio_prison_cell *cell)
+static int __lock(struct dm_bio_prison *prison,
+		  struct dm_cell_key *key,
+		  unsigned lock_level,
+		  struct dm_bio_prison_cell *cell_prealloc,
+		  struct dm_bio_prison_cell **cell_result)
 {
-	unsigned long flags;
+	struct dm_bio_prison_cell *cell;
 
-	spin_lock_irqsave(&prison->lock, flags);
-	visit_fn(context, cell);
-	rb_erase(&cell->node, &prison->cells);
-	spin_unlock_irqrestore(&prison->lock, flags);
-}
-EXPORT_SYMBOL_GPL(dm_cell_visit_put);
+	if (__find_or_insert(prison, key, cell_prealloc, &cell)) {
+		if (cell->exclusive_lock)
+			return -EBUSY;
 
-static int __promote_or_put(struct dm_bio_prison *prison,
-			    struct dm_bio_prison_cell *cell,
-			    struct bio **new_holder)
-{
-	if (bio_list_empty(&cell->bios)) {
-		rb_erase(&cell->node, &prison->cells);
-		return 1;
+		cell->exclusive_lock = true;
+		cell->exclusive_level = lock_level;
+		*cell_result = cell;
+
+		// FIXME: we don't yet know what level these shared locks
+		// were taken at, so have to quiesce them all.
+		return cell->shared_count > 0;
+
+	} else {
+		cell = cell_prealloc;
+		__setup_new_cell(key, cell);
+		cell->shared_count = 0;
+		cell->exclusive_lock = true;
+		cell->exclusive_level = lock_level;
+		*cell_result = cell;
 	}
 
-	*new_holder = bio_list_pop(&cell->bios);
 	return 0;
 }
 
-int dm_cell_promote_or_put(struct dm_bio_prison *prison,
-			   struct dm_bio_prison_cell *cell,
-			   struct bio **new_holder)
+int dm_cell_lock(struct dm_bio_prison *prison,
+		 struct dm_cell_key *key,
+		 unsigned lock_level,
+		 struct dm_bio_prison_cell *cell_prealloc,
+		 struct dm_bio_prison_cell **cell_result)
 {
 	int r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __promote_or_put(prison, cell, new_holder);
+	r = __lock(prison, key, lock_level, cell_prealloc, cell_result);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_cell_promote_or_put);
+EXPORT_SYMBOL_GPL(dm_cell_lock);
 
-/*----------------------------------------------------------------*/
-
-#define DEFERRED_SET_SIZE 64
-
-struct dm_deferred_entry {
-	struct dm_deferred_set *ds;
-	unsigned count;
-	struct list_head work_items;
-};
-
-struct dm_deferred_set {
-	spinlock_t lock;
-	unsigned current_entry;
-	unsigned sweeper;
-	struct dm_deferred_entry entries[DEFERRED_SET_SIZE];
-};
-
-struct dm_deferred_set *dm_deferred_set_create(void)
+static void __quiesce(struct dm_bio_prison *prison,
+		      struct dm_bio_prison_cell *cell,
+		      struct work_struct *continuation)
 {
-	int i;
-	struct dm_deferred_set *ds;
-
-	ds = kmalloc(sizeof(*ds), GFP_KERNEL);
-	if (!ds)
-		return NULL;
-
-	spin_lock_init(&ds->lock);
-	ds->current_entry = 0;
-	ds->sweeper = 0;
-	for (i = 0; i < DEFERRED_SET_SIZE; i++) {
-		ds->entries[i].ds = ds;
-		ds->entries[i].count = 0;
-		INIT_LIST_HEAD(&ds->entries[i].work_items);
-	}
-
-	return ds;
-}
-EXPORT_SYMBOL_GPL(dm_deferred_set_create);
-
-void dm_deferred_set_destroy(struct dm_deferred_set *ds)
-{
-	kfree(ds);
-}
-EXPORT_SYMBOL_GPL(dm_deferred_set_destroy);
-
-struct dm_deferred_entry *dm_deferred_entry_inc(struct dm_deferred_set *ds)
-{
-	unsigned long flags;
-	struct dm_deferred_entry *entry;
-
-	spin_lock_irqsave(&ds->lock, flags);
-	entry = ds->entries + ds->current_entry;
-	entry->count++;
-	spin_unlock_irqrestore(&ds->lock, flags);
-
-	return entry;
-}
-EXPORT_SYMBOL_GPL(dm_deferred_entry_inc);
-
-static unsigned ds_next(unsigned index)
-{
-	return (index + 1) % DEFERRED_SET_SIZE;
+	if (!cell->shared_count)
+		queue_work(prison->wq, continuation);
+	else
+		cell->quiesce_continuation = continuation;
 }
 
-static void __sweep(struct dm_deferred_set *ds, struct list_head *head)
-{
-	while ((ds->sweeper != ds->current_entry) &&
-	       !ds->entries[ds->sweeper].count) {
-		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
-		ds->sweeper = ds_next(ds->sweeper);
-	}
-
-	if ((ds->sweeper == ds->current_entry) && !ds->entries[ds->sweeper].count)
-		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
-}
-
-void dm_deferred_entry_dec(struct dm_deferred_entry *entry, struct list_head *head)
+void dm_cell_quiesce(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell,
+		     struct work_struct *continuation)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&entry->ds->lock, flags);
-	BUG_ON(!entry->count);
-	--entry->count;
-	__sweep(entry->ds, head);
-	spin_unlock_irqrestore(&entry->ds->lock, flags);
+	spin_lock_irqsave(&prison->lock, flags);
+	__quiesce(prison, cell, continuation);
+	spin_unlock_irqrestore(&prison->lock, flags);
 }
-EXPORT_SYMBOL_GPL(dm_deferred_entry_dec);
+EXPORT_SYMBOL_GPL(dm_cell_quiesce);
 
-/*
- * Returns 1 if deferred or 0 if no pending items to delay job.
- */
-int dm_deferred_set_add_work(struct dm_deferred_set *ds, struct list_head *work)
+static int __promote(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell,
+		     unsigned new_lock_level)
 {
-	int r = 1;
-	unsigned long flags;
-	unsigned next_entry;
+	if (!cell->exclusive_lock)
+		return -EINVAL;
 
-	spin_lock_irqsave(&ds->lock, flags);
-	if ((ds->sweeper == ds->current_entry) &&
-	    !ds->entries[ds->current_entry].count)
-		r = 0;
-	else {
-		list_add(work, &ds->entries[ds->current_entry].work_items);
-		next_entry = ds_next(ds->current_entry);
-		if (!ds->entries[next_entry].count)
-			ds->current_entry = next_entry;
-	}
-	spin_unlock_irqrestore(&ds->lock, flags);
+	cell->exclusive_level = new_lock_level;
+	return cell->shared_count > 0;
+}
+
+int dm_cell_lock_promote(struct dm_bio_prison *prison,
+			 struct dm_bio_prison_cell *cell,
+			 unsigned new_lock_level)
+{
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&prison->lock, flags);
+	r = __promote(prison, cell, new_lock_level);
+	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_deferred_set_add_work);
+EXPORT_SYMBOL_GPL(dm_cell_lock_promote);
+
+static void __unlock(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell,
+		     struct bio_list *bios)
+{
+	bio_list_merge(bios, &cell->bios);
+}
+
+void dm_cell_unlock(struct dm_bio_prison *prison,
+		    struct dm_bio_prison_cell *cell,
+		    struct bio_list *bios)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&prison->lock, flags);
+	__unlock(prison, cell, bios);
+	spin_unlock_irqrestore(&prison->lock, flags);
+}
+EXPORT_SYMBOL_GPL(dm_cell_unlock);
 
 /*----------------------------------------------------------------*/
 

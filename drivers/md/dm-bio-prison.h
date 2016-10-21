@@ -12,6 +12,7 @@
 
 #include <linux/bio.h>
 #include <linux/rbtree.h>
+#include <linux/workqueue.h>
 
 /*----------------------------------------------------------------*/
 
@@ -33,34 +34,22 @@ struct dm_cell_key {
 	dm_block_t block_begin, block_end;
 };
 
-enum dm_lock_mode {
-	LM_SHARED,
-	LM_EXCLUSIVE
-};
-
 /*
  * Treat this as opaque, only in header so callers can manage allocation
  * themselves.
  */
 struct dm_bio_prison_cell {
-	/*
-	 * For client use.  Only use these if you've been granted an
-	 * exclusive lock on the cell.
-	 */
-	void *user_ptr;
-	struct list_head user_list;
+	bool exclusive_lock;
+	unsigned exclusive_level;
+	unsigned shared_count;
+	struct work_struct *quiesce_continuation;
 
-	/*
-	 * count is positive for a shared lock, negative for an exclusive
-	 * lock.
-	 */
-	int count;
 	struct rb_node node;
 	struct dm_cell_key key;
 	struct bio_list bios;
 };
 
-struct dm_bio_prison *dm_bio_prison_create(void);
+struct dm_bio_prison *dm_bio_prison_create(struct workqueue_struct *wq);
 void dm_bio_prison_destroy(struct dm_bio_prison *prison);
 
 /*
@@ -76,69 +65,77 @@ void dm_bio_prison_free_cell(struct dm_bio_prison *prison,
 			     struct dm_bio_prison_cell *cell);
 
 /*
- * An atomic op that either retrieves an existing cell and adds an inmate
- * bio to it, or creates a new cell with the caller as holder (inmate not
- * added).  inmate may be safely set to NULL.
+ * Shared locks have a bio associated with them.
  *
- * Returns 1 if the cell was not granted, 0 the cell was granted.  Check
- * whether *cell_result == cell_prealloc to ascertain whether you need to
- * free prealloc.
+ * If the lock is granted the caller can continue to use the bio, and must
+ * call dm_cell_put() to drop the reference count when finished using it.
+ *
+ * If the lock cannot be granted then the bio will be tracked within the
+ * cell, and later given to the holder of the exclusive lock.
+ *
+ * See dm_cell_lock() for discussion of the lock_level parameter.
+ *
+ * Compare *cell_result with cell_prealloc to see if the prealloc was used.
+ *
+ * Returns true if the lock is granted.
  */
-int dm_cell_get(struct dm_bio_prison *prison,
-		struct dm_cell_key *key,
-		enum dm_lock_mode lm,
-		struct bio *inmate,
-		struct dm_bio_prison_cell *cell_prealloc,
-		struct dm_bio_prison_cell **cell_result);
+bool dm_cell_get(struct dm_bio_prison *prison,
+		 struct dm_cell_key *key,
+		 unsigned lock_level,
+		 struct bio *inmate,
+		 struct dm_bio_prison_cell *cell_prealloc,
+		 struct dm_bio_prison_cell **cell_result);
 
 /*
- * dm_cell_put always succeeds.  The return value indicates whether the
- * caller was the final holder (true == final).
+ * Decrement the shared reference count for the lock.  Returns true if
+ * returning ownership of the cell (ie. you should free it).
  */
 bool dm_cell_put(struct dm_bio_prison *prison,
-		 struct dm_bio_prison_cell *cell,
-		 struct bio_list *bios);
+		 struct dm_bio_prison_cell *cell);
 
 /*
- * Visits the cell and then releases.  Guarantees no new inmates are
- * inserted between the visit and release.
- */
-void dm_cell_visit_put(struct dm_bio_prison *prison,
-		       void (*visit_fn)(void *, struct dm_bio_prison_cell *),
-		       void *context, struct dm_bio_prison_cell *cell);
-
-/*
- * Rather than always releasing the prisoners in a cell, the client may
- * want to promote one of them to be the new holder.  There is a race here
- * though between releasing an empty cell, and other threads adding new
- * inmates.  So this function makes the decision with its lock held.
+ * Locks a cell.  No associated bio.  Exclusive locks get priority.  These
+ * lock contrain whether the io locks are granted according to level.
  *
- * This function can have two outcomes:
- * i) An inmate is promoted to be the holder of the cell (return value of 0).
- * ii) The cell has no inmate for promotion and is released (return value of 1).
+ * Shared locks will still be granted if the lock_level is > (not =) to the
+ * exclusive lock level.
+ *
+ * If an _exclusive_ lock is already held then -EBUSY is returned.
+ *
+ * Return values:
+ *  < 0 - error
+ *  0   - locked; no quiescing needed
+ *  1   - locked; quiescing needed
  */
-int dm_cell_promote_or_put(struct dm_bio_prison *prison,
-			   struct dm_bio_prison_cell *cell,
-			   struct bio **new_holder);
+int dm_cell_lock(struct dm_bio_prison *prison,
+		 struct dm_cell_key *key,
+		 unsigned lock_level,
+		 struct dm_bio_prison_cell *cell_prealloc,
+		 struct dm_bio_prison_cell **cell_result);
 
-/*----------------------------------------------------------------*/
+void dm_cell_quiesce(struct dm_bio_prison *prison,
+		     struct dm_bio_prison_cell *cell,
+		     struct work_struct *continuation);
 
 /*
- * We use the deferred set to keep track of pending reads to shared blocks.
- * We do this to ensure the new mapping caused by a write isn't performed
- * until these prior reads have completed.  Otherwise the insertion of the
- * new mapping could free the old block that the read bios are mapped to.
+ * Promotes an _exclusive_ lock to a higher lock level.
+ *
+ * Return values:
+ *  < 0 - error
+ *  0   - promoted; no quiescing needed
+ *  1   - promoted; quiescing needed
  */
+int dm_cell_lock_promote(struct dm_bio_prison *prison,
+			 struct dm_bio_prison_cell *cell,
+			 unsigned new_lock_level);
 
-struct dm_deferred_set;
-struct dm_deferred_entry;
-
-struct dm_deferred_set *dm_deferred_set_create(void);
-void dm_deferred_set_destroy(struct dm_deferred_set *ds);
-
-struct dm_deferred_entry *dm_deferred_entry_inc(struct dm_deferred_set *ds);
-void dm_deferred_entry_dec(struct dm_deferred_entry *entry, struct list_head *head);
-int dm_deferred_set_add_work(struct dm_deferred_set *ds, struct list_head *work);
+/*
+ * Adds any held bios to the bio list.  Always returns ownership of the
+ * cell (you should free it).
+ */
+void dm_cell_unlock(struct dm_bio_prison *prison,
+		    struct dm_bio_prison_cell *cell,
+		    struct bio_list *bios);
 
 /*----------------------------------------------------------------*/
 
