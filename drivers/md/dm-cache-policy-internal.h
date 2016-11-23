@@ -12,21 +12,33 @@
 
 /*----------------------------------------------------------------*/
 
-/*
- * Little inline functions that simplify calling the policy methods.
- */
-static inline int policy_map(struct dm_cache_policy *p, dm_oblock_t oblock,
-			     bool can_block, bool can_migrate, bool discarded_oblock,
-			     struct bio *bio, struct policy_locker *locker,
-			     struct policy_result *result)
-{
-	return p->map(p, oblock, can_block, can_migrate, discarded_oblock, bio, locker, result);
-}
-
 static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
 {
 	BUG_ON(!p->lookup);
 	return p->lookup(p, oblock, cblock);
+}
+
+static inline int policy_add_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	return p->add_mapping(p, oblock, cblock);
+}
+
+static inline int policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	return p->remove_mapping(p, oblock, cblock);
+}
+
+/*
+ * Little inline functions that simplify calling the policy methods.
+ */
+static inline int policy_background_work(struct dm_cache_policy *p, struct policy_work *result)
+{
+	return p->background_work(p, result);
+}
+
+static inline void policy_background_work_abort(struct dm_cache_policy *p, struct policy_work *work)
+{
+	return p->background_work_abort(p, work);
 }
 
 static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
@@ -52,30 +64,6 @@ static inline int policy_walk_mappings(struct dm_cache_policy *p,
 				      policy_walk_fn fn, void *context)
 {
 	return p->walk_mappings ? p->walk_mappings(p, fn, context) : 0;
-}
-
-static inline int policy_writeback_work(struct dm_cache_policy *p,
-					dm_oblock_t *oblock,
-					dm_cblock_t *cblock,
-					bool critical_only)
-{
-	return p->writeback_work ? p->writeback_work(p, oblock, cblock, critical_only) : -ENOENT;
-}
-
-static inline void policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
-{
-	p->remove_mapping(p, oblock);
-}
-
-static inline int policy_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
-{
-	return p->remove_cblock(p, cblock);
-}
-
-static inline void policy_force_mapping(struct dm_cache_policy *p,
-					dm_oblock_t current_oblock, dm_oblock_t new_oblock)
-{
-	return p->force_mapping(p, current_oblock, new_oblock);
 }
 
 static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)

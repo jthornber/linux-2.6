@@ -14,7 +14,7 @@ dm-log-userspace-y \
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
 dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
 dm-cache-smq-y   += dm-cache-policy-smq.o
-dm-cache-cleaner-y += dm-cache-policy-cleaner.o
+#dm-cache-cleaner-y += dm-cache-policy-cleaner.o
 dm-era-y	+= dm-era-target.o
 dm-verity-y	+= dm-verity-target.o
 md-mod-y	+= md.o bitmap.o

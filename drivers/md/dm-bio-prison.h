@@ -39,6 +39,7 @@ struct dm_cell_key {
  * themselves.
  */
 struct dm_bio_prison_cell {
+	// FIXME: pack these
 	bool exclusive_lock;
 	unsigned exclusive_level;
 	unsigned shared_count;
@@ -132,6 +133,8 @@ int dm_cell_lock_promote(struct dm_bio_prison *prison,
 /*
  * Adds any held bios to the bio list.  Always returns ownership of the
  * cell (you should free it).
+ *
+ * You must quiesce if needed before unlocking.
  */
 void dm_cell_unlock(struct dm_bio_prison *prison,
 		    struct dm_bio_prison_cell *cell,

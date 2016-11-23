@@ -38,10 +38,11 @@ struct entry {
 	unsigned hash_next:28;
 	unsigned prev:28;
 	unsigned next:28;
-	unsigned level:7;
+	unsigned level:6;
 	bool dirty:1;
 	bool allocated:1;
 	bool sentinel:1;
+	bool pending_work:1;
 
 	dm_oblock_t oblock;
 };
@@ -269,10 +270,12 @@ static void q_init(struct queue *q, struct entry_space *es, unsigned nr_levels)
 	q->nr_in_top_levels = 0u;
 }
 
+#if 0
 static unsigned q_size(struct queue *q)
 {
 	return q->nr_elts;
 }
+#endif
 
 /*
  * Insert an entry to the back of the given level.
@@ -335,6 +338,7 @@ static struct entry *q_pop(struct queue *q)
 	return e;
 }
 
+#if 0
 /*
  * Pops an entry from a level that is not past a sentinel.
  */
@@ -347,6 +351,7 @@ static struct entry *q_pop_old(struct queue *q, unsigned max_level)
 
 	return e;
 }
+#endif
 
 /*
  * This function assumes there is a non-sentinel entry to pop.  It's only
@@ -759,6 +764,88 @@ static struct entry *get_entry(struct entry_alloc *ea, unsigned index)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * A ring buffer that holds the background work that the policy wants the
+ * core policy to implement.
+ */
+// FIXME: make tunable
+#define MAX_WORK 1024
+#define MAX_WORK_MASK (MAX_WORK - 1u)
+
+struct background_work {
+	spinlock_t lock;
+	unsigned begin, end;
+	struct policy_work work[MAX_WORK];
+};
+
+static void background_work_init(struct background_work *b)
+{
+	spin_lock_init(&b->lock);
+	b->begin = b->end = 0;
+}
+
+static unsigned __bw_next(unsigned n)
+{
+	return (n + 1) & MAX_WORK_MASK;
+}
+
+static void background_work_push(struct background_work *b, struct policy_work *work)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&b->lock, flags);
+	memcpy(b->work + b->end, work, sizeof(*work));
+	b->end = __bw_next(b->end);
+	if (b->end == b->begin)
+		/*
+		 * overwrite the oldest piece of work.
+		 */
+		b->begin = __bw_next(b->begin);
+	spin_unlock_irqrestore(&b->lock, flags);
+}
+
+/*
+ * Returns -ENODATA if there's no work.
+ */
+static int background_work_pop(struct background_work *b, struct policy_work *work)
+{
+	int r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&b->lock, flags);
+	if (b->begin == b->end)
+		r = -ENODATA;
+	else {
+		memcpy(work, b->work + b->begin, sizeof(*work));
+		b->begin = __bw_next(b->begin);
+	}
+	spin_unlock_irqrestore(&b->lock, flags);
+
+	return r;
+}
+
+// FIXME: use a little hash table
+static bool background_promotion_already_present(struct background_work *b,
+						 dm_oblock_t oblock)
+{
+	bool r = false;
+	unsigned index;
+	unsigned long flags;
+
+	spin_lock_irqsave(&b->lock, flags);
+	for (index = b->begin; index != b->end; index = __bw_next(index)) {
+		if (b->work[b->begin].oblock == oblock) {
+			r = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&b->lock, flags);
+
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
 #define NR_HOTSPOT_LEVELS 64u
 #define NR_CACHE_LEVELS 64u
 
@@ -828,6 +915,8 @@ struct smq_policy {
 
 	unsigned long next_hotspot_period;
 	unsigned long next_cache_period;
+
+	struct background_work bg_work;
 };
 
 /*----------------------------------------------------------------*/
@@ -920,6 +1009,7 @@ static void sentinels_init(struct smq_policy *mq)
 
 /*----------------------------------------------------------------*/
 
+#if 0
 /*
  * These methods tie together the dirty queue, clean queue and hash table.
  */
@@ -929,6 +1019,7 @@ static void push_new(struct smq_policy *mq, struct entry *e)
 	h_insert(&mq->table, e);
 	q_push(q, e);
 }
+#endif
 
 static void push(struct smq_policy *mq, struct entry *e)
 {
@@ -963,6 +1054,8 @@ static void del(struct smq_policy *mq, struct entry *e)
 	__del(mq, e->dirty ? &mq->dirty : &mq->clean, e);
 }
 
+
+#if 0
 static struct entry *pop_old(struct smq_policy *mq, struct queue *q, unsigned max_level)
 {
 	struct entry *e = q_pop_old(q, max_level);
@@ -970,6 +1063,7 @@ static struct entry *pop_old(struct smq_policy *mq, struct queue *q, unsigned ma
 		h_remove(&mq->table, e);
 	return e;
 }
+#endif
 
 static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
 {
@@ -1095,33 +1189,69 @@ static void end_cache_period(struct smq_policy *mq)
 	}
 }
 
-static int demote_cblock(struct smq_policy *mq,
-			 struct policy_locker *locker,
-			 dm_oblock_t *oblock)
+/*----------------------------------------------------------------*/
+
+static void queue_writeback(struct smq_policy *mq)
 {
-	struct entry *demoted = q_peek(&mq->clean, mq->clean.nr_levels, false);
-	if (!demoted)
-		/*
-		 * We could get a block from mq->dirty, but that
-		 * would add extra latency to the triggering bio as it
-		 * waits for the writeback.  Better to not promote this
-		 * time and hope there's a clean block next time this block
-		 * is hit.
-		 */
-		return -ENOSPC;
+	struct policy_work work;
+	struct entry *e = q_peek(&mq->dirty, mq->dirty.nr_levels, true);
 
-	if (locker->fn(locker, demoted->oblock))
-		/*
-		 * We couldn't lock this block.
-		 */
-		return -EBUSY;
+	if (e) {
+		if (e->pending_work)
+			return;
 
-	del(mq, demoted);
-	*oblock = demoted->oblock;
-	free_entry(&mq->cache_alloc, demoted);
-
-	return 0;
+		e->pending_work = true;
+		work.op = POLICY_WRITEBACK;
+		work.oblock = e->oblock;
+		work.cblock = infer_cblock(mq, e);
+		background_work_push(&mq->bg_work, &work);
+	}
 }
+
+static void queue_demotion(struct smq_policy *mq)
+{
+	struct policy_work work;
+	struct entry *e = q_peek(&mq->clean, mq->clean.nr_levels, true);
+	if (!e)
+		queue_writeback(mq);
+
+	else {
+		if (e->pending_work)
+			return;
+
+		e->pending_work = true;
+		work.op = POLICY_DEMOTE;
+		work.oblock = e->oblock;
+		work.cblock = infer_cblock(mq, e);
+		background_work_push(&mq->bg_work, &work);
+	}
+}
+
+static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock)
+{
+	struct entry *e;
+	struct policy_work work;
+
+	if (allocator_empty(&mq->cache_alloc)) {
+		queue_demotion(mq);
+		return;
+	}
+
+	if (background_promotion_already_present(&mq->bg_work, oblock))
+		return;
+
+	/*
+	 * We allocate the entry now to reserve the cblock.  If the
+	 * background work is aborted we must remember to free it.
+	 */
+	e = alloc_entry(&mq->cache_alloc);
+	work.op = POLICY_PROMOTE;
+	work.oblock = oblock;
+	work.cblock = infer_cblock(mq, e);
+	background_work_push(&mq->bg_work, &work);
+}
+
+/*----------------------------------------------------------------*/
 
 enum promote_result {
 	PROMOTE_NOT,
@@ -1137,47 +1267,9 @@ static enum promote_result maybe_promote(bool promote)
 	return promote ? PROMOTE_PERMANENT : PROMOTE_NOT;
 }
 
-static enum promote_result should_promote(struct smq_policy *mq, struct entry *hs_e, struct bio *bio,
-					  bool fast_promote)
+static enum promote_result should_promote(struct smq_policy *mq, struct entry *hs_e)
 {
-	if (bio_data_dir(bio) == WRITE) {
-		if (!allocator_empty(&mq->cache_alloc) && fast_promote)
-			return PROMOTE_TEMPORARY;
-
-		else
-			return maybe_promote(hs_e->level >= mq->write_promote_level);
-	} else
-		return maybe_promote(hs_e->level >= mq->read_promote_level);
-}
-
-static void insert_in_cache(struct smq_policy *mq, dm_oblock_t oblock,
-			    struct policy_locker *locker,
-			    struct policy_result *result, enum promote_result pr)
-{
-	int r;
-	struct entry *e;
-
-	if (allocator_empty(&mq->cache_alloc)) {
-		result->op = POLICY_REPLACE;
-		r = demote_cblock(mq, locker, &result->old_oblock);
-		if (r) {
-			result->op = POLICY_MISS;
-			return;
-		}
-
-	} else
-		result->op = POLICY_NEW;
-
-	e = alloc_entry(&mq->cache_alloc);
-	BUG_ON(!e);
-	e->oblock = oblock;
-
-	if (pr == PROMOTE_TEMPORARY)
-		push(mq, e);
-	else
-		push_new(mq, e);
-
-	result->cblock = infer_cblock(mq, e);
+	return maybe_promote(hs_e->level >= mq->read_promote_level);
 }
 
 static dm_oblock_t to_hblock(struct smq_policy *mq, dm_oblock_t b)
@@ -1187,7 +1279,7 @@ static dm_oblock_t to_hblock(struct smq_policy *mq, dm_oblock_t b)
 	return to_oblock(r);
 }
 
-static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, struct bio *bio)
+static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b)
 {
 	unsigned hi;
 	dm_oblock_t hb = to_hblock(mq, b);
@@ -1225,47 +1317,6 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 	return e;
 }
 
-/*
- * Looks the oblock up in the hash table, then decides whether to put in
- * pre_cache, or cache etc.
- */
-static int map(struct smq_policy *mq, struct bio *bio, dm_oblock_t oblock,
-	       bool can_migrate, bool fast_promote,
-	       struct policy_locker *locker, struct policy_result *result)
-{
-	struct entry *e, *hs_e;
-	enum promote_result pr;
-
-	hs_e = update_hotspot_queue(mq, oblock, bio);
-
-	e = h_lookup(&mq->table, oblock);
-	if (e) {
-		stats_level_accessed(&mq->cache_stats, e->level);
-
-		requeue(mq, e);
-		result->op = POLICY_HIT;
-		result->cblock = infer_cblock(mq, e);
-
-	} else {
-		stats_miss(&mq->cache_stats);
-
-		pr = should_promote(mq, hs_e, bio, fast_promote);
-		if (pr == PROMOTE_NOT)
-			result->op = POLICY_MISS;
-
-		else {
-			if (!can_migrate) {
-				result->op = POLICY_MISS;
-				return -EWOULDBLOCK;
-			}
-
-			insert_in_cache(mq, oblock, locker, result, pr);
-		}
-	}
-
-	return 0;
-}
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -1290,22 +1341,32 @@ static void smq_destroy(struct dm_cache_policy *p)
 	kfree(mq);
 }
 
-static int smq_map(struct dm_cache_policy *p, dm_oblock_t oblock,
-		   bool can_block, bool can_migrate, bool fast_promote,
-		   struct bio *bio, struct policy_locker *locker,
-		   struct policy_result *result)
+/*----------------------------------------------------------------*/
+
+static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
 {
-	int r;
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
+	struct entry *e, *hs_e;
+	enum promote_result pr;
 
-	result->op = POLICY_MISS;
+	hs_e = update_hotspot_queue(mq, oblock);
 
-	spin_lock_irqsave(&mq->lock, flags);
-	r = map(mq, bio, oblock, can_migrate, fast_promote, locker, result);
-	spin_unlock_irqrestore(&mq->lock, flags);
+	e = h_lookup(&mq->table, oblock);
+	if (e) {
+		stats_level_accessed(&mq->cache_stats, e->level);
 
-	return r;
+		requeue(mq, e);
+		*cblock = infer_cblock(mq, e);
+		return 0;
+
+	} else {
+		stats_miss(&mq->cache_stats);
+
+		pr = should_promote(mq, hs_e);
+		if (pr != PROMOTE_NOT)
+			queue_promotion(mq, oblock);
+
+		return -ENOENT;
+	}
 }
 
 static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
@@ -1313,18 +1374,98 @@ static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t
 	int r;
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
-	struct entry *e;
 
 	spin_lock_irqsave(&mq->lock, flags);
-	e = h_lookup(&mq->table, oblock);
-	if (e) {
-		*cblock = infer_cblock(mq, e);
-		r = 0;
-	} else
-		r = -ENOENT;
+	r = __lookup(mq, oblock, cblock);
 	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;
+}
+
+static int __add_mapping(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct entry *e = get_entry(&mq->cache_alloc,
+				    from_cblock(cblock));
+	e->oblock = oblock;
+	push(mq, e);
+
+	return 0;
+}
+
+int smq_add_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	int r;
+	unsigned long flags;
+	struct smq_policy *mq = to_smq_policy(p);
+
+	spin_lock_irqsave(&mq->lock, flags);
+	r = __add_mapping(mq, oblock, cblock);
+	spin_unlock_irqrestore(&mq->lock, flags);
+
+	return r;
+}
+
+static void __remove_mapping(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	struct entry *e;
+
+	e = h_lookup(&mq->table, oblock);
+	BUG_ON(!e);
+
+	del(mq, e);
+	free_entry(&mq->cache_alloc, e);
+}
+
+int smq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	unsigned long flags;
+	struct smq_policy *mq = to_smq_policy(p);
+
+	spin_lock_irqsave(&mq->lock, flags);
+	__remove_mapping(mq, oblock, cblock);
+	spin_unlock_irqrestore(&mq->lock, flags);
+
+	return 0;
+}
+
+
+static int smq_background_work(struct dm_cache_policy *p, struct policy_work *result)
+{
+	struct smq_policy *mq = to_smq_policy(p);
+	return background_work_pop(&mq->bg_work, result);
+}
+
+/*
+ * We need to clear any pending work flags that have been set, and in the
+ * case of promotion free the entry for the destination cblock.
+ */
+static void __background_work_abort(struct smq_policy *mq,
+				   struct policy_work *work)
+{
+	struct entry *e = get_entry(&mq->cache_alloc,
+				    from_cblock(work->cblock));
+
+	switch (work->op) {
+	case POLICY_PROMOTE:
+		free_entry(&mq->cache_alloc, e);
+		break;
+
+	case POLICY_DEMOTE:
+	case POLICY_WRITEBACK:
+		e->pending_work = false;
+		break;
+	}
+}
+
+static void smq_background_work_abort(struct dm_cache_policy *p,
+				      struct policy_work *work)
+{
+	unsigned long flags;
+	struct smq_policy *mq = to_smq_policy(p);
+
+	spin_lock_irqsave(&mq->lock, flags);
+	__background_work_abort(mq, work);
+	spin_unlock_irqrestore(&mq->lock, flags);
 }
 
 static void __smq_set_clear_dirty(struct smq_policy *mq, dm_oblock_t oblock, bool set)
@@ -1412,54 +1553,7 @@ static int smq_walk_mappings(struct dm_cache_policy *p, policy_walk_fn fn,
 	return r;
 }
 
-static void __remove_mapping(struct smq_policy *mq, dm_oblock_t oblock)
-{
-	struct entry *e;
-
-	e = h_lookup(&mq->table, oblock);
-	BUG_ON(!e);
-
-	del(mq, e);
-	free_entry(&mq->cache_alloc, e);
-}
-
-static void smq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock)
-{
-	struct smq_policy *mq = to_smq_policy(p);
-	unsigned long flags;
-
-	spin_lock_irqsave(&mq->lock, flags);
-	__remove_mapping(mq, oblock);
-	spin_unlock_irqrestore(&mq->lock, flags);
-}
-
-static int __remove_cblock(struct smq_policy *mq, dm_cblock_t cblock)
-{
-	struct entry *e = get_entry(&mq->cache_alloc, from_cblock(cblock));
-
-	if (!e || !e->allocated)
-		return -ENODATA;
-
-	del(mq, e);
-	free_entry(&mq->cache_alloc, e);
-
-	return 0;
-}
-
-static int smq_remove_cblock(struct dm_cache_policy *p, dm_cblock_t cblock)
-{
-	int r;
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
-
-	spin_lock_irqsave(&mq->lock, flags);
-	r = __remove_cblock(mq, cblock);
-	spin_unlock_irqrestore(&mq->lock, flags);
-
-	return r;
-}
-
-
+#if 0
 #define CLEAN_TARGET_CRITICAL 5u /* percent */
 
 static bool clean_target_met(struct smq_policy *mq, bool critical)
@@ -1476,70 +1570,7 @@ static bool clean_target_met(struct smq_policy *mq, bool critical)
 	} else
 		return !q_size(&mq->dirty);
 }
-
-static int __smq_writeback_work(struct smq_policy *mq, dm_oblock_t *oblock,
-				dm_cblock_t *cblock, bool critical_only)
-{
-	struct entry *e = NULL;
-	bool target_met = clean_target_met(mq, critical_only);
-
-	if (critical_only)
-		/*
-		 * Always try and keep the bottom level clean.
-		 */
-		e = pop_old(mq, &mq->dirty, target_met ? 1u : mq->dirty.nr_levels);
-
-	else
-		e = pop_old(mq, &mq->dirty, mq->dirty.nr_levels);
-
-	if (!e)
-		return -ENODATA;
-
-	*oblock = e->oblock;
-	*cblock = infer_cblock(mq, e);
-	e->dirty = false;
-	push_new(mq, e);
-
-	return 0;
-}
-
-static int smq_writeback_work(struct dm_cache_policy *p, dm_oblock_t *oblock,
-			      dm_cblock_t *cblock, bool critical_only)
-{
-	int r;
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
-
-	spin_lock_irqsave(&mq->lock, flags);
-	r = __smq_writeback_work(mq, oblock, cblock, critical_only);
-	spin_unlock_irqrestore(&mq->lock, flags);
-
-	return r;
-}
-
-static void __force_mapping(struct smq_policy *mq,
-			    dm_oblock_t current_oblock, dm_oblock_t new_oblock)
-{
-	struct entry *e = h_lookup(&mq->table, current_oblock);
-
-	if (e) {
-		del(mq, e);
-		e->oblock = new_oblock;
-		e->dirty = true;
-		push(mq, e);
-	}
-}
-
-static void smq_force_mapping(struct dm_cache_policy *p,
-			      dm_oblock_t current_oblock, dm_oblock_t new_oblock)
-{
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
-
-	spin_lock_irqsave(&mq->lock, flags);
-	__force_mapping(mq, current_oblock, new_oblock);
-	spin_unlock_irqrestore(&mq->lock, flags);
-}
+#endif
 
 static dm_cblock_t smq_residency(struct dm_cache_policy *p)
 {
@@ -1611,16 +1642,15 @@ static int mq_emit_config_values(struct dm_cache_policy *p, char *result,
 static void init_policy_functions(struct smq_policy *mq, bool mimic_mq)
 {
 	mq->policy.destroy = smq_destroy;
-	mq->policy.map = smq_map;
 	mq->policy.lookup = smq_lookup;
+	mq->policy.add_mapping = smq_add_mapping;
+	mq->policy.remove_mapping = smq_remove_mapping;
+	mq->policy.background_work = smq_background_work;
+	mq->policy.background_work_abort = smq_background_work_abort;
 	mq->policy.set_dirty = smq_set_dirty;
 	mq->policy.clear_dirty = smq_clear_dirty;
 	mq->policy.load_mapping = smq_load_mapping;
 	mq->policy.walk_mappings = smq_walk_mappings;
-	mq->policy.remove_mapping = smq_remove_mapping;
-	mq->policy.remove_cblock = smq_remove_cblock;
-	mq->policy.writeback_work = smq_writeback_work;
-	mq->policy.force_mapping = smq_force_mapping;
 	mq->policy.residency = smq_residency;
 	mq->policy.tick = smq_tick;
 
@@ -1735,6 +1765,8 @@ static struct dm_cache_policy *__smq_create(dm_cblock_t cache_size,
 
 	mq->next_hotspot_period = jiffies;
 	mq->next_cache_period = jiffies;
+
+	background_work_init(&mq->bg_work);
 
 	return &mq->policy;
 

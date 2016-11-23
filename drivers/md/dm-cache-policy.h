@@ -63,31 +63,18 @@
  * bounded, preallocated memory.
  */
 enum policy_operation {
-	POLICY_HIT,
-	POLICY_MISS,
-	POLICY_NEW,
-	POLICY_REPLACE
-};
-
-/*
- * When issuing a POLICY_REPLACE the policy needs to make a callback to
- * lock the block being demoted.  This doesn't need to occur during a
- * writeback operation since the block remains in the cache.
- */
-struct policy_locker;
-typedef int (*policy_lock_fn)(struct policy_locker *l, dm_oblock_t oblock);
-
-struct policy_locker {
-	policy_lock_fn fn;
+	POLICY_PROMOTE,
+	POLICY_DEMOTE,
+	POLICY_WRITEBACK
 };
 
 /*
  * This is the instruction passed back to the core target.
  */
-struct policy_result {
+struct policy_work {
 	enum policy_operation op;
-	dm_oblock_t old_oblock;	/* POLICY_REPLACE */
-	dm_cblock_t cblock;	/* POLICY_HIT, POLICY_NEW, POLICY_REPLACE */
+	dm_oblock_t oblock;
+	dm_cblock_t cblock;
 };
 
 typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
@@ -99,47 +86,13 @@ typedef int (*policy_walk_fn)(void *context, dm_cblock_t cblock,
  * (ie. use container_of()).
  */
 struct dm_cache_policy {
-
-	/*
-	 * FIXME: make it clear which methods are optional, and which may
-	 * block.
-	 */
-
 	/*
 	 * Destroys this object.
 	 */
 	void (*destroy)(struct dm_cache_policy *p);
 
 	/*
-	 * See large comment above.
-	 *
-	 * oblock      - the origin block we're interested in.
-	 *
-	 * can_block - indicates whether the current thread is allowed to
-	 *             block.  -EWOULDBLOCK returned if it can't and would.
-	 *
-	 * can_migrate - gives permission for POLICY_NEW or POLICY_REPLACE
-	 *               instructions.  If denied and the policy would have
-	 *               returned one of these instructions it should
-	 *               return -EWOULDBLOCK.
-	 *
-	 * discarded_oblock - indicates whether the whole origin block is
-	 *               in a discarded state (FIXME: better to tell the
-	 *               policy about this sooner, so it can recycle that
-	 *               cache block if it wants.)
-	 * bio         - the bio that triggered this call.
-	 * result      - gets filled in with the instruction.
-	 *
-	 * May only return 0, or -EWOULDBLOCK (if !can_migrate)
-	 */
-	int (*map)(struct dm_cache_policy *p, dm_oblock_t oblock,
-		   bool can_block, bool can_migrate, bool discarded_oblock,
-		   struct bio *bio, struct policy_locker *locker,
-		   struct policy_result *result);
-
-	/*
-	 * Sometimes we want to see if a block is in the cache, without
-	 * triggering any update of stats.  (ie. it's not a real hit).
+	 * Find the location of a block.
 	 *
 	 * Must not block.
 	 *
@@ -147,6 +100,24 @@ struct dm_cache_policy {
 	 * (-EWOULDBLOCK would be typical).
 	 */
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
+
+	int (*add_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
+	int (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
+
+	/*
+	 * Checks to see if there's any background work that needs doing.
+	 */
+	bool (*has_background_work)(struct dm_cache_policy *p);
+
+	/*
+	 * Retrieves background work.  Returns -ENODATA when there's no background work.
+	 */
+	int (*get_background_work)(struct dm_cache_policy *p, struct policy_work *result);
+
+	/*
+	 * In case the target decides not to perform the work.
+	 */
+	void (*background_work_abort)(struct dm_cache_policy *p, struct policy_work *work);
 
 	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
@@ -160,36 +131,6 @@ struct dm_cache_policy {
 
 	int (*walk_mappings)(struct dm_cache_policy *p, policy_walk_fn fn,
 			     void *context);
-
-	/*
-	 * Override functions used on the error paths of the core target.
-	 * They must succeed.
-	 */
-	void (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock);
-	void (*force_mapping)(struct dm_cache_policy *p, dm_oblock_t current_oblock,
-			      dm_oblock_t new_oblock);
-
-	/*
-	 * This is called via the invalidate_cblocks message.  It is
-	 * possible the particular cblock has already been removed due to a
-	 * write io in passthrough mode.  In which case this should return
-	 * -ENODATA.
-	 */
-	int (*remove_cblock)(struct dm_cache_policy *p, dm_cblock_t cblock);
-
-	/*
-	 * Provide a dirty block to be written back by the core target.  If
-	 * critical_only is set then the policy should only provide work if
-	 * it urgently needs it.
-	 *
-	 * Returns:
-	 *
-	 * 0 and @cblock,@oblock: block to write back provided
-	 *
-	 * -ENODATA: no dirty blocks available
-	 */
-	int (*writeback_work)(struct dm_cache_policy *p, dm_oblock_t *oblock, dm_cblock_t *cblock,
-			      bool critical_only);
 
 	/*
 	 * How full is the cache?
