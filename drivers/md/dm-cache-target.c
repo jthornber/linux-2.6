@@ -233,7 +233,8 @@ struct cache {
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
-	struct work_struct worker;
+	struct work_struct deferred_bio_worker;
+	struct work_struct migration_worker;
 	struct delayed_work waker;
 	struct dm_bio_prison *prison;
 
@@ -288,7 +289,7 @@ struct dm_cache_migration {
 	struct work_struct ws;
 	struct cache *cache;
 
-	struct policy_work op;
+	struct policy_work *op;
 	struct dm_bio_prison_cell *cell;
 
 	bool err;
@@ -307,9 +308,14 @@ struct prealloc {
 
 static enum cache_metadata_mode get_cache_mode(struct cache *cache);
 
-static void wake_worker(struct cache *cache)
+static void wake_deferred_bio_worker(struct cache *cache)
 {
-	queue_work(cache->wq, &cache->worker);
+	queue_work(cache->wq, &cache->deferred_bio_worker);
+}
+
+static void wake_migration_worker(struct cache *cache)
+{
+	queue_work(cache->wq, &cache->migration_worker);
 }
 
 /*----------------------------------------------------------------*/
@@ -346,6 +352,9 @@ static void free_migration(struct dm_cache_migration *mg)
 
 	if (atomic_dec_and_test(&cache->nr_allocated_migrations))
 		wake_up(&cache->migration_wait);
+
+	// FIXME: remove
+	memset(mg, 0, sizeof(*mg));
 
 	mempool_free(mg, cache->migration_pool);
 }
@@ -908,10 +917,16 @@ static void accounted_request(struct cache *cache, struct bio *bio)
 
 static void issue(struct cache *cache, struct bio *bio)
 {
+#if 0
+	accounted_request(cache, bio);
+#else
+	// FIXME: do any bios trigger commits now?  We don't build up a
+	// position in cache like we do in thin
 	if (!bio_triggers_commit(cache, bio))
 		accounted_request(cache, bio);
 	else
 		issue_after_commit(&cache->committer, bio);
+#endif
 }
 
 static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
@@ -922,7 +937,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 	bio_list_add(&cache->deferred_writethrough_bios, bio);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(cache);
+	wake_deferred_bio_worker(cache);
 }
 
 static void writethrough_endio(struct bio *bio)
@@ -1103,7 +1118,7 @@ static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell)
 	__cell_defer(cache, cell);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(cache);
+	wake_deferred_bio_worker(cache);
 }
 
 static void bio_complete(struct bio *bio, int err)
@@ -1136,7 +1151,7 @@ static void free_io_migration(struct dm_cache_migration *mg)
 
 	dec_io_migrations(cache);
 	free_migration(mg);
-	wake_worker(cache);
+	wake_migration_worker(cache);
 }
 
 static void calc_discard_block_range(struct cache *cache, struct bio *bio,
@@ -1266,6 +1281,9 @@ static void check_for_quiesced_migrations(struct cache *cache,
 
 /*----------------------------------------------------------------*/
 
+// FIXME: reorder?
+static void defer_bios(struct cache *cache, struct bio_list *bios);
+
 static void quiesce(struct dm_cache_migration *mg,
 		    void (*continuation)(struct work_struct *))
 {
@@ -1289,7 +1307,7 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	int r;
 	struct dm_io_region o_region, c_region;
 	struct cache *cache = mg->cache;
-	sector_t cblock = from_cblock(mg->op.cblock);
+	sector_t cblock = from_cblock(mg->op->cblock);
 
 	o_region.bdev = cache->origin_dev->bdev;
 	o_region.count = cache->sectors_per_block;
@@ -1299,10 +1317,10 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	c_region.count = cache->sectors_per_block;
 
 	if (promote) {
-		o_region.sector = from_oblock(mg->op.oblock) * cache->sectors_per_block;
+		o_region.sector = from_oblock(mg->op->oblock) * cache->sectors_per_block;
 		r = dm_kcopyd_copy(cache->copier, &o_region, 1, &c_region, 0, copy_complete, &mg->ws);
 	} else {
-		o_region.sector = from_oblock(mg->op.oblock) * cache->sectors_per_block;
+		o_region.sector = from_oblock(mg->op->oblock) * cache->sectors_per_block;
 		r = dm_kcopyd_copy(cache->copier, &c_region, 1, &o_region, 0, copy_complete, &mg->ws);
 	}
 
@@ -1327,26 +1345,21 @@ static int copy(struct dm_cache_migration *mg, bool promote,
  * 6) update metadata and commit
  * 7) unlock
  */
-static void migration_complete(struct dm_cache_migration *mg)
+static void migration_complete(struct dm_cache_migration *mg, bool success)
 {
 	unsigned long flags;
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
 
+	policy_complete_background_work(mg->cache->policy, mg->op, success);
+
 	bio_list_init(&bios);
-	dm_cell_unlock(cache->prison, mg->cell, &bios);
-	free_prison_cell(cache, mg->cell);
+	if (mg->cell) {
+		dm_cell_unlock(cache->prison, mg->cell, &bios);
+		free_prison_cell(cache, mg->cell);
+	}
 	free_migration(mg);
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_merge(&cache->deferred_bios, &bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
-}
-
-static void migration_abort(struct dm_cache_migration *mg)
-{
-	policy_background_work_abort(mg->cache->policy, &mg->op);
-	migration_complete(mg);
+	defer_bios(cache, &bios);
 }
 
 static void migration_copy(struct work_struct *ws);
@@ -1354,7 +1367,7 @@ static void migration_upgrade_lock(struct work_struct *ws);
 static void migration_commit(struct work_struct *ws);
 static void migration_unlock(struct work_struct *ws);
 
-static void migrate_read_lock(struct cache *cache,
+static int migrate_read_lock(struct cache *cache,
 			      struct policy_work *op)
 {
 	int r;
@@ -1363,39 +1376,48 @@ static void migrate_read_lock(struct cache *cache,
 	struct dm_bio_prison_cell *prealloc;
 
 	if (!mg) {
-		policy_background_work_abort(cache->policy, op);
-		return;
+		policy_complete_background_work(cache->policy, op, false);
+		return -ENOMEM;
 	}
 
 	memset(mg, 0, sizeof(*mg));
 
 	prealloc = alloc_prison_cell(cache);
+	if (!prealloc) {
+		pr_alert("alloc_cell failed\n");
+		return -ENOMEM;
+	}
 
 	mg->cache = cache;
-	memcpy(&mg->op, op, sizeof(*op));
+	mg->op = op;
 	build_key(op->oblock, oblock_succ(op->oblock), &key);
 	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL, prealloc, &mg->cell);
 	if (r < 0) {
 		free_prison_cell(cache, prealloc);
-		migration_abort(mg);
+		migration_complete(mg, false);
+		return r;
 
 	} else {
-		if (mg->cell != prealloc)
+		if (mg->cell != prealloc) {
 			free_prison_cell(cache, prealloc);
+		}
 
 		quiesce(mg, migration_copy);
 	}
+
+	return 0;
 }
 
 static void migration_copy(struct work_struct *ws)
 {
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
-	int r = copy(mg, mg->op.op == POLICY_PROMOTE, migration_upgrade_lock);
+	int r;
 
+	r = copy(mg, mg->op->op == POLICY_PROMOTE, migration_upgrade_lock);
 	if (r) {
 		DMERR("migration copy failed\n");
 		mg->err = true;	// FIXME: do we still need the err field?
-		migration_abort(mg);
+		migration_complete(mg, false);
 	}
 }
 
@@ -1408,64 +1430,59 @@ static void migration_upgrade_lock(struct work_struct *ws)
 	 * Did the copy succeed?
 	 */
 	if (mg->err)
-		migration_abort(mg);
+		migration_complete(mg, false);
 
-	r = dm_cell_lock_promote(mg->cache->prison, mg->cell, WRITE_LOCK_LEVEL);
-	if (r < 0)
-		migration_abort(mg);
+	else {
+		r = dm_cell_lock_promote(mg->cache->prison, mg->cell, WRITE_LOCK_LEVEL);
+		if (r < 0) {
+			pr_alert("promote failed\n");
+			migration_complete(mg, false);
 
-	else if (r)
-		quiesce(mg, migration_commit);
+		} else if (r)
+			quiesce(mg, migration_commit);
 
-	else
-		migration_commit(ws);
+		else
+			migration_commit(ws);
+	}
+}
+
+static void migration_success(struct work_struct *ws)
+{
+	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
+	migration_complete(mg, !mg->err);
 }
 
 static void migration_commit(struct work_struct *ws)
 {
 	int r;
-	bool need_commit = false;
+	bool need_commit;
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
 	struct cache *cache = mg->cache;
 
-	switch (mg->op.op) {
+	switch (mg->op->op == POLICY_WRITEBACK) {
 	case POLICY_PROMOTE:
-		r = policy_add_mapping(cache->policy, mg->op.oblock, mg->op.cblock);
-		if (r) {
-			DMERR_LIMIT("%s: updating policy failed",
-				    cache_device_name(cache));
-
-			migration_abort(mg);
-		}
-
-		r = dm_cache_insert_mapping(cache->cmd, mg->op.cblock, mg->op.oblock);
+		r = dm_cache_insert_mapping(cache->cmd, mg->op->cblock, mg->op->oblock);
 		if (r) {
 			DMERR_LIMIT("%s: migration failed; couldn't insert mapping",
 				    cache_device_name(cache));
 			metadata_operation_failed(cache, "dm_cache_insert_mapping", r);
 
-			migration_abort(mg);
+			migration_complete(mg, false);
+			return;
 		}
 
 		need_commit = true;
 		break;
 
 	case POLICY_DEMOTE:
-		r = policy_remove_mapping(cache->policy, mg->op.oblock, mg->op.cblock);
-		if (r) {
-			DMERR_LIMIT("%s: updating policy failed",
-				    cache_device_name(cache));
-
-			migration_abort(mg);
-		}
-
-		r = dm_cache_remove_mapping(cache->cmd, mg->op.cblock);
+		r = dm_cache_remove_mapping(cache->cmd, mg->op->cblock);
 		if (r) {
 			DMERR_LIMIT("%s: migration failed; couldn't update on disk metadata",
 				    cache_device_name(cache));
 			metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
 
-			migration_abort(mg);
+			migration_complete(mg, false);
+			return;
 		}
 
 		need_commit = true;
@@ -1473,20 +1490,18 @@ static void migration_commit(struct work_struct *ws)
 
 	case POLICY_WRITEBACK:
 		/* no metadata update needed */
+		need_commit = false;
 		break;
 	}
 
-	clear_dirty(cache, mg->op.oblock, mg->op.cblock);
+	clear_dirty(cache, mg->op->oblock, mg->op->cblock);
 
 	if (need_commit) {
 		//commit(mg, migration_unlock);
 	}
-}
 
-static void migration_unlock(struct work_struct *ws)
-{
-	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
-	migration_complete(mg);
+	// FIXME: remove
+	migration_success(ws);
 }
 
 /*----------------------------------------------------------------
@@ -1500,7 +1515,18 @@ static void defer_bio(struct cache *cache, struct bio *bio)
 	bio_list_add(&cache->deferred_bios, bio);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_worker(cache);
+	wake_deferred_bio_worker(cache);
+}
+
+static void defer_bios(struct cache *cache, struct bio_list *bios)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&cache->deferred_bios, bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_deferred_bio_worker(cache);
 }
 
 static void process_flush_bio(struct cache *cache, struct bio *bio)
@@ -1592,10 +1618,7 @@ static void remap_cell_to_origin_clear_discard(struct cache *cache,
 	bio_list_init(&detail.unhandled_bios);
 	detail.any_writes = false;
 
-	spin_lock_irqsave(&cache->lock, flags);
-	//dm_cell_visit_unlock(cache->prison, inc_fn, &detail, cell);
-	bio_list_merge(&cache->deferred_bios, &detail.unhandled_bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
+        defer_bios(cache, &detail.unhandled_bios);
 
 	remap_to_origin(cache, cell_holder(cell));
 	if (issue_holder)
@@ -1626,10 +1649,7 @@ static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_
 	bio_list_init(&detail.unhandled_bios);
 	detail.any_writes = false;
 
-	spin_lock_irqsave(&cache->lock, flags);
-	//dm_cell_visit_put(cache->prison, inc_fn, &detail, cell);
-	bio_list_merge(&cache->deferred_bios, &detail.unhandled_bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
+        defer_bios(cache, &detail.unhandled_bios);
 
 	remap_to_cache(cache, cell_holder(cell), cblock);
 	if (issue_holder)
@@ -1698,7 +1718,6 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 			return DM_MAPIO_SUBMITTED;
 		}
 	} else {
-		pr_alert("hit\n");
 		// FIXME: put passthrough back in
 
 		/*
@@ -1753,7 +1772,6 @@ static int commit_if_needed(struct cache *cache)
 	return r;
 }
 
-
 static void process_deferred_bios(struct cache *cache)
 {
 	bool prealloc_used = false;
@@ -1781,17 +1799,19 @@ static void process_deferred_bios(struct cache *cache)
 			spin_lock_irqsave(&cache->lock, flags);
 			bio_list_merge(&cache->deferred_bios, &bios);
 			spin_unlock_irqrestore(&cache->lock, flags);
+
+			wake_deferred_bio_worker(cache); /* FIXME: sleep? */
 			break;
 		}
 
 		bio = bio_list_pop(&bios);
 
-		if (bio->bi_opf & REQ_PREFLUSH)
+		if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))
 			process_flush_bio(cache, bio);
 
 		else if (bio_op(bio) == REQ_OP_DISCARD)
-			;	/* FIXME: finish */
-			/* do nothing */
+			/* FIXME: finish */
+			bio_endio(bio);
 
 		else
 			process_bio(cache, bio);
@@ -1799,6 +1819,12 @@ static void process_deferred_bios(struct cache *cache)
 
 	if (prealloc_used)
 		prealloc_free_structs(cache, &structs);
+}
+
+static void do_deferred_bios(struct work_struct *ws)
+{
+	struct cache *cache = container_of(ws, struct cache, deferred_bio_worker);
+	process_deferred_bios(cache);
 }
 
 #if 0
@@ -1979,29 +2005,33 @@ static void requeue_deferred_bios(struct cache *cache)
 static void do_waker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(to_delayed_work(ws), struct cache, waker);
+
+	pr_alert(">>> do_waker\n");
 	policy_tick(cache->policy, true);
-	wake_worker(cache);
+	wake_deferred_bio_worker(cache);
+	wake_migration_worker(cache);
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
+	pr_alert("<<< do_waker\n");
 }
 
 static void do_migration(struct work_struct *ws)
 {
 	int r;
-	struct policy_work op;
-	struct cache *cache = container_of(ws, struct cache, worker);
+	struct policy_work *op;
+	struct cache *cache = container_of(ws, struct cache, migration_worker);
 
 	do {
-		r = policy_background_work(cache->policy, &op);
+		r = policy_get_background_work(cache->policy, &op);
 		if (r == -ENODATA)
 			break;
 
-		else if (r) {
+		if (r) {
 			DMERR_LIMIT("%s: policy_background_work failed",
 				    cache_device_name(cache));
 			break;
 		}
 
-		r = migrate_read_lock(cache, &op);
+		r = migrate_read_lock(cache, op);
 	} while (!r);
 }
 
@@ -2621,7 +2651,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		*error = "could not create workqueue for metadata object";
 		goto bad;
 	}
-	INIT_WORK(&cache->worker, do_migration);
+	INIT_WORK(&cache->deferred_bio_worker, do_deferred_bios);
+	INIT_WORK(&cache->migration_worker, do_migration);
 	INIT_DELAYED_WORK(&cache->waker, do_waker);
 	//cache->last_commit_jiffies = jiffies;
 
@@ -2882,23 +2913,15 @@ static void cache_postsuspend(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
 
-	pr_alert("postsuspend 1\n");
 	start_quiescing(cache);
 //	wait_for_migrations(cache);
-	pr_alert("postsuspend 2\n");
 	stop_worker(cache);
-	pr_alert("postsuspend 3\n");
 	requeue_deferred_bios(cache);
 	//requeue_deferred_cells(cache);
-	pr_alert("postsuspend 4\n");
 	stop_quiescing(cache);
 
-	pr_alert("postsuspend 5\n");
 	if (get_cache_mode(cache) == CM_WRITE)
 		(void) sync_metadata(cache);
-
-	pr_alert("postsuspend 6\n");
-
 }
 
 static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
@@ -3325,7 +3348,7 @@ static int request_invalidation(struct cache *cache, struct cblock_range *range)
 	spin_lock(&cache->invalidation_lock);
 	list_add(&req.list, &cache->invalidation_requests);
 	spin_unlock(&cache->invalidation_lock);
-	wake_worker(cache);
+	wake_deferred_bio_worker(cache);
 
 	wait_event(req.result_wait, atomic_read(&req.complete));
 	return req.err;

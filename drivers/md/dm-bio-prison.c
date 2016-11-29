@@ -191,10 +191,11 @@ static bool __put(struct dm_bio_prison *prison,
 	cell->shared_count--;
 
 	if (!cell->shared_count) {
-		if (cell->exclusive_lock && cell->quiesce_continuation) {
-			queue_work(prison->wq, cell->quiesce_continuation);
-			cell->quiesce_continuation = NULL;
-
+		if (cell->exclusive_lock){
+			if (cell->quiesce_continuation) {
+				queue_work(prison->wq, cell->quiesce_continuation);
+				cell->quiesce_continuation = NULL;
+			}
 		} else {
 			rb_erase(&cell->node, &prison->cells);
 			return true;
@@ -240,7 +241,6 @@ static int __lock(struct dm_bio_prison *prison,
 
 	} else {
 		cell = cell_prealloc;
-		__setup_new_cell(key, cell);
 		cell->shared_count = 0;
 		cell->exclusive_lock = true;
 		cell->exclusive_level = lock_level;
@@ -319,7 +319,15 @@ static void __unlock(struct dm_bio_prison *prison,
 		     struct dm_bio_prison_cell *cell,
 		     struct bio_list *bios)
 {
+	BUG_ON(!cell->exclusive_lock);
+	BUG_ON(cell->shared_count);
+
 	bio_list_merge(bios, &cell->bios);
+
+	if (cell->shared_count)
+		cell->exclusive_lock = 0;
+	else
+		rb_erase(&cell->node, &prison->cells);
 }
 
 void dm_cell_unlock(struct dm_bio_prison *prison,
@@ -565,7 +573,6 @@ struct wrapped_semaphore {
 static void dec_sem(struct work_struct *ws)
 {
 	struct wrapped_semaphore *sem = container_of(ws, struct wrapped_semaphore, ws);
-	pr_alert("up_read\n");
 	up_read(&sem->sem);
 }
 
@@ -579,7 +586,6 @@ static void drop_cell(struct work_struct *ws)
 {
 	struct delayed_work *dw = to_delayed_work(ws);
 	struct wrapped_cell *wcell = container_of(dw, struct wrapped_cell, ws);
-	pr_alert("putting cell\n");
 	dm_cell_put(wcell->prison, wcell->cell);
 }
 
@@ -684,7 +690,7 @@ static int __init dm_bio_prison_init(void)
 	if (!_cell_cache)
 		return -ENOMEM;
 
-	dm_bio_prison_unit_test();
+//	dm_bio_prison_unit_test();
 
 	return 0;
 }

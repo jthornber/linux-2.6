@@ -31,14 +31,22 @@ static inline int policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t o
 /*
  * Little inline functions that simplify calling the policy methods.
  */
-static inline int policy_background_work(struct dm_cache_policy *p, struct policy_work *result)
+static inline bool policy_has_background_work(struct dm_cache_policy *p)
 {
-	return p->background_work(p, result);
+	return p->has_background_work(p);
 }
 
-static inline void policy_background_work_abort(struct dm_cache_policy *p, struct policy_work *work)
+static inline int policy_get_background_work(struct dm_cache_policy *p,
+					     struct policy_work **result)
 {
-	return p->background_work_abort(p, work);
+	return p->get_background_work(p, result);
+}
+
+static inline void policy_complete_background_work(struct dm_cache_policy *p,
+						   struct policy_work *work,
+						   bool success)
+{
+	return p->complete_background_work(p, work, success);
 }
 
 static inline void policy_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)

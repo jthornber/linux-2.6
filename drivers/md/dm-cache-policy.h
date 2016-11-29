@@ -112,12 +112,15 @@ struct dm_cache_policy {
 	/*
 	 * Retrieves background work.  Returns -ENODATA when there's no background work.
 	 */
-	int (*get_background_work)(struct dm_cache_policy *p, struct policy_work *result);
+	int (*get_background_work)(struct dm_cache_policy *p, struct policy_work **result);
 
 	/*
-	 * In case the target decides not to perform the work.
+	 * You must pass in the same work pointer that you were given, not
+	 * a copy.
 	 */
-	void (*background_work_abort)(struct dm_cache_policy *p, struct policy_work *work);
+	void (*complete_background_work)(struct dm_cache_policy *p,
+					 struct policy_work *work,
+					 bool success);
 
 	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
 	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
