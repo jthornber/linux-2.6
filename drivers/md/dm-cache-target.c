@@ -290,6 +290,7 @@ struct dm_cache_migration {
 	struct cache *cache;
 
 	struct policy_work *op;
+	struct bio *overwrite_bio;
 	struct dm_bio_prison_cell *cell;
 
 	bool err;
@@ -1152,97 +1153,6 @@ static void calc_discard_block_range(struct cache *cache, struct bio *bio,
 		*e = to_dblock(block_div(se, cache->discard_block_size));
 }
 
-#if 0
-static void issue_copy_or_discard(struct dm_cache_migration *mg)
-{
-	bool avoid;
-	struct cache *cache = mg->cache;
-
-	if (mg->discard) {
-		issue_discard(mg);
-		return;
-	}
-
-	if (mg->writeback || mg->demote)
-		avoid = !is_dirty(cache, mg->cblock) ||
-			is_discarded_oblock(cache, mg->old_oblock);
-	else {
-		struct bio *bio = cell_holder(mg->new_ocell);
-
-		avoid = is_discarded_oblock(cache, mg->new_oblock);
-
-		if (writeback_mode(&cache->features) &&
-		    !avoid && bio_writes_complete_block(cache, bio)) {
-			issue_overwrite(mg, bio);
-			return;
-		}
-	}
-
-	avoid ? avoid_copy(mg) : issue_copy(mg);
-}
-
-static void complete_migration(struct dm_cache_migration *mg)
-{
-	if (mg->err)
-		migration_failure(mg);
-	else
-		migration_success_pre_commit(mg);
-}
-
-static void process_migrations(struct cache *cache, struct list_head *head,
-			       void (*fn)(struct dm_cache_migration *))
-{
-	unsigned long flags;
-	struct list_head list;
-	struct dm_cache_migration *mg, *tmp;
-
-	INIT_LIST_HEAD(&list);
-	spin_lock_irqsave(&cache->lock, flags);
-	list_splice_init(head, &list);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	list_for_each_entry_safe(mg, tmp, &list, list)
-		fn(mg);
-}
-
-static void __queue_quiesced_migration(struct dm_cache_migration *mg)
-{
-	list_add_tail(&mg->list, &mg->cache->quiesced_migrations);
-}
-
-static void queue_quiesced_migration(struct dm_cache_migration *mg)
-{
-	unsigned long flags;
-	struct cache *cache = mg->cache;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	__queue_quiesced_migration(mg);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
-}
-
-static void queue_quiesced_migrations(struct cache *cache, struct list_head *work)
-{
-	unsigned long flags;
-	struct dm_cache_migration *mg, *tmp;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	list_for_each_entry_safe(mg, tmp, work, list)
-		__queue_quiesced_migration(mg);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
-}
-
-static void check_for_quiesced_migrations(struct cache *cache,
-					  struct per_bio_data *pb)
-{
-	if (pb->cell)
-		dm_cell_put(cache->prison, pb->cell);
-}
-#endif
-
 /*----------------------------------------------------------------*/
 
 // FIXME: find a better place for this
@@ -1318,24 +1228,64 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	return r;
 }
 
+static void overwrite_endio(struct bio *bio)
+{
+	struct dm_cache_migration *mg = bio->bi_private;
+	struct cache *cache = mg->cache;
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	dm_unhook_bio(&pb->hook_info, bio);
+
+	if (bio->bi_error)
+		mg->err = true;
+
+	// FIXME: don't forget to complete the bio after committing
+	queue_work(mg->cache->wq, &mg->ws);
+}
+
+static void overwrite(struct dm_cache_migration *mg,
+		      void (*continuation)(struct work_struct *))
+{
+	struct bio *bio = mg->overwrite_bio;
+	size_t pb_data_size = get_per_bio_data_size(mg->cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	dm_hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
+
+	/*
+	 * The overwrite bio is part of the copy operation, as such it does
+	 * not set/clear discard or dirty flags.
+	 */
+	if (mg->op->op == POLICY_PROMOTE)
+		remap_to_cache(mg->cache, bio, mg->op->cblock);
+	else
+		remap_to_origin(mg->cache, bio);
+
+	INIT_WORK(&mg->ws, continuation);
+	accounted_request(mg->cache, bio);
+}
+
 /*
  * Migration steps:
  *
  * 1) read lock
  * 2) quiesce
- * 3) copy
+ * 3) copy or issue overwrite bio
  * 4) upgrade to write lock
  * 5) quiesce
  * 6) update metadata and commit
  * 7) unlock
  */
-static void migration_complete(struct dm_cache_migration *mg, bool success)
+static void mg_complete(struct dm_cache_migration *mg, bool success)
 {
-	unsigned long flags;
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
 
 	policy_complete_background_work(cache->policy, mg->op, success);
+
+	if (mg->overwrite_bio)
+		bio_complete(mg->overwrite_bio, mg->err ? -EIO : 0);
 
 	if (success)
 		update_stats(&cache->stats, mg->op->op);
@@ -1349,18 +1299,46 @@ static void migration_complete(struct dm_cache_migration *mg, bool success)
 	defer_bios(cache, &bios);
 }
 
-static void migration_copy(struct work_struct *ws);
-static void migration_upgrade_lock(struct work_struct *ws);
-static void migration_commit(struct work_struct *ws);
-static void migration_unlock(struct work_struct *ws);
+static void mg_copy(struct work_struct *ws);
+static void mg_upgrade_lock(struct work_struct *ws);
+static void mg_commit(struct work_struct *ws);
+static void mg_unlock(struct work_struct *ws);
 
-static int migrate_read_lock(struct cache *cache,
-			      struct policy_work *op)
+static int mg_read_lock(struct dm_cache_migration *mg)
 {
 	int r;
 	struct dm_cell_key key;
-	struct dm_cache_migration *mg = alloc_migration(cache);
+	struct cache *cache = mg->cache;
 	struct dm_bio_prison_cell *prealloc;
+
+	prealloc = alloc_prison_cell(cache);
+	if (!prealloc) {
+		pr_alert("alloc_cell failed\n");
+		return -ENOMEM;
+	}
+
+	build_key(mg->op->oblock, oblock_succ(mg->op->oblock), &key);
+	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL, prealloc, &mg->cell);
+	if (r < 0) {
+		free_prison_cell(cache, prealloc);
+		mg_complete(mg, false);
+		return r;
+	}
+
+	if (mg->cell != prealloc)
+		free_prison_cell(cache, prealloc);
+
+	if (r == 0)
+		mg_copy(&mg->ws);
+	else
+		quiesce(mg, mg_copy);
+
+	return 0;
+}
+
+static int mg_start(struct cache *cache, struct policy_work *op)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
 
 	if (!mg) {
 		policy_complete_background_work(cache->policy, op, false);
@@ -1369,61 +1347,60 @@ static int migrate_read_lock(struct cache *cache,
 
 	memset(mg, 0, sizeof(*mg));
 
-	prealloc = alloc_prison_cell(cache);
-	if (!prealloc) {
-		pr_alert("alloc_cell failed\n");
+	mg->cache = cache;
+	mg->op = op;
+	mg->overwrite_bio = NULL;
+
+	return mg_read_lock(mg);
+}
+
+static int mg_start_overwrite(struct cache *cache, struct policy_work *op, struct bio *bio)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	if (!mg) {
+		policy_complete_background_work(cache->policy, op, false);
 		return -ENOMEM;
 	}
 
+	memset(mg, 0, sizeof(*mg));
+
 	mg->cache = cache;
 	mg->op = op;
-	build_key(op->oblock, oblock_succ(op->oblock), &key);
-	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL, prealloc, &mg->cell);
-	if (r < 0) {
-		free_prison_cell(cache, prealloc);
-		migration_complete(mg, false);
-		return r;
+	mg->overwrite_bio = bio;
 
-	} else {
-		if (mg->cell != prealloc) {
-			free_prison_cell(cache, prealloc);
-		}
+	/*
+	 * We have to drop the shared lock.
+	 */
+	if (pb->cell && dm_cell_put(cache->prison, pb->cell))
+		free_prison_cell(cache, pb->cell);
+	pb->cell = NULL;
 
-		quiesce(mg, migration_copy);
-	}
+	return mg_read_lock(mg);
 
-	return 0;
 }
 
-// FIXME: The 'avoid' optimisation isn't going to work well wrt discarded
-// blocks, because:
-//  - a read to a discarded block is unlikely
-//  - a write to a dirty block will have cleared the discarded flag before
-//    the background migration kicks in.
-static void migration_copy(struct work_struct *ws)
+static void mg_copy(struct work_struct *ws)
 {
 	int r;
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
-	bool avoid = is_discarded_oblock(mg->cache, mg->op->oblock);
 
-	if (mg->op->op != POLICY_PROMOTE)
-		avoid = avoid || !is_dirty(mg->cache, mg->op->cblock);
+	if (mg->overwrite_bio)
+		overwrite(mg, mg_upgrade_lock);
 
-	if (avoid) {
-		pr_alert("avoiding copy\n");
-		migration_upgrade_lock(ws);
-
-	} else {
-		r = copy(mg, mg->op->op == POLICY_PROMOTE, migration_upgrade_lock);
+	else {
+		r = copy(mg, mg->op->op == POLICY_PROMOTE, mg_upgrade_lock);
 		if (r) {
 			DMERR("migration copy failed\n");
 			mg->err = true;	// FIXME: do we still need the err field?
-			migration_complete(mg, false);
+			mg_complete(mg, false);
 		}
 	}
 }
 
-static void migration_upgrade_lock(struct work_struct *ws)
+static void mg_upgrade_lock(struct work_struct *ws)
 {
 	int r;
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
@@ -1432,29 +1409,29 @@ static void migration_upgrade_lock(struct work_struct *ws)
 	 * Did the copy succeed?
 	 */
 	if (mg->err)
-		migration_complete(mg, false);
+		mg_complete(mg, false);
 
 	else {
 		r = dm_cell_lock_promote(mg->cache->prison, mg->cell, WRITE_LOCK_LEVEL);
 		if (r < 0) {
 			pr_alert("promote failed\n");
-			migration_complete(mg, false);
+			mg_complete(mg, false);
 
 		} else if (r)
-			quiesce(mg, migration_commit);
+			quiesce(mg, mg_commit);
 
 		else
-			migration_commit(ws);
+			mg_commit(ws);
 	}
 }
 
-static void migration_success(struct work_struct *ws)
+static void mg_success(struct work_struct *ws)
 {
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
-	migration_complete(mg, !mg->err);
+	mg_complete(mg, !mg->err);
 }
 
-static void migration_commit(struct work_struct *ws)
+static void mg_commit(struct work_struct *ws)
 {
 	int r;
 	bool need_commit;
@@ -1469,7 +1446,7 @@ static void migration_commit(struct work_struct *ws)
 				    cache_device_name(cache));
 			metadata_operation_failed(cache, "dm_cache_insert_mapping", r);
 
-			migration_complete(mg, false);
+			mg_complete(mg, false);
 			return;
 		}
 
@@ -1483,7 +1460,7 @@ static void migration_commit(struct work_struct *ws)
 				    cache_device_name(cache));
 			metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
 
-			migration_complete(mg, false);
+			mg_complete(mg, false);
 			return;
 		}
 
@@ -1503,7 +1480,7 @@ static void migration_commit(struct work_struct *ws)
 	}
 
 	// FIXME: remove
-	migration_success(ws);
+	mg_success(ws);
 }
 
 /*----------------------------------------------------------------
@@ -1675,6 +1652,18 @@ static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_
 
 /*----------------------------------------------------------------*/
 
+static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
+{
+	return (bio_data_dir(bio) == WRITE) &&
+		(bio->bi_iter.bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
+}
+
+static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
+{
+	return writeback_mode(&cache->features) &&
+		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
+}
+
 static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 {
 	int r;
@@ -1696,11 +1685,27 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	r = policy_lookup(cache->policy, block, &cblock);
-	if (unlikely(r && r != -ENOENT)) {
-		pr_alert("lookup failed: r = %d\n", r);
-		bio_io_error(bio);
-		return DM_MAPIO_SUBMITTED;
+	if (optimisable_bio(cache, bio, block)) {
+		struct policy_work *op = NULL;
+
+		r = policy_lookup_with_work(cache->policy, block, &cblock, &op);
+		if (unlikely(r && r != -ENOENT)) {
+			pr_alert("lookup failed: r = %d\n", r);
+			bio_io_error(bio);
+			return DM_MAPIO_SUBMITTED;
+		}
+
+		if (r == -ENOENT && op) {
+			mg_start_overwrite(cache, op, bio);
+			return DM_MAPIO_SUBMITTED;
+		}
+	} else {
+		r = policy_lookup(cache->policy, block, &cblock);
+		if (unlikely(r && r != -ENOENT)) {
+			pr_alert("lookup failed: r = %d\n", r);
+			bio_io_error(bio);
+			return DM_MAPIO_SUBMITTED;
+		}
 	}
 
 	if (r == -ENOENT) {
@@ -2046,7 +2051,7 @@ static void do_migration(struct work_struct *ws)
 			break;
 		}
 
-		r = migrate_read_lock(cache, op);
+		r = mg_start(cache, op);
 	} while (!r);
 }
 

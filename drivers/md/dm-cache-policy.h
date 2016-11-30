@@ -101,6 +101,16 @@ struct dm_cache_policy {
 	 */
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
 
+	/*
+	 * Sometimes the core target can optimise a migration, eg, the
+	 * block may be discarded, or the bio may coverr an entire block.
+	 * In order to optimise it needs the migration immediately though
+	 * so it knows to do something different with the bio.
+	 */
+	int (*lookup_with_work)(struct dm_cache_policy *p,
+				dm_oblock_t oblock, dm_cblock_t *cblock,
+				struct policy_work **work);
+
 	int (*add_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
 	int (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
 

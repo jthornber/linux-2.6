@@ -803,20 +803,28 @@ static void background_work_init(struct background_work *b)
 }
 
 static int background_work_queue(struct background_work *b,
-				 struct policy_work *work)
+				 struct policy_work *work,
+				 struct policy_work **pwork)
 {
 	int r = 0;
 	struct smq_work *w;
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->lock, flags);
-	if (list_empty(&b->free))
+	if (list_empty(&b->free)) {
+		// FIXME: get these from a mempool
+		pr_alert("out of background work structs\n");
 		r = -ENOMEM;
 
-	else {
+	} else {
 		w = list_first_entry(&b->free, struct smq_work, list);
 		memcpy(&w->work, work, sizeof(*work));
-		list_move(&w->list, &b->queued);
+
+		if (pwork) {
+			*pwork = &w->work;
+			list_move(&w->list, &b->issued);
+		} else
+			list_move(&w->list, &b->queued);
 	}
 	spin_unlock_irqrestore(&b->lock, flags);
 
@@ -871,7 +879,8 @@ static void background_work_complete(struct background_work *b,
 
 // FIXME: make this quicker (hash table?)
 static bool background_promotion_already_present(struct background_work *b,
-						 dm_oblock_t oblock)
+						 dm_oblock_t oblock,
+						 struct policy_work **workp)
 {
 	bool r = true;
 	unsigned long flags;
@@ -879,8 +888,14 @@ static bool background_promotion_already_present(struct background_work *b,
 
 	spin_lock_irqsave(&b->lock, flags);
 	list_for_each_entry (w, &b->queued, list)
-		if (w->work.oblock == oblock)
+		if (w->work.oblock == oblock) {
+			if (workp && w->work.op == POLICY_PROMOTE) {
+				pr_alert("background work already present\n");
+				*workp = &w->work;
+				list_move(&w->list, &b->issued);
+			}
 			goto out;
+		}
 
 	list_for_each_entry (w, &b->issued, list)
 		if (w->work.oblock == oblock)
@@ -1252,7 +1267,7 @@ static void queue_writeback(struct smq_policy *mq)
 		work.op = POLICY_WRITEBACK;
 		work.oblock = e->oblock;
 		work.cblock = infer_cblock(mq, e);
-		background_work_queue(&mq->bg_work, &work);
+		background_work_queue(&mq->bg_work, &work, NULL);
 	}
 }
 
@@ -1271,11 +1286,12 @@ static void queue_demotion(struct smq_policy *mq)
 		work.op = POLICY_DEMOTE;
 		work.oblock = e->oblock;
 		work.cblock = infer_cblock(mq, e);
-		background_work_queue(&mq->bg_work, &work);
+		background_work_queue(&mq->bg_work, &work, NULL);
 	}
 }
 
-static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock)
+static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
+			    struct policy_work **workp)
 {
 	struct entry *e;
 	struct policy_work work;
@@ -1285,7 +1301,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock)
 		return;
 	}
 
-	if (background_promotion_already_present(&mq->bg_work, oblock))
+	if (background_promotion_already_present(&mq->bg_work, oblock, workp))
 		return;
 
 	/*
@@ -1296,7 +1312,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock)
 	work.op = POLICY_PROMOTE;
 	work.oblock = oblock;
 	work.cblock = infer_cblock(mq, e);
-	background_work_queue(&mq->bg_work, &work);
+	background_work_queue(&mq->bg_work, &work, workp);
 }
 
 /*----------------------------------------------------------------*/
@@ -1391,7 +1407,8 @@ static void smq_destroy(struct dm_cache_policy *p)
 
 /*----------------------------------------------------------------*/
 
-static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock)
+static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock,
+		    struct policy_work **work)
 {
 	struct entry *e, *hs_e;
 	enum promote_result pr;
@@ -1411,7 +1428,7 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 
 		pr = should_promote(mq, hs_e);
 		if (pr != PROMOTE_NOT)
-			queue_promotion(mq, oblock);
+			queue_promotion(mq, oblock, work);
 
 		return -ENOENT;
 	}
@@ -1424,7 +1441,22 @@ static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t
 	struct smq_policy *mq = to_smq_policy(p);
 
 	spin_lock_irqsave(&mq->lock, flags);
-	r = __lookup(mq, oblock, cblock);
+	r = __lookup(mq, oblock, cblock, NULL);
+	spin_unlock_irqrestore(&mq->lock, flags);
+
+	return r;
+}
+
+static int smq_lookup_with_work(struct dm_cache_policy *p,
+				dm_oblock_t oblock, dm_cblock_t *cblock,
+				struct policy_work **work)
+{
+	int r;
+	unsigned long flags;
+	struct smq_policy *mq = to_smq_policy(p);
+
+	spin_lock_irqsave(&mq->lock, flags);
+	r = __lookup(mq, oblock, cblock, work);
 	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;
@@ -1715,6 +1747,7 @@ static void init_policy_functions(struct smq_policy *mq, bool mimic_mq)
 {
 	mq->policy.destroy = smq_destroy;
 	mq->policy.lookup = smq_lookup;
+	mq->policy.lookup_with_work = smq_lookup_with_work;
 	mq->policy.add_mapping = smq_add_mapping;
 	mq->policy.remove_mapping = smq_remove_mapping;
 	mq->policy.has_background_work = smq_has_background_work;

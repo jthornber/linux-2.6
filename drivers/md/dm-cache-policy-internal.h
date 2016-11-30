@@ -14,8 +14,19 @@
 
 static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
 {
-	BUG_ON(!p->lookup);
 	return p->lookup(p, oblock, cblock);
+}
+
+static inline int policy_lookup_with_work(struct dm_cache_policy *p,
+					  dm_oblock_t oblock, dm_cblock_t *cblock,
+					  struct policy_work **work)
+{
+	if (!p->lookup_with_work) {
+		*work = NULL;
+		return p->lookup(p, oblock, cblock);
+	}
+
+	return p->lookup_with_work(p, oblock, cblock, work);
 }
 
 static inline int policy_add_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
