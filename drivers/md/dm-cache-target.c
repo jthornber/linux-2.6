@@ -1105,22 +1105,6 @@ static bool discard_or_flush(struct bio *bio)
 	       bio->bi_opf & (REQ_PREFLUSH | REQ_FUA);
 }
 
-static void __cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell)
-{
-	__cell_release(cache, cell, &cache->deferred_bios);
-}
-
-static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	__cell_defer(cache, cell);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_deferred_bio_worker(cache);
-}
-
 static void bio_complete(struct bio *bio, int err)
 {
 	bio->bi_error = err;
@@ -1167,26 +1151,6 @@ static void calc_discard_block_range(struct cache *cache, struct bio *bio,
 	else
 		*e = to_dblock(block_div(se, cache->discard_block_size));
 }
-
-#if 0
-static void issue_discard(struct dm_cache_migration *mg)
-{
-	dm_dblock_t b, e;
-	struct bio *bio = cell_holder(mg->new_ocell);
-	struct cache *cache = mg->cache;
-
-	calc_discard_block_range(cache, bio, &b, &e);
-	while (b != e) {
-		set_discard(cache, b);
-		b = to_dblock(from_dblock(b) + 1);
-	}
-
-	bio_endio(bio);
-	cell_defer(cache, mg->new_ocell, false);
-	free_migration(mg);
-	wake_worker(cache);
-}
-#endif
 
 #if 0
 static void issue_copy_or_discard(struct dm_cache_migration *mg)
@@ -1281,6 +1245,26 @@ static void check_for_quiesced_migrations(struct cache *cache,
 
 /*----------------------------------------------------------------*/
 
+// FIXME: find a better place for this
+static void update_stats(struct cache_stats *stats, enum policy_operation op)
+{
+	switch (op) {
+	case POLICY_PROMOTE:
+		atomic_inc(&stats->promotion);
+		break;
+
+	case POLICY_DEMOTE:
+		atomic_inc(&stats->demotion);
+		break;
+
+	case POLICY_WRITEBACK:
+		/* not yet tracked */
+		break;
+	}
+}
+
+/*----------------------------------------------------------------*/
+
 // FIXME: reorder?
 static void defer_bios(struct cache *cache, struct bio_list *bios);
 
@@ -1351,7 +1335,10 @@ static void migration_complete(struct dm_cache_migration *mg, bool success)
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
 
-	policy_complete_background_work(mg->cache->policy, mg->op, success);
+	policy_complete_background_work(cache->policy, mg->op, success);
+
+	if (success)
+		update_stats(&cache->stats, mg->op->op);
 
 	bio_list_init(&bios);
 	if (mg->cell) {
@@ -1408,16 +1395,31 @@ static int migrate_read_lock(struct cache *cache,
 	return 0;
 }
 
+// FIXME: The 'avoid' optimisation isn't going to work well wrt discarded
+// blocks, because:
+//  - a read to a discarded block is unlikely
+//  - a write to a dirty block will have cleared the discarded flag before
+//    the background migration kicks in.
 static void migration_copy(struct work_struct *ws)
 {
-	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
 	int r;
+	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
+	bool avoid = is_discarded_oblock(mg->cache, mg->op->oblock);
 
-	r = copy(mg, mg->op->op == POLICY_PROMOTE, migration_upgrade_lock);
-	if (r) {
-		DMERR("migration copy failed\n");
-		mg->err = true;	// FIXME: do we still need the err field?
-		migration_complete(mg, false);
+	if (mg->op->op != POLICY_PROMOTE)
+		avoid = avoid || !is_dirty(mg->cache, mg->op->cblock);
+
+	if (avoid) {
+		pr_alert("avoiding copy\n");
+		migration_upgrade_lock(ws);
+
+	} else {
+		r = copy(mg, mg->op->op == POLICY_PROMOTE, migration_upgrade_lock);
+		if (r) {
+			DMERR("migration copy failed\n");
+			mg->err = true;	// FIXME: do we still need the err field?
+			migration_complete(mg, false);
+		}
 	}
 }
 
@@ -1772,6 +1774,23 @@ static int commit_if_needed(struct cache *cache)
 	return r;
 }
 
+static void process_discard_bio(struct cache *cache, struct bio *bio)
+{
+	dm_dblock_t b, e;
+
+	// FIXME: do we need to lock the region?  Or can we just assume the
+	// user wont be so foolish as to issue discard concurrently with
+	// other IO?
+
+	calc_discard_block_range(cache, bio, &b, &e);
+	while (b != e) {
+		set_discard(cache, b);
+		b = to_dblock(from_dblock(b) + 1);
+	}
+
+	bio_endio(bio);
+}
+
 static void process_deferred_bios(struct cache *cache)
 {
 	bool prealloc_used = false;
@@ -1796,11 +1815,8 @@ static void process_deferred_bios(struct cache *cache)
 		 */
 		prealloc_used = true;
 		if (prealloc_data_structs(cache, &structs)) {
-			spin_lock_irqsave(&cache->lock, flags);
-			bio_list_merge(&cache->deferred_bios, &bios);
-			spin_unlock_irqrestore(&cache->lock, flags);
-
-			wake_deferred_bio_worker(cache); /* FIXME: sleep? */
+			pr_alert("couldn't prealloc structs\n");
+			defer_bios(cache, &bios);
 			break;
 		}
 
@@ -1810,8 +1826,7 @@ static void process_deferred_bios(struct cache *cache)
 			process_flush_bio(cache, bio);
 
 		else if (bio_op(bio) == REQ_OP_DISCARD)
-			/* FIXME: finish */
-			bio_endio(bio);
+			process_discard_bio(cache, bio);
 
 		else
 			process_bio(cache, bio);
@@ -1848,6 +1863,8 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 		accounted_request(cache, bio);
 }
 #endif
+
+// FIXME: put spare_migration_bandwidth back in
 
 #if 0
 static void writeback_some_dirty_blocks(struct cache *cache)
@@ -2006,12 +2023,10 @@ static void do_waker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(to_delayed_work(ws), struct cache, waker);
 
-	pr_alert(">>> do_waker\n");
 	policy_tick(cache->policy, true);
-	wake_deferred_bio_worker(cache);
+//	wake_deferred_bio_worker(cache);
 	wake_migration_worker(cache);
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
-	pr_alert("<<< do_waker\n");
 }
 
 static void do_migration(struct work_struct *ws)

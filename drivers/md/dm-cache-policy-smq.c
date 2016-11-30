@@ -809,7 +809,6 @@ static int background_work_queue(struct background_work *b,
 	struct smq_work *w;
 	unsigned long flags;
 
-	pr_alert("pushing background work\n");
 	spin_lock_irqsave(&b->lock, flags);
 	if (list_empty(&b->free))
 		r = -ENOMEM;
@@ -846,11 +845,10 @@ static int background_work_issue(struct background_work *b, struct policy_work *
 	struct smq_work *w;
 
 	spin_lock_irqsave(&b->lock, flags);
-	if (list_empty(&b->queued)) {
-		pr_alert("no background work\n");
+	if (list_empty(&b->queued))
 		r = -ENODATA;
 
-	} else {
+	else {
 		w = list_first_entry(&b->queued, struct smq_work, list);
 		list_move(&w->list, &b->issued);
 		*work = &w->work;
@@ -1432,6 +1430,7 @@ static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t
 	return r;
 }
 
+// FIXME: can the add/remote functions invalidate queued background work?
 static int __add_mapping(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	struct entry *e = get_entry(&mq->cache_alloc,
