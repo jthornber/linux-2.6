@@ -774,6 +774,7 @@ static struct entry *get_entry(struct entry_alloc *ea, unsigned index)
 
 struct smq_work {
 	struct list_head list;
+	struct rb_node node;
 	struct policy_work work;
 };
 
@@ -782,10 +783,77 @@ struct background_work {
 
 	struct list_head issued;
 	struct list_head queued;
-	struct list_head free;
+	struct rb_root pending;
 
+	// FIXME: use a mempool
+	struct list_head free;
 	struct smq_work work[MAX_WORK];
 };
+
+static int cmp_oblock(dm_oblock_t lhs, dm_oblock_t rhs)
+{
+	if (from_oblock(lhs) < from_oblock(rhs))
+		return -1;
+
+	if (from_oblock(rhs) < from_oblock(lhs))
+		return 1;
+
+	return 0;
+}
+
+static bool __insert_pending(struct background_work *b,
+			     struct smq_work *nw)
+{
+	int cmp;
+	struct smq_work *w;
+	struct rb_node **new = &b->pending.rb_node, *parent = NULL;
+
+	while (*new) {
+		w = container_of(*new, struct smq_work, node);
+
+		parent = *new;
+		cmp = cmp_oblock(w->work.oblock, nw->work.oblock);
+		if (cmp < 0)
+			new = &((*new)->rb_left);
+
+		else if (cmp > 0)
+			new = &((*new)->rb_right);
+
+		else
+			/* already present */
+			return false;
+	}
+
+	rb_link_node(&nw->node, parent, new);
+	rb_insert_color(&nw->node, &b->pending);
+
+	return true;
+}
+
+static struct smq_work *__find_pending(struct background_work *b,
+				       dm_oblock_t oblock)
+{
+	int cmp;
+	struct smq_work *w;
+	struct rb_node **new = &b->pending.rb_node;
+
+	while (*new) {
+		w = container_of(*new, struct smq_work, node);
+
+		cmp = cmp_oblock(w->work.oblock, oblock);
+		if (cmp < 0)
+			new = &((*new)->rb_left);
+
+		else if (cmp > 0)
+			new = &((*new)->rb_right);
+
+		else
+			break;
+	}
+
+	return *new ? w : NULL;
+}
+
 
 // FIXME: audit to see if we need to be locking with irqsave
 
@@ -802,23 +870,27 @@ static void background_work_init(struct background_work *b)
 		list_add_tail(&b->work[i].list, &b->free);
 }
 
-static int background_work_queue(struct background_work *b,
-				 struct policy_work *work,
-				 struct policy_work **pwork)
+static int __work_queue(struct background_work *b,
+			struct policy_work *work,
+			struct policy_work **pwork)
 {
-	int r = 0;
 	struct smq_work *w;
-	unsigned long flags;
 
-	spin_lock_irqsave(&b->lock, flags);
 	if (list_empty(&b->free)) {
 		// FIXME: get these from a mempool
 		pr_alert("out of background work structs\n");
-		r = -ENOMEM;
+		return -ENOMEM;
 
 	} else {
 		w = list_first_entry(&b->free, struct smq_work, list);
 		memcpy(&w->work, work, sizeof(*work));
+
+		if (!__insert_pending(b, w))
+			/*
+			 * There was a race, we'll just ignore this second
+			 * bit of work for the same oblock.
+			 */
+			return -EINVAL;
 
 		if (pwork) {
 			*pwork = &w->work;
@@ -826,6 +898,19 @@ static int background_work_queue(struct background_work *b,
 		} else
 			list_move(&w->list, &b->queued);
 	}
+
+	return 0;
+}
+
+static int background_work_queue(struct background_work *b,
+				 struct policy_work *work,
+				 struct policy_work **pwork)
+{
+	int r = 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(&b->lock, flags);
+	r = __work_queue(b, work, pwork);
 	spin_unlock_irqrestore(&b->lock, flags);
 
 	return r;
@@ -874,35 +959,30 @@ static void background_work_complete(struct background_work *b,
 
 	spin_lock_irqsave(&b->lock, flags);
 	list_move(&w->list, &b->free);
+	rb_erase(&w->node, &b->pending);
 	spin_unlock_irqrestore(&b->lock, flags);
 }
 
-// FIXME: make this quicker (hash table?)
 static bool background_promotion_already_present(struct background_work *b,
 						 dm_oblock_t oblock,
 						 struct policy_work **workp)
 {
-	bool r = true;
-	unsigned long flags;
+	bool r = false;
 	struct smq_work *w;
+	unsigned long flags;
 
 	spin_lock_irqsave(&b->lock, flags);
-	list_for_each_entry (w, &b->queued, list)
-		if (w->work.oblock == oblock) {
-			if (workp && w->work.op == POLICY_PROMOTE) {
-				pr_alert("background work already present\n");
-				*workp = &w->work;
-				list_move(&w->list, &b->issued);
-			}
-			goto out;
+	w = __find_pending(b, oblock);
+	if (w) {
+		r = true;
+
+		if (workp && w->work.op == POLICY_PROMOTE) {
+			pr_alert("background work already present\n");
+			*workp = &w->work;
+			list_move(&w->list, &b->issued);
 		}
+	}
 
-	list_for_each_entry (w, &b->issued, list)
-		if (w->work.oblock == oblock)
-			goto out;
-	r = false;
-
-out:
 	spin_unlock_irqrestore(&b->lock, flags);
 	return r;
 }

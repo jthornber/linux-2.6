@@ -23,6 +23,9 @@
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
 	"A percentage of time allocated for copying to and/or from cache");
 
+// FIXME: put the io tracker back in (it's not the sequential io tracking
+// thing any more.
+
 /*----------------------------------------------------------------*/
 
 /*
@@ -144,12 +147,20 @@ struct invalidation_request {
  * Committing metadata is slow and synchronous, so we try and amortise the
  * cost by batching commits.
  */
+
+// FIXME: can we pull the commit logic out of here, and just take a
+// work_struct?  Turning this into a plain 'batcher'
+
 struct cache;
 struct commit_batcher {
 	struct cache *cache;
 	spinlock_t lock;
 	struct list_head work_items;
 	struct bio_list bios;
+	struct work_struct ws;
+
+	bool commit_scheduled;
+	bool clean_shutdown;
 };
 
 struct cache {
@@ -296,17 +307,6 @@ struct dm_cache_migration {
 	bool err;
 };
 
-/*
- * Processing a bio in the worker thread may require these memory
- * allocations.  We prealloc to avoid deadlocks (the same worker thread
- * frees them back to the mempool).
- */
-struct prealloc {
-	struct dm_cache_migration *mg;
-	struct dm_bio_prison_cell *cell1;
-	struct dm_bio_prison_cell *cell2;
-};
-
 static enum cache_metadata_mode get_cache_mode(struct cache *cache);
 
 static void wake_deferred_bio_worker(struct cache *cache)
@@ -323,10 +323,7 @@ static void wake_migration_worker(struct cache *cache)
 
 static struct dm_bio_prison_cell *alloc_prison_cell(struct cache *cache)
 {
-	/* FIXME: change to use a local slab. */
-
-	struct dm_bio_prison_cell *cell = dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
-	return cell;
+	return dm_bio_prison_alloc_cell(cache->prison, GFP_NOWAIT);
 }
 
 static void free_prison_cell(struct cache *cache, struct dm_bio_prison_cell *cell)
@@ -360,131 +357,16 @@ static void free_migration(struct dm_cache_migration *mg)
 	mempool_free(mg, cache->migration_pool);
 }
 
-static int prealloc_data_structs(struct cache *cache, struct prealloc *p)
-{
-	if (!p->mg) {
-		p->mg = alloc_migration(cache);
-		if (!p->mg)
-			return -ENOMEM;
-	}
-
-	if (!p->cell1) {
-		p->cell1 = alloc_prison_cell(cache);
-		if (!p->cell1)
-			return -ENOMEM;
-	}
-
-	if (!p->cell2) {
-		p->cell2 = alloc_prison_cell(cache);
-		if (!p->cell2)
-			return -ENOMEM;
-	}
-
-	return 0;
-}
-
-static void prealloc_free_structs(struct cache *cache, struct prealloc *p)
-{
-	if (p->cell2)
-		free_prison_cell(cache, p->cell2);
-
-	if (p->cell1)
-		free_prison_cell(cache, p->cell1);
-
-	if (p->mg)
-		free_migration(p->mg);
-}
-
-static struct dm_cache_migration *prealloc_get_migration(struct prealloc *p)
-{
-	struct dm_cache_migration *mg = p->mg;
-
-	BUG_ON(!mg);
-	p->mg = NULL;
-
-	return mg;
-}
-
-/*
- * You must have a cell within the prealloc struct to return.  If not this
- * function will BUG() rather than returning NULL.
- */
-static struct dm_bio_prison_cell *prealloc_get_cell(struct prealloc *p)
-{
-	struct dm_bio_prison_cell *r = NULL;
-
-	if (p->cell1) {
-		r = p->cell1;
-		p->cell1 = NULL;
-
-	} else if (p->cell2) {
-		r = p->cell2;
-		p->cell2 = NULL;
-	} else
-		BUG();
-
-	return r;
-}
-
-/*
- * You can't have more than two cells in a prealloc struct.  BUG() will be
- * called if you try and overfill.
- */
-static void prealloc_put_cell(struct prealloc *p, struct dm_bio_prison_cell *cell)
-{
-	if (!p->cell2)
-		p->cell2 = cell;
-
-	else if (!p->cell1)
-		p->cell1 = cell;
-
-	else
-		BUG();
-}
-
 /*----------------------------------------------------------------*/
 
 // FIXME: should these be here?
 static void metadata_operation_failed(struct cache *cache, const char *op, int r);
 static void accounted_request(struct cache *cache, struct bio *bio);
 
-static void commit_batcher_init(struct commit_batcher *cb,
-				struct cache *cache)
+static void commit_work(struct work_struct *cb_ws)
 {
-	cb->cache = cache;
-	spin_lock_init(&cb->lock);
-	INIT_LIST_HEAD(&cb->work_items);
-	bio_list_init(&cb->bios);
-}
+	struct commit_batcher *cb = container_of(cb_ws, struct commit_batcher, ws);
 
-static void wait_for_commit(struct commit_batcher *cb,
-			    struct work_struct *ws)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cb->lock, flags);
-	list_add_tail(&ws->entry, &cb->work_items);
-	spin_unlock_irqrestore(&cb->lock, flags);
-}
-
-/*
- * Bios are errored if commit failed.
- */
-static void issue_after_commit(struct commit_batcher *cb,
-			       struct bio *bio)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cb->lock, flags);
-	bio_list_add(&cb->bios, bio);
-	spin_unlock_irqrestore(&cb->lock, flags);
-}
-
-/*
- * Returns the commit result.
- */
-static int trigger_commit(struct commit_batcher *cb, bool clean_shutdown)
-{
 	int r;
 	struct bio *bio;
 	unsigned long flags;
@@ -493,24 +375,29 @@ static int trigger_commit(struct commit_batcher *cb, bool clean_shutdown)
 	struct work_struct *ws, *tmp;
 	struct dm_cache_migration *mg;
 
-	r = dm_cache_commit(cb->cache->cmd, clean_shutdown);
-
 	bio_list_init(&bios);
 	INIT_LIST_HEAD(&work_items);
 
+	/*
+	 * We have to grab these before the commit to avoid a race
+	 * condition.
+	 */
 	spin_lock_irqsave(&cb->lock, flags);
 	bio_list_merge(&bios, &cb->bios);
-	list_splice_init(&work_items, &cb->work_items);
+	bio_list_init(&cb->bios);
+	list_splice_init(&cb->work_items, &work_items);
 	spin_unlock_irqrestore(&cb->lock, flags);
 
+	r = dm_cache_commit(cb->cache->cmd, cb->clean_shutdown);
 	if (r) {
 		while ((bio = bio_list_pop(&bios)))
 			bio_io_error(bio);
 
 		list_for_each_entry_safe(ws, tmp, &work_items, entry) {
 			mg = container_of(ws, struct dm_cache_migration, ws);
+			INIT_LIST_HEAD(&ws->entry); /* to avoid a WARN_ON */
 			mg->err = true;
-			queue_work(mg->cache->wq, ws);
+			queue_work(cb->cache->wq, ws);
 		}
 
 		metadata_operation_failed(cb->cache, "dm_cache_commit", r);
@@ -521,11 +408,80 @@ static int trigger_commit(struct commit_batcher *cb, bool clean_shutdown)
 			accounted_request(mg->cache, bio);
 		}
 
-		list_for_each_entry_safe(ws, tmp, &work_items, entry)
+		list_for_each_entry_safe(ws, tmp, &work_items, entry) {
+			INIT_LIST_HEAD(&ws->entry); /* to avoid a WARN_ON */
 			queue_work(cb->cache->wq, ws);
+		}
 	}
+}
 
-	return r;
+static void commit_batcher_init(struct commit_batcher *cb,
+				struct cache *cache)
+{
+	cb->cache = cache;
+	spin_lock_init(&cb->lock);
+	INIT_LIST_HEAD(&cb->work_items);
+	bio_list_init(&cb->bios);
+	INIT_WORK(&cb->ws, commit_work);
+	cb->commit_scheduled = false;
+}
+
+static void async_commit(struct commit_batcher *cb, bool clean_shutdown)
+{
+	cb->clean_shutdown = clean_shutdown;
+	queue_work(cb->cache->wq, &cb->ws);
+}
+
+// FIXME: rename, introduce plug/unplug nomenclature?
+static void wait_for_commit(struct commit_batcher *cb,
+			    struct dm_cache_migration *mg)
+{
+	unsigned long flags;
+	bool commit_scheduled;
+
+	spin_lock_irqsave(&cb->lock, flags);
+	commit_scheduled = cb->commit_scheduled;
+	list_add_tail(&mg->ws.entry, &cb->work_items);
+	spin_unlock_irqrestore(&cb->lock, flags);
+
+	if (commit_scheduled)
+		async_commit(cb, false);
+}
+
+/*
+ * Bios are errored if commit failed.
+ */
+static void issue_after_commit(struct commit_batcher *cb,
+			       struct bio *bio)
+{
+	unsigned long flags;
+	bool commit_scheduled;
+
+	spin_lock_irqsave(&cb->lock, flags);
+	commit_scheduled = cb->commit_scheduled;
+	bio_list_add(&cb->bios, bio);
+	spin_unlock_irqrestore(&cb->lock, flags);
+
+	if (commit_scheduled)
+		async_commit(cb, false);
+}
+
+/*
+ * Call this if some urgent IO is waiting for the commit to complete (ie. a
+ * read, or a flush).
+ */
+static void schedule_commit(struct commit_batcher *cb)
+{
+	bool force;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cb->lock, flags);
+	force = !bio_list_empty(&cb->bios) || !list_empty(&cb->work_items);
+	cb->commit_scheduled = true;
+	spin_unlock_irqrestore(&cb->lock, flags);
+
+	if (force)
+		async_commit(cb, false);
 }
 
 /*----------------------------------------------------------------*/
@@ -611,6 +567,30 @@ static struct per_bio_data *init_per_bio_data(struct bio *bio, size_t data_size)
 
 /*----------------------------------------------------------------*/
 
+static void defer_bio(struct cache *cache, struct bio *bio)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_add(&cache->deferred_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_deferred_bio_worker(cache);
+}
+
+static void defer_bios(struct cache *cache, struct bio_list *bios)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&cache->deferred_bios, bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_deferred_bio_worker(cache);
+}
+
+/*----------------------------------------------------------------*/
+
 static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bio *bio)
 {
 	int r;
@@ -621,6 +601,8 @@ static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bi
 	struct dm_bio_prison_cell *cell_prealloc, *cell;
 
 	cell_prealloc = alloc_prison_cell(cache);
+	if (!cell_prealloc)
+		defer_bio(cache, bio);
 
 	build_key(oblock, end, &key);
 	r = dm_cell_get(cache->prison, &key, lock_level(bio), bio, cell_prealloc, &cell);
@@ -642,32 +624,6 @@ static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bi
 	return r;
 }
 
-static int get_cell(struct cache *cache,
-		    dm_oblock_t oblock,
-		    struct prealloc *structs,
-		    struct dm_bio_prison_cell **cell_result);
-
-#if 0
-{
-	int r;
-	struct dm_cell_key key;
-	struct dm_bio_prison_cell *cell_prealloc;
-
-	cell_prealloc = prealloc_get_cell(structs);
-
-	build_key(oblock, to_oblock(from_oblock(oblock) + 1ULL), &key);
-	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL,
-			 cell_prealloc, cell_result);
-	if (r)
-		prealloc_put_cell(structs, cell_prealloc);
-	else {
-		BUG_ON(*cell_result != cell_prealloc);
-		(*cell_result)->user_ptr = NULL;
-	}
-
-	return r;
-}
-#endif
 /*----------------------------------------------------------------*/
 
 static bool is_dirty(struct cache *cache, dm_cblock_t b)
@@ -916,18 +872,10 @@ static void accounted_request(struct cache *cache, struct bio *bio)
 	generic_make_request(bio);
 }
 
+// FIXME: remove
 static void issue(struct cache *cache, struct bio *bio)
 {
-#if 0
 	accounted_request(cache, bio);
-#else
-	// FIXME: do any bios trigger commits now?  We don't build up a
-	// position in cache like we do in thin
-	if (!bio_triggers_commit(cache, bio))
-		accounted_request(cache, bio);
-	else
-		issue_after_commit(&cache->committer, bio);
-#endif
 }
 
 static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
@@ -1092,14 +1040,6 @@ static void dec_io_migrations(struct cache *cache)
 	atomic_dec(&cache->nr_io_migrations);
 }
 
-static void __cell_release(struct cache *cache,
-			   struct dm_bio_prison_cell *cell,
-			   struct bio_list *bios)
-{
-	dm_cell_unlock(cache->prison, cell, bios);
-	free_prison_cell(cache, cell);
-}
-
 static bool discard_or_flush(struct bio *bio)
 {
 	return bio_op(bio) == REQ_OP_DISCARD ||
@@ -1175,9 +1115,6 @@ static void update_stats(struct cache_stats *stats, enum policy_operation op)
 
 /*----------------------------------------------------------------*/
 
-// FIXME: reorder?
-static void defer_bios(struct cache *cache, struct bio_list *bios);
-
 static void quiesce(struct dm_cache_migration *mg,
 		    void (*continuation)(struct work_struct *))
 {
@@ -1226,6 +1163,19 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	INIT_WORK(&mg->ws, continuation);
 
 	return r;
+}
+
+static void overwrite_drop_shared_lock(struct cache *cache, struct bio *bio)
+{
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	/*
+	 * We have to drop the shared lock.
+	 */
+	if (pb->cell && dm_cell_put(cache->prison, pb->cell))
+		free_prison_cell(cache, pb->cell);
+	pb->cell = NULL;
 }
 
 static void overwrite_endio(struct bio *bio)
@@ -1299,142 +1249,16 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 	defer_bios(cache, &bios);
 }
 
-static void mg_copy(struct work_struct *ws);
-static void mg_upgrade_lock(struct work_struct *ws);
-static void mg_commit(struct work_struct *ws);
-static void mg_unlock(struct work_struct *ws);
-
-static int mg_read_lock(struct dm_cache_migration *mg)
-{
-	int r;
-	struct dm_cell_key key;
-	struct cache *cache = mg->cache;
-	struct dm_bio_prison_cell *prealloc;
-
-	prealloc = alloc_prison_cell(cache);
-	if (!prealloc) {
-		pr_alert("alloc_cell failed\n");
-		return -ENOMEM;
-	}
-
-	build_key(mg->op->oblock, oblock_succ(mg->op->oblock), &key);
-	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL, prealloc, &mg->cell);
-	if (r < 0) {
-		free_prison_cell(cache, prealloc);
-		mg_complete(mg, false);
-		return r;
-	}
-
-	if (mg->cell != prealloc)
-		free_prison_cell(cache, prealloc);
-
-	if (r == 0)
-		mg_copy(&mg->ws);
-	else
-		quiesce(mg, mg_copy);
-
-	return 0;
-}
-
-static int mg_start(struct cache *cache, struct policy_work *op)
-{
-	struct dm_cache_migration *mg = alloc_migration(cache);
-
-	if (!mg) {
-		policy_complete_background_work(cache->policy, op, false);
-		return -ENOMEM;
-	}
-
-	memset(mg, 0, sizeof(*mg));
-
-	mg->cache = cache;
-	mg->op = op;
-	mg->overwrite_bio = NULL;
-
-	return mg_read_lock(mg);
-}
-
-static int mg_start_overwrite(struct cache *cache, struct policy_work *op, struct bio *bio)
-{
-	struct dm_cache_migration *mg = alloc_migration(cache);
-	size_t pb_data_size = get_per_bio_data_size(cache);
-	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
-
-	if (!mg) {
-		policy_complete_background_work(cache->policy, op, false);
-		return -ENOMEM;
-	}
-
-	memset(mg, 0, sizeof(*mg));
-
-	mg->cache = cache;
-	mg->op = op;
-	mg->overwrite_bio = bio;
-
-	/*
-	 * We have to drop the shared lock.
-	 */
-	if (pb->cell && dm_cell_put(cache->prison, pb->cell))
-		free_prison_cell(cache, pb->cell);
-	pb->cell = NULL;
-
-	return mg_read_lock(mg);
-
-}
-
-static void mg_copy(struct work_struct *ws)
-{
-	int r;
-	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
-
-	if (mg->overwrite_bio)
-		overwrite(mg, mg_upgrade_lock);
-
-	else {
-		r = copy(mg, mg->op->op == POLICY_PROMOTE, mg_upgrade_lock);
-		if (r) {
-			DMERR("migration copy failed\n");
-			mg->err = true;	// FIXME: do we still need the err field?
-			mg_complete(mg, false);
-		}
-	}
-}
-
-static void mg_upgrade_lock(struct work_struct *ws)
-{
-	int r;
-	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
-
-	/*
-	 * Did the copy succeed?
-	 */
-	if (mg->err)
-		mg_complete(mg, false);
-
-	else {
-		r = dm_cell_lock_promote(mg->cache->prison, mg->cell, WRITE_LOCK_LEVEL);
-		if (r < 0) {
-			pr_alert("promote failed\n");
-			mg_complete(mg, false);
-
-		} else if (r)
-			quiesce(mg, mg_commit);
-
-		else
-			mg_commit(ws);
-	}
-}
-
 static void mg_success(struct work_struct *ws)
 {
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
 	mg_complete(mg, !mg->err);
 }
 
-static void mg_commit(struct work_struct *ws)
+static void mg_update_metadata(struct work_struct *ws)
 {
 	int r;
-	bool need_commit;
+	bool need_commit = false;
 	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
 	struct cache *cache = mg->cache;
 
@@ -1474,59 +1298,150 @@ static void mg_commit(struct work_struct *ws)
 	}
 
 	clear_dirty(cache, mg->op->oblock, mg->op->cblock);
+	clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
 
 	if (need_commit) {
-		//commit(mg, migration_unlock);
+		INIT_WORK(&mg->ws, mg_success);
+		wait_for_commit(&cache->committer, mg);
+	} else
+		mg_success(ws);
+}
+
+static void mg_upgrade_lock(struct work_struct *ws)
+{
+	int r;
+	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
+
+	/*
+	 * Did the copy succeed?
+	 */
+	if (mg->err)
+		mg_complete(mg, false);
+
+	else {
+		r = dm_cell_lock_promote(mg->cache->prison, mg->cell, WRITE_LOCK_LEVEL);
+		if (r < 0) {
+			pr_alert("promote failed\n");
+			mg_complete(mg, false);
+
+		} else if (r)
+			quiesce(mg, mg_update_metadata);
+
+		else
+			mg_update_metadata(ws);
+	}
+}
+
+static void mg_copy(struct work_struct *ws)
+{
+	int r;
+	struct dm_cache_migration *mg = container_of(ws, struct dm_cache_migration, ws);
+
+	if (mg->overwrite_bio)
+		overwrite(mg, mg_upgrade_lock);
+
+	else {
+		if (is_discarded_oblock(mg->cache, mg->op->oblock) ||
+		    ((mg->op->op != POLICY_PROMOTE) && !is_dirty(mg->cache, mg->op->cblock))) {
+			pr_alert("skipping copy\n");
+			mg_upgrade_lock(ws);
+			return;
+		}
+
+		r = copy(mg, mg->op->op == POLICY_PROMOTE, mg_upgrade_lock);
+		if (r) {
+			DMERR("migration copy failed\n");
+			mg->err = true;	// FIXME: do we still need the err field?
+			mg_complete(mg, false);
+		}
+	}
+}
+
+static int mg_read_lock(struct dm_cache_migration *mg)
+{
+	int r;
+	struct dm_cell_key key;
+	struct cache *cache = mg->cache;
+	struct dm_bio_prison_cell *prealloc;
+
+	prealloc = alloc_prison_cell(cache);
+	if (!prealloc) {
+		pr_alert("alloc_cell failed\n");
+		mg_complete(mg, false);
+		return -ENOMEM;
 	}
 
-	// FIXME: remove
-	mg_success(ws);
+	build_key(mg->op->oblock, oblock_succ(mg->op->oblock), &key);
+	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL, prealloc, &mg->cell);
+	if (r < 0) {
+		free_prison_cell(cache, prealloc);
+		mg_complete(mg, false);
+		return r;
+	}
+
+	if (mg->cell != prealloc)
+		free_prison_cell(cache, prealloc);
+
+	/*
+	 * The read lock wont quiesce until we drop this.
+	 */
+	if (mg->overwrite_bio)
+		overwrite_drop_shared_lock(cache, mg->overwrite_bio);
+
+	if (r == 0)
+		/*
+		 * Can't happen because we know a shared lock was held.
+		 */
+		mg_copy(&mg->ws);
+	else
+		quiesce(mg, mg_copy);
+
+	return 0;
+}
+
+static int mg_start(struct cache *cache, struct policy_work *op)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+
+	if (!mg) {
+		policy_complete_background_work(cache->policy, op, false);
+		return -ENOMEM;
+	}
+
+	memset(mg, 0, sizeof(*mg));
+
+	mg->cache = cache;
+	mg->op = op;
+	mg->overwrite_bio = NULL;
+
+	mg_read_lock(mg);
+
+	return 0;
+}
+
+static int mg_start_overwrite(struct cache *cache, struct policy_work *op, struct bio *bio)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+
+	if (!mg) {
+		policy_complete_background_work(cache->policy, op, false);
+		return -ENOMEM;
+	}
+
+	memset(mg, 0, sizeof(*mg));
+
+	mg->cache = cache;
+	mg->op = op;
+	mg->overwrite_bio = bio;
+
+	mg_read_lock(mg);
+
+	return 0;
 }
 
 /*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
-static void defer_bio(struct cache *cache, struct bio *bio)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_add(&cache->deferred_bios, bio);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_deferred_bio_worker(cache);
-}
-
-static void defer_bios(struct cache *cache, struct bio_list *bios)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	bio_list_merge(&cache->deferred_bios, bios);
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_deferred_bio_worker(cache);
-}
-
-static void process_flush_bio(struct cache *cache, struct bio *bio)
-{
-	size_t pb_data_size = get_per_bio_data_size(cache);
-	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
-
-	BUG_ON(bio->bi_iter.bi_size);
-	if (!pb->req_nr)
-		remap_to_origin(cache, bio);
-	else
-		remap_to_cache(cache, bio, 0);
-
-	/*
-	 * REQ_PREFLUSH is not directed at any particular block so we don't
-	 * need to inc_ds().  REQ_FUA's are split into a write + REQ_PREFLUSH
-	 * by dm-core.
-	 */
-	issue(cache, bio);
-}
-
 static bool spare_migration_bandwidth(struct cache *cache)
 {
 	sector_t current_volume = (atomic_read(&cache->nr_io_migrations) + 1) *
@@ -1548,110 +1463,6 @@ static void inc_miss_counter(struct cache *cache, struct bio *bio)
 
 /*----------------------------------------------------------------*/
 
-struct inc_detail {
-	struct cache *cache;
-	struct bio_list bios_for_issue;
-	struct bio_list unhandled_bios;
-	bool any_writes;
-};
-
-static void inc_fn(void *context, struct dm_bio_prison_cell *cell);
-
-#if 0
-{
-	struct bio *bio;
-	struct inc_detail *detail = context;
-	struct cache *cache = detail->cache;
-
-	inc_ds(cache, cell_holder(cell), cell);
-	if (bio_data_dir(cell_holder(cell)) == WRITE)
-		detail->any_writes = true;
-
-	while ((bio = bio_list_pop(&cell->bios))) {
-		if (discard_or_flush(bio)) {
-			bio_list_add(&detail->unhandled_bios, bio);
-			continue;
-		}
-
-		if (bio_data_dir(bio) == WRITE)
-			detail->any_writes = true;
-
-		bio_list_add(&detail->bios_for_issue, bio);
-		inc_ds(cache, bio, cell);
-	}
-}
-
-// FIXME: refactor these two
-static void remap_cell_to_origin_clear_discard(struct cache *cache,
-					       struct dm_bio_prison_cell *cell,
-					       dm_oblock_t oblock, bool issue_holder)
-{
-	struct bio *bio;
-	unsigned long flags;
-	struct inc_detail detail;
-	struct bio_list bios;
-	bio_list_init(&bios);	/* FIXME: not used */
-
-	detail.cache = cache;
-	bio_list_init(&detail.bios_for_issue);
-	bio_list_init(&detail.unhandled_bios);
-	detail.any_writes = false;
-
-        defer_bios(cache, &detail.unhandled_bios);
-
-	remap_to_origin(cache, cell_holder(cell));
-	if (issue_holder)
-		issue(cache, cell_holder(cell));
-	else
-		accounted_begin(cache, cell_holder(cell));
-
-	if (detail.any_writes)
-		clear_discard(cache, oblock_to_dblock(cache, oblock));
-
-	while ((bio = bio_list_pop(&detail.bios_for_issue))) {
-		remap_to_origin(cache, bio);
-		issue(cache, bio);
-	}
-
-	free_prison_cell(cache, cell);
-}
-
-static void remap_cell_to_cache_dirty(struct cache *cache, struct dm_bio_prison_cell *cell,
-				      dm_oblock_t oblock, dm_cblock_t cblock, bool issue_holder)
-{
-	struct bio *bio;
-	unsigned long flags;
-	struct inc_detail detail;
-
-	detail.cache = cache;
-	bio_list_init(&detail.bios_for_issue);
-	bio_list_init(&detail.unhandled_bios);
-	detail.any_writes = false;
-
-        defer_bios(cache, &detail.unhandled_bios);
-
-	remap_to_cache(cache, cell_holder(cell), cblock);
-	if (issue_holder)
-		issue(cache, cell_holder(cell));
-	else
-		accounted_begin(cache, cell_holder(cell));
-
-	if (detail.any_writes) {
-		set_dirty(cache, oblock, cblock);
-		clear_discard(cache, oblock_to_dblock(cache, oblock));
-	}
-
-	while ((bio = bio_list_pop(&detail.bios_for_issue))) {
-		remap_to_cache(cache, bio, cblock);
-		issue(cache, bio);
-	}
-
-	free_prison_cell(cache, cell);
-}
-#endif
-
-/*----------------------------------------------------------------*/
-
 static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 {
 	return (bio_data_dir(bio) == WRITE) &&
@@ -1664,7 +1475,8 @@ static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t bl
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
 }
 
-static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
+static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
+		   bool *commit_needed)
 {
 	int r;
 	bool rb;
@@ -1680,8 +1492,12 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 		}
 
 		/*
-		 * An exclusive lock is held for this block, so we have to wait.
+		 * An exclusive lock is held for this block, so we have to
+		 * wait.  We set the commit_needed flag so the current
+		 * transaction will be committed asap, allowing this lock
+		 * to be dropped.
 		 */
+		*commit_needed = true;
 		return DM_MAPIO_SUBMITTED;
 	}
 
@@ -1742,11 +1558,15 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 	return DM_MAPIO_REMAPPED;
 }
 
-static void process_bio(struct cache *cache,
+static bool process_bio(struct cache *cache,
 			struct bio *bio)
 {
-	if (map_bio(cache, bio, get_bio_block(cache, bio)) == DM_MAPIO_REMAPPED)
+	bool commit_needed;
+
+	if (map_bio(cache, bio, get_bio_block(cache, bio), &commit_needed) == DM_MAPIO_REMAPPED)
 		issue(cache, bio);
+
+	return commit_needed;
 }
 
 /*
@@ -1779,7 +1599,23 @@ static int commit_if_needed(struct cache *cache)
 	return r;
 }
 
-static void process_discard_bio(struct cache *cache, struct bio *bio)
+static bool process_flush_bio(struct cache *cache, struct bio *bio)
+{
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	BUG_ON(bio->bi_iter.bi_size);
+	if (!pb->req_nr)
+		remap_to_origin(cache, bio);
+	else
+		remap_to_cache(cache, bio, 0);
+
+	pr_alert("queuing flush bio\n");
+	issue_after_commit(&cache->committer, bio);
+	return true;
+}
+
+static bool process_discard_bio(struct cache *cache, struct bio *bio)
 {
 	dm_dblock_t b, e;
 
@@ -1794,17 +1630,18 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 	}
 
 	bio_endio(bio);
+
+	// FIXME:
+	return false;
 }
 
 static void process_deferred_bios(struct cache *cache)
 {
-	bool prealloc_used = false;
 	unsigned long flags;
+	bool commit_needed = false;
 	struct bio_list bios;
 	struct bio *bio;
-	struct prealloc structs;
 
-	memset(&structs, 0, sizeof(structs));
 	bio_list_init(&bios);
 
 	spin_lock_irqsave(&cache->lock, flags);
@@ -1812,33 +1649,19 @@ static void process_deferred_bios(struct cache *cache)
 	bio_list_init(&cache->deferred_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	while (!bio_list_empty(&bios)) {
-		/*
-		 * If we've got no free migration structs, and processing
-		 * this bio might require one, we pause until there are some
-		 * prepared mappings to process.
-		 */
-		prealloc_used = true;
-		if (prealloc_data_structs(cache, &structs)) {
-			pr_alert("couldn't prealloc structs\n");
-			defer_bios(cache, &bios);
-			break;
-		}
-
-		bio = bio_list_pop(&bios);
-
+	while ((bio = bio_list_pop(&bios))) {
 		if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))
-			process_flush_bio(cache, bio);
+			commit_needed = process_flush_bio(cache, bio) || commit_needed;
 
 		else if (bio_op(bio) == REQ_OP_DISCARD)
-			process_discard_bio(cache, bio);
+			commit_needed = process_discard_bio(cache, bio) || commit_needed;
 
 		else
-			process_bio(cache, bio);
+			commit_needed = process_bio(cache, bio) || commit_needed;
 	}
 
-	if (prealloc_used)
-		prealloc_free_structs(cache, &structs);
+	if (commit_needed)
+		schedule_commit(&cache->committer);
 }
 
 static void do_deferred_bios(struct work_struct *ws)
@@ -1871,36 +1694,6 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 
 // FIXME: put spare_migration_bandwidth back in
 
-#if 0
-static void writeback_some_dirty_blocks(struct cache *cache)
-{
-	bool prealloc_used = false;
-	dm_oblock_t oblock;
-	dm_cblock_t cblock;
-	struct prealloc structs;
-	struct dm_bio_prison_cell *old_ocell;
-	bool busy = !iot_idle_for(&cache->origin_tracker, HZ);
-
-	memset(&structs, 0, sizeof(structs));
-
-	while (spare_migration_bandwidth(cache)) {
-		if (policy_writeback_work(cache->policy, &oblock, &cblock, busy))
-			break; /* no work to do */
-
-		prealloc_used = true;
-		if (prealloc_data_structs(cache, &structs) ||
-		    get_cell(cache, oblock, &structs, &old_ocell)) {
-			policy_set_dirty(cache->policy, oblock);
-			break;
-		}
-
-		writeback(cache, &structs, oblock, cblock, old_ocell);
-	}
-
-	if (prealloc_used)
-		prealloc_free_structs(cache, &structs);
-}
-#endif
 /*----------------------------------------------------------------
  * Invalidations.
  * Dropping something from the cache *without* writing back.
@@ -2031,6 +1824,7 @@ static void do_waker(struct work_struct *ws)
 	policy_tick(cache->policy, true);
 //	wake_deferred_bio_worker(cache);
 	wake_migration_worker(cache);
+	schedule_commit(&cache->committer);
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
 }
 
@@ -2783,6 +2577,8 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache *cache = ti->private;
 
+	int r;
+	bool commit_needed;
 	dm_oblock_t block = get_bio_block(cache, bio);
 	size_t pb_data_size = get_per_bio_data_size(cache);
 
@@ -2809,7 +2605,11 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 #endif
 	}
 
-	return map_bio(cache, bio, block);
+	r = map_bio(cache, bio, block, &commit_needed);
+	if (commit_needed)
+		schedule_commit(&cache->committer);
+
+	return r;
 }
 
 static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)

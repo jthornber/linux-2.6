@@ -320,7 +320,6 @@ static void __unlock(struct dm_bio_prison *prison,
 		     struct bio_list *bios)
 {
 	BUG_ON(!cell->exclusive_lock);
-	BUG_ON(cell->shared_count);
 
 	bio_list_merge(bios, &cell->bios);
 
