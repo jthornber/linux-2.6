@@ -877,8 +877,7 @@ static int __work_queue(struct background_work *b,
 	struct smq_work *w;
 
 	if (list_empty(&b->free)) {
-		// FIXME: get these from a mempool
-		pr_alert("out of background work structs\n");
+		// FIXME: get these from a mempool.  No we've got to limit this somehow.  mempool + limit?
 		return -ENOMEM;
 
 	} else {

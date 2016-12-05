@@ -23,8 +23,78 @@
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
 	"A percentage of time allocated for copying to and/or from cache");
 
-// FIXME: put the io tracker back in (it's not the sequential io tracking
-// thing any more.
+/*----------------------------------------------------------------*/
+
+#define IOT_RESOLUTION 4
+
+struct io_tracker {
+	spinlock_t lock;
+
+/*
+ * Sectors of in-flight IO.
+ */
+	sector_t in_flight;
+
+/*
+ * The time, in jiffies, when this device became idle (if it is
+ * indeed idle).
+ */
+	unsigned long idle_time;
+	unsigned long last_update_time;
+};
+
+static void iot_init(struct io_tracker *iot)
+{
+	spin_lock_init(&iot->lock);
+	iot->in_flight = 0ul;
+	iot->idle_time = 0ul;
+	iot->last_update_time = jiffies;
+}
+
+static bool __iot_idle_for(struct io_tracker *iot, unsigned long jifs)
+{
+	if (iot->in_flight)
+		return false;
+
+	return time_after(jiffies, iot->idle_time + jifs);
+}
+
+static bool iot_idle_for(struct io_tracker *iot, unsigned long jifs)
+{
+	bool r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	r = __iot_idle_for(iot, jifs);
+	spin_unlock_irqrestore(&iot->lock, flags);
+
+	return r;
+}
+
+static void iot_io_begin(struct io_tracker *iot, sector_t len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	iot->in_flight += len;
+	spin_unlock_irqrestore(&iot->lock, flags);
+}
+
+static void __iot_io_end(struct io_tracker *iot, sector_t len)
+{
+	iot->in_flight -= len;
+	if (!iot->in_flight)
+		iot->idle_time = jiffies;
+}
+
+static void iot_io_end(struct io_tracker *iot, sector_t len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&iot->lock, flags);
+	__iot_io_end(iot, len);
+	spin_unlock_irqrestore(&iot->lock, flags);
+}
 
 /*----------------------------------------------------------------*/
 
@@ -152,6 +222,7 @@ struct invalidation_request {
 // work_struct?  Turning this into a plain 'batcher'
 
 struct cache;
+
 struct commit_batcher {
 	struct cache *cache;
 	spinlock_t lock;
@@ -274,8 +345,7 @@ struct cache {
 	spinlock_t invalidation_lock;
 	struct list_head invalidation_requests;
 
-	//struct io_tracker origin_tracker;
-
+	struct io_tracker origin_tracker;
 	struct commit_batcher committer;
 };
 
@@ -852,18 +922,18 @@ static void accounted_begin(struct cache *cache, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	if (accountable_bio(cache, bio))
+	if (accountable_bio(cache, bio)) {
 		pb->len = bio_sectors(bio);
+		iot_io_begin(&cache->origin_tracker, pb->len);
+	}
 }
 
 static void accounted_complete(struct cache *cache, struct bio *bio)
 {
-#if 0
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
 	iot_io_end(&cache->origin_tracker, pb->len);
-#endif
 }
 
 static void accounted_request(struct cache *cache, struct bio *bio)
@@ -1236,6 +1306,8 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 
 	if (mg->overwrite_bio)
 		bio_complete(mg->overwrite_bio, mg->err ? -EIO : 0);
+	else
+		dec_io_migrations(cache);
 
 	if (success)
 		update_stats(&cache->stats, mg->op->op);
@@ -1414,6 +1486,7 @@ static int mg_start(struct cache *cache, struct policy_work *op)
 	mg->op = op;
 	mg->overwrite_bio = NULL;
 
+	inc_io_migrations(cache);
 	mg_read_lock(mg);
 
 	return 0;
@@ -1444,9 +1517,15 @@ static int mg_start_overwrite(struct cache *cache, struct policy_work *op, struc
  *--------------------------------------------------------------*/
 static bool spare_migration_bandwidth(struct cache *cache)
 {
+#if 0
 	sector_t current_volume = (atomic_read(&cache->nr_io_migrations) + 1) *
 		cache->sectors_per_block;
-	return current_volume < cache->migration_threshold;
+	sector_t threshold = iot_idle_for(&cache->origin_tracker, HZ) ?
+		cache->migration_threshold * 4 :
+		cache->migration_threshold;
+#else
+	return true;
+#endif
 }
 
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
@@ -1692,8 +1771,6 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 }
 #endif
 
-// FIXME: put spare_migration_bandwidth back in
-
 /*----------------------------------------------------------------
  * Invalidations.
  * Dropping something from the cache *without* writing back.
@@ -1834,7 +1911,7 @@ static void do_migration(struct work_struct *ws)
 	struct policy_work *op;
 	struct cache *cache = container_of(ws, struct cache, migration_worker);
 
-	do {
+	while (spare_migration_bandwidth(cache)) {
 		r = policy_get_background_work(cache->policy, &op);
 		if (r == -ENODATA)
 			break;
@@ -1846,7 +1923,9 @@ static void do_migration(struct work_struct *ws)
 		}
 
 		r = mg_start(cache, op);
-	} while (!r);
+		if (r)
+			break;
+	}
 }
 
 /*----------------------------------------------------------------*/
@@ -2503,7 +2582,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	INIT_LIST_HEAD(&cache->invalidation_requests);
 
 	commit_batcher_init(&cache->committer, cache);
-	//iot_init(&cache->origin_tracker);
+	iot_init(&cache->origin_tracker);
 
 	*result = cache;
 	return 0;
