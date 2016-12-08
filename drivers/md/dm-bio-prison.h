@@ -96,7 +96,7 @@ bool dm_cell_put(struct dm_bio_prison *prison,
 
 /*
  * Locks a cell.  No associated bio.  Exclusive locks get priority.  These
- * lock contrain whether the io locks are granted according to level.
+ * locks constrain whether the io locks are granted according to level.
  *
  * Shared locks will still be granted if the lock_level is > (not =) to the
  * exclusive lock level.

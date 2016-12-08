@@ -976,7 +976,6 @@ static bool background_promotion_already_present(struct background_work *b,
 		r = true;
 
 		if (workp && w->work.op == POLICY_PROMOTE) {
-			pr_alert("background work already present\n");
 			*workp = &w->work;
 			list_move(&w->list, &b->issued);
 		}
