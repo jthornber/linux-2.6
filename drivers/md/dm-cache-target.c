@@ -1230,14 +1230,10 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	c_region.sector = from_cblock(mg->op->cblock) * cache->sectors_per_block;
 	c_region.count = cache->sectors_per_block;
 
-	if (promote) {
-		pr_alert("copying origin to cache, oblock = %llu\n",
-			 (unsigned long long) mg->op->oblock);
+	if (promote)
 		r = dm_kcopyd_copy(cache->copier, &o_region, 1, &c_region, 0, copy_complete, &mg->k);
-	} else {
-		pr_alert("copying cache to origin\n");
+	else
 		r = dm_kcopyd_copy(cache->copier, &c_region, 1, &o_region, 0, copy_complete, &mg->k);
-	}
 
 	if (r < 0) {
 		DMERR_LIMIT("%s: issuing copy failed", cache_device_name(cache));
@@ -1476,8 +1472,7 @@ static int mg_lock_writes(struct dm_cache_migration *mg)
 	 * everything.
 	 */
 	build_key(mg->op->oblock, oblock_succ(mg->op->oblock), &key);
-//	r = dm_cell_lock(cache->prison, &key, mg->overwrite_bio ? READ_LOCK_LEVEL : WRITE_LOCK_LEVEL,
-	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL,
+	r = dm_cell_lock(cache->prison, &key, mg->overwrite_bio ? READ_LOCK_LEVEL : WRITE_LOCK_LEVEL,
 			 prealloc, &mg->cell);
 	if (r < 0) {
 		free_prison_cell(cache, prealloc);
@@ -1562,7 +1557,7 @@ static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 
 static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 {
-#if 0
+#if 1
 	return writeback_mode(&cache->features) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
 #else
@@ -1578,6 +1573,8 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 	dm_cblock_t cblock;
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
+
+	*commit_needed = false;
 
 	rb = bio_detain_shared(cache, block, bio);
 	if (!rb) {
@@ -1655,6 +1652,14 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			remap_to_cache_dirty(cache, bio, block, cblock);
 	}
 
+	// FIXME: tidy
+	if (bio->bi_opf & REQ_FUA) {
+		// FIXME: I think accounted_begin gets called twice in this case
+		issue_after_unplug(&cache->committer, bio);
+		*commit_needed = true;
+		return DM_MAPIO_SUBMITTED;
+	}
+
 	return DM_MAPIO_REMAPPED;
 }
 
@@ -1707,7 +1712,8 @@ static bool process_flush_bio(struct cache *cache, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	// BUG_ON(bio->bi_iter.bi_size);
+	BUG_ON(bio->bi_opf & REQ_FUA);
+	BUG_ON(bio->bi_iter.bi_size);
 	if (!pb->req_nr)
 		remap_to_origin(cache, bio);
 	else
@@ -1724,7 +1730,7 @@ static bool process_discard_bio(struct cache *cache, struct bio *bio)
 	// FIXME: do we need to lock the region?  Or can we just assume the
 	// user wont be so foolish as to issue discard concurrently with
 	// other IO?
-#if 0
+#if 1
 	calc_discard_block_range(cache, bio, &b, &e);
 	while (b != e) {
 		set_discard(cache, b);
@@ -1754,7 +1760,7 @@ static void process_deferred_bios(struct work_struct *ws)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	while ((bio = bio_list_pop(&bios))) {
-		if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))
+		if (bio->bi_opf & REQ_PREFLUSH)
 			commit_needed = process_flush_bio(cache, bio) || commit_needed;
 
 		else if (bio_op(bio) == REQ_OP_DISCARD)

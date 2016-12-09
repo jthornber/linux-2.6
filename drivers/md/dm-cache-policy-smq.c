@@ -977,7 +977,6 @@ static bool background_promotion_already_present(struct background_work *b,
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->lock, flags);
-#if 0
 	w = __find_pending(b, oblock);
 	if (w) {
 		r = true;
@@ -992,37 +991,6 @@ static bool background_promotion_already_present(struct background_work *b,
 		if (workp)
 			*workp = NULL;
 	}
-#else
-	list_for_each_entry (w, &b->queued, list)
-		if (w->work.oblock == oblock) {
-			if (workp) {
-				if (w->work.op == POLICY_PROMOTE) {
-					pr_alert("background work already present\n");
-					*workp = &w->work;
-					list_move(&w->list, &b->issued);
-				} else
-					*workp = NULL;
-			}
-			r = true;
-			goto out;
-		}
-
-	list_for_each_entry (w, &b->issued, list)
-		if (w->work.oblock == oblock) {
-			if (workp) {
-				if (w->work.op == POLICY_PROMOTE) {
-					pr_alert("background work already present\n");
-					*workp = &w->work;
-					list_move(&w->list, &b->issued);
-				} else
-					*workp = NULL;
-			}
-			r = true;
-			goto out;
-		}
-
-out:
-#endif
 	spin_unlock_irqrestore(&b->lock, flags);
 	return r;
 }

@@ -195,6 +195,7 @@ static bool __put(struct dm_bio_prison *prison,
 	BUG_ON(!cell->shared_count);
 	cell->shared_count--;
 
+	// FIXME: shared locks granted above the lock level could starve this
 	if (!cell->shared_count) {
 		if (cell->exclusive_lock){
 			if (cell->quiesce_continuation) {
