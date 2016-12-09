@@ -134,9 +134,13 @@ int dm_cell_lock_promote(struct dm_bio_prison *prison,
  * Adds any held bios to the bio list.  Always returns ownership of the
  * cell (you should free it).
  *
- * You must quiesce if needed before unlocking.
+ * There may be shared locks still held at this point even if you quiesced
+ * (ie. different lock levels).
+ *
+ * Returns true if returning ownership of the cell (ie. you should free
+ * it).
  */
-void dm_cell_unlock(struct dm_bio_prison *prison,
+bool dm_cell_unlock(struct dm_bio_prison *prison,
 		    struct dm_bio_prison_cell *cell,
 		    struct bio_list *bios);
 

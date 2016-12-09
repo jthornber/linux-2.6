@@ -704,7 +704,10 @@ static void init_entry(struct entry *e)
 	e->next = INDEXER_NULL;
 	e->prev = INDEXER_NULL;
 	e->level = 0u;
+	e->dirty = true;	/* FIXME: audit */
 	e->allocated = true;
+	e->sentinel = false;
+	e->pending_work = false;
 }
 
 static struct entry *alloc_entry(struct entry_alloc *ea)
@@ -876,6 +879,9 @@ static int __work_queue(struct background_work *b,
 {
 	struct smq_work *w;
 
+	if (pwork)
+		*pwork = NULL;
+
 	if (list_empty(&b->free)) {
 		// FIXME: get these from a mempool.  No we've got to limit this somehow.  mempool + limit?
 		return -ENOMEM;
@@ -971,16 +977,52 @@ static bool background_promotion_already_present(struct background_work *b,
 	unsigned long flags;
 
 	spin_lock_irqsave(&b->lock, flags);
+#if 0
 	w = __find_pending(b, oblock);
 	if (w) {
 		r = true;
 
+#if 0
+		// FIXME: only do this if we know it's not already issued.
 		if (workp && w->work.op == POLICY_PROMOTE) {
 			*workp = &w->work;
 			list_move(&w->list, &b->issued);
 		}
+#endif
+		if (workp)
+			*workp = NULL;
 	}
+#else
+	list_for_each_entry (w, &b->queued, list)
+		if (w->work.oblock == oblock) {
+			if (workp) {
+				if (w->work.op == POLICY_PROMOTE) {
+					pr_alert("background work already present\n");
+					*workp = &w->work;
+					list_move(&w->list, &b->issued);
+				} else
+					*workp = NULL;
+			}
+			r = true;
+			goto out;
+		}
 
+	list_for_each_entry (w, &b->issued, list)
+		if (w->work.oblock == oblock) {
+			if (workp) {
+				if (w->work.op == POLICY_PROMOTE) {
+					pr_alert("background work already present\n");
+					*workp = &w->work;
+					list_move(&w->list, &b->issued);
+				} else
+					*workp = NULL;
+			}
+			r = true;
+			goto out;
+		}
+
+out:
+#endif
 	spin_unlock_irqrestore(&b->lock, flags);
 	return r;
 }
@@ -1338,6 +1380,7 @@ static void queue_writeback(struct smq_policy *mq)
 	struct entry *e = q_peek(&mq->dirty, mq->dirty.nr_levels, true);
 
 	if (e) {
+		pr_alert("queue_writeback\n");
 		if (e->pending_work)
 			return;
 
@@ -1357,6 +1400,8 @@ static void queue_demotion(struct smq_policy *mq)
 		queue_writeback(mq);
 
 	else {
+		pr_alert("queue_demotion\n");
+
 		if (e->pending_work)
 			return;
 
@@ -1616,6 +1661,7 @@ static void __complete_background_work(struct smq_policy *mq,
 {
 	struct entry *e = get_entry(&mq->cache_alloc,
 				    from_cblock(work->cblock));
+	e->pending_work = false;
 
 	switch (work->op) {
 	case POLICY_PROMOTE:
@@ -1628,10 +1674,9 @@ static void __complete_background_work(struct smq_policy *mq,
 	case POLICY_DEMOTE:
 		if (success)
 			__remove_mapping(mq, work->oblock, work->cblock);
-		/* fall through */
+		break;
 
 	case POLICY_WRITEBACK:
-		e->pending_work = false;
 		break;
 	}
 

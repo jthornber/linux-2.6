@@ -119,10 +119,22 @@ static inline void queue_continuation(struct workqueue_struct *wq,
 
 // FIXME: do we need a way of aborting queued work items?
 struct batcher {
+	/*
+	 * The operation that everyone is waiting for (commit).
+	 */
 	int (*unplug_op)(void *context);
 	void *unplug_context;
+
+	/*
+	 * This is how bios should be issued once the unplug op is complete
+	 * (accounted_request).
+	 */
 	void (*issue_op)(struct bio *bio, void *context);
 	void *issue_context;
+
+	/*
+	 * Queued work gets put on here after unplug.
+	 */
 	struct workqueue_struct *wq;
 
 	spinlock_t lock;
@@ -141,7 +153,7 @@ static void __unplug(struct work_struct *_ws)
 	unsigned long flags;
 	struct list_head work_items;
 	struct work_struct *ws, *tmp;
-	struct continuation *c;
+	struct continuation *k;
 	struct bio *bio;
 	struct bio_list bios;
 
@@ -162,8 +174,8 @@ static void __unplug(struct work_struct *_ws)
 	r = b->unplug_op(b->unplug_context);
 
 	list_for_each_entry_safe(ws, tmp, &work_items, entry) {
-		c = container_of(ws, struct continuation, ws);
-		c->input = r;
+		k = container_of(ws, struct continuation, ws);
+		k->input = r;
 		INIT_LIST_HEAD(&ws->entry); /* to avoid a WARN_ON */
 		queue_work(b->wq, ws);
 	}
@@ -659,6 +671,7 @@ static void defer_bios(struct cache *cache, struct bio_list *bios)
 
 	spin_lock_irqsave(&cache->lock, flags);
 	bio_list_merge(&cache->deferred_bios, bios);
+	bio_list_init(bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	wake_deferred_bio_worker(cache);
@@ -675,7 +688,7 @@ static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bi
 	dm_oblock_t end = to_oblock(from_oblock(oblock) + 1ULL);
 	struct dm_bio_prison_cell *cell_prealloc, *cell;
 
-	cell_prealloc = alloc_prison_cell(cache);
+	cell_prealloc = alloc_prison_cell(cache); /* FIXME: allow wait if calling from worker */
 	if (!cell_prealloc)
 		defer_bio(cache, bio);
 
@@ -1206,7 +1219,6 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	int r;
 	struct dm_io_region o_region, c_region;
 	struct cache *cache = mg->cache;
-	sector_t cblock = from_cblock(mg->op->cblock);
 
 	init_continuation(&mg->k, continuation);
 
@@ -1215,14 +1227,17 @@ static int copy(struct dm_cache_migration *mg, bool promote,
 	o_region.count = cache->sectors_per_block;
 
 	c_region.bdev = cache->cache_dev->bdev;
-	c_region.sector = cblock * cache->sectors_per_block;
+	c_region.sector = from_cblock(mg->op->cblock) * cache->sectors_per_block;
 	c_region.count = cache->sectors_per_block;
 
-
-	if (promote)
+	if (promote) {
+		pr_alert("copying origin to cache, oblock = %llu\n",
+			 (unsigned long long) mg->op->oblock);
 		r = dm_kcopyd_copy(cache->copier, &o_region, 1, &c_region, 0, copy_complete, &mg->k);
-	else
+	} else {
+		pr_alert("copying cache to origin\n");
 		r = dm_kcopyd_copy(cache->copier, &c_region, 1, &o_region, 0, copy_complete, &mg->k);
+	}
 
 	if (r < 0) {
 		DMERR_LIMIT("%s: issuing copy failed", cache_device_name(cache));
@@ -1310,8 +1325,8 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 
 	bio_list_init(&bios);
 	if (mg->cell) {
-		dm_cell_unlock(cache->prison, mg->cell, &bios);
-		free_prison_cell(cache, mg->cell);
+		if (dm_cell_unlock(cache->prison, mg->cell, &bios))
+			free_prison_cell(cache, mg->cell);
 		mg->cell = NULL; /* FIXME: remove, just a sanity check */
 	}
 	free_migration(mg);
@@ -1372,7 +1387,8 @@ static void mg_update_metadata(struct work_struct *ws)
 		break;
 	}
 
-	clear_dirty(cache, mg->op->oblock, mg->op->cblock);
+	if (!mg->overwrite_bio)
+		clear_dirty(cache, mg->op->oblock, mg->op->cblock);
 	clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
 
 	if (need_commit) {
@@ -1399,7 +1415,6 @@ static void mg_upgrade_lock(struct work_struct *ws)
 		 */
 		r = dm_cell_lock_promote(mg->cache->prison, mg->cell, READ_LOCK_LEVEL);
 		if (r < 0) {
-			pr_alert("promote failed\n");
 			mg_complete(mg, false);
 
 		} else if (r)
@@ -1448,13 +1463,6 @@ static int mg_lock_writes(struct dm_cache_migration *mg)
 	struct cache *cache = mg->cache;
 	struct dm_bio_prison_cell *prealloc;
 
-	// FIXME: can we avoid taking this lock in the first place?
-	/*
-	 * The read lock will not quiesce until we drop this.
-	 */
-	if (mg->overwrite_bio)
-		bio_drop_shared_lock(cache, mg->overwrite_bio);
-
 	prealloc = alloc_prison_cell(cache);
 	if (!prealloc) {
 		pr_alert("alloc_cell failed\n");
@@ -1468,7 +1476,8 @@ static int mg_lock_writes(struct dm_cache_migration *mg)
 	 * everything.
 	 */
 	build_key(mg->op->oblock, oblock_succ(mg->op->oblock), &key);
-	r = dm_cell_lock(cache->prison, &key, mg->overwrite_bio ? READ_LOCK_LEVEL : WRITE_LOCK_LEVEL,
+//	r = dm_cell_lock(cache->prison, &key, mg->overwrite_bio ? READ_LOCK_LEVEL : WRITE_LOCK_LEVEL,
+	r = dm_cell_lock(cache->prison, &key, READ_LOCK_LEVEL,
 			 prealloc, &mg->cell);
 	if (r < 0) {
 		free_prison_cell(cache, prealloc);
@@ -1510,9 +1519,8 @@ static int mg_start(struct cache *cache, struct policy_work *op, struct bio *bio
 
 	if (!bio)
 		inc_io_migrations(cache);
-	mg_lock_writes(mg);
 
-	return 0;
+	return mg_lock_writes(mg);
 }
 
 /*----------------------------------------------------------------
@@ -1602,6 +1610,7 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			// FIXME: no point using an overwrite bio is
 			// optimisable because discarded.  Also can we drop
 			// the shared lock on bio here?
+			bio_drop_shared_lock(cache, bio);
 			mg_start(cache, op, bio);
 			return DM_MAPIO_SUBMITTED;
 		}
@@ -1619,10 +1628,11 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		 * Miss.
 		 */
 		inc_miss_counter(cache, bio);
-		if (pb->req_nr == 0)
+		if (pb->req_nr == 0) {
+			accounted_begin(cache, bio);
 			remap_to_origin_clear_discard(cache, bio, block);
 
-		else {
+		} else {
 			/*
 			 * This is a duplicate writethrough io that is no
 			 * longer needed because the block has been demoted.
@@ -1654,7 +1664,7 @@ static bool process_bio(struct cache *cache,
 	bool commit_needed;
 
 	if (map_bio(cache, bio, get_bio_block(cache, bio), &commit_needed) == DM_MAPIO_REMAPPED)
-		accounted_request(cache, bio);
+		generic_make_request(bio);
 
 	return commit_needed;
 }
@@ -1697,7 +1707,7 @@ static bool process_flush_bio(struct cache *cache, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-//	BUG_ON(bio->bi_iter.bi_size);
+	// BUG_ON(bio->bi_iter.bi_size);
 	if (!pb->req_nr)
 		remap_to_origin(cache, bio);
 	else
@@ -1714,12 +1724,13 @@ static bool process_discard_bio(struct cache *cache, struct bio *bio)
 	// FIXME: do we need to lock the region?  Or can we just assume the
 	// user wont be so foolish as to issue discard concurrently with
 	// other IO?
-
+#if 0
 	calc_discard_block_range(cache, bio, &b, &e);
 	while (b != e) {
 		set_discard(cache, b);
 		b = to_dblock(from_dblock(b) + 1);
 	}
+#endif
 
 	bio_endio(bio);
 
@@ -2734,6 +2745,8 @@ static bool sync_metadata(struct cache *cache)
 {
 	int r1, r2, r3, r4;
 
+	pr_alert("sync_metadata\n");
+
 	r1 = write_dirty_bitset(cache);
 	if (r1)
 		DMERR("%s: could not write dirty bitset", cache_device_name(cache));
@@ -2763,6 +2776,8 @@ static bool sync_metadata(struct cache *cache)
 static void cache_postsuspend(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
+
+	pr_alert("cache_postsuspend\n");
 
 	prevent_background_work(cache);
 	BUG_ON(atomic_read(&cache->nr_io_migrations));
@@ -2948,6 +2963,7 @@ static int cache_preresume(struct dm_target *ti)
 	}
 
 	if (!cache->loaded_mappings) {
+		pr_alert("loading mappings\n");
 		r = dm_cache_load_mappings(cache->cmd, cache->policy,
 					   load_mapping, cache);
 		if (r) {

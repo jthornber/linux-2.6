@@ -153,9 +153,14 @@ static bool __get(struct dm_bio_prison *prison,
 		  struct dm_bio_prison_cell **cell)
 {
 	if (__find_or_insert(prison, key, cell_prealloc, cell)) {
-		if ((*cell)->exclusive_lock && (lock_level <= (*cell)->exclusive_level)) {
-			bio_list_add(&(*cell)->bios, inmate);
-			return false;
+		if ((*cell)->exclusive_lock) {
+			if (lock_level <= (*cell)->exclusive_level) {
+				bio_list_add(&(*cell)->bios, inmate);
+				return false;
+			} else {
+				pr_alert("shared lock granted whilst exclusive, req lock level = %u, exclusive level = %u\n",
+					 lock_level, (*cell)->exclusive_level);
+			}
 		}
 
 		(*cell)->shared_count++;
@@ -315,29 +320,36 @@ int dm_cell_lock_promote(struct dm_bio_prison *prison,
 }
 EXPORT_SYMBOL_GPL(dm_cell_lock_promote);
 
-static void __unlock(struct dm_bio_prison *prison,
+static bool __unlock(struct dm_bio_prison *prison,
 		     struct dm_bio_prison_cell *cell,
 		     struct bio_list *bios)
 {
 	BUG_ON(!cell->exclusive_lock);
 
 	bio_list_merge(bios, &cell->bios);
+	bio_list_init(&cell->bios);
 
-	if (cell->shared_count)
+	if (cell->shared_count) {
 		cell->exclusive_lock = 0;
-	else
-		rb_erase(&cell->node, &prison->cells);
+		return false;
+	}
+
+	rb_erase(&cell->node, &prison->cells);
+	return true;
 }
 
-void dm_cell_unlock(struct dm_bio_prison *prison,
+bool dm_cell_unlock(struct dm_bio_prison *prison,
 		    struct dm_bio_prison_cell *cell,
 		    struct bio_list *bios)
 {
+	bool r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	__unlock(prison, cell, bios);
+	r = __unlock(prison, cell, bios);
 	spin_unlock_irqrestore(&prison->lock, flags);
+
+	return r;
 }
 EXPORT_SYMBOL_GPL(dm_cell_unlock);
 
