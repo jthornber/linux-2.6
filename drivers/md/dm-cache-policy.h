@@ -99,7 +99,8 @@ struct dm_cache_policy {
 	 * Returns 0 if in cache, -ENOENT if not, < 0 for other errors
 	 * (-EWOULDBLOCK would be typical).
 	 */
-	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock);
+	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock,
+		      int data_dir, bool fast_copy, bool *background_queued);
 
 	/*
 	 * Sometimes the core target can optimise a migration, eg, the
@@ -109,6 +110,7 @@ struct dm_cache_policy {
 	 */
 	int (*lookup_with_work)(struct dm_cache_policy *p,
 				dm_oblock_t oblock, dm_cblock_t *cblock,
+				int data_dir, bool fast_copy,
 				struct policy_work **work);
 
 	int (*add_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);

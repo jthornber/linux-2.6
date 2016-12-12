@@ -158,8 +158,8 @@ static bool __get(struct dm_bio_prison *prison,
 				bio_list_add(&(*cell)->bios, inmate);
 				return false;
 			} else {
-				pr_alert("shared lock granted whilst exclusive, req lock level = %u, exclusive level = %u\n",
-					 lock_level, (*cell)->exclusive_level);
+				//	pr_alert("shared lock granted whilst exclusive, req lock level = %u, exclusive level = %u\n",
+				//	 lock_level, (*cell)->exclusive_level);
 			}
 		}
 

@@ -1568,8 +1568,8 @@ static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t bl
 static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		   bool *commit_needed)
 {
-	int r;
-	bool rb;
+	int r, data_dir;
+	bool rb, background_queued;
 	dm_cblock_t cblock;
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
@@ -1593,10 +1593,12 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		return DM_MAPIO_SUBMITTED;
 	}
 
+	data_dir = bio_data_dir(bio);
+
 	if (optimisable_bio(cache, bio, block)) {
 		struct policy_work *op = NULL;
 
-		r = policy_lookup_with_work(cache->policy, block, &cblock, &op);
+		r = policy_lookup_with_work(cache->policy, block, &cblock, data_dir, true, &op);
 		if (unlikely(r && r != -ENOENT)) {
 			pr_alert("lookup failed: r = %d\n", r);
 			bio_io_error(bio);
@@ -1612,12 +1614,15 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			return DM_MAPIO_SUBMITTED;
 		}
 	} else {
-		r = policy_lookup(cache->policy, block, &cblock);
+		r = policy_lookup(cache->policy, block, &cblock, data_dir, false, &background_queued);
 		if (unlikely(r && r != -ENOENT)) {
 			pr_alert("lookup failed: r = %d\n", r);
 			bio_io_error(bio);
 			return DM_MAPIO_SUBMITTED;
 		}
+
+		if (background_queued)
+			wake_migration_worker(cache);
 	}
 
 	if (r == -ENOENT) {

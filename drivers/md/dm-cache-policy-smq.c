@@ -772,7 +772,7 @@ static struct entry *get_entry(struct entry_alloc *ea, unsigned index)
  * core policy to implement.
  */
 // FIXME: make tunable
-#define MAX_WORK 1024
+#define MAX_WORK 10240
 #define MAX_WORK_MASK (MAX_WORK - 1u)
 
 struct smq_work {
@@ -783,6 +783,10 @@ struct smq_work {
 
 struct background_work {
 	spinlock_t lock;
+
+	atomic_t pending_promotes;
+	atomic_t pending_writebacks;
+	atomic_t pending_demotes;
 
 	struct list_head issued;
 	struct list_head queued;
@@ -864,6 +868,10 @@ static void background_work_init(struct background_work *b)
 {
 	unsigned i;
 
+	atomic_set(&b->pending_promotes, 0);
+	atomic_set(&b->pending_writebacks, 0);
+	atomic_set(&b->pending_demotes, 0);
+
 	spin_lock_init(&b->lock);
 	INIT_LIST_HEAD(&b->issued);
 	INIT_LIST_HEAD(&b->queued);
@@ -871,6 +879,41 @@ static void background_work_init(struct background_work *b)
 
 	for (i = 0; i < MAX_WORK; i++)
 		list_add_tail(&b->work[i].list, &b->free);
+}
+
+static void inc_stats(struct background_work *b, struct policy_work *w)
+{
+	switch (w->op) {
+	case POLICY_PROMOTE:
+		atomic_inc(&b->pending_promotes);
+		break;
+
+	case POLICY_DEMOTE:
+		atomic_inc(&b->pending_demotes);
+		break;
+
+	case POLICY_WRITEBACKS:
+		atomic_inc(&b->pending_writebacks);
+		break;
+	}
+}
+
+// FIXME: refactor
+static void dec_stats(struct background_work *b, struct policy_work *w)
+{
+	switch (w->op) {
+	case POLICY_PROMOTE:
+		atomic_inc(&b->pending_promotes);
+		break;
+
+	case POLICY_DEMOTE:
+		atomic_inc(&b->pending_demotes);
+		break;
+
+	case POLICY_WRITEBACKS:
+		atomic_inc(&b->pending_writebacks);
+		break;
+	}
 }
 
 static int __work_queue(struct background_work *b,
@@ -1271,6 +1314,7 @@ static void update_promote_levels(struct smq_policy *mq)
 	unsigned threshold_level = allocator_empty(&mq->cache_alloc) ?
 		default_promote_level(mq) : (NR_HOTSPOT_LEVELS / 2u);
 
+#if 0
 	/*
 	 * If the hotspot queue is performing badly then we have little
 	 * confidence that we know which blocks to promote.  So we cut down
@@ -1288,6 +1332,7 @@ static void update_promote_levels(struct smq_policy *mq)
 	case Q_WELL:
 		break;
 	}
+#endif
 
 	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
 	mq->write_promote_level = (NR_HOTSPOT_LEVELS - threshold_level) + 2u;
@@ -1422,9 +1467,16 @@ static enum promote_result maybe_promote(bool promote)
 	return promote ? PROMOTE_PERMANENT : PROMOTE_NOT;
 }
 
-static enum promote_result should_promote(struct smq_policy *mq, struct entry *hs_e)
+static enum promote_result should_promote(struct smq_policy *mq, struct entry *hs_e,
+					  int data_dir, bool fast_promote)
 {
-	return maybe_promote(hs_e->level >= mq->read_promote_level);
+	if (data_dir == WRITE) {
+		if (!allocator_empty(&mq->cache_alloc) && fast_promote)
+			return PROMOTE_TEMPORARY;
+
+		return maybe_promote(hs_e->level >= mq->write_promote_level);
+	} else
+		return maybe_promote(hs_e->level >= mq->read_promote_level);
 }
 
 static dm_oblock_t to_hblock(struct smq_policy *mq, dm_oblock_t b)
@@ -1499,11 +1551,13 @@ static void smq_destroy(struct dm_cache_policy *p)
 /*----------------------------------------------------------------*/
 
 static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock,
-		    struct policy_work **work)
+		    int data_dir, bool fast_copy,
+		    struct policy_work **work, bool *background_work)
 {
 	struct entry *e, *hs_e;
 	enum promote_result pr;
 
+	*background_work = false;
 	hs_e = update_hotspot_queue(mq, oblock);
 
 	e = h_lookup(&mq->table, oblock);
@@ -1517,22 +1571,28 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 	} else {
 		stats_miss(&mq->cache_stats);
 
-		pr = should_promote(mq, hs_e);
-		if (pr != PROMOTE_NOT)
+		pr = should_promote(mq, hs_e, data_dir, fast_copy);
+		if (pr != PROMOTE_NOT) {
 			queue_promotion(mq, oblock, work);
+			*background_work = true;
+		}
 
 		return -ENOENT;
 	}
 }
 
-static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
+static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock,
+		      int data_dir, bool fast_copy,
+		      bool *background_work)
 {
 	int r;
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
 
 	spin_lock_irqsave(&mq->lock, flags);
-	r = __lookup(mq, oblock, cblock, NULL);
+	r = __lookup(mq, oblock, cblock,
+		     data_dir, fast_copy,
+		     NULL, background_work);
 	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;
@@ -1540,14 +1600,16 @@ static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t
 
 static int smq_lookup_with_work(struct dm_cache_policy *p,
 				dm_oblock_t oblock, dm_cblock_t *cblock,
+				int data_dir, bool fast_copy,
 				struct policy_work **work)
 {
 	int r;
+	bool background_queued;
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
 
 	spin_lock_irqsave(&mq->lock, flags);
-	r = __lookup(mq, oblock, cblock, work);
+	r = __lookup(mq, oblock, cblock, data_dir, fast_copy, work, &background_queued);
 	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;

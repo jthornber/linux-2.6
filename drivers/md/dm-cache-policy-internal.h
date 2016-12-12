@@ -12,21 +12,24 @@
 
 /*----------------------------------------------------------------*/
 
-static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock)
+static inline int policy_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock,
+				int data_dir, bool fast_copy,
+				bool *background_queued)
 {
-	return p->lookup(p, oblock, cblock);
+	return p->lookup(p, oblock, cblock, data_dir, fast_copy, background_queued);
 }
 
 static inline int policy_lookup_with_work(struct dm_cache_policy *p,
 					  dm_oblock_t oblock, dm_cblock_t *cblock,
+					  int data_dir, bool fast_copy,
 					  struct policy_work **work)
 {
 	if (!p->lookup_with_work) {
 		*work = NULL;
-		return p->lookup(p, oblock, cblock);
+		return p->lookup(p, oblock, cblock, data_dir, fast_copy, NULL);
 	}
 
-	return p->lookup_with_work(p, oblock, cblock, work);
+	return p->lookup_with_work(p, oblock, cblock, data_dir, fast_copy, work);
 }
 
 static inline int policy_add_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
