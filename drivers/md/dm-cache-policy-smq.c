@@ -892,7 +892,7 @@ static void inc_stats(struct background_work *b, struct policy_work *w)
 		atomic_inc(&b->pending_demotes);
 		break;
 
-	case POLICY_WRITEBACKS:
+	case POLICY_WRITEBACK:
 		atomic_inc(&b->pending_writebacks);
 		break;
 	}
@@ -910,10 +910,21 @@ static void dec_stats(struct background_work *b, struct policy_work *w)
 		atomic_inc(&b->pending_demotes);
 		break;
 
-	case POLICY_WRITEBACKS:
+	case POLICY_WRITEBACK:
 		atomic_inc(&b->pending_writebacks);
 		break;
 	}
+}
+
+static bool adequate_writebacks_queued(struct background_work *b)
+{
+	// FIXME: hard coded value
+	return atomic_read(&b->pending_writebacks) > 1024;
+}
+
+static bool adequate_demotions_queued(struct background_work *b)
+{
+	return atomic_read(&b->pending_demotes) > 1024;
 }
 
 static int __work_queue(struct background_work *b,
@@ -945,6 +956,7 @@ static int __work_queue(struct background_work *b,
 			list_move(&w->list, &b->issued);
 		} else
 			list_move(&w->list, &b->queued);
+		inc_stats(b, &w->work);
 	}
 
 	return 0;
@@ -1006,6 +1018,7 @@ static void background_work_complete(struct background_work *b,
 	struct smq_work *w = container_of(op, struct smq_work, work);
 
 	spin_lock_irqsave(&b->lock, flags);
+	dec_stats(b, &w->work);
 	list_move(&w->list, &b->free);
 	rb_erase(&w->node, &b->pending);
 	spin_unlock_irqrestore(&b->lock, flags);
@@ -1219,6 +1232,7 @@ static void push(struct smq_policy *mq, struct entry *e)
 {
 	struct entry *sentinel;
 
+	BUG_ON(e->pending_work);
 	h_insert(&mq->table, e);
 
 	/*
@@ -1268,6 +1282,12 @@ static void requeue(struct smq_policy *mq, struct entry *e)
 {
 	struct entry *sentinel;
 
+	/*
+	 * Pending work has temporarily been taken out of the queues.
+	 */
+	if (e->pending_work)
+		return;
+
 	if (!test_and_set_bit(from_cblock(infer_cblock(mq, e)), mq->cache_hit_bits)) {
 		if (e->dirty) {
 			sentinel = writeback_sentinel(mq, e->level);
@@ -1311,8 +1331,15 @@ static void update_promote_levels(struct smq_policy *mq)
 	 * If there are unused cache entries then we want to be really
 	 * eager to promote.
 	 */
+#if 0
 	unsigned threshold_level = allocator_empty(&mq->cache_alloc) ?
-		default_promote_level(mq) : (NR_HOTSPOT_LEVELS / 2u);
+		default_promote_level(mq) * 8 : (NR_HOTSPOT_LEVELS / 2u);
+
+	threshold_level = max(threshold_level, NR_HOTSPOT_LEVELS);
+#else
+	// just trying to force demotions
+	unsigned threshold_level = NR_HOTSPOT_LEVELS; // / 2u;
+#endif
 
 #if 0
 	/*
@@ -1387,17 +1414,38 @@ static void end_cache_period(struct smq_policy *mq)
 
 /*----------------------------------------------------------------*/
 
+static void mark_pending(struct smq_policy *mq, struct entry *e)
+{
+	BUG_ON(e->pending_work);
+	e->pending_work = true;
+	q_del(e->dirty ? &mq->dirty : &mq->clean, e);
+}
+
+static void clear_pending(struct smq_policy *mq, struct entry *e)
+{
+	struct entry *sentinel;
+
+	BUG_ON(!e->pending_work);
+	e->pending_work = false;
+
+	// FIXME: common code with push()
+	if (e->dirty) {
+		sentinel = writeback_sentinel(mq, e->level);
+		q_push_before(&mq->dirty, sentinel, e);
+	} else {
+		sentinel = demote_sentinel(mq, e->level);
+		q_push_before(&mq->clean, sentinel, e);
+	}
+
+}
+
 static void queue_writeback(struct smq_policy *mq)
 {
 	struct policy_work work;
 	struct entry *e = q_peek(&mq->dirty, mq->dirty.nr_levels, true);
 
 	if (e) {
-		pr_alert("queue_writeback\n");
-		if (e->pending_work)
-			return;
-
-		e->pending_work = true;
+		mark_pending(mq, e);
 		work.op = POLICY_WRITEBACK;
 		work.oblock = e->oblock;
 		work.cblock = infer_cblock(mq, e);
@@ -1409,21 +1457,20 @@ static void queue_demotion(struct smq_policy *mq)
 {
 	struct policy_work work;
 	struct entry *e = q_peek(&mq->clean, mq->clean.nr_levels, true);
-	if (!e)
-		queue_writeback(mq);
 
-	else {
-		pr_alert("queue_demotion\n");
-
-		if (e->pending_work)
-			return;
-
-		e->pending_work = true;
-		work.op = POLICY_DEMOTE;
-		work.oblock = e->oblock;
-		work.cblock = infer_cblock(mq, e);
-		background_work_queue(&mq->bg_work, &work, NULL);
+	pr_alert("queue_demotion\n");
+	if (!e) {
+		pr_alert("no clean\n");
+		if (!adequate_writebacks_queued(&mq->bg_work))
+			queue_writeback(mq);
+		return;
 	}
+
+	mark_pending(mq, e);
+	work.op = POLICY_DEMOTE;
+	work.oblock = e->oblock;
+	work.cblock = infer_cblock(mq, e);
+	background_work_queue(&mq->bg_work, &work, NULL);
 }
 
 static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
@@ -1433,7 +1480,8 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	struct policy_work work;
 
 	if (allocator_empty(&mq->cache_alloc)) {
-		queue_demotion(mq);
+		if (!adequate_demotions_queued(&mq->bg_work))
+			queue_demotion(mq);
 		return;
 	}
 
@@ -1445,6 +1493,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	 * background work is aborted we must remember to free it.
 	 */
 	e = alloc_entry(&mq->cache_alloc);
+	e->pending_work = true;
 	work.op = POLICY_PROMOTE;
 	work.oblock = oblock;
 	work.cblock = infer_cblock(mq, e);
@@ -1677,8 +1726,22 @@ static bool smq_has_background_work(struct dm_cache_policy *p)
 
 static int smq_get_background_work(struct dm_cache_policy *p, struct policy_work **result)
 {
+	int r;
+	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
-	return background_work_issue(&mq->bg_work, result);
+
+	/* protected with it's own lock */
+	r = background_work_issue(&mq->bg_work, result);
+	if (r == -ENODATA) {
+		/* find some writeback work to do */
+		spin_lock_irqsave(&mq->lock, flags);
+		queue_writeback(mq);
+		spin_unlock_irqrestore(&mq->lock, flags);
+
+		r = background_work_issue(&mq->bg_work, result);
+	}
+
+	return r;
 }
 
 /*
@@ -1691,7 +1754,7 @@ static void __complete_background_work(struct smq_policy *mq,
 {
 	struct entry *e = get_entry(&mq->cache_alloc,
 				    from_cblock(work->cblock));
-	e->pending_work = false;
+	clear_pending(mq, e);
 
 	switch (work->op) {
 	case POLICY_PROMOTE:

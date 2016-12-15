@@ -1310,11 +1310,16 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 	struct cache *cache = mg->cache;
 
 	policy_complete_background_work(cache->policy, mg->op, success);
+	clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
 
-	if (mg->overwrite_bio)
+	if (mg->overwrite_bio) {
+		set_dirty(cache, mg->op->oblock, mg->op->cblock);
 		bio_complete(mg->overwrite_bio, mg->k.input);
-	else
+	} else {
+		if (success)
+			clear_dirty(cache, mg->op->oblock, mg->op->cblock);
 		dec_io_migrations(cache);
+	}
 
 	if (success)
 		update_stats(&cache->stats, mg->op->op);
@@ -1382,10 +1387,6 @@ static void mg_update_metadata(struct work_struct *ws)
 		need_commit = false;
 		break;
 	}
-
-	if (!mg->overwrite_bio)
-		clear_dirty(cache, mg->op->oblock, mg->op->cblock);
-	clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
 
 	if (need_commit) {
 		init_continuation(&mg->k, mg_success);
@@ -1530,6 +1531,7 @@ static bool spare_migration_bandwidth(struct cache *cache)
 	sector_t threshold = iot_idle_for(&cache->origin_tracker, HZ) ?
 		cache->migration_threshold * 4 :
 		cache->migration_threshold;
+	return current_volume <= threshold;
 #else
 	return true;
 #endif
@@ -1614,7 +1616,7 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			return DM_MAPIO_SUBMITTED;
 		}
 	} else {
-		r = policy_lookup(cache->policy, block, &cblock, data_dir, false, &background_queued);
+		r = policy_lookup(cache->policy, block, &cblock, data_dir, true, &background_queued);
 		if (unlikely(r && r != -ENOENT)) {
 			pr_alert("lookup failed: r = %d\n", r);
 			bio_io_error(bio);
