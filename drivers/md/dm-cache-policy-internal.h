@@ -32,16 +32,6 @@ static inline int policy_lookup_with_work(struct dm_cache_policy *p,
 	return p->lookup_with_work(p, oblock, cblock, data_dir, fast_copy, work);
 }
 
-static inline int policy_add_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	return p->add_mapping(p, oblock, cblock);
-}
-
-static inline int policy_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	return p->remove_mapping(p, oblock, cblock);
-}
-
 /*
  * Little inline functions that simplify calling the policy methods.
  */

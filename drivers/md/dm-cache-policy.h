@@ -113,9 +113,6 @@ struct dm_cache_policy {
 				int data_dir, bool fast_copy,
 				struct policy_work **work);
 
-	int (*add_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
-	int (*remove_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock);
-
 	/*
 	 * Checks to see if there's any background work that needs doing.
 	 */

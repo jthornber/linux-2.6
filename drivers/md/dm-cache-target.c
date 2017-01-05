@@ -354,6 +354,7 @@ struct cache_stats {
 	atomic_t write_miss;
 	atomic_t demotion;
 	atomic_t promotion;
+        atomic_t writeback;
 	atomic_t copies_avoided;
 	atomic_t cache_cell_clash;
 	atomic_t commit_count;
@@ -734,6 +735,28 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 		if (atomic_dec_return(&cache->nr_dirty) == 0)
 			dm_table_event(cache->ti->table);
 	}
+}
+
+/*
+ * These two are called when setting after migrations to force the policy
+ * and dirty bitset to be in sync.
+ */
+// FIXME: more efficient to use the cblock rather than the oblock for the policy call
+static void force_set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset))
+		atomic_inc(&cache->nr_dirty);
+        policy_set_dirty(cache->policy, oblock);
+}
+
+static void force_clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
+{
+	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
+                if (atomic_dec_return(&cache->nr_dirty) == 0)
+			dm_table_event(cache->ti->table);
+	}
+
+        policy_clear_dirty(cache->policy, oblock);
 }
 
 /*----------------------------------------------------------------*/
@@ -1152,8 +1175,7 @@ static void prevent_background_work(struct cache *cache)
 	down_write(&cache->background_work_lock);
 }
 
-static void allow_background_work(struct cache *cache)
-{
+static void allow_background_work(struct cache *cache) {
 	up_write(&cache->background_work_lock);
 }
 
@@ -1183,7 +1205,7 @@ static void update_stats(struct cache_stats *stats, enum policy_operation op)
 		break;
 
 	case POLICY_WRITEBACK:
-		/* not yet tracked */
+                atomic_inc(&stats->writeback);
 		break;
 	}
 }
@@ -1308,21 +1330,48 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 {
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
+        dm_cblock_t cblock = mg->op->cblock;
+        dm_oblock_t oblock = mg->op->oblock;
 
-	policy_complete_background_work(cache->policy, mg->op, success);
-	clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
-
-	if (mg->overwrite_bio) {
-		set_dirty(cache, mg->op->oblock, mg->op->cblock);
-		bio_complete(mg->overwrite_bio, mg->k.input);
-	} else {
-		if (success)
-			clear_dirty(cache, mg->op->oblock, mg->op->cblock);
-		dec_io_migrations(cache);
-	}
-
+        // FIXME: why don't nr promotions match the residency?
 	if (success)
 		update_stats(&cache->stats, mg->op->op);
+
+        if (!success)
+                pr_alert("migration failed\n");
+
+        switch (mg->op->op) {
+        case POLICY_PROMOTE:
+                clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
+                if (mg->overwrite_bio) {
+                        policy_complete_background_work(cache->policy, mg->op, success);
+                        if (success)
+                                force_set_dirty(cache, oblock, cblock);
+
+                        // FIXME: we could retry this to the origin
+                        bio_complete(mg->overwrite_bio, success ? 0 : -EIO);
+                } else {
+                        policy_complete_background_work(cache->policy, mg->op, success);
+                        if (success)
+                                force_clear_dirty(cache, oblock, cblock);
+                        dec_io_migrations(cache);
+                }
+                break;
+
+        case POLICY_DEMOTE:
+                BUG_ON(mg->overwrite_bio);
+                clear_discard(cache, oblock_to_dblock(cache, oblock));
+                policy_complete_background_work(cache->policy, mg->op, success);
+                dec_io_migrations(cache);
+                break;
+
+        case POLICY_WRITEBACK:
+                if (success)
+                        force_clear_dirty(cache, oblock, cblock);
+                policy_complete_background_work(cache->policy, mg->op, success);
+                dec_io_migrations(cache);
+                break;
+        }
 
 	bio_list_init(&bios);
 	if (mg->cell) {
@@ -1559,12 +1608,8 @@ static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 
 static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 {
-#if 1
 	return writeback_mode(&cache->features) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
-#else
-	return false;
-#endif
 }
 
 static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
@@ -1612,11 +1657,12 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			// optimisable because discarded.  Also can we drop
 			// the shared lock on bio here?
 			bio_drop_shared_lock(cache, bio);
+                        BUG_ON(op->op != POLICY_PROMOTE);
 			mg_start(cache, op, bio);
 			return DM_MAPIO_SUBMITTED;
 		}
 	} else {
-		r = policy_lookup(cache->policy, block, &cblock, data_dir, true, &background_queued);
+		r = policy_lookup(cache->policy, block, &cblock, data_dir, false, &background_queued);
 		if (unlikely(r && r != -ENOENT)) {
 			pr_alert("lookup failed: r = %d\n", r);
 			bio_io_error(bio);
@@ -1891,6 +1937,7 @@ static void do_waker(struct work_struct *ws)
 
 static void check_migrations(struct work_struct *ws)
 {
+#if 1
 	int r;
 	struct policy_work *op;
 	struct cache *cache = container_of(ws, struct cache, migration_worker);
@@ -1910,6 +1957,7 @@ static void check_migrations(struct work_struct *ws)
 		if (r)
 			break;
 	}
+#endif
 }
 
 /*----------------------------------------------------------------*/
@@ -1939,6 +1987,9 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 static void destroy(struct cache *cache)
 {
 	unsigned i;
+
+        pr_alert("%llu writebacks\n",
+                 (unsigned long long) atomic_read(&cache->stats.writeback));
 
 	mempool_destroy(cache->migration_pool);
 
@@ -2815,9 +2866,9 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
 		return r;
 
 	if (dirty)
-		set_dirty(cache, oblock, cblock);
+		force_set_dirty(cache, oblock, cblock);
 	else
-		clear_dirty(cache, oblock, cblock);
+		force_clear_dirty(cache, oblock, cblock);
 
 	return 0;
 }

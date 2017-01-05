@@ -34,6 +34,8 @@ static unsigned safe_mod(unsigned n, unsigned d)
 
 /*----------------------------------------------------------------*/
 
+#define DEBUG_ENTRY
+
 struct entry {
 	unsigned hash_next:28;
 	unsigned prev:28;
@@ -45,6 +47,10 @@ struct entry {
 	bool pending_work:1;
 
 	dm_oblock_t oblock;
+
+#ifdef DEBUG_ENTRY
+        unsigned long last_hit;
+#endif
 };
 
 /*----------------------------------------------------------------*/
@@ -193,10 +199,25 @@ static void l_add_before(struct entry_space *es, struct ilist *l,
 	}
 }
 
+#if 0
+static bool l_contains(struct entry_space *es, struct ilist *l, struct entry *sought)
+{
+        struct entry *e;
+
+        for (e = l_head(es, l); e; e = l_next(es, e)) {
+                if (e == sought)
+                        return true;
+        }
+
+        return false;
+}
+#endif
 static void l_del(struct entry_space *es, struct ilist *l, struct entry *e)
 {
 	struct entry *prev = l_prev(es, e);
 	struct entry *next = l_next(es, e);
+
+//        BUG_ON(!l_contains(es, l, e));
 
 	if (prev)
 		prev->next = e->next;
@@ -282,6 +303,8 @@ static unsigned q_size(struct queue *q)
  */
 static void q_push(struct queue *q, struct entry *e)
 {
+        BUG_ON(e->pending_work);
+
 	if (!e->sentinel)
 		q->nr_elts++;
 
@@ -290,6 +313,8 @@ static void q_push(struct queue *q, struct entry *e)
 
 static void q_push_before(struct queue *q, struct entry *old, struct entry *e)
 {
+        BUG_ON(e->pending_work);
+
 	if (!e->sentinel)
 		q->nr_elts++;
 
@@ -456,40 +481,131 @@ static void q_redistribute(struct queue *q)
 	}
 }
 
-static void q_requeue_before(struct queue *q, struct entry *dest, struct entry *e, unsigned extra_levels)
+static bool q_check_ages(struct queue *q, unsigned long min_age)
 {
-	struct entry *de;
-	unsigned new_level;
+	unsigned l;
+	struct entry *e;
 
-	q_del(q, e);
+	for (l = 0; l < q->nr_levels; l++) {
+		for (e = l_head(q->es, q->qs + l); e; e = l_next(q->es, e)) {
+			if (e->sentinel)
+				break;
 
-	if (extra_levels && (e->level < q->nr_levels - 1u)) {
-		new_level = min(q->nr_levels - 1u, e->level + extra_levels);
-		for (de = l_head(q->es, q->qs + new_level); de; de = l_next(q->es, de)) {
-			if (de->sentinel)
-				continue;
-
-			q_del(q, de);
-			de->level = e->level;
-
-			if (dest)
-				q_push_before(q, dest, de);
-			else
-				q_push(q, de);
-			break;
+			if (jiffies - e->last_hit < min_age)
+				return false;
 		}
-
-		e->level = new_level;
 	}
 
+	return true;
+}
+
+// FIXME: Obviously very slow, but just trying to
+// get correct behaviour first.
+
+/*
+ * We insert at one of these three points,
+ * depending on the sentinels_passed count.
+ *
+ * |....|s1|....|s2|....|
+ *     ^       ^
+ *     1       2
+*/
+static struct entry *find_sentinel(struct queue *q, unsigned level, unsigned pos)
+{
+	struct entry *e;
+
+	BUG_ON(pos >= 2);
+
+	for (e = l_head(q->es, q->qs + level); e; e = l_next(q->es, e)) {
+		if (e->sentinel) {
+			if (!pos)
+				return e;
+
+			pos--;
+		}
+	}
+
+	return NULL;
+}
+
+static void q_push_before_sentinel(struct queue *q, struct entry *e, unsigned pos)
+{
+	struct entry *s;
+
+	switch (pos) {
+	case 0:
+	case 1:
+		s = find_sentinel(q, e->level, pos);
+		if (!s) {
+			q_push(q, e);
+			break;
+		}
+		q_push_before(q, s, e);
+		break;
+
+	default:
+		q_push(q, e);
+	}
+}
+
+static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels, struct entry *s1, struct entry *s2)
+{
+ 	struct entry *de;
+	unsigned sentinels_passed = 0;
+	unsigned new_level = min(q->nr_levels - 1u, e->level + extra_levels);
+
+	/* try and find an entry to swap with */
+	if (extra_levels && (e->level < q->nr_levels - 1u)) {
+		for (de = l_head(q->es, q->qs + new_level); de && de->sentinel; de = l_next(q->es, de))
+			sentinels_passed++;
+
+		if (de) {
+			q_del(q, de);
+			de->level = e->level;
+			if (s1) {
+				switch (sentinels_passed) {
+				case 0:
+					q_push_before(q, s1, de);
+					break;
+
+				case 1:
+					q_push_before(q, s2, de);
+					break;
+
+				default:
+					q_push(q, de);
+				}
+			} else
+				q_push(q, de);
+		}
+	}
+
+	q_del(q, e);
+	e->level = new_level;
 	q_push(q, e);
 }
 
-static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels)
+#if 0
+static bool q_any_pending(struct queue *q)
 {
-	q_requeue_before(q, NULL, e, extra_levels);
-}
+        unsigned level;
+        struct ilist *l;
+        struct entry *e;
 
+        for (level = 0u; level < q->nr_levels; level++) {
+                l = q->qs + level;
+                for (e = l_head(q->es, l); e; e = l_next(q->es, e)) {
+                        if (e->pending_work) {
+                                if (e->sentinel)
+                                        pr_alert("sentinel is pending\n");
+                                return true;
+                        }
+                }
+        }
+
+        return false;
+}
+#endif
 /*----------------------------------------------------------------*/
 
 #define FP_SHIFT 8
@@ -944,12 +1060,14 @@ static int __work_queue(struct background_work *b,
 		w = list_first_entry(&b->free, struct smq_work, list);
 		memcpy(&w->work, work, sizeof(*work));
 
-		if (!__insert_pending(b, w))
+		if (!__insert_pending(b, w)) {
 			/*
 			 * There was a race, we'll just ignore this second
 			 * bit of work for the same oblock.
 			 */
+			pr_alert("insert_pending failed\n");
 			return -EINVAL;
+		}
 
 		if (pwork) {
 			*pwork = &w->work;
@@ -1056,8 +1174,8 @@ static bool background_promotion_already_present(struct background_work *b,
 #define NR_HOTSPOT_LEVELS 64u
 #define NR_CACHE_LEVELS 64u
 
-#define WRITEBACK_PERIOD (10 * HZ)
-#define DEMOTE_PERIOD (60 * HZ)
+#define WRITEBACK_PERIOD (10ul * HZ)
+#define DEMOTE_PERIOD (60ul * HZ)
 
 #define HOTSPOT_UPDATE_PERIOD (HZ)
 #define CACHE_UPDATE_PERIOD (10u * HZ)
@@ -1172,15 +1290,16 @@ static void __update_demote_sentinels(struct smq_policy *mq)
 static void update_sentinels(struct smq_policy *mq)
 {
 	if (time_after(jiffies, mq->next_writeback_period)) {
-		__update_writeback_sentinels(mq);
+		pr_alert("update_sentinels\n");
 		mq->next_writeback_period = jiffies + WRITEBACK_PERIOD;
 		mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
+		__update_writeback_sentinels(mq);
 	}
 
 	if (time_after(jiffies, mq->next_demote_period)) {
-		__update_demote_sentinels(mq);
 		mq->next_demote_period = jiffies + DEMOTE_PERIOD;
 		mq->current_demote_sentinels = !mq->current_demote_sentinels;
+		__update_demote_sentinels(mq);
 	}
 }
 
@@ -1216,62 +1335,37 @@ static void sentinels_init(struct smq_policy *mq)
 
 /*----------------------------------------------------------------*/
 
-#if 0
-/*
- * These methods tie together the dirty queue, clean queue and hash table.
- */
-static void push_new(struct smq_policy *mq, struct entry *e)
+static void del_queue(struct smq_policy *mq, struct entry *e)
 {
-	struct queue *q = e->dirty ? &mq->dirty : &mq->clean;
-	h_insert(&mq->table, e);
-	q_push(q, e);
+        q_del(e->dirty ? &mq->dirty : &mq->clean, e);
 }
-#endif
 
-static void push(struct smq_policy *mq, struct entry *e)
+static void push_queue(struct smq_policy *mq, struct entry *e)
 {
 	struct entry *sentinel;
 
-	BUG_ON(e->pending_work);
+        /*
+         * Punch this into the queue just in front of the sentinel, to
+         * ensure it's cleaned straight away.
+         */
+        if (e->dirty) {
+		e->last_hit = jiffies;
+                sentinel = writeback_sentinel(mq, e->level);
+                q_push_before(&mq->dirty, sentinel, e);
+        } else {
+                sentinel = demote_sentinel(mq, e->level);
+                q_push_before(&mq->clean, sentinel, e);
+        }
+}
+
+// !h, !q, a -> h, q, a
+static void push(struct smq_policy *mq, struct entry *e)
+{
 	h_insert(&mq->table, e);
 
-	/*
-	 * Punch this into the queue just in front of the sentinel, to
-	 * ensure it's cleaned straight away.
-	 */
-	if (e->dirty) {
-		sentinel = writeback_sentinel(mq, e->level);
-		q_push_before(&mq->dirty, sentinel, e);
-	} else {
-		sentinel = demote_sentinel(mq, e->level);
-		q_push_before(&mq->clean, sentinel, e);
-	}
+        if (!e->pending_work)
+                push_queue(mq, e);
 }
-
-/*
- * Removes an entry from cache.  Removes from the hash table.
- */
-static void __del(struct smq_policy *mq, struct queue *q, struct entry *e)
-{
-	q_del(q, e);
-	h_remove(&mq->table, e);
-}
-
-static void del(struct smq_policy *mq, struct entry *e)
-{
-	__del(mq, e->dirty ? &mq->dirty : &mq->clean, e);
-}
-
-
-#if 0
-static struct entry *pop_old(struct smq_policy *mq, struct queue *q, unsigned max_level)
-{
-	struct entry *e = q_pop_old(q, max_level);
-	if (e)
-		h_remove(&mq->table, e);
-	return e;
-}
-#endif
 
 static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
 {
@@ -1280,8 +1374,6 @@ static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
 
 static void requeue(struct smq_policy *mq, struct entry *e)
 {
-	struct entry *sentinel;
-
 	/*
 	 * Pending work has temporarily been taken out of the queues.
 	 */
@@ -1289,14 +1381,16 @@ static void requeue(struct smq_policy *mq, struct entry *e)
 		return;
 
 	if (!test_and_set_bit(from_cblock(infer_cblock(mq, e)), mq->cache_hit_bits)) {
-		if (e->dirty) {
-			sentinel = writeback_sentinel(mq, e->level);
-			q_requeue_before(&mq->dirty, sentinel, e, 1u);
-		} else {
-			sentinel = demote_sentinel(mq, e->level);
-			q_requeue_before(&mq->clean, sentinel, e, 1u);
-		}
-	}
+                // FIXME: surely these should be placed *after* the sentinel?
+                if (e->dirty) {
+//			BUG_ON(!q_check_ages(&mq->dirty, WRITEBACK_PERIOD));
+                        q_requeue(&mq->dirty, e, 1u,
+				  get_sentinel(&mq->writeback_sentinel_alloc, e->level, !mq->current_writeback_sentinels),
+				  get_sentinel(&mq->writeback_sentinel_alloc, e->level, mq->current_writeback_sentinels));
+			//BUG_ON(q_check_ages(&mq->dirty, WRITEBACK_PERIOD));
+                } else
+                        q_requeue(&mq->clean, e, 1u, NULL, NULL);
+        }
 }
 
 static unsigned default_promote_level(struct smq_policy *mq)
@@ -1327,21 +1421,16 @@ static unsigned default_promote_level(struct smq_policy *mq)
 
 static void update_promote_levels(struct smq_policy *mq)
 {
+#if 0
 	/*
 	 * If there are unused cache entries then we want to be really
 	 * eager to promote.
 	 */
-#if 0
 	unsigned threshold_level = allocator_empty(&mq->cache_alloc) ?
 		default_promote_level(mq) * 8 : (NR_HOTSPOT_LEVELS / 2u);
 
 	threshold_level = max(threshold_level, NR_HOTSPOT_LEVELS);
-#else
-	// just trying to force demotions
-	unsigned threshold_level = NR_HOTSPOT_LEVELS; // / 2u;
-#endif
 
-#if 0
 	/*
 	 * If the hotspot queue is performing badly then we have little
 	 * confidence that we know which blocks to promote.  So we cut down
@@ -1359,6 +1448,8 @@ static void update_promote_levels(struct smq_policy *mq)
 	case Q_WELL:
 		break;
 	}
+#else
+        unsigned threshold_level = NR_HOTSPOT_LEVELS; // / 2u;
 #endif
 
 	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
@@ -1416,61 +1507,61 @@ static void end_cache_period(struct smq_policy *mq)
 
 static void mark_pending(struct smq_policy *mq, struct entry *e)
 {
+        BUG_ON(e->sentinel);
+        BUG_ON(!e->allocated);
 	BUG_ON(e->pending_work);
 	e->pending_work = true;
-	q_del(e->dirty ? &mq->dirty : &mq->clean, e);
 }
 
 static void clear_pending(struct smq_policy *mq, struct entry *e)
 {
-	struct entry *sentinel;
-
 	BUG_ON(!e->pending_work);
 	e->pending_work = false;
-
-	// FIXME: common code with push()
-	if (e->dirty) {
-		sentinel = writeback_sentinel(mq, e->level);
-		q_push_before(&mq->dirty, sentinel, e);
-	} else {
-		sentinel = demote_sentinel(mq, e->level);
-		q_push_before(&mq->clean, sentinel, e);
-	}
-
 }
+
+static unsigned nr_queue_writeback_calls = 0;
 
 static void queue_writeback(struct smq_policy *mq)
 {
 	struct policy_work work;
-	struct entry *e = q_peek(&mq->dirty, mq->dirty.nr_levels, true);
+	struct entry *e = q_peek(&mq->dirty, mq->dirty.nr_levels, false);
 
 	if (e) {
+		if (jiffies - e->last_hit < WRITEBACK_PERIOD)
+			pr_alert("writeback age: %lu, writeback_period = %lu\n", jiffies - e->last_hit, WRITEBACK_PERIOD);
+
 		mark_pending(mq, e);
+                q_del(&mq->dirty, e);
+
 		work.op = POLICY_WRITEBACK;
 		work.oblock = e->oblock;
 		work.cblock = infer_cblock(mq, e);
 		background_work_queue(&mq->bg_work, &work, NULL);
 	}
+
+        nr_queue_writeback_calls++;
 }
 
 static void queue_demotion(struct smq_policy *mq)
 {
+#if 1
 	struct policy_work work;
 	struct entry *e = q_peek(&mq->clean, mq->clean.nr_levels, true);
 
-	pr_alert("queue_demotion\n");
 	if (!e) {
-		pr_alert("no clean\n");
 		if (!adequate_writebacks_queued(&mq->bg_work))
 			queue_writeback(mq);
 		return;
 	}
 
 	mark_pending(mq, e);
+	q_del(&mq->clean, e);
+
 	work.op = POLICY_DEMOTE;
 	work.oblock = e->oblock;
 	work.cblock = infer_cblock(mq, e);
 	background_work_queue(&mq->bg_work, &work, NULL);
+#endif
 }
 
 static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
@@ -1493,6 +1584,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	 * background work is aborted we must remember to free it.
 	 */
 	e = alloc_entry(&mq->cache_alloc);
+        BUG_ON(!e);
 	e->pending_work = true;
 	work.op = POLICY_PROMOTE;
 	work.oblock = oblock;
@@ -1547,7 +1639,8 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b)
 		hi = get_index(&mq->hotspot_alloc, e);
 		q_requeue(&mq->hotspot, e,
 			  test_and_set_bit(hi, mq->hotspot_hit_bits) ?
-			  0u : mq->hotspot_level_jump);
+			  0u : mq->hotspot_level_jump,
+			  NULL, NULL);
 
 	} else {
 		stats_miss(&mq->hotspot_stats);
@@ -1588,6 +1681,8 @@ static struct smq_policy *to_smq_policy(struct dm_cache_policy *p)
 static void smq_destroy(struct dm_cache_policy *p)
 {
 	struct smq_policy *mq = to_smq_policy(p);
+
+        pr_alert("%u queue_writeback calls\n", nr_queue_writeback_calls);
 
 	h_exit(&mq->hotspot_table);
 	h_exit(&mq->table);
@@ -1664,53 +1759,6 @@ static int smq_lookup_with_work(struct dm_cache_policy *p,
 	return r;
 }
 
-// FIXME: can the add/remote functions invalidate queued background work?
-static int __add_mapping(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	struct entry *e = get_entry(&mq->cache_alloc,
-				    from_cblock(cblock));
-	e->oblock = oblock;
-	push(mq, e);
-
-	return 0;
-}
-
-static int smq_add_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	int r;
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
-
-	spin_lock_irqsave(&mq->lock, flags);
-	r = __add_mapping(mq, oblock, cblock);
-	spin_unlock_irqrestore(&mq->lock, flags);
-
-	return r;
-}
-
-static void __remove_mapping(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	struct entry *e;
-
-	e = h_lookup(&mq->table, oblock);
-	BUG_ON(!e);
-
-	del(mq, e);
-	free_entry(&mq->cache_alloc, e);
-}
-
-static int smq_remove_mapping(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
-
-	spin_lock_irqsave(&mq->lock, flags);
-	__remove_mapping(mq, oblock, cblock);
-	spin_unlock_irqrestore(&mq->lock, flags);
-
-	return 0;
-}
-
 static bool smq_has_background_work(struct dm_cache_policy *p)
 {
 	bool r;
@@ -1726,9 +1774,14 @@ static bool smq_has_background_work(struct dm_cache_policy *p)
 
 static int smq_get_background_work(struct dm_cache_policy *p, struct policy_work **result)
 {
+#if 1
 	int r;
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
+
+        //spin_lock_irqsave(&mq->lock, flags);
+        //BUG_ON(q_any_pending(&mq->dirty));
+        //spin_unlock_irqrestore(&mq->lock, flags);
 
 	/* protected with it's own lock */
 	r = background_work_issue(&mq->bg_work, result);
@@ -1741,7 +1794,15 @@ static int smq_get_background_work(struct dm_cache_policy *p, struct policy_work
 		r = background_work_issue(&mq->bg_work, result);
 	}
 
+        //spin_lock_irqsave(&mq->lock, flags);
+        //BUG_ON(q_any_pending(&mq->dirty));
+        //spin_unlock_irqrestore(&mq->lock, flags);
+
 	return r;
+#else
+        return -ENODATA;
+#endif
+
 }
 
 /*
@@ -1754,22 +1815,39 @@ static void __complete_background_work(struct smq_policy *mq,
 {
 	struct entry *e = get_entry(&mq->cache_alloc,
 				    from_cblock(work->cblock));
-	clear_pending(mq, e);
 
 	switch (work->op) {
 	case POLICY_PROMOTE:
-		if (success)
-			__add_mapping(mq, work->oblock, work->cblock);
-		else
-			free_entry(&mq->cache_alloc, e);
+                // !h, !q, a
+                clear_pending(mq, e);
+		if (success) {
+                        e->oblock = work->oblock;
+                        push(mq, e);
+                        // h, q, a
+                } else {
+                        free_entry(&mq->cache_alloc, e);
+                        // !h, !q, !a
+                }
 		break;
 
 	case POLICY_DEMOTE:
-		if (success)
-			__remove_mapping(mq, work->oblock, work->cblock);
-		break;
+                // h, !q, a
+		if (success) {
+                        h_remove(&mq->table, e);
+                        free_entry(&mq->cache_alloc, e);
+                        // !h, !q, !a
+                } else {
+                        push_queue(mq, e);
+                        // h, q, a
+                }
+                break;
 
 	case POLICY_WRITEBACK:
+                // h, !q, a
+                BUG_ON(e->dirty);
+                clear_pending(mq, e);
+                push_queue(mq, e);
+                // h, q, a
 		break;
 	}
 
@@ -1788,6 +1866,7 @@ static void smq_complete_background_work(struct dm_cache_policy *p,
 	spin_unlock_irqrestore(&mq->lock, flags);
 }
 
+// in_hash(oblock) -> in_hash(oblock)
 static void __smq_set_clear_dirty(struct smq_policy *mq, dm_oblock_t oblock, bool set)
 {
 	struct entry *e;
@@ -1795,9 +1874,14 @@ static void __smq_set_clear_dirty(struct smq_policy *mq, dm_oblock_t oblock, boo
 	e = h_lookup(&mq->table, oblock);
 	BUG_ON(!e);
 
-	del(mq, e);
-	e->dirty = set;
-	push(mq, e);
+        // FIXME: I hate this
+        if (e->pending_work)
+                e->dirty = set;
+        else {
+                del_queue(mq, e);
+                e->dirty = set;
+                push_queue(mq, e);
+        }
 }
 
 static void smq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
@@ -1831,6 +1915,7 @@ static int smq_load_mapping(struct dm_cache_policy *p,
 	e->oblock = oblock;
 	e->dirty = false;	/* this gets corrected in a minute */
 	e->level = hint_valid ? min(hint, NR_CACHE_LEVELS - 1) : 1;
+        e->pending_work = false;
 	push(mq, e);
 
 	return 0;
@@ -1964,8 +2049,6 @@ static void init_policy_functions(struct smq_policy *mq, bool mimic_mq)
 	mq->policy.destroy = smq_destroy;
 	mq->policy.lookup = smq_lookup;
 	mq->policy.lookup_with_work = smq_lookup_with_work;
-	mq->policy.add_mapping = smq_add_mapping;
-	mq->policy.remove_mapping = smq_remove_mapping;
 	mq->policy.has_background_work = smq_has_background_work;
 	mq->policy.get_background_work = smq_get_background_work;
 	mq->policy.complete_background_work = smq_complete_background_work;
