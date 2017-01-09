@@ -131,8 +131,7 @@ int dm_cell_lock_promote(struct dm_bio_prison *prison,
 			 unsigned new_lock_level);
 
 /*
- * Adds any held bios to the bio list.  Always returns ownership of the
- * cell (you should free it).
+ * Adds any held bios to the bio list.
  *
  * There may be shared locks still held at this point even if you quiesced
  * (ie. different lock levels).

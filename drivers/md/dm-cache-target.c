@@ -728,15 +728,6 @@ static void set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbloc
 	}
 }
 
-static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
-{
-	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
-		policy_clear_dirty(cache->policy, oblock);
-		if (atomic_dec_return(&cache->nr_dirty) == 0)
-			dm_table_event(cache->ti->table);
-	}
-}
-
 /*
  * These two are called when setting after migrations to force the policy
  * and dirty bitset to be in sync.
@@ -749,6 +740,7 @@ static void force_set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t
         policy_set_dirty(cache->policy, oblock);
 }
 
+// FIXME: do we need to make the policy call, since the background complete should do this?
 static void force_clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
