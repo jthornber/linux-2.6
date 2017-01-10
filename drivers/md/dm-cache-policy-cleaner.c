@@ -23,8 +23,12 @@ struct wb_cache_entry {
 	struct list_head list;
 	struct hlist_node hlist;
 
+#if 0
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;
+#else
+	struct policy_work work;
+#endif
 	bool dirty:1;
 	bool pending:1;
 };
@@ -145,7 +149,7 @@ static struct wb_cache_entry *lookup_cache_entry(struct policy *p, dm_oblock_t o
 	struct hlist_head *bucket = &hash->table[h];
 
 	hlist_for_each_entry(cur, bucket, hlist) {
-		if (cur->oblock == oblock) {
+		if (cur->work.oblock == oblock) {
 			/* Move upfront bucket for faster access. */
 			hlist_del(&cur->hlist);
 			hlist_add_head(&cur->hlist, bucket);
@@ -158,7 +162,7 @@ static struct wb_cache_entry *lookup_cache_entry(struct policy *p, dm_oblock_t o
 
 static void insert_cache_hash_entry(struct policy *p, struct wb_cache_entry *e)
 {
-	unsigned h = hash_64(from_oblock(e->oblock), p->chash.hash_bits);
+	unsigned h = hash_64(from_oblock(e->work.oblock), p->chash.hash_bits);
 
 	hlist_add_head(&e->hlist, &p->chash.table[h]);
 }
@@ -169,56 +173,107 @@ static void remove_cache_hash_entry(struct wb_cache_entry *e)
 }
 
 /* Public interface (see dm-cache-policy.h */
-static int wb_map(struct dm_cache_policy *pe, dm_oblock_t oblock,
-		  bool can_block, bool can_migrate, bool discarded_oblock,
-		  struct bio *bio, struct policy_locker *locker,
-		  struct policy_result *result)
-{
-	struct policy *p = to_policy(pe);
-	struct wb_cache_entry *e;
-	unsigned long flags;
-
-	result->op = POLICY_MISS;
-
-	if (can_block)
-		spin_lock_irqsave(&p->lock, flags);
-
-	else if (!spin_trylock_irqsave(&p->lock, flags))
-		return -EWOULDBLOCK;
-
-	e = lookup_cache_entry(p, oblock);
-	if (e) {
-		result->op = POLICY_HIT;
-		result->cblock = e->cblock;
-
-	}
-
-	spin_unlock_irqrestore(&p->lock, flags);
-
-	return 0;
-}
-
-static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t *cblock)
+static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t *cblock,
+		     int data_dir, bool fast_copy, bool *background_queued)
 {
 	int r;
 	struct policy *p = to_policy(pe);
 	struct wb_cache_entry *e;
 	unsigned long flags;
 
-	if (!spin_trylock_irqsave(&p->lock, flags))
-		return -EWOULDBLOCK;
+	*background_queued = false;
+
+	spin_lock_irqsave(&p->lock, flags);
 
 	e = lookup_cache_entry(p, oblock);
 	if (e) {
-		*cblock = e->cblock;
+		*cblock = e->work.cblock;
 		r = 0;
-
 	} else
 		r = -ENOENT;
 
 	spin_unlock_irqrestore(&p->lock, flags);
 
 	return r;
+}
+
+static bool wb_has_background_work(struct dm_cache_policy *pe)
+{
+	bool r = false;
+	unsigned long flags;
+	struct policy *p = to_policy(pe);
+
+	spin_lock_irqsave(&p->lock, flags);
+
+	if (!list_empty(&p->dirty))
+		r = true;
+
+	spin_unlock_irqrestore(&p->lock, flags);
+
+	return r;
+}
+
+static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
+{
+	struct list_head *l;
+	struct wb_cache_entry *r;
+
+	// FIXME: is not tracking outstanding work (aside from p->dirty list) broken?
+	if (list_empty(&p->dirty))
+		return NULL;
+
+	l = list_pop(&p->dirty);
+	r = container_of(l, struct wb_cache_entry, list);
+	list_add(l, &p->clean_pending);
+
+	return r;
+}
+
+static int wb_get_background_work(struct dm_cache_policy *pe, bool idle,
+				  struct policy_work **result)
+{
+	int r = -ENODATA;
+	unsigned long flags;
+	struct policy *p = to_policy(pe);
+	struct wb_cache_entry *e;
+
+	spin_lock_irqsave(&p->lock, flags);
+
+	e = get_next_dirty_entry(p);
+	if (e) {
+		e->work.op = POLICY_WRITEBACK;
+		*result = &e->work;
+		r = 0;
+	}
+
+	spin_unlock_irqrestore(&p->lock, flags);
+
+	return r;
+}
+
+static void wb_complete_background_work(struct dm_cache_policy *pe,
+					struct policy_work *work,
+					bool success)
+{
+	unsigned long flags;
+	struct policy *p = to_policy(pe);
+	struct wb_cache_entry *e;
+
+	spin_lock_irqsave(&p->lock, flags);
+
+	e = lookup_cache_entry(p, work->oblock);
+
+	if (work->op == POLICY_WRITEBACK) {
+		if (success) {
+			BUG_ON(e->dirty);
+			/* remove from p->clean_pending */
+			list_del(&e->list);
+		}
+	}
+
+	// FIXME: at what point should cache entries be removed!? side-effect of DEMOTE?
+
+	spin_unlock_irqrestore(&p->lock, flags);
 }
 
 static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
@@ -282,8 +337,8 @@ static int wb_load_mapping(struct dm_cache_policy *pe,
 	struct wb_cache_entry *e = alloc_cache_entry(p);
 
 	if (e) {
-		e->cblock = cblock;
-		e->oblock = oblock;
+		e->work.cblock = cblock;
+		e->work.oblock = oblock;
 		e->dirty = false; /* blocks default to clean */
 		add_cache_entry(p, e);
 		r = 0;
@@ -302,6 +357,7 @@ static void wb_destroy(struct dm_cache_policy *pe)
 	kfree(p);
 }
 
+#if 0
 static struct wb_cache_entry *__wb_force_remove_mapping(struct policy *p, dm_oblock_t oblock)
 {
 	struct wb_cache_entry *r = lookup_cache_entry(p, oblock);
@@ -341,45 +397,7 @@ static void wb_force_mapping(struct dm_cache_policy *pe,
 	add_cache_entry(p, e);
 	spin_unlock_irqrestore(&p->lock, flags);
 }
-
-static struct wb_cache_entry *get_next_dirty_entry(struct policy *p)
-{
-	struct list_head *l;
-	struct wb_cache_entry *r;
-
-	if (list_empty(&p->dirty))
-		return NULL;
-
-	l = list_pop(&p->dirty);
-	r = container_of(l, struct wb_cache_entry, list);
-	list_add(l, &p->clean_pending);
-
-	return r;
-}
-
-static int wb_writeback_work(struct dm_cache_policy *pe,
-			     dm_oblock_t *oblock,
-			     dm_cblock_t *cblock,
-			     bool critical_only)
-{
-	int r = -ENOENT;
-	struct policy *p = to_policy(pe);
-	struct wb_cache_entry *e;
-	unsigned long flags;
-
-	spin_lock_irqsave(&p->lock, flags);
-
-	e = get_next_dirty_entry(p);
-	if (e) {
-		*oblock = e->oblock;
-		*cblock = e->cblock;
-		r = 0;
-	}
-
-	spin_unlock_irqrestore(&p->lock, flags);
-
-	return r;
-}
+#endif
 
 static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 {
@@ -390,15 +408,14 @@ static dm_cblock_t wb_residency(struct dm_cache_policy *pe)
 static void init_policy_functions(struct policy *p)
 {
 	p->policy.destroy = wb_destroy;
-	p->policy.map = wb_map;
 	p->policy.lookup = wb_lookup;
+	p->policy.has_background_work = wb_has_background_work;
+	p->policy.get_background_work = wb_get_background_work;
+	p->policy.complete_background_work = wb_complete_background_work;
 	p->policy.set_dirty = wb_set_dirty;
 	p->policy.clear_dirty = wb_clear_dirty;
 	p->policy.load_mapping = wb_load_mapping;
 	p->policy.get_hint = NULL;
-	p->policy.remove_mapping = wb_remove_mapping;
-	p->policy.writeback_work = wb_writeback_work;
-	p->policy.force_mapping = wb_force_mapping;
 	p->policy.residency = wb_residency;
 	p->policy.tick = NULL;
 }
@@ -435,7 +452,7 @@ static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 
 static struct dm_cache_policy_type wb_policy_type = {
 	.name = "cleaner",
-	.version = {1, 0, 0},
+	.version = {2, 0, 0},
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = wb_create
