@@ -1453,7 +1453,7 @@ static void update_promote_levels(struct smq_policy *mq)
 	}
 
 	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
-	mq->write_promote_level = (NR_HOTSPOT_LEVELS - threshold_level) + 2u;
+	mq->write_promote_level = (NR_HOTSPOT_LEVELS - threshold_level); // + 2u;
 }
 
 /*
@@ -1510,31 +1510,42 @@ static void end_cache_period(struct smq_policy *mq)
 /*
  * Targets are given as a percentage.
  */
-#define CLEAN_TARGET 20u
-#define FREE_TARGET 5u
+#define CLEAN_TARGET 25u
+#define FREE_TARGET 25u
 
 static unsigned percent_to_target(struct smq_policy *mq, unsigned p)
 {
 	return from_cblock(mq->cache_size) * p / 100u;
 }
 
-static bool clean_target_met(struct smq_policy *mq)
+static bool clean_target_met(struct smq_policy *mq, bool idle)
 {
 	/*
 	 * Cache entries may not be populated.  So we're cannot rely on the
 	 * size of the clean queue.
 	 */
 	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->dirty);
-	return (nr_clean + nr_writebacks_queued(&mq->bg_work)) >=
-	       percent_to_target(mq, CLEAN_TARGET);
+
+	if (idle)
+		/*
+		 * We'd like to clean everything.
+		 */
+		return q_size(&mq->dirty) > 0u;
+	else
+		return (nr_clean + nr_writebacks_queued(&mq->bg_work)) >=
+		       percent_to_target(mq, CLEAN_TARGET);
 }
 
-static bool free_target_met(struct smq_policy *mq)
+static bool free_target_met(struct smq_policy *mq, bool idle)
 {
 	unsigned nr_free = from_cblock(mq->cache_size) -
-		           mq->cache_alloc.nr_allocated;
-	return (nr_free + nr_demotions_queued(&mq->bg_work)) >=
-	       percent_to_target(mq, FREE_TARGET);
+			   mq->cache_alloc.nr_allocated;
+
+	if (idle)
+		return (nr_free + nr_demotions_queued(&mq->bg_work)) >=
+		       percent_to_target(mq, FREE_TARGET);
+	else
+		return true;
 }
 
 /*----------------------------------------------------------------*/
@@ -1585,7 +1596,7 @@ static void queue_demotion(struct smq_policy *mq)
 	struct entry *e = q_peek(&mq->clean, mq->clean.nr_levels, true);
 
 	if (!e) {
-		if (!clean_target_met(mq))
+		if (!clean_target_met(mq, false))
 			queue_writeback(mq);
 		return;
 	}
@@ -1606,7 +1617,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	struct policy_work work;
 
 	if (allocator_empty(&mq->cache_alloc)) {
-		if (!free_target_met(mq))
+		if (!free_target_met(mq, false))
 			queue_demotion(mq);
 		return;
 	}
@@ -1809,7 +1820,8 @@ static bool smq_has_background_work(struct dm_cache_policy *p)
 	return r;
 }
 
-static int smq_get_background_work(struct dm_cache_policy *p, struct policy_work **result)
+static int smq_get_background_work(struct dm_cache_policy *p, bool idle,
+				   struct policy_work **result)
 {
 	int r;
 	unsigned long flags;
@@ -1820,10 +1832,10 @@ static int smq_get_background_work(struct dm_cache_policy *p, struct policy_work
 	if (r == -ENODATA) {
 		/* find some writeback work to do */
 		spin_lock_irqsave(&mq->lock, flags);
-		if (!free_target_met(mq))
+		if (!free_target_met(mq, idle))
 			queue_demotion(mq);
 
-		else if (!clean_target_met(mq))
+		else if (!clean_target_met(mq, idle))
 			queue_writeback(mq);
 		spin_unlock_irqrestore(&mq->lock, flags);
 

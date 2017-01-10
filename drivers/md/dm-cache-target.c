@@ -1564,18 +1564,21 @@ static int mg_start(struct cache *cache, struct policy_work *op, struct bio *bio
  * bio processing
  *--------------------------------------------------------------*/
 
-static bool spare_migration_bandwidth(struct cache *cache)
+enum busy {
+	IDLE,
+	MODERATE,
+	BUSY
+};
+
+static enum busy spare_migration_bandwidth(struct cache *cache)
 {
-#if 0
 	sector_t current_volume = (atomic_read(&cache->nr_io_migrations) + 1) *
 		cache->sectors_per_block;
-	sector_t threshold = iot_idle_for(&cache->origin_tracker, HZ) ?
-		cache->migration_threshold * 4 :
-		cache->migration_threshold;
-	return current_volume <= threshold;
-#else
-	return true;
-#endif
+
+	if (current_volume <= cache->migration_threshold)
+		return iot_idle_for(&cache->origin_tracker, HZ) ? IDLE : MODERATE;
+	else
+		return BUSY;
 }
 
 static void inc_hit_counter(struct cache *cache, struct bio *bio)
@@ -1929,13 +1932,17 @@ static void do_waker(struct work_struct *ws)
 
 static void check_migrations(struct work_struct *ws)
 {
-#if 1
 	int r;
 	struct policy_work *op;
 	struct cache *cache = container_of(ws, struct cache, migration_worker);
+	enum busy b;
 
-	while (spare_migration_bandwidth(cache)) {
-		r = policy_get_background_work(cache->policy, &op);
+	for (;;) {
+		b = spare_migration_bandwidth(cache);
+		if (b == BUSY)
+			break;
+
+		r = policy_get_background_work(cache->policy, b == IDLE, &op);
 		if (r == -ENODATA)
 			break;
 
@@ -1949,7 +1956,6 @@ static void check_migrations(struct work_struct *ws)
 		if (r)
 			break;
 	}
-#endif
 }
 
 /*----------------------------------------------------------------*/

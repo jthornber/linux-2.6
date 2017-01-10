@@ -41,9 +41,10 @@ static inline bool policy_has_background_work(struct dm_cache_policy *p)
 }
 
 static inline int policy_get_background_work(struct dm_cache_policy *p,
+					     bool idle,
 					     struct policy_work **result)
 {
-	return p->get_background_work(p, result);
+	return p->get_background_work(p, idle, result);
 }
 
 static inline void policy_complete_background_work(struct dm_cache_policy *p,
