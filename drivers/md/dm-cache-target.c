@@ -676,7 +676,7 @@ static void defer_bios(struct cache *cache, struct bio_list *bios)
 
 static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bio *bio)
 {
-	int r; // FIXME: returns bool
+	bool r;
 	size_t pb_size;
 	struct per_bio_data *pb;
 	struct dm_cell_key_v2 key;
@@ -684,8 +684,10 @@ static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bi
 	struct dm_bio_prison_cell_v2 *cell_prealloc, *cell;
 
 	cell_prealloc = alloc_prison_cell(cache); /* FIXME: allow wait if calling from worker */
-	if (!cell_prealloc)
+	if (!cell_prealloc) {
 		defer_bio(cache, bio);
+		return false;
+	}
 
 	build_key(oblock, end, &key);
 	r = dm_cell_get_v2(cache->prison, &key, lock_level(bio), bio, cell_prealloc, &cell);
@@ -1615,11 +1617,6 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 
 	rb = bio_detain_shared(cache, block, bio);
 	if (!rb) {
-		if (rb < 0) {
-			bio_io_error(bio);
-			return DM_MAPIO_SUBMITTED;
-		}
-
 		/*
 		 * An exclusive lock is held for this block, so we have to
 		 * wait.  We set the commit_needed flag so the current
