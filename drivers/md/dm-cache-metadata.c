@@ -105,6 +105,7 @@ struct dm_cache_metadata {
 	atomic_t ref_count;
 	struct list_head list;
 
+	unsigned version;
 	struct block_device *bdev;
 	struct dm_block_manager *bm;
 	struct dm_space_map *metadata_sm;
@@ -146,8 +147,6 @@ struct dm_cache_metadata {
 	 * the device.
 	 */
 	bool fail_io:1;
-
-	struct dm_cache_metadata_features features;
 
 	/*
 	 * Metadata format 2 fields.
@@ -328,7 +327,7 @@ static void __copy_sm_root(struct dm_cache_metadata *cmd,
 
 static bool separate_dirty_bits(struct dm_cache_metadata *cmd)
 {
-	return cmd->features.separate_dirty_bits;
+	return cmd->version >= 2;
 }
 
 static int __write_initial_superblock(struct dm_cache_metadata *cmd)
@@ -362,7 +361,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->flags = 0;
 	memset(disk_super->uuid, 0, sizeof(disk_super->uuid));
 	disk_super->magic = cpu_to_le64(CACHE_SUPERBLOCK_MAGIC);
-	disk_super->version = cpu_to_le32(MAX_CACHE_VERSION);
+	disk_super->version = cpu_to_le32(cmd->version);
 	memset(disk_super->policy_name, 0, sizeof(disk_super->policy_name));
 	memset(disk_super->policy_version, 0, sizeof(disk_super->policy_version));
 	disk_super->policy_hint_size = 0;
@@ -383,10 +382,8 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->write_hits = cpu_to_le32(0);
 	disk_super->write_misses = cpu_to_le32(0);
 
-	if (separate_dirty_bits(cmd)) {
+	if (separate_dirty_bits(cmd))
 		disk_super->dirty_root = cpu_to_le64(cmd->dirty_root);
-		disk_super->incompat_flags |= cpu_to_le32(DM_CACHE_FEATURE_INCOMPAT_SEP_DIRTY_BITS);
-	}
 
 	return dm_tm_commit(cmd->tm, sblock);
 }
@@ -440,7 +437,6 @@ bad:
 static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 				     struct dm_cache_metadata *cmd)
 {
-	bool flag;
 	uint32_t incompat_flags, features;
 
 	incompat_flags = le32_to_cpu(disk_super->incompat_flags);
@@ -448,13 +444,6 @@ static int __check_incompat_features(struct cache_disk_superblock *disk_super,
 	if (features) {
 		DMERR("could not access metadata due to unsupported optional features (%lx).",
 		      (unsigned long)features);
-		return -EINVAL;
-	}
-
-	flag = incompat_flags & DM_CACHE_FEATURE_INCOMPAT_SEP_DIRTY_BITS;
-	if (flag != cmd->features.separate_dirty_bits) {
-		DMERR("could not access metadata due to conflicting separate dirty bits config (disk=%u vs incore=%u)",
-		      (unsigned)flag, (unsigned)cmd->features.separate_dirty_bits);
 		return -EINVAL;
 	}
 
@@ -591,6 +580,7 @@ static unsigned long clear_clean_shutdown(unsigned long flags)
 static void read_superblock_fields(struct dm_cache_metadata *cmd,
 				   struct cache_disk_superblock *disk_super)
 {
+	cmd->version = le32_to_cpu(disk_super->version);
 	cmd->flags = le32_to_cpu(disk_super->flags);
 	cmd->root = le64_to_cpu(disk_super->mapping_root);
 	cmd->hint_root = le64_to_cpu(disk_super->hint_root);
@@ -610,10 +600,8 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->stats.write_hits = le32_to_cpu(disk_super->write_hits);
 	cmd->stats.write_misses = le32_to_cpu(disk_super->write_misses);
 
-	if (disk_super->incompat_flags & cpu_to_le32(DM_CACHE_FEATURE_INCOMPAT_SEP_DIRTY_BITS)) {
+	if (separate_dirty_bits(cmd))
 		cmd->dirty_root = le64_to_cpu(disk_super->dirty_root);
-		cmd->features.separate_dirty_bits = true;
-	}
 
 	cmd->changed = false;
 }
@@ -752,19 +740,11 @@ static void unpack_value(__le64 value_le, dm_oblock_t *block, unsigned *flags)
 
 /*----------------------------------------------------------------*/
 
-static void copy_metadata_features(struct dm_cache_metadata *cmd,
-				   struct dm_cache_metadata_features *features)
-{
-	struct dm_cache_metadata_features *in_core_features = &cmd->features;
-
-	in_core_features->separate_dirty_bits = features->separate_dirty_bits;
-}
-
 static struct dm_cache_metadata *metadata_open(struct block_device *bdev,
 					       sector_t data_block_size,
 					       bool may_format_device,
 					       size_t policy_hint_size,
-					       struct dm_cache_metadata_features *features)
+					       unsigned metadata_version)
 {
 	int r;
 	struct dm_cache_metadata *cmd;
@@ -775,6 +755,7 @@ static struct dm_cache_metadata *metadata_open(struct block_device *bdev,
 		return ERR_PTR(-ENOMEM);
 	}
 
+	cmd->version = metadata_version;
 	atomic_set(&cmd->ref_count, 1);
 	init_rwsem(&cmd->root_lock);
 	cmd->bdev = bdev;
@@ -783,7 +764,6 @@ static struct dm_cache_metadata *metadata_open(struct block_device *bdev,
 	cmd->policy_hint_size = policy_hint_size;
 	cmd->changed = true;
 	cmd->fail_io = false;
-	copy_metadata_features(cmd, features);
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
@@ -825,7 +805,7 @@ static struct dm_cache_metadata *lookup_or_open(struct block_device *bdev,
 						sector_t data_block_size,
 						bool may_format_device,
 						size_t policy_hint_size,
-						struct dm_cache_metadata_features *features)
+						unsigned metadata_version)
 {
 	struct dm_cache_metadata *cmd, *cmd2;
 
@@ -837,7 +817,7 @@ static struct dm_cache_metadata *lookup_or_open(struct block_device *bdev,
 		return cmd;
 
 	cmd = metadata_open(bdev, data_block_size, may_format_device,
-			    policy_hint_size, features);
+			    policy_hint_size, metadata_version);
 	if (!IS_ERR(cmd)) {
 		mutex_lock(&table_lock);
 		cmd2 = lookup(bdev);
@@ -870,10 +850,10 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
 						 bool may_format_device,
 						 size_t policy_hint_size,
-						 struct dm_cache_metadata_features *features)
+						 unsigned metadata_version)
 {
 	struct dm_cache_metadata *cmd = lookup_or_open(bdev, data_block_size, may_format_device,
-						       policy_hint_size, features);
+						       policy_hint_size, metadata_version);
 
 	if (!IS_ERR(cmd) && !same_params(cmd, data_block_size)) {
 		dm_cache_metadata_close(cmd);
