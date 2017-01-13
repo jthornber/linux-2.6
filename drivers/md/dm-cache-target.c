@@ -345,7 +345,7 @@ enum cache_io_mode {
 struct cache_features {
 	enum cache_metadata_mode mode;
 	enum cache_io_mode io_mode;
-	struct dm_cache_metadata_features metadata_features;
+	unsigned metadata_version;
 };
 
 struct cache_stats {
@@ -2204,7 +2204,7 @@ static void init_features(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
 	cf->io_mode = CM_IO_WRITEBACK;
-	cf->metadata_features.separate_dirty_bits = false;
+	cf->metadata_version = 1;
 }
 
 static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
@@ -2237,11 +2237,8 @@ static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 		else if (!strcasecmp(arg, "passthrough"))
 			cf->io_mode = CM_IO_PASSTHROUGH;
 
-		else if (!strcasecmp(arg, "combined_dirty_bits"))
-			cf->metadata_features.separate_dirty_bits = false;
-
-		else if (!strcasecmp(arg, "separate_dirty_bits"))
-			cf->metadata_features.separate_dirty_bits = true;
+		else if (!strcasecmp(arg, "metadata2"))
+			cf->metadata_version = 2;
 
 		else {
 			*error = "Unrecognised cache feature requested";
@@ -2498,7 +2495,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev,
 				     ca->block_size, may_format,
 				     dm_cache_policy_get_hint_size(cache->policy),
-				     &ca->features.metadata_features);
+				     ca->features.metadata_version);
 	if (IS_ERR(cmd)) {
 		*error = "Error creating metadata object";
 		r = PTR_ERR(cmd);
@@ -3131,25 +3128,25 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->stats.promotion),
 		       (unsigned long) atomic_read(&cache->nr_dirty));
 
+		if (cache->features.metadata_version == 2)
+			DMEMIT("2 metadata2 ");
+		else
+			DMEMIT("1 ");
+
 		if (writethrough_mode(&cache->features))
-			DMEMIT("2 writethrough ");
+			DMEMIT("writethrough ");
 
 		else if (passthrough_mode(&cache->features))
-			DMEMIT("2 passthrough ");
+			DMEMIT("passthrough ");
 
 		else if (writeback_mode(&cache->features))
-			DMEMIT("2 writeback ");
+			DMEMIT("writeback ");
 
 		else {
 			DMERR("%s: internal error: unknown io mode: %d",
 			      cache_device_name(cache), (int) cache->features.io_mode);
 			goto err;
 		}
-
-		if (cache->features.metadata_features.separate_dirty_bits)
-			DMEMIT("separate_dirty_bits ");
-		else
-			DMEMIT("combined_dirty_bits ");
 
 		DMEMIT("2 migration_threshold %llu ", (unsigned long long) cache->migration_threshold);
 

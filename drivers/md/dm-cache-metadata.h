@@ -46,15 +46,9 @@
  * following masks.
  */
 
-#define DM_CACHE_FEATURE_INCOMPAT_SEP_DIRTY_BITS    0x0001
-
 #define DM_CACHE_FEATURE_COMPAT_SUPP	  0UL
 #define DM_CACHE_FEATURE_COMPAT_RO_SUPP	  0UL
-#define DM_CACHE_FEATURE_INCOMPAT_SUPP	  DM_CACHE_FEATURE_INCOMPAT_SEP_DIRTY_BITS
-
-struct dm_cache_metadata_features {
-	bool separate_dirty_bits:1;
-};
+#define DM_CACHE_FEATURE_INCOMPAT_SUPP	  0UL
 
 /*
  * Reopens or creates a new, empty metadata volume.  Returns an ERR_PTR on
@@ -64,7 +58,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
 						 bool may_format_device,
 						 size_t policy_hint_size,
-						 struct dm_cache_metadata_features *features);
+						 unsigned metadata_version);
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
