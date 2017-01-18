@@ -114,6 +114,7 @@ struct dm_cache_policy {
 	/*
 	 * Checks to see if there's any background work that needs doing.
 	 */
+	// FIXME: remove, since get_background_work can queue new work anyway.
 	bool (*has_background_work)(struct dm_cache_policy *p);
 
 	/*
