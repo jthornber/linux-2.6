@@ -4,8 +4,9 @@
  * This file is released under the GPL.
  */
 
-#include "dm-cache-policy.h"
+#include "dm-cache-background-tracker.h"
 #include "dm-cache-policy-internal.h"
+#include "dm-cache-policy.h"
 #include "dm.h"
 
 #include <linux/hash.h>
@@ -762,7 +763,7 @@ static struct entry *h_lookup(struct hash_table *ht, dm_oblock_t oblock)
 	e = __h_lookup(ht, h, oblock, &prev);
 	if (e && prev) {
 		/*
-		 * Move to the front because this entry is likely
+                * Move to the front because this entry is likely
 		 * to be hit again.
 		 */
 		__h_unlink(ht, h, e, prev);
@@ -883,293 +884,6 @@ static struct entry *get_entry(struct entry_alloc *ea, unsigned index)
 
 /*----------------------------------------------------------------*/
 
-/*
- * A ring buffer that holds the background work that the policy wants the
- * core policy to implement.
- */
-// FIXME: make tunable
-#define MAX_WORK 10240
-#define MAX_WORK_MASK (MAX_WORK - 1u)
-
-struct smq_work {
-	struct list_head list;
-	struct rb_node node;
-	struct policy_work work;
-};
-
-struct background_work {
-	spinlock_t lock;
-
-	atomic_t pending_promotes;
-	atomic_t pending_writebacks;
-	atomic_t pending_demotes;
-
-	struct list_head issued;
-	struct list_head queued;
-	struct rb_root pending;
-
-	// FIXME: use a mempool
-	struct list_head free;
-	struct smq_work work[MAX_WORK];
-};
-
-static int cmp_oblock(dm_oblock_t lhs, dm_oblock_t rhs)
-{
-	if (from_oblock(lhs) < from_oblock(rhs))
-		return -1;
-
-	if (from_oblock(rhs) < from_oblock(lhs))
-		return 1;
-
-	return 0;
-}
-
-static bool __insert_pending(struct background_work *b,
-			     struct smq_work *nw)
-{
-	int cmp;
-	struct smq_work *w;
-	struct rb_node **new = &b->pending.rb_node, *parent = NULL;
-
-	while (*new) {
-		w = container_of(*new, struct smq_work, node);
-
-		parent = *new;
-		cmp = cmp_oblock(w->work.oblock, nw->work.oblock);
-		if (cmp < 0)
-			new = &((*new)->rb_left);
-
-		else if (cmp > 0)
-			new = &((*new)->rb_right);
-
-		else
-			/* already present */
-			return false;
-	}
-
-	rb_link_node(&nw->node, parent, new);
-	rb_insert_color(&nw->node, &b->pending);
-
-	return true;
-}
-
-static struct smq_work *__find_pending(struct background_work *b,
-				       dm_oblock_t oblock)
-{
-	int cmp;
-	struct smq_work *w;
-	struct rb_node **new = &b->pending.rb_node;
-
-	while (*new) {
-		w = container_of(*new, struct smq_work, node);
-
-		cmp = cmp_oblock(w->work.oblock, oblock);
-		if (cmp < 0)
-			new = &((*new)->rb_left);
-
-		else if (cmp > 0)
-			new = &((*new)->rb_right);
-
-		else
-			break;
-	}
-
-	return *new ? w : NULL;
-}
-
-
-// FIXME: audit to see if we need to be locking with irqsave
-
-static void background_work_init(struct background_work *b)
-{
-	unsigned i;
-
-	atomic_set(&b->pending_promotes, 0);
-	atomic_set(&b->pending_writebacks, 0);
-	atomic_set(&b->pending_demotes, 0);
-
-	spin_lock_init(&b->lock);
-	INIT_LIST_HEAD(&b->issued);
-	INIT_LIST_HEAD(&b->queued);
-	INIT_LIST_HEAD(&b->free);
-
-	for (i = 0; i < MAX_WORK; i++)
-		list_add_tail(&b->work[i].list, &b->free);
-}
-
-static void inc_stats(struct background_work *b, struct policy_work *w)
-{
-	switch (w->op) {
-	case POLICY_PROMOTE:
-		atomic_inc(&b->pending_promotes);
-		break;
-
-	case POLICY_DEMOTE:
-		atomic_inc(&b->pending_demotes);
-		break;
-
-	case POLICY_WRITEBACK:
-		atomic_inc(&b->pending_writebacks);
-		break;
-	}
-}
-
-// FIXME: refactor
-static void dec_stats(struct background_work *b, struct policy_work *w)
-{
-	switch (w->op) {
-	case POLICY_PROMOTE:
-		atomic_dec(&b->pending_promotes);
-		break;
-
-	case POLICY_DEMOTE:
-		atomic_dec(&b->pending_demotes);
-		break;
-
-	case POLICY_WRITEBACK:
-		atomic_dec(&b->pending_writebacks);
-		break;
-	}
-}
-
-static unsigned nr_writebacks_queued(struct background_work *b)
-{
-	return atomic_read(&b->pending_writebacks);
-}
-
-static unsigned nr_demotions_queued(struct background_work *b)
-{
-	return atomic_read(&b->pending_demotes);
-}
-
-static int __work_queue(struct background_work *b,
-			struct policy_work *work,
-			struct policy_work **pwork)
-{
-	struct smq_work *w;
-
-	if (pwork)
-		*pwork = NULL;
-
-	if (list_empty(&b->free)) {
-		// FIXME: get these from a mempool.  No we've got to limit this somehow.  mempool + limit?
-		return -ENOMEM;
-
-	} else {
-		w = list_first_entry(&b->free, struct smq_work, list);
-		memcpy(&w->work, work, sizeof(*work));
-
-		if (!__insert_pending(b, w)) {
-			/*
-			 * There was a race, we'll just ignore this second
-			 * bit of work for the same oblock.
-			 */
-			pr_alert("insert_pending failed\n");
-			return -EINVAL;
-		}
-
-		if (pwork) {
-			*pwork = &w->work;
-			list_move(&w->list, &b->issued);
-		} else
-			list_move(&w->list, &b->queued);
-		inc_stats(b, &w->work);
-	}
-
-	return 0;
-}
-
-static int background_work_queue(struct background_work *b,
-				 struct policy_work *work,
-				 struct policy_work **pwork)
-{
-	int r = 0;
-	unsigned long flags;
-
-	spin_lock_irqsave(&b->lock, flags);
-	r = __work_queue(b, work, pwork);
-	spin_unlock_irqrestore(&b->lock, flags);
-
-	return r;
-}
-
-static bool background_any_queued(struct background_work *b)
-{
-	bool r;
-	unsigned long flags;
-
-	spin_lock_irqsave(&b->lock, flags);
-	r = !list_empty(&b->queued);
-	spin_unlock_irqrestore(&b->lock, flags);
-
-	return r;
-}
-
-/*
- * Returns -ENODATA if there's no work.
- */
-static int background_work_issue(struct background_work *b, struct policy_work **work)
-{
-	int r = 0;
-	unsigned long flags;
-	struct smq_work *w;
-
-	spin_lock_irqsave(&b->lock, flags);
-	if (list_empty(&b->queued))
-		r = -ENODATA;
-
-	else {
-		w = list_first_entry(&b->queued, struct smq_work, list);
-		list_move(&w->list, &b->issued);
-		*work = &w->work;
-	}
-	spin_unlock_irqrestore(&b->lock, flags);
-
-	return r;
-}
-
-static void background_work_complete(struct background_work *b,
-				     struct policy_work *op)
-{
-	unsigned long flags;
-	struct smq_work *w = container_of(op, struct smq_work, work);
-
-	spin_lock_irqsave(&b->lock, flags);
-	dec_stats(b, &w->work);
-	list_move(&w->list, &b->free);
-	rb_erase(&w->node, &b->pending);
-	spin_unlock_irqrestore(&b->lock, flags);
-}
-
-static bool background_promotion_already_present(struct background_work *b,
-						 dm_oblock_t oblock,
-						 struct policy_work **workp)
-{
-	bool r = false;
-	struct smq_work *w;
-	unsigned long flags;
-
-	spin_lock_irqsave(&b->lock, flags);
-	w = __find_pending(b, oblock);
-	if (w) {
-		r = true;
-
-#if 0
-		// FIXME: only do this if we know it's not already issued.
-		if (workp && w->work.op == POLICY_PROMOTE) {
-			*workp = &w->work;
-			list_move(&w->list, &b->issued);
-		}
-#endif
-		if (workp)
-			*workp = NULL;
-	}
-	spin_unlock_irqrestore(&b->lock, flags);
-	return r;
-}
-
-/*----------------------------------------------------------------*/
-
 #define NR_HOTSPOT_LEVELS 64u
 #define NR_CACHE_LEVELS 64u
 
@@ -1240,7 +954,7 @@ struct smq_policy {
 	unsigned long next_hotspot_period;
 	unsigned long next_cache_period;
 
-	struct background_work bg_work;
+	struct background_tracker *bg_work;
 };
 
 /*----------------------------------------------------------------*/
@@ -1534,7 +1248,7 @@ static bool clean_target_met(struct smq_policy *mq, bool idle)
 		 */
 		return q_size(&mq->dirty) > 0u;
 	else
-		return (nr_clean + nr_writebacks_queued(&mq->bg_work)) >=
+		return (nr_clean + btracker_nr_writebacks_queued(mq->bg_work)) >=
 		       percent_to_target(mq, CLEAN_TARGET);
 }
 
@@ -1544,7 +1258,7 @@ static bool free_target_met(struct smq_policy *mq, bool idle)
 			   mq->cache_alloc.nr_allocated;
 
 	if (idle)
-		return (nr_free + nr_demotions_queued(&mq->bg_work)) >=
+		return (nr_free + btracker_nr_demotions_queued(mq->bg_work)) >=
 		       percent_to_target(mq, FREE_TARGET);
 	else
 		return true;
@@ -1567,9 +1281,11 @@ static void clear_pending(struct smq_policy *mq, struct entry *e)
 }
 
 static unsigned nr_queue_writeback_calls = 0;
+static bool btracker_queue_failed = false;
 
 static void queue_writeback(struct smq_policy *mq)
 {
+        int r;
 	struct policy_work work;
 	struct entry *e;
 
@@ -1586,7 +1302,13 @@ static void queue_writeback(struct smq_policy *mq)
 		work.op = POLICY_WRITEBACK;
 		work.oblock = e->oblock;
 		work.cblock = infer_cblock(mq, e);
-		background_work_queue(&mq->bg_work, &work, NULL);
+
+		r = btracker_queue(mq->bg_work, &work, NULL);
+        if (r) {
+                        // FIXME: finish, I think we have to get rid of this race.
+                        pr_alert("btracker_queue failed, this is racey\n");
+                        btracker_queue_failed = true;
+                }
 	}
 
         nr_queue_writeback_calls++;
@@ -1609,7 +1331,7 @@ static void queue_demotion(struct smq_policy *mq)
 	work.op = POLICY_DEMOTE;
 	work.oblock = e->oblock;
 	work.cblock = infer_cblock(mq, e);
-	background_work_queue(&mq->bg_work, &work, NULL);
+	btracker_queue(mq->bg_work, &work, NULL);
 }
 
 static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
@@ -1624,8 +1346,8 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 		return;
 	}
 
-	if (background_promotion_already_present(&mq->bg_work, oblock, workp))
-		return;
+	if (btracker_promotion_already_present(mq->bg_work, oblock))
+                return;
 
 	/*
 	 * We allocate the entry now to reserve the cblock.  If the
@@ -1637,7 +1359,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	work.op = POLICY_PROMOTE;
 	work.oblock = oblock;
 	work.cblock = infer_cblock(mq, e);
-	background_work_queue(&mq->bg_work, &work, workp);
+	btracker_queue(mq->bg_work, &work, workp);
 }
 
 /*----------------------------------------------------------------*/
@@ -1711,7 +1433,7 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b)
 		}
 	}
 
-	return e;
+return e;
 }
 
 /*----------------------------------------------------------------*/
@@ -1730,10 +1452,12 @@ static void smq_destroy(struct dm_cache_policy *p)
 {
 	struct smq_policy *mq = to_smq_policy(p);
 
+        pr_alert("btracker_queueu_failed = %d\n", btracker_queue_failed);
         pr_alert("%u queue_writeback calls\n", nr_queue_writeback_calls);
-	pr_alert("%u pending writebacks\n", nr_writebacks_queued(&mq->bg_work));
-	pr_alert("%u pending demotions\n", nr_demotions_queued(&mq->bg_work));
+	pr_alert("%u pending writebacks\n", btracker_nr_writebacks_queued(mq->bg_work));
+	pr_alert("%u pending demotions\n", btracker_nr_demotions_queued(mq->bg_work));
 
+	btracker_destroy(mq->bg_work);
 	h_exit(&mq->hotspot_table);
 	h_exit(&mq->table);
 	free_bitset(mq->hotspot_hit_bits);
@@ -1816,7 +1540,7 @@ static bool smq_has_background_work(struct dm_cache_policy *p)
 	struct smq_policy *mq = to_smq_policy(p);
 
 	spin_lock_irqsave(&mq->lock, flags);
-	r = background_any_queued(&mq->bg_work);
+	r = btracker_any_queued(mq->bg_work);
 	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;
@@ -1830,7 +1554,7 @@ static int smq_get_background_work(struct dm_cache_policy *p, bool idle,
 	struct smq_policy *mq = to_smq_policy(p);
 
 	/* protected with it's own lock */
-	r = background_work_issue(&mq->bg_work, result);
+	r = btracker_issue(mq->bg_work, result);
 	if (r == -ENODATA) {
 		/* find some writeback work to do */
 		spin_lock_irqsave(&mq->lock, flags);
@@ -1841,7 +1565,7 @@ static int smq_get_background_work(struct dm_cache_policy *p, bool idle,
 			queue_writeback(mq);
 		spin_unlock_irqrestore(&mq->lock, flags);
 
-		r = background_work_issue(&mq->bg_work, result);
+		r = btracker_issue(mq->bg_work, result);
 	}
 
 	return r;
@@ -1893,7 +1617,7 @@ static void __complete_background_work(struct smq_policy *mq,
 		break;
 	}
 
-	background_work_complete(&mq->bg_work, work);
+	btracker_complete(mq->bg_work, work);
 }
 
 static void smq_complete_background_work(struct dm_cache_policy *p,
@@ -2175,10 +1899,14 @@ static struct dm_cache_policy *__smq_create(dm_cblock_t cache_size,
 	mq->next_hotspot_period = jiffies;
 	mq->next_cache_period = jiffies;
 
-	background_work_init(&mq->bg_work);
+	mq->bg_work = btracker_create(10240); /* FIXME: hard coded value */
+	if (!mq->bg_work)
+		goto bad_btracker;
 
 	return &mq->policy;
 
+bad_btracker:
+	h_exit(&mq->hotspot_table);
 bad_alloc_hotspot_table:
 	h_exit(&mq->table);
 bad_alloc_table:

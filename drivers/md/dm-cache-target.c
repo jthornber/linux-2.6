@@ -1368,6 +1368,7 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 			free_prison_cell(cache, mg->cell);
 		mg->cell = NULL; /* FIXME: remove, just a sanity check */
 	}
+
 	free_migration(mg);
 	defer_bios(cache, &bios);
 	wake_migration_worker(cache);
