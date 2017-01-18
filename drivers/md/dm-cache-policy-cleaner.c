@@ -253,16 +253,14 @@ static int wb_get_background_work(struct dm_cache_policy *pe, bool idle,
 	unsigned long flags;
 	struct policy *p = to_policy(pe);
 
-	/* protected with it's own lock */
+        spin_lock_irqsave(&p->lock, flags);
 	r = btracker_issue(p->bg_work, result);
 	if (r == -ENODATA) {
 		/* find some writeback work to do */
-		spin_lock_irqsave(&p->lock, flags);
 		__queue_writeback(p);
-		spin_unlock_irqrestore(&p->lock, flags);
-
 		r = btracker_issue(p->bg_work, result);
 	}
+        spin_unlock_irqrestore(&p->lock, flags);
 
 	return r;
 }

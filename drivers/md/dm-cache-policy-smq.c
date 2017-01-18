@@ -1553,20 +1553,19 @@ static int smq_get_background_work(struct dm_cache_policy *p, bool idle,
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
 
-	/* protected with it's own lock */
+        spin_lock_irqsave(&mq->lock, flags);
 	r = btracker_issue(mq->bg_work, result);
 	if (r == -ENODATA) {
 		/* find some writeback work to do */
-		spin_lock_irqsave(&mq->lock, flags);
 		if (!free_target_met(mq, idle))
 			queue_demotion(mq);
 
 		else if (!clean_target_met(mq, idle))
 			queue_writeback(mq);
-		spin_unlock_irqrestore(&mq->lock, flags);
 
 		r = btracker_issue(mq->bg_work, result);
 	}
+        spin_unlock_irqrestore(&mq->lock, flags);
 
 	return r;
 }
