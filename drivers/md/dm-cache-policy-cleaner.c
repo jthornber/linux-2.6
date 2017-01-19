@@ -76,6 +76,7 @@ static struct list_head *list_pop(struct list_head *q)
 {
 	struct list_head *r = q->next;
 
+        BUG_ON(list_empty(q));
 	list_del(r);
 	return r;
 }
@@ -183,7 +184,8 @@ static int wb_lookup(struct dm_cache_policy *pe, dm_oblock_t oblock, dm_cblock_t
 	struct wb_cache_entry *e;
 	unsigned long flags;
 
-	*background_queued = false;
+        if (background_queued)
+                *background_queued = false;
 
 	spin_lock_irqsave(&p->lock, flags);
 
@@ -205,14 +207,22 @@ static int wb_lookup_with_work(struct dm_cache_policy *pe,
 				struct policy_work **work)
 {
 	bool background_queued = false;
-	*work = NULL;
-	return wb_lookup(pe, oblock, cblock, data_dir, fast_copy, &background_queued);
+        if (work)
+                *work = NULL;
+        return wb_lookup(pe, oblock, cblock, data_dir, fast_copy, &background_queued);
 }
 
 static bool wb_has_background_work(struct dm_cache_policy *pe)
 {
+        int r;
 	struct policy *p = to_policy(pe);
-	return btracker_any_queued(p->bg_work);
+        unsigned long flags;
+
+        spin_lock_irqsave(&p->lock, flags);
+	r = btracker_any_queued(p->bg_work);
+        spin_unlock_irqrestore(&p->lock, flags);
+
+        return r;
 }
 
 static void __queue_writeback(struct policy *p)
@@ -310,19 +320,24 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	struct wb_cache_entry *e;
 
 	e = lookup_cache_entry(p, oblock);
-	BUG_ON(!e);
+        if (!e) {
+                pr_alert("lookup failed\n");
+                BUG();
+        }
 
+        // FIXME: refactor, get rid of this indentation
 	if (set) {
 		if (!e->dirty) {
 			e->dirty = true;
-			list_move(&e->list, &p->dirty);
+                        if (!e->pending)
+                                list_move(&e->list, &p->dirty);
 		}
 
 	} else {
 		if (e->dirty) {
-			e->pending = false;
 			e->dirty = false;
-			list_move(&e->list, &p->clean);
+                        if (!e->pending)
+                                list_move(&e->list, &p->clean);
 		}
 	}
 }

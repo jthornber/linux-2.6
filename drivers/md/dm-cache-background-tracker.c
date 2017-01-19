@@ -33,7 +33,7 @@ struct background_tracker *btracker_create(unsigned max_work)
 {
 	struct background_tracker *b = kmalloc(sizeof(*b), GFP_KERNEL);
 
-        b->max_work = max_work;
+	b->max_work = max_work;
 	atomic_set(&b->pending_promotes, 0);
 	atomic_set(&b->pending_writebacks, 0);
 	atomic_set(&b->pending_demotes, 0);
@@ -41,8 +41,8 @@ struct background_tracker *btracker_create(unsigned max_work)
 	INIT_LIST_HEAD(&b->issued);
 	INIT_LIST_HEAD(&b->queued);
 
-        b->pending = RB_ROOT;
-        b->work_cache = KMEM_CACHE(bt_work, 0);
+	b->pending = RB_ROOT;
+	b->work_cache = KMEM_CACHE(bt_work, 0);
 	if (!b->work_cache) {
 		DMERR("couldn't create mempool for background work items");
 		kfree(b);
@@ -99,7 +99,7 @@ static bool __insert_pending(struct background_tracker *b,
 }
 
 static struct bt_work *__find_pending(struct background_tracker *b,
-                                      dm_oblock_t oblock)
+				      dm_oblock_t oblock)
 {
 	int cmp;
 	struct bt_work *w;
@@ -168,7 +168,7 @@ int btracker_queue(struct background_tracker *b,
 	if (max_work_reached(b))
 		return -ENOMEM;
 
-        pr_alert("alloc\n");
+        //pr_alert("alloc\n");
 	w = kmem_cache_alloc(b->work_cache, GFP_NOWAIT);
 	if (!w)
 		return -ENOMEM;
@@ -180,7 +180,6 @@ int btracker_queue(struct background_tracker *b,
 		 * There was a race, we'll just ignore this second
 		 * bit of work for the same oblock.
 		 */
-                pr_alert("free 1");
                 kmem_cache_free(b->work_cache, w);
 		return -EINVAL;
         }
@@ -225,7 +224,7 @@ void btracker_complete(struct background_tracker *b,
 	update_stats(b, &w->work, -1);
 	rb_erase(&w->node, &b->pending);
         list_del(&w->list);
-        pr_alert("free 2");
+        //pr_alert("free 2");
 	kmem_cache_free(b->work_cache, w);
 }
 

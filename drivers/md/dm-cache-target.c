@@ -1162,10 +1162,12 @@ static void calc_discard_block_range(struct cache *cache, struct bio *bio,
 static void prevent_background_work(struct cache *cache)
 {
 	down_write(&cache->background_work_lock);
+        pr_alert("background work blocked\n");
 }
 
 static void allow_background_work(struct cache *cache) {
 	up_write(&cache->background_work_lock);
+        pr_alert("background work allowed\n");
 }
 
 static bool background_work_begin(struct cache *cache)

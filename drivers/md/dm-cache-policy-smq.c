@@ -1433,7 +1433,7 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b)
 		}
 	}
 
-return e;
+        return e;
 }
 
 /*----------------------------------------------------------------*/
