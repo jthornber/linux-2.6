@@ -8,7 +8,6 @@
 #include "dm-bio-prison-v2.h"
 #include "dm-bio-record.h"
 #include "dm-cache-metadata.h"
-#include "dm-cache-policy-validator.h"
 
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
