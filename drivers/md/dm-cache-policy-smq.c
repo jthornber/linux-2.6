@@ -218,7 +218,7 @@ static void l_del(struct entry_space *es, struct ilist *l, struct entry *e)
 	struct entry *prev = l_prev(es, e);
 	struct entry *next = l_next(es, e);
 
-//        BUG_ON(!l_contains(es, l, e));
+//	  BUG_ON(!l_contains(es, l, e));
 
 	if (prev)
 		prev->next = e->next;
@@ -763,7 +763,7 @@ static struct entry *h_lookup(struct hash_table *ht, dm_oblock_t oblock)
 	e = __h_lookup(ht, h, oblock, &prev);
 	if (e && prev) {
 		/*
-		* Move to the front because this entry is likely
+		 * Move to the front because this entry is likely
 		 * to be hit again.
 		 */
 		__h_unlink(ht, h, e, prev);
@@ -1237,7 +1237,7 @@ static unsigned percent_to_target(struct smq_policy *mq, unsigned p)
 static bool clean_target_met(struct smq_policy *mq, bool idle)
 {
 	/*
-	 * Cache entries may not be populated.  So we're cannot rely on the
+	 * Cache entries may not be populated.  So we cannot rely on the
 	 * size of the clean queue.
 	 */
 	unsigned nr_clean = from_cblock(mq->cache_size) - q_size(&mq->dirty);
@@ -1602,6 +1602,7 @@ static void __complete_background_work(struct smq_policy *mq,
 			free_entry(&mq->cache_alloc, e);
 			// !h, !q, !a
 		} else {
+			clear_pending(mq, e);
 			push_queue(mq, e);
 			// h, q, a
 		}

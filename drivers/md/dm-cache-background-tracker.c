@@ -51,12 +51,14 @@ struct background_tracker *btracker_create(unsigned max_work)
 
 	return b;
 }
+EXPORT_SYMBOL_GPL(btracker_create);
 
 void btracker_destroy(struct background_tracker *b)
 {
 	kmem_cache_destroy(b->work_cache);
 	kfree(b);
 }
+EXPORT_SYMBOL_GPL(btracker_destroy);
 
 static int cmp_oblock(dm_oblock_t lhs, dm_oblock_t rhs)
 {
@@ -144,11 +146,13 @@ unsigned btracker_nr_writebacks_queued(struct background_tracker *b)
 {
 	return atomic_read(&b->pending_writebacks);
 }
+EXPORT_SYMBOL_GPL(btracker_nr_writebacks_queued);
 
 unsigned btracker_nr_demotions_queued(struct background_tracker *b)
 {
 	return atomic_read(&b->pending_demotes);
 }
+EXPORT_SYMBOL_GPL(btracker_nr_demotions_queued);
 
 static bool max_work_reached(struct background_tracker *b)
 {
@@ -180,6 +184,7 @@ int btracker_queue(struct background_tracker *b,
 		 * There was a race, we'll just ignore this second
 		 * bit of work for the same oblock.
 		 */
+		pr_alert("free 1");
 		kmem_cache_free(b->work_cache, w);
 		return -EINVAL;
 	}
@@ -193,11 +198,13 @@ int btracker_queue(struct background_tracker *b,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btracker_queue);
 
 bool btracker_any_queued(struct background_tracker *b)
 {
 	return !list_empty(&b->queued);
 }
+EXPORT_SYMBOL_GPL(btracker_any_queued);
 
 /*
  * Returns -ENODATA if there's no work.
@@ -215,6 +222,7 @@ int btracker_issue(struct background_tracker *b, struct policy_work **work)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btracker_issue);
 
 void btracker_complete(struct background_tracker *b,
 		       struct policy_work *op)
@@ -227,11 +235,13 @@ void btracker_complete(struct background_tracker *b,
 	pr_alert("free 2");
 	kmem_cache_free(b->work_cache, w);
 }
+EXPORT_SYMBOL_GPL(btracker_complete);
 
 bool btracker_promotion_already_present(struct background_tracker *b,
 					dm_oblock_t oblock)
 {
 	return __find_pending(b, oblock) != NULL;
 }
+EXPORT_SYMBOL_GPL(btracker_promotion_already_present);
 
 /*----------------------------------------------------------------*/

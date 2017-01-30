@@ -711,7 +711,7 @@ int __init dm_bio_prison_init_v2(void)
 	return 0;
 }
 
-void __exit dm_bio_prison_exit_v2(void)
+void dm_bio_prison_exit_v2(void)
 {
 	kmem_cache_destroy(_cell_cache);
 	_cell_cache = NULL;

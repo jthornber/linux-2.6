@@ -320,10 +320,7 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	struct wb_cache_entry *e;
 
 	e = lookup_cache_entry(p, oblock);
-	if (!e) {
-		pr_alert("lookup failed\n");
-		BUG();
-	}
+	BUG_ON(!e);
 
 	// FIXME: refactor, get rid of this indentation
 	if (set) {
@@ -442,6 +439,7 @@ static struct dm_cache_policy *wb_create(dm_cblock_t cache_size,
 	if (!p->bg_work) {
 		free_cache_blocks_and_hash(p);
 		kfree(p);
+		return NULL;
 	}
 
 	return &p->policy;

@@ -408,7 +408,7 @@ static int __init dm_bio_prison_init_v1(void)
 	return 0;
 }
 
-static void __exit dm_bio_prison_exit_v1(void)
+static void dm_bio_prison_exit_v1(void)
 {
 	kmem_cache_destroy(_cell_cache);
 	_cell_cache = NULL;
