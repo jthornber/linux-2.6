@@ -243,7 +243,7 @@ static void issue_after_unplug(struct batcher *b, struct bio *bio)
        spin_unlock_irqrestore(&b->lock, flags);
 
        if (unplug_scheduled)
-               async_unplug(b);
+	       async_unplug(b);
 }
 
 /*
@@ -356,7 +356,7 @@ struct cache_stats {
 	atomic_t write_miss;
 	atomic_t demotion;
 	atomic_t promotion;
-        atomic_t writeback;
+	atomic_t writeback;
 	atomic_t copies_avoided;
 	atomic_t cache_cell_clash;
 	atomic_t commit_count;
@@ -734,18 +734,18 @@ static void force_set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t
 {
 	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset))
 		atomic_inc(&cache->nr_dirty);
-        policy_set_dirty(cache->policy, oblock);
+	policy_set_dirty(cache->policy, oblock);
 }
 
 // FIXME: do we need to make the policy call, since the background complete should do this?
 static void force_clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
 	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
-                if (atomic_dec_return(&cache->nr_dirty) == 0)
+		if (atomic_dec_return(&cache->nr_dirty) == 0)
 			dm_table_event(cache->ti->table);
 	}
 
-        policy_clear_dirty(cache->policy, oblock);
+	policy_clear_dirty(cache->policy, oblock);
 }
 
 /*----------------------------------------------------------------*/
@@ -1163,12 +1163,12 @@ static void calc_discard_block_range(struct cache *cache, struct bio *bio,
 static void prevent_background_work(struct cache *cache)
 {
 	down_write(&cache->background_work_lock);
-        pr_alert("background work blocked\n");
+	pr_alert("background work blocked\n");
 }
 
 static void allow_background_work(struct cache *cache) {
 	up_write(&cache->background_work_lock);
-        pr_alert("background work allowed\n");
+	pr_alert("background work allowed\n");
 }
 
 static bool background_work_begin(struct cache *cache)
@@ -1197,7 +1197,7 @@ static void update_stats(struct cache_stats *stats, enum policy_operation op)
 		break;
 
 	case POLICY_WRITEBACK:
-                atomic_inc(&stats->writeback);
+		atomic_inc(&stats->writeback);
 		break;
 	}
 }
@@ -1322,48 +1322,48 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 {
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
-        dm_cblock_t cblock = mg->op->cblock;
-        dm_oblock_t oblock = mg->op->oblock;
+	dm_cblock_t cblock = mg->op->cblock;
+	dm_oblock_t oblock = mg->op->oblock;
 
-        // FIXME: why don't nr promotions match the residency?
+	// FIXME: why don't nr promotions match the residency?
 	if (success)
 		update_stats(&cache->stats, mg->op->op);
 
-        if (!success)
-                pr_alert("migration failed\n");
+	if (!success)
+		pr_alert("migration failed\n");
 
-        switch (mg->op->op) {
-        case POLICY_PROMOTE:
-                clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
-                if (mg->overwrite_bio) {
-                        policy_complete_background_work(cache->policy, mg->op, success);
-                        if (success)
-                                force_set_dirty(cache, oblock, cblock);
+	switch (mg->op->op) {
+	case POLICY_PROMOTE:
+		clear_discard(cache, oblock_to_dblock(cache, mg->op->oblock));
+		if (mg->overwrite_bio) {
+			policy_complete_background_work(cache->policy, mg->op, success);
+			if (success)
+				force_set_dirty(cache, oblock, cblock);
 
-                        // FIXME: we could retry this to the origin
-                        bio_complete(mg->overwrite_bio, success ? 0 : -EIO);
-                } else {
-                        policy_complete_background_work(cache->policy, mg->op, success);
-                        if (success)
-                                force_clear_dirty(cache, oblock, cblock);
-                        dec_io_migrations(cache);
-                }
-                break;
+			// FIXME: we could retry this to the origin
+			bio_complete(mg->overwrite_bio, success ? 0 : -EIO);
+		} else {
+			policy_complete_background_work(cache->policy, mg->op, success);
+			if (success)
+				force_clear_dirty(cache, oblock, cblock);
+			dec_io_migrations(cache);
+		}
+		break;
 
-        case POLICY_DEMOTE:
-                BUG_ON(mg->overwrite_bio);
-                clear_discard(cache, oblock_to_dblock(cache, oblock));
-                policy_complete_background_work(cache->policy, mg->op, success);
-                dec_io_migrations(cache);
-                break;
+	case POLICY_DEMOTE:
+		BUG_ON(mg->overwrite_bio);
+		clear_discard(cache, oblock_to_dblock(cache, oblock));
+		policy_complete_background_work(cache->policy, mg->op, success);
+		dec_io_migrations(cache);
+		break;
 
-        case POLICY_WRITEBACK:
-                if (success)
-                        force_clear_dirty(cache, oblock, cblock);
-                policy_complete_background_work(cache->policy, mg->op, success);
-                dec_io_migrations(cache);
-                break;
-        }
+	case POLICY_WRITEBACK:
+		if (success)
+			force_clear_dirty(cache, oblock, cblock);
+		policy_complete_background_work(cache->policy, mg->op, success);
+		dec_io_migrations(cache);
+		break;
+	}
 
 	bio_list_init(&bios);
 	if (mg->cell) {
@@ -1608,7 +1608,7 @@ static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t bl
 	return writeback_mode(&cache->features) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
 #else
-        return false;
+	return false;
 #endif
 }
 
@@ -1652,7 +1652,7 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			// optimisable because discarded.  Also can we drop
 			// the shared lock on bio here?
 			bio_drop_shared_lock(cache, bio);
-                        BUG_ON(op->op != POLICY_PROMOTE);
+			BUG_ON(op->op != POLICY_PROMOTE);
 			mg_start(cache, op, bio);
 			return DM_MAPIO_SUBMITTED;
 		}
@@ -1874,7 +1874,7 @@ static void process_invalidation_request(struct cache *cache, struct invalidatio
 		}
 
 		begin++;
-        }
+	}
 
 	cache->commit_requested = true;
 
@@ -1985,8 +1985,8 @@ static void destroy(struct cache *cache)
 {
 	unsigned i;
 
-        pr_alert("%llu writebacks\n",
-                 (unsigned long long) atomic_read(&cache->stats.writeback));
+	pr_alert("%llu writebacks\n",
+		 (unsigned long long) atomic_read(&cache->stats.writeback));
 
 	mempool_destroy(cache->migration_pool);
 

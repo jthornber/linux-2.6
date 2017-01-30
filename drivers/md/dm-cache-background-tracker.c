@@ -168,7 +168,7 @@ int btracker_queue(struct background_tracker *b,
 	if (max_work_reached(b))
 		return -ENOMEM;
 
-        pr_alert("alloc\n");
+	pr_alert("alloc\n");
 	w = kmem_cache_alloc(b->work_cache, GFP_NOWAIT);
 	if (!w)
 		return -ENOMEM;
@@ -180,9 +180,9 @@ int btracker_queue(struct background_tracker *b,
 		 * There was a race, we'll just ignore this second
 		 * bit of work for the same oblock.
 		 */
-                kmem_cache_free(b->work_cache, w);
+		kmem_cache_free(b->work_cache, w);
 		return -EINVAL;
-        }
+	}
 
 	if (pwork) {
 		*pwork = &w->work;
@@ -210,8 +210,8 @@ int btracker_issue(struct background_tracker *b, struct policy_work **work)
 		return -ENODATA;
 
 	w = list_first_entry(&b->queued, struct bt_work, list);
-        list_move(&w->list, &b->issued);
-        *work = &w->work;
+	list_move(&w->list, &b->issued);
+	*work = &w->work;
 
 	return 0;
 }
@@ -223,8 +223,8 @@ void btracker_complete(struct background_tracker *b,
 
 	update_stats(b, &w->work, -1);
 	rb_erase(&w->node, &b->pending);
-        list_del(&w->list);
-        pr_alert("free 2");
+	list_del(&w->list);
+	pr_alert("free 2");
 	kmem_cache_free(b->work_cache, w);
 }
 

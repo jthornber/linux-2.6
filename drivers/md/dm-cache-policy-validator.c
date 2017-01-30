@@ -14,11 +14,11 @@ struct validator_work {
 };
 
 struct validator {
-        struct dm_cache_policy policy;
+	struct dm_cache_policy policy;
 
-        dm_cblock_t cache_size;
-        unsigned long *alloc;
-        unsigned long *cblock_pending;
+	dm_cblock_t cache_size;
+	unsigned long *alloc;
+	unsigned long *cblock_pending;
 	dm_oblock_t *mapping;
 
 	dm_oblock_t origin_size;
@@ -32,8 +32,8 @@ struct validator {
 
 static void *check_ptr(void *ptr)
 {
-        BUG_ON(!ptr);
-        return ptr;
+	BUG_ON(!ptr);
+	return ptr;
 }
 
 static void validator_create(struct validator *v, dm_cblock_t cblocks,
@@ -64,7 +64,7 @@ static bool oblock_in_cache(struct validator *v, dm_oblock_t oblock)
 }
 
 static bool cblock_contains(struct validator *v, dm_cblock_t cblock,
-                            dm_oblock_t oblock)
+			    dm_oblock_t oblock)
 {
 	return v->mapping[from_cblock(cblock)] == oblock;
 }
@@ -137,13 +137,13 @@ static unsigned residency(struct validator *v)
 
 static void v_destroy(struct dm_cache_policy *p)
 {
-        struct validator *v = to_validator(p);
+	struct validator *v = to_validator(p);
 	free_bitset(v->alloc);
 	free_bitset(v->cblock_pending);
 	kfree(v->mapping);
 	free_bitset(v->oblock_in_cache);
 	free_bitset(v->oblock_pending);
-        kfree(v);
+	kfree(v);
 }
 
 static int v_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock,
@@ -193,7 +193,7 @@ static int v_lookup_with_work(struct dm_cache_policy *p,
 }
 
 static int v_get_background_work(struct dm_cache_policy *p, bool idle,
-			         struct policy_work **result)
+				 struct policy_work **result)
 {
 	int r;
 	struct validator *v = to_validator(p);
@@ -244,7 +244,7 @@ static void v_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
 }
 
 static int v_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock,
-		        dm_cblock_t cblock, uint32_t hint, bool hint_valid)
+			dm_cblock_t cblock, uint32_t hint, bool hint_valid)
 {
 	struct validator *v = to_validator(p);
 	set_mapping(v, oblock, cblock);
@@ -287,32 +287,32 @@ static int set_config_value(struct dm_cache_policy *p,
 #endif
 static void init_policy_functions(struct dm_cache_policy *p)
 {
-        p->destroy = v_destroy;
-        p->lookup = v_lookup;
-        p->lookup_with_work = v_lookup_with_work;
+	p->destroy = v_destroy;
+	p->lookup = v_lookup;
+	p->lookup_with_work = v_lookup_with_work;
 //        p->has_background_work = v_has_background_work;
-        p->get_background_work = v_get_background_work;
-        p->complete_background_work = v_complete_background_work;
-        p->set_dirty = v_set_dirty;
-        p->clear_dirty = v_clear_dirty;
-        p->load_mapping = v_load_mapping;
-        p->get_hint = v_get_hint;
-        p->residency = v_residency;
-        p->tick = v_tick;
+	p->get_background_work = v_get_background_work;
+	p->complete_background_work = v_complete_background_work;
+	p->set_dirty = v_set_dirty;
+	p->clear_dirty = v_clear_dirty;
+	p->load_mapping = v_load_mapping;
+	p->get_hint = v_get_hint;
+	p->residency = v_residency;
+	p->tick = v_tick;
 }
 
 static struct dm_cache_policy *create_validator_policy(dm_cblock_t cache_size,
-					 	       sector_t origin_size,
+						       sector_t origin_size,
 						       sector_t cache_block_size)
 {
-        struct validator *v = check_ptr(kzalloc(sizeof(*v), GFP_KERNEL));
+	struct validator *v = check_ptr(kzalloc(sizeof(*v), GFP_KERNEL));
 
 	struct dm_cache_policy *wrappee = dm_cache_policy_create(
 			"smq", cache_size, origin_size, cache_block_size);
 	validator_create(v, cache_size, to_oblock(dm_div_up(origin_size, cache_block_size)), wrappee);
-        init_policy_functions(&v->policy);
+	init_policy_functions(&v->policy);
 
-        return &v->policy;
+	return &v->policy;
 }
 
 /*----------------------------------------------------------------*/
