@@ -325,6 +325,14 @@ config DM_CACHE_SMQ
          of less memory utilization, improved performance and increased
          adaptability in the face of changing workloads.
 
+config DM_CACHE_VALIDATOR
+	tristate "Validator policy (EXPERIMENTAL)"
+	depends on DM_CACHE
+	depends on DM_CACHE_SMQ
+	default y
+	---help---
+	  A debug cache policy
+
 config DM_CACHE_CLEANER
        tristate "Cleaner Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
