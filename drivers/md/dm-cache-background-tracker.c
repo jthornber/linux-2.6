@@ -168,7 +168,7 @@ int btracker_queue(struct background_tracker *b,
 	if (max_work_reached(b))
 		return -ENOMEM;
 
-        //pr_alert("alloc\n");
+        pr_alert("alloc\n");
 	w = kmem_cache_alloc(b->work_cache, GFP_NOWAIT);
 	if (!w)
 		return -ENOMEM;
@@ -224,7 +224,7 @@ void btracker_complete(struct background_tracker *b,
 	update_stats(b, &w->work, -1);
 	rb_erase(&w->node, &b->pending);
         list_del(&w->list);
-        //pr_alert("free 2");
+        pr_alert("free 2");
 	kmem_cache_free(b->work_cache, w);
 }
 

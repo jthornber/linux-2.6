@@ -8,6 +8,7 @@
 #include "dm-bio-prison-v2.h"
 #include "dm-bio-record.h"
 #include "dm-cache-metadata.h"
+#include "dm-cache-policy-validator.h"
 
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
@@ -1603,8 +1604,12 @@ static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 
 static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 {
+#if 0
 	return writeback_mode(&cache->features) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
+#else
+        return false;
+#endif
 }
 
 static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
@@ -2379,6 +2384,7 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 		return PTR_ERR(p);
 	}
 	cache->policy = p;
+	BUG_ON(!cache->policy);
 
 	return 0;
 }
