@@ -333,6 +333,14 @@ config DM_CACHE_CLEANER
          A simple cache policy that writes back all data to the
          origin.  Used when decommissioning a dm-cache.
 
+config DM_CACHE_VALIDATOR
+       tristate "Stochastic MQ Validator Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       depends on DM_CACHE_SMQ
+       default y
+       ---help---
+         Validates the SMQ cache policy.
+
 config DM_ERA
        tristate "Era target (EXPERIMENTAL)"
        depends on BLK_DEV_DM
