@@ -290,7 +290,7 @@ static void init_policy_functions(struct dm_cache_policy *p)
 	p->destroy = v_destroy;
 	p->lookup = v_lookup;
 	p->lookup_with_work = v_lookup_with_work;
-//	  p->has_background_work = v_has_background_work;
+//        p->has_background_work = v_has_background_work;
 	p->get_background_work = v_get_background_work;
 	p->complete_background_work = v_complete_background_work;
 	p->set_dirty = v_set_dirty;

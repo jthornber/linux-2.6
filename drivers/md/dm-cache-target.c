@@ -1162,10 +1162,12 @@ static void calc_discard_block_range(struct cache *cache, struct bio *bio,
 static void prevent_background_work(struct cache *cache)
 {
 	down_write(&cache->background_work_lock);
+	pr_alert("background work blocked\n");
 }
 
 static void allow_background_work(struct cache *cache) {
 	up_write(&cache->background_work_lock);
+	pr_alert("background work allowed\n");
 }
 
 static bool background_work_begin(struct cache *cache)
@@ -1605,7 +1607,7 @@ static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t bl
 	return writeback_mode(&cache->features) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
 #else
-        return false;
+	return false;
 #endif
 }
 
