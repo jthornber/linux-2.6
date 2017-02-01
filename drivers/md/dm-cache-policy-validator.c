@@ -42,8 +42,7 @@ static void validator_create(struct validator *v, dm_cblock_t cblocks,
 	v->cache_size = cblocks;
 	v->alloc = check_ptr(alloc_bitset(from_cblock(cblocks)));
 	v->cblock_pending = check_ptr(alloc_bitset(from_cblock(cblocks)));
-	v->mapping = check_ptr(kzalloc(sizeof(*v->mapping) * from_cblock(cblocks),
-				       GFP_KERNEL));
+	v->mapping = check_ptr(vzalloc(sizeof(*v->mapping) * from_cblock(cblocks)));
 
 	v->origin_size = oblocks;
 	v->oblock_in_cache = check_ptr(alloc_bitset(from_oblock(oblocks)));
@@ -140,7 +139,7 @@ static void v_destroy(struct dm_cache_policy *p)
 	struct validator *v = to_validator(p);
 	free_bitset(v->alloc);
 	free_bitset(v->cblock_pending);
-	kfree(v->mapping);
+	vfree(v->mapping);
 	free_bitset(v->oblock_in_cache);
 	free_bitset(v->oblock_pending);
 	kfree(v);
