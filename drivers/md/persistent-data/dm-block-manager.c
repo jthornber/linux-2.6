@@ -303,16 +303,6 @@ static void report_recursive_bug(dm_block_t b, int r)
 		DMERR("recursive acquisition of block %llu requested.",
 		      (unsigned long long) b);
 }
-#else
-#define bl_init(x)
-#define bl_down_read(x) 0
-#define bl_down_read_nonblock(x) 0
-#define bl_up_read(x)
-#define bl_down_write(x) 0
-#define bl_up_write(x)
-#define report_recursive_bug(x, y)
-#endif
-
 #else  /* !CONFIG_DM_DEBUG_BLOCK_MANAGER_LOCKING */
 
 #define bl_init(x) do { } while (0)
