@@ -35,8 +35,6 @@ static unsigned safe_mod(unsigned n, unsigned d)
 
 /*----------------------------------------------------------------*/
 
-#define DEBUG_ENTRY
-
 struct entry {
 	unsigned hash_next:28;
 	unsigned prev:28;
@@ -48,10 +46,6 @@ struct entry {
 	bool pending_work:1;
 
 	dm_oblock_t oblock;
-
-#ifdef DEBUG_ENTRY
-	unsigned long last_hit;
-#endif
 };
 
 /*----------------------------------------------------------------*/
@@ -200,25 +194,10 @@ static void l_add_before(struct entry_space *es, struct ilist *l,
 	}
 }
 
-#if 0
-static bool l_contains(struct entry_space *es, struct ilist *l, struct entry *sought)
-{
-	struct entry *e;
-
-	for (e = l_head(es, l); e; e = l_next(es, e)) {
-		if (e == sought)
-			return true;
-	}
-
-	return false;
-}
-#endif
 static void l_del(struct entry_space *es, struct ilist *l, struct entry *e)
 {
 	struct entry *prev = l_prev(es, e);
 	struct entry *next = l_next(es, e);
-
-//	  BUG_ON(!l_contains(es, l, e));
 
 	if (prev)
 		prev->next = e->next;
@@ -362,21 +341,6 @@ static struct entry *q_pop(struct queue *q)
 	return e;
 }
 
-#if 0
-/*
- * Pops an entry from a level that is not past a sentinel.
- */
-static struct entry *q_pop_old(struct queue *q, unsigned max_level)
-{
-	struct entry *e = q_peek(q, max_level, false);
-
-	if (e)
-		q_del(q, e);
-
-	return e;
-}
-#endif
-
 /*
  * This function assumes there is a non-sentinel entry to pop.  It's only
  * used by redistribute, so we know this is true.  It also doesn't adjust
@@ -480,75 +444,6 @@ static void q_redistribute(struct queue *q)
 	}
 }
 
-#if 0
-static bool q_check_ages(struct queue *q, unsigned long min_age)
-{
-	unsigned l;
-	struct entry *e;
-
-	for (l = 0; l < q->nr_levels; l++) {
-		for (e = l_head(q->es, q->qs + l); e; e = l_next(q->es, e)) {
-			if (e->sentinel)
-				break;
-
-			if (jiffies - e->last_hit < min_age)
-				return false;
-		}
-	}
-
-	return true;
-}
-
-// FIXME: Obviously very slow, but just trying to
-// get correct behaviour first.
-
-/*
- * We insert at one of these three points,
- * depending on the sentinels_passed count.
- *
- * |....|s1|....|s2|....|
- *     ^       ^
- *     1       2
-*/
-static struct entry *find_sentinel(struct queue *q, unsigned level, unsigned pos)
-{
-	struct entry *e;
-
-	BUG_ON(pos >= 2);
-
-	for (e = l_head(q->es, q->qs + level); e; e = l_next(q->es, e)) {
-		if (e->sentinel) {
-			if (!pos)
-				return e;
-
-			pos--;
-		}
-	}
-
-	return NULL;
-}
-
-static void q_push_before_sentinel(struct queue *q, struct entry *e, unsigned pos)
-{
-	struct entry *s;
-
-	switch (pos) {
-	case 0:
-	case 1:
-		s = find_sentinel(q, e->level, pos);
-		if (!s) {
-			q_push(q, e);
-			break;
-		}
-		q_push_before(q, s, e);
-		break;
-
-	default:
-		q_push(q, e);
-	}
-}
-#endif
-
 static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels, struct entry *s1, struct entry *s2)
 {
 	struct entry *de;
@@ -586,27 +481,6 @@ static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels, s
 	q_push(q, e);
 }
 
-#if 0
-static bool q_any_pending(struct queue *q)
-{
-	unsigned level;
-	struct ilist *l;
-	struct entry *e;
-
-	for (level = 0u; level < q->nr_levels; level++) {
-		l = q->qs + level;
-		for (e = l_head(q->es, l); e; e = l_next(q->es, e)) {
-			if (e->pending_work) {
-				if (e->sentinel)
-					pr_alert("sentinel is pending\n");
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-#endif
 /*----------------------------------------------------------------*/
 
 #define FP_SHIFT 8
@@ -1053,26 +927,11 @@ static void del_queue(struct smq_policy *mq, struct entry *e)
 	q_del(e->dirty ? &mq->dirty : &mq->clean, e);
 }
 
-static bool scrambled = false;
-
-static void check_dirty_queue(struct smq_policy *mq, const char *desc)
-{
-#if 0
-	if (!scrambled && !q_check_ages(&mq->dirty, WRITEBACK_PERIOD)) {
-		pr_alert("ages scrambled: %s\n", desc);
-		scrambled = true;
-	}
-#endif
-}
-
 static void push_queue(struct smq_policy *mq, struct entry *e)
 {
-	if (e->dirty) {
-		e->last_hit = jiffies;
-		check_dirty_queue(mq, "pq before q_push_before");
+	if (e->dirty)
 		q_push(&mq->dirty, e);
-		check_dirty_queue(mq, "pq after q_push_before");
-	} else
+	else
 		q_push(&mq->clean, e);
 }
 
@@ -1080,12 +939,8 @@ static void push_queue(struct smq_policy *mq, struct entry *e)
 static void push(struct smq_policy *mq, struct entry *e)
 {
 	h_insert(&mq->table, e);
-
-	if (!e->pending_work) {
-		check_dirty_queue(mq, "before push_queue\n");
+	if (!e->pending_work)
 		push_queue(mq, e);
-		check_dirty_queue(mq, "after push_queue\n");
-	}
 }
 
 static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
@@ -1103,11 +958,9 @@ static void requeue(struct smq_policy *mq, struct entry *e)
 
 	if (!test_and_set_bit(from_cblock(infer_cblock(mq, e)), mq->cache_hit_bits)) {
 		if (e->dirty) {
-			check_dirty_queue(mq, "before requeue");
 			q_requeue(&mq->dirty, e, 1u,
 				  get_sentinel(&mq->writeback_sentinel_alloc, e->level, !mq->current_writeback_sentinels),
 				  get_sentinel(&mq->writeback_sentinel_alloc, e->level, mq->current_writeback_sentinels));
-			check_dirty_queue(mq, "after requeue");
 		} else
 			q_requeue(&mq->clean, e, 1u, NULL, NULL);
 	}
@@ -1211,9 +1064,7 @@ static void end_cache_period(struct smq_policy *mq)
 	if (time_after(jiffies, mq->next_cache_period)) {
 		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
 
-		check_dirty_queue(mq, "before redistribute\n");
 		q_redistribute(&mq->dirty);
-		check_dirty_queue(mq, "after redistribute\n");
 		q_redistribute(&mq->clean);
 		stats_reset(&mq->cache_stats);
 
@@ -1289,13 +1140,9 @@ static void queue_writeback(struct smq_policy *mq)
 	struct policy_work work;
 	struct entry *e;
 
-	check_dirty_queue(mq, "before q_peek\n");
 	e = q_peek(&mq->dirty, mq->dirty.nr_levels, false);
 
 	if (e) {
-		if (!scrambled && (jiffies - e->last_hit < WRITEBACK_PERIOD))
-			pr_alert("writeback age: %lu, writeback_period = %lu\n", jiffies - e->last_hit, WRITEBACK_PERIOD);
-
 		mark_pending(mq, e);
 		q_del(&mq->dirty, e);
 
@@ -1304,7 +1151,7 @@ static void queue_writeback(struct smq_policy *mq)
 		work.cblock = infer_cblock(mq, e);
 
 		r = btracker_queue(mq->bg_work, &work, NULL);
-	if (r) {
+		if (r) {
 			// FIXME: finish, I think we have to get rid of this race.
 			pr_alert("btracker_queue failed, this is racey\n");
 			btracker_queue_failed = true;
@@ -1723,9 +1570,7 @@ static void smq_tick(struct dm_cache_policy *p, bool can_block)
 
 	spin_lock_irqsave(&mq->lock, flags);
 	mq->tick++;
-	check_dirty_queue(mq, "before update_sentinels");
 	update_sentinels(mq);
-	check_dirty_queue(mq, "after update_sentinels");
 	end_hotspot_period(mq);
 	end_cache_period(mq);
 	spin_unlock_irqrestore(&mq->lock, flags);
