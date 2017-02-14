@@ -416,7 +416,7 @@ struct cache {
 	/*
 	 * Fields for converting from sectors to blocks.
 	 */
-	uint32_t sectors_per_block;
+	sector_t sectors_per_block;
 	int sectors_per_block_shift;
 
 	spinlock_t lock;
@@ -1603,7 +1603,7 @@ static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
 
 static bool optimisable_bio(struct cache *cache, struct bio *bio, dm_oblock_t block)
 {
-#if 0
+#if 1
 	return writeback_mode(&cache->features) &&
 		(is_discarded_oblock(cache, block) || bio_writes_complete_block(cache, bio));
 #else
@@ -2569,7 +2569,9 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	cache->wq = alloc_ordered_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
+	//cache->wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM);
+	//cache->wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
+	cache->wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM, 0);
 	if (!cache->wq) {
 		*error = "could not create workqueue for metadata object";
 		goto bad;
@@ -3121,11 +3123,11 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%u %llu/%llu %u %llu/%llu %u %u %u %u %u %u %lu ",
+		DMEMIT("%u %llu/%llu %llu %llu/%llu %u %u %u %u %u %u %lu ",
 		       (unsigned)DM_CACHE_METADATA_BLOCK_SIZE,
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
-		       cache->sectors_per_block,
+		       (unsigned long long)cache->sectors_per_block,
 		       (unsigned long long) from_cblock(residency),
 		       (unsigned long long) from_cblock(cache->cache_size),
 		       (unsigned) atomic_read(&cache->stats.read_hit),

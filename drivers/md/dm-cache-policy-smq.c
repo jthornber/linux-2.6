@@ -1468,6 +1468,8 @@ static void smq_destroy(struct dm_cache_policy *p)
 
 /*----------------------------------------------------------------*/
 
+#define MISSES_ONLY 1
+
 static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock,
 		    int data_dir, bool fast_copy,
 		    struct policy_work **work, bool *background_work)
@@ -1476,7 +1478,9 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 	enum promote_result pr;
 
 	*background_work = false;
+#ifndef MISSES_ONLY
 	hs_e = update_hotspot_queue(mq, oblock);
+#endif
 
 	e = h_lookup(&mq->table, oblock);
 	if (e) {
@@ -1488,6 +1492,13 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 
 	} else {
 		stats_miss(&mq->cache_stats);
+
+#ifdef MISSES_ONLY
+		/*
+		 * The hotspot queue only gets updated with misses.
+		 */
+		hs_e = update_hotspot_queue(mq, oblock);
+#endif
 
 		pr = should_promote(mq, hs_e, data_dir, fast_copy);
 		if (pr != PROMOTE_NOT) {
