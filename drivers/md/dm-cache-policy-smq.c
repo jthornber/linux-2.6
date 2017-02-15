@@ -546,7 +546,7 @@ static enum performance stats_assess(struct stats *s)
 
 /*----------------------------------------------------------------*/
 
-struct hash_table {
+struct smq_hash_table {
 	struct entry_space *es;
 	unsigned long long hash_bits;
 	unsigned *buckets;
@@ -556,7 +556,7 @@ struct hash_table {
  * All cache entries are stored in a chained hash table.  To save space we
  * use indexing again, and only store indexes to the next entry.
  */
-static int h_init(struct hash_table *ht, struct entry_space *es, unsigned nr_entries)
+static int h_init(struct smq_hash_table *ht, struct entry_space *es, unsigned nr_entries)
 {
 	unsigned i, nr_buckets;
 
@@ -574,34 +574,34 @@ static int h_init(struct hash_table *ht, struct entry_space *es, unsigned nr_ent
 	return 0;
 }
 
-static void h_exit(struct hash_table *ht)
+static void h_exit(struct smq_hash_table *ht)
 {
 	vfree(ht->buckets);
 }
 
-static struct entry *h_head(struct hash_table *ht, unsigned bucket)
+static struct entry *h_head(struct smq_hash_table *ht, unsigned bucket)
 {
 	return to_entry(ht->es, ht->buckets[bucket]);
 }
 
-static struct entry *h_next(struct hash_table *ht, struct entry *e)
+static struct entry *h_next(struct smq_hash_table *ht, struct entry *e)
 {
 	return to_entry(ht->es, e->hash_next);
 }
 
-static void __h_insert(struct hash_table *ht, unsigned bucket, struct entry *e)
+static void __h_insert(struct smq_hash_table *ht, unsigned bucket, struct entry *e)
 {
 	e->hash_next = ht->buckets[bucket];
 	ht->buckets[bucket] = to_index(ht->es, e);
 }
 
-static void h_insert(struct hash_table *ht, struct entry *e)
+static void h_insert(struct smq_hash_table *ht, struct entry *e)
 {
 	unsigned h = hash_64(from_oblock(e->oblock), ht->hash_bits);
 	__h_insert(ht, h, e);
 }
 
-static struct entry *__h_lookup(struct hash_table *ht, unsigned h, dm_oblock_t oblock,
+static struct entry *__h_lookup(struct smq_hash_table *ht, unsigned h, dm_oblock_t oblock,
 				struct entry **prev)
 {
 	struct entry *e;
@@ -617,7 +617,7 @@ static struct entry *__h_lookup(struct hash_table *ht, unsigned h, dm_oblock_t o
 	return NULL;
 }
 
-static void __h_unlink(struct hash_table *ht, unsigned h,
+static void __h_unlink(struct smq_hash_table *ht, unsigned h,
 		       struct entry *e, struct entry *prev)
 {
 	if (prev)
@@ -629,7 +629,7 @@ static void __h_unlink(struct hash_table *ht, unsigned h,
 /*
  * Also moves each entry to the front of the bucket.
  */
-static struct entry *h_lookup(struct hash_table *ht, dm_oblock_t oblock)
+static struct entry *h_lookup(struct smq_hash_table *ht, dm_oblock_t oblock)
 {
 	struct entry *e, *prev;
 	unsigned h = hash_64(from_oblock(oblock), ht->hash_bits);
@@ -647,7 +647,7 @@ static struct entry *h_lookup(struct hash_table *ht, dm_oblock_t oblock)
 	return e;
 }
 
-static void h_remove(struct hash_table *ht, struct entry *e)
+static void h_remove(struct smq_hash_table *ht, struct entry *e)
 {
 	unsigned h = hash_64(from_oblock(e->oblock), ht->hash_bits);
 	struct entry *prev;
@@ -813,8 +813,8 @@ struct smq_policy {
 	 * The hash tables allows us to quickly find an entry by origin
 	 * block.
 	 */
-	struct hash_table table;
-	struct hash_table hotspot_table;
+	struct smq_hash_table table;
+	struct smq_hash_table hotspot_table;
 
 	bool current_writeback_sentinels;
 	unsigned long next_writeback_period;
