@@ -1323,7 +1323,6 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 	enum promote_result pr;
 
 	*background_work = false;
-	hs_e = update_hotspot_queue(mq, oblock);
 
 	e = h_lookup(&mq->table, oblock);
 	if (e) {
@@ -1335,6 +1334,11 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 
 	} else {
 		stats_miss(&mq->cache_stats);
+
+		/*
+		 * The hotspot queue only gets updated with misses.
+		 */
+		hs_e = update_hotspot_queue(mq, oblock);
 
 		pr = should_promote(mq, hs_e, data_dir, fast_copy);
 		if (pr != PROMOTE_NOT) {
