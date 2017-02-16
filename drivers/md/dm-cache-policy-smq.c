@@ -877,7 +877,6 @@ static void __update_demote_sentinels(struct smq_policy *mq)
 static void update_sentinels(struct smq_policy *mq)
 {
 	if (time_after(jiffies, mq->next_writeback_period)) {
-		pr_alert("update_sentinels\n");
 		mq->next_writeback_period = jiffies + WRITEBACK_PERIOD;
 		mq->current_writeback_sentinels = !mq->current_writeback_sentinels;
 		__update_writeback_sentinels(mq);
@@ -1299,7 +1298,7 @@ static void smq_destroy(struct dm_cache_policy *p)
 {
 	struct smq_policy *mq = to_smq_policy(p);
 
-	pr_alert("btracker_queueu_failed = %d\n", btracker_queue_failed);
+	pr_alert("btracker_queue_failed = %d\n", btracker_queue_failed);
 	pr_alert("%u queue_writeback calls\n", nr_queue_writeback_calls);
 	pr_alert("%u pending writebacks\n", btracker_nr_writebacks_queued(mq->bg_work));
 	pr_alert("%u pending demotions\n", btracker_nr_demotions_queued(mq->bg_work));
