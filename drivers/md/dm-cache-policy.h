@@ -131,8 +131,8 @@ struct dm_cache_policy {
 					 struct policy_work *work,
 					 bool success);
 
-	void (*set_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
-	void (*clear_dirty)(struct dm_cache_policy *p, dm_oblock_t oblock);
+	void (*set_dirty)(struct dm_cache_policy *p, dm_cblock_t cblock);
+	void (*clear_dirty)(struct dm_cache_policy *p, dm_cblock_t cblock);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a

@@ -1483,14 +1483,10 @@ static void smq_complete_background_work(struct dm_cache_policy *p,
 }
 
 // in_hash(oblock) -> in_hash(oblock)
-static void __smq_set_clear_dirty(struct smq_policy *mq, dm_oblock_t oblock, bool set)
+static void __smq_set_clear_dirty(struct smq_policy *mq, dm_cblock_t cblock, bool set)
 {
-	struct entry *e;
+	struct entry *e = get_entry(&mq->cache_alloc, from_cblock(cblock));
 
-	e = h_lookup(&mq->table, oblock);
-	BUG_ON(!e);
-
-	// FIXME: I hate this
 	if (e->pending_work)
 		e->dirty = set;
 	else {
@@ -1500,23 +1496,23 @@ static void __smq_set_clear_dirty(struct smq_policy *mq, dm_oblock_t oblock, boo
 	}
 }
 
-static void smq_set_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static void smq_set_dirty(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
 
 	spin_lock_irqsave(&mq->lock, flags);
-	__smq_set_clear_dirty(mq, oblock, true);
+	__smq_set_clear_dirty(mq, cblock, true);
 	spin_unlock_irqrestore(&mq->lock, flags);
 }
 
-static void smq_clear_dirty(struct dm_cache_policy *p, dm_oblock_t oblock)
+static void smq_clear_dirty(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	struct smq_policy *mq = to_smq_policy(p);
 	unsigned long flags;
 
 	spin_lock_irqsave(&mq->lock, flags);
-	__smq_set_clear_dirty(mq, oblock, false);
+	__smq_set_clear_dirty(mq, cblock, false);
 	spin_unlock_irqrestore(&mq->lock, flags);
 }
 

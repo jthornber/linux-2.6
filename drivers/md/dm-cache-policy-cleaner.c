@@ -314,13 +314,10 @@ static void wb_complete_background_work(struct dm_cache_policy *pe,
 	spin_unlock_irqrestore(&p->lock, flags);
 }
 
-static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bool set)
+static void __set_clear_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock, bool set)
 {
 	struct policy *p = to_policy(pe);
-	struct wb_cache_entry *e;
-
-	e = lookup_cache_entry(p, oblock);
-	BUG_ON(!e);
+	struct wb_cache_entry *e = p->cblocks + from_cblock(cblock);
 
 	// FIXME: refactor, get rid of this indentation
 	if (set) {
@@ -339,23 +336,23 @@ static void __set_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock, bo
 	}
 }
 
-static void wb_set_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+static void wb_set_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock)
 {
 	struct policy *p = to_policy(pe);
 	unsigned long flags;
 
 	spin_lock_irqsave(&p->lock, flags);
-	__set_clear_dirty(pe, oblock, true);
+	__set_clear_dirty(pe, cblock, true);
 	spin_unlock_irqrestore(&p->lock, flags);
 }
 
-static void wb_clear_dirty(struct dm_cache_policy *pe, dm_oblock_t oblock)
+static void wb_clear_dirty(struct dm_cache_policy *pe, dm_cblock_t cblock)
 {
 	struct policy *p = to_policy(pe);
 	unsigned long flags;
 
 	spin_lock_irqsave(&p->lock, flags);
-	__set_clear_dirty(pe, oblock, false);
+	__set_clear_dirty(pe, cblock, false);
 	spin_unlock_irqrestore(&p->lock, flags);
 }
 
