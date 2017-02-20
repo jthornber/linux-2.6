@@ -1460,7 +1460,6 @@ static void __complete_background_work(struct smq_policy *mq,
 
 	case POLICY_WRITEBACK:
 		// h, !q, a
-		BUG_ON(e->dirty);
 		clear_pending(mq, e);
 		push_queue(mq, e);
 		// h, q, a
