@@ -1346,9 +1346,10 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 
 	case POLICY_DEMOTE:
 		/*
-		 * No point setting or clearing dirty, since it's meaningless
-		 * now the cblock is unused.
+		 * We clear dirty here to update the nr_dirty counter.
 		 */
+		if (success)
+			force_clear_dirty(cache, cblock);
 		policy_complete_background_work(cache->policy, mg->op, success);
 		dec_io_migrations(cache);
 		break;
@@ -1429,6 +1430,9 @@ static void mg_update_metadata(struct work_struct *ws)
 	if (need_commit) {
 		init_continuation(&mg->k, mg_success);
 		continue_after_commit(&cache->committer, &mg->k);
+
+		// FIXME: it would be nice to do this after a small delay
+		schedule_commit(&cache->committer);
 	} else
 		mg_complete(mg, true);
 }
@@ -1571,13 +1575,14 @@ enum busy {
 
 static enum busy spare_migration_bandwidth(struct cache *cache)
 {
+	bool idle = iot_idle_for(&cache->origin_tracker, HZ);
 	sector_t current_volume = (atomic_read(&cache->nr_io_migrations) + 1) *
 		cache->sectors_per_block;
 
 	if (current_volume <= cache->migration_threshold)
-		return iot_idle_for(&cache->origin_tracker, HZ) ? IDLE : MODERATE;
+		return idle ? IDLE : MODERATE;
 	else
-		return BUSY;
+		return idle ? MODERATE : BUSY;
 }
 
 static void inc_hit_counter(struct cache *cache, struct bio *bio)

@@ -765,7 +765,7 @@ static struct entry *get_entry(struct entry_alloc *ea, unsigned index)
 #define DEMOTE_PERIOD (60ul * HZ)
 
 #define HOTSPOT_UPDATE_PERIOD (HZ)
-#define CACHE_UPDATE_PERIOD (10u * HZ)
+#define CACHE_UPDATE_PERIOD (60ul * HZ)
 
 struct smq_policy {
 	struct dm_cache_policy policy;
@@ -1096,7 +1096,7 @@ static bool clean_target_met(struct smq_policy *mq, bool idle)
 		/*
 		 * We'd like to clean everything.
 		 */
-		return q_size(&mq->dirty) > 0u;
+		return q_size(&mq->dirty) == 0u;
 	else
 		return (nr_clean + btracker_nr_writebacks_queued(mq->bg_work)) >=
 		       percent_to_target(mq, CLEAN_TARGET);
