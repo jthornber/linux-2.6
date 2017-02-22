@@ -840,6 +840,8 @@ struct smq_policy {
 	unsigned long next_cache_period;
 
 	struct background_tracker *bg_work;
+
+	bool migrations_allowed;
 };
 
 /*----------------------------------------------------------------*/
@@ -1181,8 +1183,12 @@ static void queue_writeback(struct smq_policy *mq)
 static void queue_demotion(struct smq_policy *mq)
 {
 	struct policy_work work;
-	struct entry *e = q_peek(&mq->clean, mq->clean.nr_levels, true);
+	struct entry *e;
 
+	if (unlikely(WARN_ON_ONCE(!mq->migrations_allowed)))
+		return;
+
+	e = q_peek(&mq->clean, mq->clean.nr_levels, true);
 	if (!e) {
 		if (!clean_target_met(mq, false))
 			queue_writeback(mq);
@@ -1203,6 +1209,9 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 {
 	struct entry *e;
 	struct policy_work work;
+
+	if (!mq->migrations_allowed)
+		return;
 
 	if (allocator_empty(&mq->cache_alloc)) {
 		if (!free_target_met(mq, false))
@@ -1420,7 +1429,7 @@ static int smq_get_background_work(struct dm_cache_policy *p, bool idle,
 	r = btracker_issue(mq->bg_work, result);
 	if (r == -ENODATA) {
 		/* find some writeback work to do */
-		if (!free_target_met(mq, idle))
+		if (mq->migrations_allowed && !free_target_met(mq, idle))
 			queue_demotion(mq);
 
 		else if (!clean_target_met(mq, idle))
@@ -1678,7 +1687,8 @@ static void calc_hotspot_params(sector_t origin_size,
 static struct dm_cache_policy *__smq_create(dm_cblock_t cache_size,
 					    sector_t origin_size,
 					    sector_t cache_block_size,
-					    bool mimic_mq)
+					    bool mimic_mq,
+					    bool migrations_allowed)
 {
 	unsigned i;
 	unsigned nr_sentinels_per_queue = 2u * NR_CACHE_LEVELS;
@@ -1764,6 +1774,8 @@ static struct dm_cache_policy *__smq_create(dm_cblock_t cache_size,
 	if (!mq->bg_work)
 		goto bad_btracker;
 
+	mq->migrations_allowed = migrations_allowed;
+
 	return &mq->policy;
 
 bad_btracker:
@@ -1786,14 +1798,21 @@ static struct dm_cache_policy *smq_create(dm_cblock_t cache_size,
 					  sector_t origin_size,
 					  sector_t cache_block_size)
 {
-	return __smq_create(cache_size, origin_size, cache_block_size, false);
+	return __smq_create(cache_size, origin_size, cache_block_size, false, true);
 }
 
 static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 					 sector_t origin_size,
 					 sector_t cache_block_size)
 {
-	return __smq_create(cache_size, origin_size, cache_block_size, true);
+	return __smq_create(cache_size, origin_size, cache_block_size, true, true);
+}
+
+static struct dm_cache_policy *cleaner_create(dm_cblock_t cache_size,
+					      sector_t origin_size,
+					      sector_t cache_block_size)
+{
+	return __smq_create(cache_size, origin_size, cache_block_size, false, false);
 }
 
 /*----------------------------------------------------------------*/
@@ -1812,6 +1831,14 @@ static struct dm_cache_policy_type mq_policy_type = {
 	.hint_size = 4,
 	.owner = THIS_MODULE,
 	.create = mq_create,
+};
+
+static struct dm_cache_policy_type cleaner_policy_type = {
+	.name = "cleaner",
+	.version = {2, 0, 0},
+	.hint_size = 4,
+	.owner = THIS_MODULE,
+	.create = cleaner_create,
 };
 
 static struct dm_cache_policy_type default_policy_type = {
@@ -1836,23 +1863,36 @@ static int __init smq_init(void)
 	r = dm_cache_policy_register(&mq_policy_type);
 	if (r) {
 		DMERR("register failed (as mq) %d", r);
-		dm_cache_policy_unregister(&smq_policy_type);
-		return -ENOMEM;
+		goto out_mq;
+	}
+
+	r = dm_cache_policy_register(&cleaner_policy_type);
+	if (r) {
+		DMERR("register failed (as cleaner) %d", r);
+		goto out_cleaner;
 	}
 
 	r = dm_cache_policy_register(&default_policy_type);
 	if (r) {
 		DMERR("register failed (as default) %d", r);
-		dm_cache_policy_unregister(&mq_policy_type);
-		dm_cache_policy_unregister(&smq_policy_type);
-		return -ENOMEM;
+		goto out_default;
 	}
 
 	return 0;
+
+out_default:
+	dm_cache_policy_unregister(&cleaner_policy_type);
+out_cleaner:
+	dm_cache_policy_unregister(&mq_policy_type);
+out_mq:
+	dm_cache_policy_unregister(&smq_policy_type);
+
+	return -ENOMEM;
 }
 
 static void __exit smq_exit(void)
 {
+	dm_cache_policy_unregister(&cleaner_policy_type);
 	dm_cache_policy_unregister(&smq_policy_type);
 	dm_cache_policy_unregister(&mq_policy_type);
 	dm_cache_policy_unregister(&default_policy_type);
@@ -1867,3 +1907,4 @@ MODULE_DESCRIPTION("smq cache policy");
 
 MODULE_ALIAS("dm-cache-default");
 MODULE_ALIAS("dm-cache-mq");
+MODULE_ALIAS("dm-cache-cleaner");
