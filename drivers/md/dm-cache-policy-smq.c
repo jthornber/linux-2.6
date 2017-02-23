@@ -1564,6 +1564,17 @@ static int smq_load_mapping(struct dm_cache_policy *p,
 	return 0;
 }
 
+static void smq_invalidate_mapping(struct dm_cache_policy *p, dm_cblock_t cblock)
+{
+	struct smq_policy *mq = to_smq_policy(p);
+	struct entry *e = get_entry(&mq->cache_alloc, from_cblock(cblock));
+
+	// FIXME: what if this block has pending background work?
+	del_queue(mq, e);
+	h_remove(&mq->table, e);
+	free_entry(&mq->cache_alloc, e);
+}
+
 static uint32_t smq_get_hint(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	struct smq_policy *mq = to_smq_policy(p);
@@ -1599,6 +1610,12 @@ static void smq_tick(struct dm_cache_policy *p, bool can_block)
 	end_hotspot_period(mq);
 	end_cache_period(mq);
 	spin_unlock_irqrestore(&mq->lock, flags);
+}
+
+static void smq_allow_migrations(struct dm_cache_policy *p, bool allow)
+{
+	struct smq_policy *mq = to_smq_policy(p);
+	mq->migrations_allowed = allow;
 }
 
 /*
@@ -1653,9 +1670,11 @@ static void init_policy_functions(struct smq_policy *mq, bool mimic_mq)
 	mq->policy.set_dirty = smq_set_dirty;
 	mq->policy.clear_dirty = smq_clear_dirty;
 	mq->policy.load_mapping = smq_load_mapping;
+	mq->policy.invalidate_mapping = smq_invalidate_mapping;
 	mq->policy.get_hint = smq_get_hint;
 	mq->policy.residency = smq_residency;
 	mq->policy.tick = smq_tick;
+	mq->policy.allow_migrations = smq_allow_migrations;
 
 	if (mimic_mq) {
 		mq->policy.set_config_value = mq_set_config_value;
