@@ -524,6 +524,9 @@ struct dm_cache_migration {
 	struct policy_work *op;
 	struct bio *overwrite_bio;
 	struct dm_bio_prison_cell_v2 *cell;
+
+	dm_cblock_t invalidate_cblock;
+	dm_oblock_t invalidate_oblock;
 };
 
 /*----------------------------------------------------------------*/
@@ -1564,6 +1567,116 @@ static int mg_start(struct cache *cache, struct policy_work *op, struct bio *bio
 }
 
 /*----------------------------------------------------------------
+ * invalidation processing
+ *--------------------------------------------------------------*/
+
+static void invalidate_complete(struct dm_cache_migration *mg, bool success)
+{
+	struct bio_list bios;
+	struct cache *cache = mg->cache;
+
+	bio_list_init(&bios);
+	if (dm_cell_unlock_v2(cache->prison, mg->cell, &bios))
+		free_prison_cell(cache, mg->cell);
+
+	if (success)
+		defer_bio(cache, mg->overwrite_bio);
+	else
+		bio_complete(mg->overwrite_bio, -EIO);
+
+	free_migration(mg);
+	defer_bios(cache, &bios);
+	wake_migration_worker(cache);
+
+	background_work_end(cache);
+}
+
+static void invalidate_success(struct work_struct *ws)
+{
+	struct dm_cache_migration *mg = ws_to_mg(ws);
+	invalidate_complete(mg, true);
+}
+
+static void invalidate_remove(struct work_struct *ws)
+{
+	int r;
+	struct dm_cache_migration *mg = ws_to_mg(ws);
+	struct cache *cache = mg->cache;
+
+	r = dm_cache_remove_mapping(cache->cmd, mg->invalidate_cblock);
+	if (r) {
+		DMERR_LIMIT("%s: invalidation failed; couldn't update on disk metadata",
+			    cache_device_name(cache));
+		metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
+		invalidate_complete(mg, false);
+	}
+
+	init_continuation(&mg->k, invalidate_success);
+	continue_after_commit(&cache->committer, &mg->k);
+	schedule_commit(&cache->committer);
+}
+
+static int invalidate_lock(struct dm_cache_migration *mg)
+{
+	int r;
+	struct dm_cell_key_v2 key;
+	struct cache *cache = mg->cache;
+	struct dm_bio_prison_cell_v2 *prealloc;
+
+	prealloc = alloc_prison_cell(cache);
+	if (!prealloc) {
+		invalidate_complete(mg, false);
+		return -ENOMEM;
+	}
+
+	build_key(mg->invalidate_oblock, oblock_succ(mg->invalidate_oblock), &key);
+	r = dm_cell_lock_v2(cache->prison, &key,
+			    READ_WRITE_LOCK_LEVEL, prealloc, &mg->cell);
+	if (r < 0) {
+		free_prison_cell(cache, prealloc);
+		invalidate_complete(mg, false);
+		return r;
+	}
+
+	if (mg->cell != prealloc)
+		free_prison_cell(cache, prealloc);
+
+	if (!r) {
+		/*
+		 * We can't call invalidate_remove() directly here because we
+		 * might still be in request context.
+		 */
+		init_continuation(&mg->k, invalidate_remove);
+		mg->k.input = 0;
+		queue_work(cache->wq, &mg->k.ws);
+	} else
+		quiesce(mg, invalidate_remove);
+
+	return 0;
+}
+
+static int invalidate_start(struct cache *cache, dm_cblock_t cblock,
+			    dm_oblock_t oblock, struct bio *bio)
+{
+	struct dm_cache_migration *mg = alloc_migration(cache);
+
+	if (!background_work_begin(cache))
+		return -EPERM;
+
+	if (!mg)
+		return -ENOMEM;
+
+	memset(mg, 0, sizeof(*mg));
+
+	mg->cache = cache;
+	mg->overwrite_bio = bio;
+	mg->invalidate_cblock = cblock;
+	mg->invalidate_oblock = oblock;
+
+	return invalidate_lock(mg);
+}
+
+/*----------------------------------------------------------------
  * bio processing
  *--------------------------------------------------------------*/
 
@@ -1685,18 +1798,31 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			return DM_MAPIO_SUBMITTED;
 		}
 	} else {
-		// FIXME: put passthrough back in
-
 		/*
 		 * Hit.
 		 */
 		inc_hit_counter(cache, bio);
-		if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
-		    !is_dirty(cache, cblock)) {
-			remap_to_origin_then_cache(cache, bio, block, cblock);
-			accounted_begin(cache, bio);
-		} else
-			remap_to_cache_dirty(cache, bio, block, cblock);
+
+		/*
+		 * Passthrough always maps to the origin, invalidating any
+		 * cache blocks that are written to.
+		 */
+		if (passthrough_mode(&cache->features)) {
+			if (bio_data_dir(bio) == WRITE) {
+				bio_drop_shared_lock(cache, bio);
+				atomic_inc(&cache->stats.demotion);
+				invalidate_start(cache, cblock, block, bio);
+			} else
+				remap_to_origin_clear_discard(cache, bio, block);
+
+		} else {
+			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
+			    !is_dirty(cache, cblock)) {
+				remap_to_origin_then_cache(cache, bio, block, cblock);
+				accounted_begin(cache, bio);
+			} else
+				remap_to_cache_dirty(cache, bio, block, cblock);
+		}
 	}
 
 	// FIXME: tidy
