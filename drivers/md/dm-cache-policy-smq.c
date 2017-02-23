@@ -289,6 +289,16 @@ static void q_push(struct queue *q, struct entry *e)
 	l_add_tail(q->es, q->qs + e->level, e);
 }
 
+static void q_push_front(struct queue *q, struct entry *e)
+{
+	BUG_ON(e->pending_work);
+
+	if (!e->sentinel)
+		q->nr_elts++;
+
+	l_add_head(q->es, q->qs + e->level, e);
+}
+
 static void q_push_before(struct queue *q, struct entry *old, struct entry *e)
 {
 	BUG_ON(e->pending_work);
@@ -944,6 +954,21 @@ static void push(struct smq_policy *mq, struct entry *e)
 		push_queue(mq, e);
 }
 
+static void push_queue_front(struct smq_policy *mq, struct entry *e)
+{
+	if (e->dirty)
+		q_push_front(&mq->dirty, e);
+	else
+		q_push_front(&mq->clean, e);
+}
+
+static void push_front(struct smq_policy *mq, struct entry *e)
+{
+	h_insert(&mq->table, e);
+	if (!e->pending_work)
+		push_queue_front(mq, e);
+}
+
 static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
 {
 	return to_cblock(get_index(&mq->cache_alloc, e));
@@ -1537,6 +1562,7 @@ static unsigned random_level(dm_cblock_t cblock)
 
 static int smq_load_mapping(struct dm_cache_policy *p,
 			    dm_oblock_t oblock, dm_cblock_t cblock,
+			    bool dirty,
 			    uint32_t hint, bool hint_valid)
 {
 	struct smq_policy *mq = to_smq_policy(p);
@@ -1544,10 +1570,15 @@ static int smq_load_mapping(struct dm_cache_policy *p,
 
 	e = alloc_particular_entry(&mq->cache_alloc, from_cblock(cblock));
 	e->oblock = oblock;
-	e->dirty = false;	/* this gets corrected in a minute */
+	e->dirty = dirty;
 	e->level = hint_valid ? min(hint, NR_CACHE_LEVELS - 1) : random_level(cblock);
 	e->pending_work = false;
-	push(mq, e);
+
+	/*
+	 * When we load mappings we push ahead of both sentinels in order to
+	 * allow demotions and cleaning to occur immediately.
+	 */
+	push_front(mq, e);
 
 	return 0;
 }

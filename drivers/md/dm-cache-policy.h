@@ -139,7 +139,8 @@ struct dm_cache_policy {
 	 * mapping from the metadata device into the policy.
 	 */
 	int (*load_mapping)(struct dm_cache_policy *p, dm_oblock_t oblock,
-			    dm_cblock_t cblock, uint32_t hint, bool hint_valid);
+			    dm_cblock_t cblock, bool dirty,
+			    uint32_t hint, bool hint_valid);
 
 	/*
 	 * Gets the hint for a given cblock.  Called in a single threaded

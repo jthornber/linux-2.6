@@ -2862,14 +2862,9 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
 	int r;
 	struct cache *cache = context;
 
-	r = policy_load_mapping(cache->policy, oblock, cblock, hint, hint_valid);
+	r = policy_load_mapping(cache->policy, oblock, cblock, dirty, hint, hint_valid);
 	if (r)
 		return r;
-
-	if (dirty)
-		force_set_dirty(cache, cblock);
-	else
-		force_clear_dirty(cache, cblock);
 
 	return 0;
 }
