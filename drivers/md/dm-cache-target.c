@@ -463,6 +463,7 @@ struct cache {
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
 	struct work_struct deferred_bio_worker;
+	struct work_struct deferred_writethrough_worker;
 	struct work_struct migration_worker;
 	struct delayed_work waker;
 	struct dm_bio_prison_v2 *prison;
@@ -536,6 +537,11 @@ static enum cache_metadata_mode get_cache_mode(struct cache *cache);
 static void wake_deferred_bio_worker(struct cache *cache)
 {
 	queue_work(cache->wq, &cache->deferred_bio_worker);
+}
+
+static void wake_deferred_writethrough_worker(struct cache *cache)
+{
+	queue_work(cache->wq, &cache->deferred_writethrough_worker);
 }
 
 static bool passthrough_mode(struct cache_features *f);
@@ -1003,7 +1009,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 	bio_list_add(&cache->deferred_writethrough_bios, bio);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	wake_deferred_bio_worker(cache);
+	wake_deferred_writethrough_worker(cache);
 }
 
 static void writethrough_endio(struct bio *bio)
@@ -1945,9 +1951,10 @@ static void process_deferred_bios(struct work_struct *ws)
 		schedule_commit(&cache->committer);
 }
 
-#if 0
-static void process_deferred_writethrough_bios(struct cache *cache)
+static void process_deferred_writethrough_bios(struct work_struct *ws)
 {
+	struct cache *cache = container_of(ws, struct cache, deferred_writethrough_worker);
+
 	unsigned long flags;
 	struct bio_list bios;
 	struct bio *bio;
@@ -1960,12 +1967,11 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	/*
-	 * These bios have already been through inc_ds()
+	 * These bios have already been through accounted_begin()
 	 */
 	while ((bio = bio_list_pop(&bios)))
-		accounted_request(cache, bio);
+		generic_make_request(bio);
 }
-#endif
 
 /*----------------------------------------------------------------
  * Invalidations.
@@ -2702,6 +2708,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 	INIT_WORK(&cache->deferred_bio_worker, process_deferred_bios);
+	INIT_WORK(&cache->deferred_writethrough_worker,
+		  process_deferred_writethrough_bios);
 	INIT_WORK(&cache->migration_worker, check_migrations);
 	INIT_DELAYED_WORK(&cache->waker, do_waker);
 
