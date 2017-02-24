@@ -143,6 +143,11 @@ struct dm_cache_policy {
 			    uint32_t hint, bool hint_valid);
 
 	/*
+	 * Drops the mapping, irrespective of whether it's clean or dirty.
+	 */
+	void (*invalidate_mapping)(struct dm_cache_policy *p, dm_cblock_t cblock);
+
+	/*
 	 * Gets the hint for a given cblock.  Called in a single threaded
 	 * context.  So no locking required.
 	 */
@@ -169,6 +174,8 @@ struct dm_cache_policy {
 				  unsigned maxlen, ssize_t *sz_ptr);
 	int (*set_config_value)(struct dm_cache_policy *p,
 				const char *key, const char *value);
+
+	void (*allow_migrations)(struct dm_cache_policy *p, bool allow);
 
 	/*
 	 * Book keeping ptr for the policy register, not for general use.

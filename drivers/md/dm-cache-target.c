@@ -538,9 +538,11 @@ static void wake_deferred_bio_worker(struct cache *cache)
 	queue_work(cache->wq, &cache->deferred_bio_worker);
 }
 
+static bool passthrough_mode(struct cache_features *f);
 static void wake_migration_worker(struct cache *cache)
 {
-	queue_work(cache->wq, &cache->migration_worker);
+	if (!passthrough_mode(&cache->features))
+		queue_work(cache->wq, &cache->migration_worker);
 }
 
 /*----------------------------------------------------------------*/
@@ -1266,9 +1268,6 @@ static void bio_drop_shared_lock(struct cache *cache, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	/*
-	 * We have to drop the shared lock.
-	 */
 	if (pb->cell && dm_cell_put_v2(cache->prison, pb->cell))
 		free_prison_cell(cache, pb->cell);
 	pb->cell = NULL;
@@ -1575,18 +1574,16 @@ static void invalidate_complete(struct dm_cache_migration *mg, bool success)
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
 
+	policy_invalidate_mapping(cache->policy, mg->invalidate_cblock);
 	bio_list_init(&bios);
 	if (dm_cell_unlock_v2(cache->prison, mg->cell, &bios))
 		free_prison_cell(cache, mg->cell);
 
-	if (success)
-		defer_bio(cache, mg->overwrite_bio);
-	else
+	if (!success && mg->overwrite_bio)
 		bio_complete(mg->overwrite_bio, -EIO);
 
 	free_migration(mg);
 	defer_bios(cache, &bios);
-	wake_migration_worker(cache);
 
 	background_work_end(cache);
 }
@@ -1613,6 +1610,8 @@ static void invalidate_remove(struct work_struct *ws)
 
 	init_continuation(&mg->k, invalidate_success);
 	continue_after_commit(&cache->committer, &mg->k);
+	remap_to_origin_clear_discard(cache, mg->overwrite_bio, mg->invalidate_oblock);
+	mg->overwrite_bio = NULL;
 	schedule_commit(&cache->committer);
 }
 
@@ -2657,6 +2656,8 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 			r = -EINVAL;
 			goto bad;
 		}
+
+		policy_allow_migrations(cache->policy, false);
 	}
 
 	spin_lock_init(&cache->lock);

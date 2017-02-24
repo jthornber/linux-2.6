@@ -74,6 +74,12 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 	return p->load_mapping(p, oblock, cblock, dirty, hint, hint_valid);
 }
 
+static inline void policy_invalidate_mapping(struct dm_cache_policy *p,
+					     dm_cblock_t cblock)
+{
+	p->invalidate_mapping(p, cblock);
+}
+
 static inline uint32_t policy_get_hint(struct dm_cache_policy *p,
 				       dm_cblock_t cblock)
 {
@@ -107,6 +113,11 @@ static inline int policy_set_config_value(struct dm_cache_policy *p,
 					  const char *key, const char *value)
 {
 	return p->set_config_value ? p->set_config_value(p, key, value) : -EINVAL;
+}
+
+static inline void policy_allow_migrations(struct dm_cache_policy *p, bool allow)
+{
+	return p->allow_migrations(p, allow);
 }
 
 /*----------------------------------------------------------------*/
