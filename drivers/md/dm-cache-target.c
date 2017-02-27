@@ -1486,14 +1486,11 @@ static void mg_copy(struct work_struct *ws)
 		overwrite(mg, mg_upgrade_lock);
 
 	else {
-#if 0
 		if (is_discarded_oblock(mg->cache, mg->op->oblock) ||
 		    ((mg->op->op != POLICY_PROMOTE) && !is_dirty(mg->cache, mg->op->cblock))) {
-			pr_alert("skipping copy\n");
 			mg_upgrade_lock(ws);
 			return;
 		}
-#endif
 
 		r = copy(mg, mg->op->op == POLICY_PROMOTE, mg_upgrade_lock);
 		if (r) {
