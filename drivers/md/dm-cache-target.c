@@ -542,9 +542,9 @@ static bool writeback_mode(struct cache_features *f)
 	return f->io_mode == CM_IO_WRITEBACK;
 }
 
-static bool passthrough_mode(struct cache_features *f)
+static inline bool passthrough_mode(struct cache_features *f)
 {
-	return f->io_mode == CM_IO_PASSTHROUGH;
+	return unlikely(f->io_mode == CM_IO_PASSTHROUGH);
 }
 
 /*----------------------------------------------------------------*/
@@ -561,8 +561,10 @@ static void wake_deferred_writethrough_worker(struct cache *cache)
 
 static void wake_migration_worker(struct cache *cache)
 {
-	if (!passthrough_mode(&cache->features))
-		queue_work(cache->wq, &cache->migration_worker);
+	if (passthrough_mode(&cache->features))
+		return;
+
+	queue_work(cache->wq, &cache->migration_worker);
 }
 
 /*----------------------------------------------------------------*/
