@@ -1443,6 +1443,19 @@ static void mg_update_metadata(struct work_struct *ws)
 		mg_complete(mg, true);
 }
 
+static void mg_update_metadata_after_copy(struct work_struct *ws)
+{
+	struct dm_cache_migration *mg = ws_to_mg(ws);
+
+	/*
+	 * Did the copy succeed?
+	 */
+	if (mg->k.input)
+		mg_complete(mg, false);
+	else
+		mg_update_metadata(ws);
+}
+
 static void mg_upgrade_lock(struct work_struct *ws)
 {
 	int r;
@@ -1481,11 +1494,10 @@ static void mg_copy(struct work_struct *ws)
 		 * It's safe to do this here, even though it's new data
 		 * because all IO has been locked out of the block.
 		 *
-		 * FIXME: mg_lock_writes() already took READ_WRITE_LOCK_LEVEL
-		 * so why is mg_upgrade_lock() being used as the continuation
-		 * instead of mg_update_metadata()?
+		 * mg_lock_writes() already took READ_WRITE_LOCK_LEVEL
+		 * so _not_ using mg_upgrade_lock() as continutation.
 		 */
-		overwrite(mg, mg_upgrade_lock);
+		overwrite(mg, mg_update_metadata_after_copy);
 
 	else {
 		if (is_discarded_oblock(mg->cache, mg->op->oblock) ||
