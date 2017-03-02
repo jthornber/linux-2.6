@@ -532,7 +532,22 @@ struct dm_cache_migration {
 
 /*----------------------------------------------------------------*/
 
-static enum cache_metadata_mode get_cache_mode(struct cache *cache);
+static bool writethrough_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_WRITETHROUGH;
+}
+
+static bool writeback_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_WRITEBACK;
+}
+
+static bool passthrough_mode(struct cache_features *f)
+{
+	return f->io_mode == CM_IO_PASSTHROUGH;
+}
+
+/*----------------------------------------------------------------*/
 
 static void wake_deferred_bio_worker(struct cache *cache)
 {
@@ -544,7 +559,6 @@ static void wake_deferred_writethrough_worker(struct cache *cache)
 	queue_work(cache->wq, &cache->deferred_writethrough_worker);
 }
 
-static bool passthrough_mode(struct cache_features *f);
 static void wake_migration_worker(struct cache *cache)
 {
 	if (!passthrough_mode(&cache->features))
@@ -624,21 +638,6 @@ static unsigned lock_level(struct bio *bio)
  */
 #define PB_DATA_SIZE_WB (offsetof(struct per_bio_data, cache))
 #define PB_DATA_SIZE_WT (sizeof(struct per_bio_data))
-
-static bool writethrough_mode(struct cache_features *f)
-{
-	return f->io_mode == CM_IO_WRITETHROUGH;
-}
-
-static bool writeback_mode(struct cache_features *f)
-{
-	return f->io_mode == CM_IO_WRITEBACK;
-}
-
-static bool passthrough_mode(struct cache_features *f)
-{
-	return f->io_mode == CM_IO_PASSTHROUGH;
-}
 
 static size_t get_per_bio_data_size(struct cache *cache)
 {
@@ -843,51 +842,6 @@ static bool is_discarded_oblock(struct cache *cache, dm_oblock_t b)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
-}
-
-/*----------------------------------------------------------------*/
-
-static void load_stats(struct cache *cache)
-{
-	struct dm_cache_statistics stats;
-
-	dm_cache_metadata_get_stats(cache->cmd, &stats);
-	atomic_set(&cache->stats.read_hit, stats.read_hits);
-	atomic_set(&cache->stats.read_miss, stats.read_misses);
-	atomic_set(&cache->stats.write_hit, stats.write_hits);
-	atomic_set(&cache->stats.write_miss, stats.write_misses);
-}
-
-static void save_stats(struct cache *cache)
-{
-	struct dm_cache_statistics stats;
-
-	if (get_cache_mode(cache) >= CM_READ_ONLY)
-		return;
-
-	stats.read_hits = atomic_read(&cache->stats.read_hit);
-	stats.read_misses = atomic_read(&cache->stats.read_miss);
-	stats.write_hits = atomic_read(&cache->stats.write_hit);
-	stats.write_misses = atomic_read(&cache->stats.write_miss);
-
-	dm_cache_metadata_set_stats(cache->cmd, &stats);
-}
-
-static void update_stats(struct cache_stats *stats, enum policy_operation op)
-{
-	switch (op) {
-	case POLICY_PROMOTE:
-		atomic_inc(&stats->promotion);
-		break;
-
-	case POLICY_DEMOTE:
-		atomic_inc(&stats->demotion);
-		break;
-
-	case POLICY_WRITEBACK:
-		atomic_inc(&stats->writeback);
-		break;
-	}
 }
 
 /*----------------------------------------------------------------
@@ -1146,6 +1100,51 @@ static void metadata_operation_failed(struct cache *cache, const char *op, int r
 		    cache_device_name(cache), op, r);
 	abort_transaction(cache);
 	set_cache_mode(cache, CM_READ_ONLY);
+}
+
+/*----------------------------------------------------------------*/
+
+static void load_stats(struct cache *cache)
+{
+	struct dm_cache_statistics stats;
+
+	dm_cache_metadata_get_stats(cache->cmd, &stats);
+	atomic_set(&cache->stats.read_hit, stats.read_hits);
+	atomic_set(&cache->stats.read_miss, stats.read_misses);
+	atomic_set(&cache->stats.write_hit, stats.write_hits);
+	atomic_set(&cache->stats.write_miss, stats.write_misses);
+}
+
+static void save_stats(struct cache *cache)
+{
+	struct dm_cache_statistics stats;
+
+	if (get_cache_mode(cache) >= CM_READ_ONLY)
+		return;
+
+	stats.read_hits = atomic_read(&cache->stats.read_hit);
+	stats.read_misses = atomic_read(&cache->stats.read_miss);
+	stats.write_hits = atomic_read(&cache->stats.write_hit);
+	stats.write_misses = atomic_read(&cache->stats.write_miss);
+
+	dm_cache_metadata_set_stats(cache->cmd, &stats);
+}
+
+static void update_stats(struct cache_stats *stats, enum policy_operation op)
+{
+	switch (op) {
+	case POLICY_PROMOTE:
+		atomic_inc(&stats->promotion);
+		break;
+
+	case POLICY_DEMOTE:
+		atomic_inc(&stats->demotion);
+		break;
+
+	case POLICY_WRITEBACK:
+		atomic_inc(&stats->writeback);
+		break;
+	}
 }
 
 /*----------------------------------------------------------------
@@ -2084,22 +2083,6 @@ static void check_migrations(struct work_struct *ws)
 	}
 }
 
-/*----------------------------------------------------------------*/
-
-static int is_congested(struct dm_dev *dev, int bdi_bits)
-{
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-	return bdi_congested(&q->backing_dev_info, bdi_bits);
-}
-
-static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
-{
-	struct cache *cache = container_of(cb, struct cache, callbacks);
-
-	return is_congested(cache->origin_dev, bdi_bits) ||
-		is_congested(cache->cache_dev, bdi_bits);
-}
-
 /*----------------------------------------------------------------
  * Target methods
  *--------------------------------------------------------------*/
@@ -2553,6 +2536,20 @@ static void set_cache_size(struct cache *cache, dm_cblock_t size)
 			     (unsigned long long) nr_blocks);
 
 	cache->cache_size = size;
+}
+
+static int is_congested(struct dm_dev *dev, int bdi_bits)
+{
+	struct request_queue *q = bdev_get_queue(dev->bdev);
+	return bdi_congested(&q->backing_dev_info, bdi_bits);
+}
+
+static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
+{
+	struct cache *cache = container_of(cb, struct cache, callbacks);
+
+	return is_congested(cache->origin_dev, bdi_bits) ||
+		is_congested(cache->cache_dev, bdi_bits);
 }
 
 #define DEFAULT_MIGRATION_THRESHOLD 2048
