@@ -1250,7 +1250,7 @@ static void overwrite_endio(struct bio *bio)
 	dm_unhook_bio(&pb->hook_info, bio);
 
 	if (bio->bi_error)
-		mg->k.input = -EIO;
+		mg->k.input = bio->bi_error;
 
 	queue_continuation(mg->cache->wq, &mg->k);
 }
@@ -1307,7 +1307,7 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 			if (success)
 				force_set_dirty(cache, cblock);
 			else
-				mg->overwrite_bio->bi_error = -EIO;
+				mg->overwrite_bio->bi_error = (mg->k.input ? : -EIO);
 			bio_endio(mg->overwrite_bio);
 		} else {
 			if (success)
