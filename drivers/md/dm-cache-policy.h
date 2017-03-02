@@ -13,8 +13,6 @@
 
 /*----------------------------------------------------------------*/
 
-/* FIXME: make it clear which methods are optional. */
-
 /*
  * The cache policy makes the important decisions about which blocks get to
  * live on the faster cache device.
@@ -103,6 +101,8 @@ struct dm_cache_policy {
 	 * block may be discarded, or the bio may cover an entire block.
 	 * In order to optimise it needs the migration immediately though
 	 * so it knows to do something different with the bio.
+	 *
+	 * This method is optional (policy-internal will fallback to using lookup).
 	 */
 	int (*lookup_with_work)(struct dm_cache_policy *p,
 				dm_oblock_t oblock, dm_cblock_t *cblock,
@@ -156,6 +156,8 @@ struct dm_cache_policy {
 	 * queue merging has occurred).  To stop the policy being fooled by
 	 * these, the core target sends regular tick() calls to the policy.
 	 * The policy should only count an entry as hit once per tick.
+	 *
+	 * This method is optional.
 	 */
 	void (*tick)(struct dm_cache_policy *p, bool can_block);
 
