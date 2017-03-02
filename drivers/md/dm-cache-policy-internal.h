@@ -48,14 +48,12 @@ static inline void policy_complete_background_work(struct dm_cache_policy *p,
 
 static inline void policy_set_dirty(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
-	if (p->set_dirty)
-		p->set_dirty(p, cblock);
+	p->set_dirty(p, cblock);
 }
 
 static inline void policy_clear_dirty(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
-	if (p->clear_dirty)
-		p->clear_dirty(p, cblock);
+	p->clear_dirty(p, cblock);
 }
 
 static inline int policy_load_mapping(struct dm_cache_policy *p,
