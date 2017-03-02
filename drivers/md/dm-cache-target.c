@@ -1407,11 +1407,6 @@ static void mg_update_metadata(struct work_struct *ws)
 			mg_complete(mg, false);
 			return;
 		}
-
-		/*
-		 * FIXME: explain why we only commit on demote.
-		 */
-		need_commit = false;
 		break;
 
 	case POLICY_DEMOTE:
@@ -1425,12 +1420,14 @@ static void mg_update_metadata(struct work_struct *ws)
 			return;
 		}
 
+		/*
+		 * FIXME: explain why we only commit on demote.
+		 */
 		need_commit = true;
 		break;
 
 	case POLICY_WRITEBACK:
 		/* no metadata update needed */
-		need_commit = false;
 		break;
 	}
 
@@ -1477,10 +1474,14 @@ static void mg_copy(struct work_struct *ws)
 	int r;
 	struct dm_cache_migration *mg = ws_to_mg(ws);
 
-	if (mg->overwrite_bio)
+	if (mg->overwrite_bio) {
 		/*
 		 * It's safe to do this here, even though it's new data
 		 * because all IO has been locked out of the block.
+		 *
+		 * FIXME: mg_lock_writes() already took READ_WRITE_LOCK_LEVEL
+		 * so why is mg_upgrade_lock() being used as the continuation
+		 * instead of mg_update_metadata()?
 		 */
 		overwrite(mg, mg_upgrade_lock);
 
@@ -1761,9 +1762,8 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		}
 
 		if (r == -ENOENT && op) {
-			// FIXME: no point using an overwrite bio is
-			// optimisable because discarded.  Also can we drop
-			// the shared lock on bio here?
+			// FIXME: no point using an overwrite bio, is
+			// optimisable because discarded.
 			bio_drop_shared_lock(cache, bio);
 			BUG_ON(op->op != POLICY_PROMOTE);
 			mg_start(cache, op, bio);
@@ -2590,7 +2590,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	ca->metadata_dev = ca->origin_dev = ca->cache_dev = NULL;
 
-	/* FIXME: factor out this whole section */
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
 	origin_blocks = block_div(origin_blocks, ca->block_size);
 	cache->origin_blocks = to_oblock(origin_blocks);
