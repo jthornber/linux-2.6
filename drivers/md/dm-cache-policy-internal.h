@@ -31,14 +31,6 @@ static inline int policy_lookup_with_work(struct dm_cache_policy *p,
 	return p->lookup_with_work(p, oblock, cblock, data_dir, fast_copy, work);
 }
 
-/*
- * Little inline functions that simplify calling the policy methods.
- */
-static inline bool policy_has_background_work(struct dm_cache_policy *p)
-{
-	return p->has_background_work(p);
-}
-
 static inline int policy_get_background_work(struct dm_cache_policy *p,
 					     bool idle, struct policy_work **result)
 {
