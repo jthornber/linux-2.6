@@ -31,7 +31,6 @@ unsigned btracker_nr_demotions_queued(struct background_tracker *b);
 int btracker_queue(struct background_tracker *b,
 		   struct policy_work *work,
 		   struct policy_work **pwork);
-bool btracker_any_queued(struct background_tracker *b);
 
 /*
  * Returns -ENODATA if there's no work.

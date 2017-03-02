@@ -198,12 +198,6 @@ int btracker_queue(struct background_tracker *b,
 }
 EXPORT_SYMBOL_GPL(btracker_queue);
 
-bool btracker_any_queued(struct background_tracker *b)
-{
-	return !list_empty(&b->queued);
-}
-EXPORT_SYMBOL_GPL(btracker_any_queued);
-
 /*
  * Returns -ENODATA if there's no work.
  */

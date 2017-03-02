@@ -1423,19 +1423,6 @@ static int smq_lookup_with_work(struct dm_cache_policy *p,
 	return r;
 }
 
-static bool smq_has_background_work(struct dm_cache_policy *p)
-{
-	bool r;
-	unsigned long flags;
-	struct smq_policy *mq = to_smq_policy(p);
-
-	spin_lock_irqsave(&mq->lock, flags);
-	r = btracker_any_queued(mq->bg_work);
-	spin_unlock_irqrestore(&mq->lock, flags);
-
-	return r;
-}
-
 static int smq_get_background_work(struct dm_cache_policy *p, bool idle,
 				   struct policy_work **result)
 {
@@ -1683,7 +1670,6 @@ static void init_policy_functions(struct smq_policy *mq, bool mimic_mq)
 	mq->policy.destroy = smq_destroy;
 	mq->policy.lookup = smq_lookup;
 	mq->policy.lookup_with_work = smq_lookup_with_work;
-	mq->policy.has_background_work = smq_has_background_work;
 	mq->policy.get_background_work = smq_get_background_work;
 	mq->policy.complete_background_work = smq_complete_background_work;
 	mq->policy.set_dirty = smq_set_dirty;

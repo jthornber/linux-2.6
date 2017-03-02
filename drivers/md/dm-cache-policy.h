@@ -112,12 +112,6 @@ struct dm_cache_policy {
 				struct policy_work **work);
 
 	/*
-	 * Checks to see if there's any background work that needs doing.
-	 */
-	// FIXME: remove, since get_background_work can queue new work anyway.
-	bool (*has_background_work)(struct dm_cache_policy *p);
-
-	/*
 	 * Retrieves background work.  Returns -ENODATA when there's no background work.
 	 */
 	int (*get_background_work)(struct dm_cache_policy *p, bool idle,
