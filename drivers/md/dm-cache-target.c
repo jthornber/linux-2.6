@@ -1290,7 +1290,7 @@ static void overwrite_endio(struct bio *bio)
 	dm_unhook_bio(&pb->hook_info, bio);
 
 	if (bio->bi_error)
-		mg->k.input = -EIO;
+		mg->k.input = bio->bi_error;
 
 	queue_continuation(mg->cache->wq, &mg->k);
 }
@@ -1345,7 +1345,9 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 		if (mg->overwrite_bio) {
 			if (success)
 				force_set_dirty(cache, cblock);
-			bio_complete(mg->overwrite_bio, success ? 0 : -EIO);
+			else
+				mg->overwrite_bio->bi_error = (mg->k.input ? : -EIO);
+			bio_endio(mg->overwrite_bio);
 		} else {
 			if (success)
 				force_clear_dirty(cache, cblock);
@@ -1489,7 +1491,7 @@ static void mg_copy(struct work_struct *ws)
 	int r;
 	struct dm_cache_migration *mg = ws_to_mg(ws);
 
-	if (mg->overwrite_bio) {
+	if (mg->overwrite_bio)
 		/*
 		 * It's safe to do this here, even though it's new data
 		 * because all IO has been locked out of the block.
