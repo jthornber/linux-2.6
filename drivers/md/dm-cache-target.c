@@ -1780,14 +1780,13 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 
 		r = policy_lookup_with_work(cache->policy, block, &cblock, data_dir, true, &op);
 		if (unlikely(r && r != -ENOENT)) {
-			pr_alert("lookup failed: r = %d\n", r);
+			DMERR_LIMIT("%s: lookup failed: error = %d",
+				    cache_device_name(cache), r);
 			bio_io_error(bio);
 			return DM_MAPIO_SUBMITTED;
 		}
 
 		if (r == -ENOENT && op) {
-			// FIXME: no point using an overwrite bio, is
-			// optimisable because discarded.
 			bio_drop_shared_lock(cache, bio);
 			BUG_ON(op->op != POLICY_PROMOTE);
 			mg_start(cache, op, bio);
@@ -1796,7 +1795,8 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 	} else {
 		r = policy_lookup(cache->policy, block, &cblock, data_dir, false, &background_queued);
 		if (unlikely(r && r != -ENOENT)) {
-			pr_alert("lookup failed: r = %d\n", r);
+			DMERR_LIMIT("%s: lookup failed: error = %d",
+				    cache_device_name(cache), r);
 			bio_io_error(bio);
 			return DM_MAPIO_SUBMITTED;
 		}
