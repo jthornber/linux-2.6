@@ -728,7 +728,6 @@ static void force_set_dirty(struct cache *cache, dm_cblock_t cblock)
 	policy_set_dirty(cache->policy, cblock);
 }
 
-// FIXME: do we need to make the policy call, since the background complete should do this?
 static void force_clear_dirty(struct cache *cache, dm_cblock_t cblock)
 {
 	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
@@ -1356,7 +1355,6 @@ static void mg_success(struct work_struct *ws)
 static void mg_update_metadata(struct work_struct *ws)
 {
 	int r;
-	bool need_commit = false;
 	struct dm_cache_migration *mg = ws_to_mg(ws);
 	struct cache *cache = mg->cache;
 	struct policy_work *op = mg->op;
@@ -1372,6 +1370,7 @@ static void mg_update_metadata(struct work_struct *ws)
 			mg_complete(mg, false);
 			return;
 		}
+		mg_complete(mg, true);
 		break;
 
 	case POLICY_DEMOTE:
@@ -1386,24 +1385,33 @@ static void mg_update_metadata(struct work_struct *ws)
 		}
 
 		/*
-		 * FIXME: explain why we only commit on demote.
+		 * It would be nice if we only had to commit when a REQ_FLUSH
+		 * comes through.  But there's one scenario that we have to
+		 * look out for:
+		 *
+		 * - vblock x in a cache block
+		 * - domotion occurs
+		 * - cache block gets reallocated and over written
+		 * - crash
+		 *
+		 * When we recover, because there was no commit the cache will
+		 * rollback to having the data for vblock x in the cache block.
+		 * But the cache block has since been overwritten, so it'll end
+		 * up pointing to data that was never in 'x' during the history
+		 * of the device.
+		 *
+		 * To avoid this issue we require a commit as part of the
+		 * demotion operation.
 		 */
-		need_commit = true;
+		init_continuation(&mg->k, mg_success);
+		continue_after_commit(&cache->committer, &mg->k);
+		schedule_commit(&cache->committer);
 		break;
 
 	case POLICY_WRITEBACK:
-		/* no metadata update needed */
+		mg_complete(mg, true);
 		break;
 	}
-
-	if (need_commit) {
-		init_continuation(&mg->k, mg_success);
-		continue_after_commit(&cache->committer, &mg->k);
-
-		// FIXME: it would be nice to do this after a small delay
-		schedule_commit(&cache->committer);
-	} else
-		mg_complete(mg, true);
 }
 
 static void mg_update_metadata_after_copy(struct work_struct *ws)
