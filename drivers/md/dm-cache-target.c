@@ -2944,6 +2944,7 @@ static void cache_postsuspend(struct dm_target *ti)
 
 	cancel_delayed_work(&cache->waker);
 	flush_workqueue(cache->wq);
+	WARN_ON(cache->origin_tracker.in_flight);
 
 	/*
 	 * If it's a flush suspend there won't be any deferred bios, so this
