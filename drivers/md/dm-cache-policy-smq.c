@@ -1570,15 +1570,19 @@ static int smq_load_mapping(struct dm_cache_policy *p,
 	return 0;
 }
 
-static void smq_invalidate_mapping(struct dm_cache_policy *p, dm_cblock_t cblock)
+static int smq_invalidate_mapping(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	struct smq_policy *mq = to_smq_policy(p);
 	struct entry *e = get_entry(&mq->cache_alloc, from_cblock(cblock));
+
+	if (!e->allocated)
+		return -ENODATA;
 
 	// FIXME: what if this block has pending background work?
 	del_queue(mq, e);
 	h_remove(&mq->table, e);
 	free_entry(&mq->cache_alloc, e);
+	return 0;
 }
 
 static uint32_t smq_get_hint(struct dm_cache_policy *p, dm_cblock_t cblock)

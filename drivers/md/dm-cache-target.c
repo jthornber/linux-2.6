@@ -367,25 +367,6 @@ struct cache_stats {
 	atomic_t discard_count;
 };
 
-/*
- * Defines a range of cblocks, begin to (end - 1) are in the range.  end is
- * the one-past-the-end value.
- */
-struct cblock_range {
-	dm_cblock_t begin;
-	dm_cblock_t end;
-};
-
-struct invalidation_request {
-	struct list_head list;
-	struct cblock_range *cblocks;
-
-	atomic_t complete;
-	int err;
-
-	wait_queue_head_t result_wait;
-};
-
 struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -1385,7 +1366,6 @@ static void mg_complete(struct dm_cache_migration *mg, bool success)
 	background_work_end(cache);
 }
 
-// FIXME: code review got to here.
 static void mg_success(struct work_struct *ws)
 {
 	struct dm_cache_migration *mg = ws_to_mg(ws);
@@ -1483,10 +1463,10 @@ static void mg_upgrade_lock(struct work_struct *ws)
 		 */
 		r = dm_cell_lock_promote_v2(mg->cache->prison, mg->cell,
 					    READ_WRITE_LOCK_LEVEL);
-		if (r < 0) {
+		if (r < 0)
 			mg_complete(mg, false);
 
-		} else if (r)
+		else if (r)
 			quiesce(mg, mg_update_metadata);
 
 		else
@@ -1534,7 +1514,8 @@ static int mg_lock_writes(struct dm_cache_migration *mg)
 
 	prealloc = alloc_prison_cell(cache);
 	if (!prealloc) {
-		pr_alert("alloc_cell failed\n");
+		DMERR_LIMIT("%s: unable to alloc prison cell",
+			    cache_device_name(cache));
 		mg_complete(mg, false);
 		return -ENOMEM;
 	}
@@ -1601,7 +1582,6 @@ static void invalidate_complete(struct dm_cache_migration *mg, bool success)
 	struct bio_list bios;
 	struct cache *cache = mg->cache;
 
-	policy_invalidate_mapping(cache->policy, mg->invalidate_cblock);
 	bio_list_init(&bios);
 	if (dm_cell_unlock_v2(cache->prison, mg->cell, &bios))
 		free_prison_cell(cache, mg->cell);
@@ -1621,25 +1601,47 @@ static void invalidate_success(struct work_struct *ws)
 	invalidate_complete(mg, true);
 }
 
+static int invalidate_cblock(struct cache *cache, dm_cblock_t cblock)
+{
+	int r = policy_invalidate_mapping(cache->policy, cblock);
+	if (!r) {
+		r = dm_cache_remove_mapping(cache->cmd, cblock);
+		if (r) {
+			DMERR_LIMIT("%s: invalidation failed; couldn't update on disk metadata",
+				    cache_device_name(cache));
+			metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
+		}
+
+	} else if (r == -ENODATA) {
+		/*
+		 * Harmless, already unmapped.
+		 */
+		r = 0;
+
+	} else {
+		DMERR("%s: policy_invalidate_mapping failed", cache_device_name(cache));
+	}
+
+	return r;
+}
+
 static void invalidate_remove(struct work_struct *ws)
 {
 	int r;
 	struct dm_cache_migration *mg = ws_to_mg(ws);
 	struct cache *cache = mg->cache;
 
-	r = dm_cache_remove_mapping(cache->cmd, mg->invalidate_cblock);
-	if (r) {
-		DMERR_LIMIT("%s: invalidation failed; couldn't update on disk metadata",
-			    cache_device_name(cache));
-		metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
+	r = invalidate_cblock(cache, mg->invalidate_cblock);
+	if (r)
 		invalidate_complete(mg, false);
-	}
 
-	init_continuation(&mg->k, invalidate_success);
-	continue_after_commit(&cache->committer, &mg->k);
-	remap_to_origin_clear_discard(cache, mg->overwrite_bio, mg->invalidate_oblock);
-	mg->overwrite_bio = NULL;
-	schedule_commit(&cache->committer);
+	else {
+		init_continuation(&mg->k, invalidate_success);
+		continue_after_commit(&cache->committer, &mg->k);
+		remap_to_origin_clear_discard(cache, mg->overwrite_bio, mg->invalidate_oblock);
+		mg->overwrite_bio = NULL;
+		schedule_commit(&cache->committer);
+	}
 }
 
 static int invalidate_lock(struct dm_cache_migration *mg)
@@ -1667,16 +1669,18 @@ static int invalidate_lock(struct dm_cache_migration *mg)
 	if (mg->cell != prealloc)
 		free_prison_cell(cache, prealloc);
 
-	if (!r) {
+	if (r)
+		quiesce(mg, invalidate_remove);
+
+	else {
 		/*
 		 * We can't call invalidate_remove() directly here because we
 		 * might still be in request context.
 		 */
-		init_continuation(&mg->k, invalidate_remove);
 		mg->k.input = 0;
+		init_continuation(&mg->k, invalidate_remove);
 		queue_work(cache->wq, &mg->k.ws);
-	} else
-		quiesce(mg, invalidate_remove);
+	}
 
 	return 0;
 }
@@ -1684,11 +1688,12 @@ static int invalidate_lock(struct dm_cache_migration *mg)
 static int invalidate_start(struct cache *cache, dm_cblock_t cblock,
 			    dm_oblock_t oblock, struct bio *bio)
 {
-	struct dm_cache_migration *mg = alloc_migration(cache);
+	struct dm_cache_migration *mg;
 
 	if (!background_work_begin(cache))
 		return -EPERM;
 
+	mg = alloc_migration(cache);
 	if (!mg)
 		return -ENOMEM;
 
@@ -1850,14 +1855,10 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		}
 	}
 
-	// FIXME: tidy
-	if (bio->bi_opf & REQ_FUA) {
-		// FIXME: I think accounted_begin gets called twice in this case
-		issue_after_commit(&cache->committer, bio);
-		*commit_needed = true;
-		return DM_MAPIO_SUBMITTED;
-	}
-
+	/*
+	 * dm core turns FUA requests into a separate payload and FLUSH req.
+	 */
+	BUG_ON(bio->bi_opf & REQ_FUA);
 	return DM_MAPIO_REMAPPED;
 }
 
@@ -1909,8 +1910,6 @@ static bool process_flush_bio(struct cache *cache, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	BUG_ON(bio->bi_opf & REQ_FUA);
-	BUG_ON(bio->bi_iter.bi_size);
 	if (!pb->req_nr)
 		remap_to_origin(cache, bio);
 	else
@@ -1927,13 +1926,11 @@ static bool process_discard_bio(struct cache *cache, struct bio *bio)
 	// FIXME: do we need to lock the region?  Or can we just assume the
 	// user wont be so foolish as to issue discard concurrently with
 	// other IO?
-#if 1
 	calc_discard_block_range(cache, bio, &b, &e);
 	while (b != e) {
 		set_discard(cache, b);
 		b = to_dblock(from_dblock(b) + 1);
 	}
-#endif
 
 	bio_endio(bio);
 
@@ -1993,61 +1990,7 @@ static void process_deferred_writethrough_bios(struct work_struct *ws)
 		generic_make_request(bio);
 }
 
-/*----------------------------------------------------------------
- * Invalidations.
- * Dropping something from the cache *without* writing back.
- *--------------------------------------------------------------*/
-
-#if 0
-static void process_invalidation_request(struct cache *cache, struct invalidation_request *req)
-{
-	int r = 0;
-	uint64_t begin = from_cblock(req->cblocks->begin);
-	uint64_t end = from_cblock(req->cblocks->end);
-
-	while (begin != end) {
-		r = policy_remove_cblock(cache->policy, to_cblock(begin));
-		if (!r) {
-			r = dm_cache_remove_mapping(cache->cmd, to_cblock(begin));
-			if (r) {
-				metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
-				break;
-			}
-
-		} else if (r == -ENODATA) {
-			/* harmless, already unmapped */
-			r = 0;
-
-		} else {
-			DMERR("%s: policy_remove_cblock failed", cache_device_name(cache));
-			break;
-		}
-
-		begin++;
-	}
-
-	cache->commit_requested = true;
-
-	req->err = r;
-	atomic_set(&req->complete, 1);
-
-	wake_up(&req->result_wait);
-}
-
-static void process_invalidation_requests(struct cache *cache)
-{
-	struct list_head list;
-	struct invalidation_request *req, *tmp;
-
-	INIT_LIST_HEAD(&list);
-	spin_lock(&cache->invalidation_lock);
-	list_splice_init(&cache->invalidation_requests, &list);
-	spin_unlock(&cache->invalidation_lock);
-
-	list_for_each_entry_safe (req, tmp, &list, list)
-		process_invalidation_request(cache, req);
-}
-#endif
+// FIXME: code review got to here.
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -3352,10 +3295,19 @@ err:
 }
 
 /*
+ * Defines a range of cblocks, begin to (end - 1) are in the range.  end is
+ * the one-past-the-end value.
+ */
+struct cblock_range {
+	dm_cblock_t begin;
+	dm_cblock_t end;
+};
+
+/*
  * A cache block range can take two forms:
  *
  * i) A single cblock, eg. '3456'
- * ii) A begin and end cblock with dots between, eg. 123-234
+ * ii) A begin and end cblock with a dash between, eg. 123-234
  */
 static int parse_cblock_range(struct cache *cache, const char *str,
 			      struct cblock_range *result)
@@ -3421,23 +3373,31 @@ static int validate_cblock_range(struct cache *cache, struct cblock_range *range
 	return 0;
 }
 
+static inline dm_cblock_t cblock_succ(dm_cblock_t b)
+{
+	return to_cblock(from_cblock(b) + 1);
+}
+
 static int request_invalidation(struct cache *cache, struct cblock_range *range)
 {
-	struct invalidation_request req;
+	int r = 0;
 
-	INIT_LIST_HEAD(&req.list);
-	req.cblocks = range;
-	atomic_set(&req.complete, 0);
-	req.err = 0;
-	init_waitqueue_head(&req.result_wait);
+	/*
+	 * We don't need to do any locking here because we know we're in
+	 * passthrough mode.  There's is potential for a race between an
+	 * invalidation triggered by an io and an invalidation message.  This
+	 * is harmless, we must not worry if the policy call fails.
+	 */
+	while (range->begin != range->end) {
+		r = invalidate_cblock(cache, range->begin);
+		if (r)
+			return r;
 
-	spin_lock(&cache->invalidation_lock);
-	list_add(&req.list, &cache->invalidation_requests);
-	spin_unlock(&cache->invalidation_lock);
-	wake_deferred_bio_worker(cache);
+		range->begin = cblock_succ(range->begin);
+	}
 
-	wait_event(req.result_wait, atomic_read(&req.complete));
-	return req.err;
+	cache->commit_requested = true;
+	return r;
 }
 
 static int process_invalidate_cblocks_message(struct cache *cache, unsigned count,
