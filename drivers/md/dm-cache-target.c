@@ -1595,10 +1595,10 @@ static void invalidate_complete(struct dm_cache_migration *mg, bool success)
 	background_work_end(cache);
 }
 
-static void invalidate_success(struct work_struct *ws)
+static void invalidate_completed(struct work_struct *ws)
 {
 	struct dm_cache_migration *mg = ws_to_mg(ws);
-	invalidate_complete(mg, true);
+	invalidate_complete(mg, !mg->k.input);
 }
 
 static int invalidate_cblock(struct cache *cache, dm_cblock_t cblock)
@@ -1618,9 +1618,8 @@ static int invalidate_cblock(struct cache *cache, dm_cblock_t cblock)
 		 */
 		r = 0;
 
-	} else {
+	} else
 		DMERR("%s: policy_invalidate_mapping failed", cache_device_name(cache));
-	}
 
 	return r;
 }
@@ -1636,7 +1635,7 @@ static void invalidate_remove(struct work_struct *ws)
 		invalidate_complete(mg, false);
 
 	else {
-		init_continuation(&mg->k, invalidate_success);
+		init_continuation(&mg->k, invalidate_completed);
 		continue_after_commit(&cache->committer, &mg->k);
 		remap_to_origin_clear_discard(cache, mg->overwrite_bio, mg->invalidate_oblock);
 		mg->overwrite_bio = NULL;
