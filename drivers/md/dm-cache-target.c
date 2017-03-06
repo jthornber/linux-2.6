@@ -2005,7 +2005,6 @@ static void process_deferred_writethrough_bios(struct work_struct *ws)
 		generic_make_request(bio);
 }
 
-// FIXME: code review got to here.
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
@@ -2724,7 +2723,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	iot_init(&cache->origin_tracker);
 
 	init_rwsem(&cache->background_work_lock);
-	/* FIXME: train lockdep to not complain about returning to userspace holding lock? */
 	prevent_background_work(cache);
 
 	*result = cache;
