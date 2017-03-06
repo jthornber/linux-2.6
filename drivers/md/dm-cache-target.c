@@ -1863,7 +1863,17 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 	/*
 	 * dm core turns FUA requests into a separate payload and FLUSH req.
 	 */
-	BUG_ON(bio->bi_opf & REQ_FUA);
+	if (bio->bi_opf & REQ_FUA) {
+		/*
+		 * issue_after_commit will call accounted_begin a second time.  So
+		 * we call accounted_complete() to avoid double accounting.
+		 */
+		accounted_complete(cache, bio);
+		issue_after_commit(&cache->committer, bio);
+		*commit_needed = true;
+		return DM_MAPIO_SUBMITTED;
+	}
+
 	return DM_MAPIO_REMAPPED;
 }
 
