@@ -61,10 +61,10 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 	return p->load_mapping(p, oblock, cblock, dirty, hint, hint_valid);
 }
 
-static inline void policy_invalidate_mapping(struct dm_cache_policy *p,
-					     dm_cblock_t cblock)
+static inline int policy_invalidate_mapping(struct dm_cache_policy *p,
+					    dm_cblock_t cblock)
 {
-	p->invalidate_mapping(p, cblock);
+	return p->invalidate_mapping(p, cblock);
 }
 
 static inline uint32_t policy_get_hint(struct dm_cache_policy *p,

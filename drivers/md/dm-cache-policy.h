@@ -136,8 +136,9 @@ struct dm_cache_policy {
 
 	/*
 	 * Drops the mapping, irrespective of whether it's clean or dirty.
+	 * Returns -ENODATA if cblock is not mapped.
 	 */
-	void (*invalidate_mapping)(struct dm_cache_policy *p, dm_cblock_t cblock);
+	int (*invalidate_mapping)(struct dm_cache_policy *p, dm_cblock_t cblock);
 
 	/*
 	 * Gets the hint for a given cblock.  Called in a single threaded
