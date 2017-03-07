@@ -16,49 +16,7 @@
 /*
  * The cache policy makes the important decisions about which blocks get to
  * live on the faster cache device.
- *
- * When the core target has to remap a bio it calls the 'map' method of the
- * policy.  This returns an instruction telling the core target what to do.
- *
- * POLICY_HIT:
- *   That block is in the cache.  Remap to the cache and carry on.
- *
- * POLICY_MISS:
- *   This block is on the origin device.  Remap and carry on.
- *
- * POLICY_NEW:
- *   This block is currently on the origin device, but the policy wants to
- *   move it.  The core should:
- *
- *   - hold any further io to this origin block
- *   - copy the origin to the given cache block
- *   - release all the held blocks
- *   - remap the original block to the cache
- *
- * POLICY_REPLACE:
- *   This block is currently on the origin device.  The policy wants to
- *   move it to the cache, with the added complication that the destination
- *   cache block needs a writeback first.  The core should:
- *
- *   - hold any further io to this origin block
- *   - hold any further io to the origin block that's being written back
- *   - writeback
- *   - copy new block to cache
- *   - release held blocks
- *   - remap bio to cache and reissue.
- *
- * Should the core run into trouble while processing a POLICY_NEW or
- * POLICY_REPLACE instruction it will roll back the policies mapping using
- * remove_mapping() or force_mapping().  These methods must not fail.  This
- * approach avoids having transactional semantics in the policy (ie, the
- * core informing the policy when a migration is complete), and hence makes
- * it easier to write new policies.
- *
- * In general policy methods should never block, except in the case of the
- * map function when can_migrate is set.  So be careful to implement using
- * bounded, preallocated memory.
  */
-// FIXME: update above documentation to reflect the following operations
 enum policy_operation {
 	POLICY_PROMOTE,
 	POLICY_DEMOTE,
@@ -75,9 +33,8 @@ struct policy_work {
 };
 
 /*
- * The cache policy object.  Just a bunch of methods.  It is envisaged that
- * this structure will be embedded in a bigger, policy specific structure
- * (ie. use container_of()).
+ * The cache policy object.  It is envisaged that this structure will be
+ * embedded in a bigger, policy specific structure (ie. use container_of()).
  */
 struct dm_cache_policy {
 	/*
@@ -90,8 +47,11 @@ struct dm_cache_policy {
 	 *
 	 * Must not block.
 	 *
-	 * Returns 0 if in cache, -ENOENT if not, < 0 for other errors
-	 * (-EWOULDBLOCK would be typical).
+	 * Returns 0 if in cache (cblock will be set), -ENOENT if not, < 0 for
+	 * other errors (-EWOULDBLOCK would be typical).  data_dir should be
+	 * READ or WRITE. fast_copy should be set if migrating this block would
+	 * be 'cheap' somehow (eg, discarded data). background_queued will be set
+	 * if a migration has just been queued.
 	 */
 	int (*lookup)(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t *cblock,
 		      int data_dir, bool fast_copy, bool *background_queued);
@@ -102,7 +62,8 @@ struct dm_cache_policy {
 	 * In order to optimise it needs the migration immediately though
 	 * so it knows to do something different with the bio.
 	 *
-	 * This method is optional (policy-internal will fallback to using lookup).
+	 * This method is optional (policy-internal will fallback to using
+	 * lookup).
 	 */
 	int (*lookup_with_work)(struct dm_cache_policy *p,
 				dm_oblock_t oblock, dm_cblock_t *cblock,
@@ -110,7 +71,8 @@ struct dm_cache_policy {
 				struct policy_work **work);
 
 	/*
-	 * Retrieves background work.  Returns -ENODATA when there's no background work.
+	 * Retrieves background work.  Returns -ENODATA when there's no
+	 * background work.
 	 */
 	int (*get_background_work)(struct dm_cache_policy *p, bool idle,
 			           struct policy_work **result);
