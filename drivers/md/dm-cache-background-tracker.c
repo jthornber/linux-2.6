@@ -18,7 +18,7 @@ struct bt_work {
 
 struct background_tracker {
 	unsigned max_work;
-	atomic_t pending_promotes;
+	atomic_t pending_total;
 	atomic_t pending_writebacks;
 	atomic_t pending_demotes;
 
@@ -34,7 +34,7 @@ struct background_tracker *btracker_create(unsigned max_work)
 	struct background_tracker *b = kmalloc(sizeof(*b), GFP_KERNEL);
 
 	b->max_work = max_work;
-	atomic_set(&b->pending_promotes, 0);
+	atomic_set(&b->pending_total, 0);
 	atomic_set(&b->pending_writebacks, 0);
 	atomic_set(&b->pending_demotes, 0);
 
@@ -127,11 +127,9 @@ static struct bt_work *__find_pending(struct background_tracker *b,
 
 static void update_stats(struct background_tracker *b, struct policy_work *w, int delta)
 {
-	switch (w->op) {
-	case POLICY_PROMOTE:
-		atomic_add(delta, &b->pending_promotes);
-		break;
+	atomic_add(delta, &b->pending_total);
 
+	switch (w->op) {
 	case POLICY_DEMOTE:
 		atomic_add(delta, &b->pending_demotes);
 		break;
@@ -156,8 +154,7 @@ EXPORT_SYMBOL_GPL(btracker_nr_demotions_queued);
 
 static bool max_work_reached(struct background_tracker *b)
 {
-	// FIXME: finish
-	return false;
+	return atomic_read(&b->pending_total) >= b->max_work;
 }
 
 int btracker_queue(struct background_tracker *b,
