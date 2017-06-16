@@ -12,7 +12,7 @@ dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
 dm-bio-prison-y += dm-bio-prison-v1.o dm-bio-prison-v2.o dm-utils.o
-dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
+dm-thin-pool-y	+= dm-thin.o dm-thin-base.o dm-thin-metadata.o
 dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o \
 		    dm-cache-background-tracker.o
 dm-cache-smq-y   += dm-cache-policy-smq.o

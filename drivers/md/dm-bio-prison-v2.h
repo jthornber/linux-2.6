@@ -32,7 +32,7 @@ struct dm_bio_prison_v2;
  * device.
  */
 struct dm_cell_key_v2 {
-	int virtual;
+	bool virtual;
 	dm_thin_id dev;
 	dm_block_t block_begin, block_end;
 };
