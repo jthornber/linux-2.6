@@ -9,6 +9,7 @@
 
 #include "dm-thin-metadata.h"
 #include "dm-bio-prison-v2.h"
+#include "dm-utils.h"
 
 // FIXME: audit which of these are actually needed
 #include <linux/device-mapper.h>
@@ -32,7 +33,11 @@
  * also provides the interface for creating and destroying internal
  * devices.
  */
-struct dm_thin_new_mapping;
+struct throttle {
+	struct rw_semaphore lock;
+	unsigned long threshold;
+	bool throttle_applied;
+};
 
 /*
  * The pool runs in 4 modes.  Ordered in degraded order for comparisons.
@@ -54,11 +59,6 @@ struct pool_features {
 };
 
 struct thin_c;
-typedef void (*process_bio_fn)(struct thin_c *tc, struct bio *bio);
-typedef void (*process_cell_fn)(struct thin_c *tc, struct dm_bio_prison_cell_v2 *cell);
-typedef void (*process_mapping_fn)(struct dm_thin_new_mapping *m);
-
-#define CELL_SORT_ARRAY_SIZE 8192
 
 struct pool {
 	struct list_head list;
@@ -98,24 +98,14 @@ struct pool {
 	struct dm_deferred_set *shared_read_ds;
 	struct dm_deferred_set *all_io_ds;
 
-	struct dm_thin_new_mapping *next_mapping;
-	mempool_t *mapping_pool;
+	mempool_t *program_pool;
 
-	process_bio_fn process_bio;
-	process_bio_fn process_discard;
-
-	process_cell_fn process_cell;
-	process_cell_fn process_discard_cell;
-
-	process_mapping_fn process_prepared_mapping;
-	process_mapping_fn process_prepared_discard;
-	process_mapping_fn process_prepared_discard_pt2;
-
-	struct dm_bio_prison_cell **cell_sort_array;
+	struct batcher committer;
+	struct throttle throttle;
 };
 
-static enum pool_mode get_pool_mode(struct pool *pool);
-static void metadata_operation_failed(struct pool *pool, const char *op, int r);
+enum pool_mode get_pool_mode(struct pool *pool);
+void metadata_operation_failed(struct pool *pool, const char *op, int r);
 
 /*
  * Target context for a pool.
@@ -164,14 +154,14 @@ struct thin_c {
 struct dm_thin_program;
 typedef bool (*i_fn)(struct dm_thin_program *);
 
-struct instruction {
-	i_fn fn;
-	union value arg;
-};
-
 union value {
 	void *ptr;
 	uint64_t u;
+};
+
+struct instruction {
+	i_fn fn;
+	union value arg;
 };
 
 #define PRG_STACK_SIZE 16
@@ -191,13 +181,14 @@ struct dm_thin_program {
 	 * in the on_failure instruction.
 	 */
 	union value arg;
+	struct bio_list bios;  // prealloc
 };
 
 struct dm_thin_endio_hook {
 	struct thin_c *tc;
-	struct dm_thin_new_mapping *overwrite_mapping;
+	struct dm_thin_program *overwrite_prg;
+	struct dm_bio_prison_cell_v2 *cell;
 	struct rb_node rb_node;
-	struct dm_bio_prison_cell *cell;
 };
 
 void thin_get(struct thin_c *tc);

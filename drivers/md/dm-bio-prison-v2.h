@@ -37,15 +37,18 @@ struct dm_cell_key_v2 {
 	dm_block_t block_begin, block_end;
 };
 
+#define MAX_CELL_LEVELS 2
 /*
  * Treat this as opaque, only in header so callers can manage allocation
  * themselves.
  */
+// FIXME: this structure is getting too big
 struct dm_bio_prison_cell_v2 {
 	// FIXME: pack these
 	bool exclusive_lock;
 	unsigned exclusive_level;
-	unsigned shared_count;
+	unsigned shared_counts[MAX_CELL_LEVELS];
+	unsigned imprisoned_counts[MAX_CELL_LEVELS];
 	struct work_struct *quiesce_continuation;
 
 	struct rb_node node;
@@ -96,6 +99,7 @@ bool dm_cell_get_v2(struct dm_bio_prison_v2 *prison,
  * returning ownership of the cell (ie. you should free it).
  */
 bool dm_cell_put_v2(struct dm_bio_prison_v2 *prison,
+		    unsigned lock_level,
 		    struct dm_bio_prison_cell_v2 *cell);
 
 /*
@@ -146,6 +150,15 @@ int dm_cell_lock_promote_v2(struct dm_bio_prison_v2 *prison,
 bool dm_cell_unlock_v2(struct dm_bio_prison_v2 *prison,
 		       struct dm_bio_prison_cell_v2 *cell,
 		       struct bio_list *bios);
+
+/*
+ * Rather than unlocking, and then processing all the imprisoned bios from
+ * scratch, we can drop the exclusive lock and grant the shared lock to all the
+ * bios en-mass.
+ */
+bool dm_cell_exclusive_to_shared(struct dm_bio_prison_v2 *prison,
+				 struct dm_bio_prison_cell_v2 *cell,
+				 struct bio_list *bios);
 
 /*----------------------------------------------------------------*/
 

@@ -152,6 +152,8 @@ static bool __get(struct dm_bio_prison_v2 *prison,
 		  struct dm_bio_prison_cell_v2 *cell_prealloc,
 		  struct dm_bio_prison_cell_v2 **cell)
 {
+	BUG_ON(lock_level >= MAX_CELL_LEVELS);
+
 	if (__find_or_insert(prison, key, cell_prealloc, cell)) {
 		if ((*cell)->exclusive_lock) {
 			if (lock_level <= (*cell)->exclusive_level) {
@@ -160,10 +162,10 @@ static bool __get(struct dm_bio_prison_v2 *prison,
 			}
 		}
 
-		(*cell)->shared_count++;
+		(*cell)->shared_counts[lock_level]++;
 
 	} else
-		(*cell)->shared_count = 1;
+		(*cell)->shared_counts[lock_level] = 1;
 
 	return true;
 }
@@ -186,36 +188,50 @@ bool dm_cell_get_v2(struct dm_bio_prison_v2 *prison,
 }
 EXPORT_SYMBOL_GPL(dm_cell_get_v2);
 
+static bool __none_shared_below(struct dm_bio_prison_v2 *prison,
+		                unsigned lock_level,
+				struct dm_bio_prison_cell_v2 *cell)
+{
+	do {
+		if (cell->shared_counts[lock_level])
+			return false;
+
+	} while (lock_level--);
+
+	return true;
+}
+
 static bool __put(struct dm_bio_prison_v2 *prison,
+		  unsigned lock_level,
 		  struct dm_bio_prison_cell_v2 *cell)
 {
-	BUG_ON(!cell->shared_count);
-	cell->shared_count--;
+	BUG_ON(!cell->shared_counts[lock_level]);
+	cell->shared_counts[lock_level]--;
 
-	// FIXME: shared locks granted above the lock level could starve this
-	if (!cell->shared_count) {
-		if (cell->exclusive_lock){
-			if (cell->quiesce_continuation) {
-				queue_work(prison->wq, cell->quiesce_continuation);
-				cell->quiesce_continuation = NULL;
-			}
-		} else {
-			rb_erase(&cell->node, &prison->cells);
-			return true;
+	if (cell->exclusive_lock) {
+		if (cell->quiesce_continuation &&
+		    __none_shared_below(prison, cell->exclusive_level, cell)) {
+			queue_work(prison->wq, cell->quiesce_continuation);
+			cell->quiesce_continuation = NULL;
 		}
+
+	} else if (__none_shared_below(prison, MAX_CELL_LEVELS - 1, cell)) {
+		rb_erase(&cell->node, &prison->cells);
+		return true;
 	}
 
 	return false;
 }
 
 bool dm_cell_put_v2(struct dm_bio_prison_v2 *prison,
+		    unsigned lock_level,
 		    struct dm_bio_prison_cell_v2 *cell)
 {
 	bool r;
 	unsigned long flags;
 
 	spin_lock_irqsave(&prison->lock, flags);
-	r = __put(prison, cell);
+	r = __put(prison, lock_level, cell);
 	spin_unlock_irqrestore(&prison->lock, flags);
 
 	return r;
@@ -230,6 +246,8 @@ static int __lock(struct dm_bio_prison_v2 *prison,
 {
 	struct dm_bio_prison_cell_v2 *cell;
 
+	BUG_ON(lock_level >= MAX_CELL_LEVELS);
+
 	if (__find_or_insert(prison, key, cell_prealloc, &cell)) {
 		if (cell->exclusive_lock)
 			return -EBUSY;
@@ -238,13 +256,11 @@ static int __lock(struct dm_bio_prison_v2 *prison,
 		cell->exclusive_level = lock_level;
 		*cell_result = cell;
 
-		// FIXME: we don't yet know what level these shared locks
-		// were taken at, so have to quiesce them all.
-		return cell->shared_count > 0;
+		return !__none_shared_below(prison, lock_level, cell);
 
 	} else {
 		cell = cell_prealloc;
-		cell->shared_count = 0;
+		memset(cell->shared_counts, 0, sizeof(cell->shared_counts));
 		cell->exclusive_lock = true;
 		cell->exclusive_level = lock_level;
 		*cell_result = cell;
@@ -274,7 +290,7 @@ static void __quiesce(struct dm_bio_prison_v2 *prison,
 		      struct dm_bio_prison_cell_v2 *cell,
 		      struct work_struct *continuation)
 {
-	if (!cell->shared_count)
+	if (__none_shared_below(prison, cell->exclusive_level, cell))
 		queue_work(prison->wq, continuation);
 	else
 		cell->quiesce_continuation = continuation;
@@ -300,7 +316,7 @@ static int __promote(struct dm_bio_prison_v2 *prison,
 		return -EINVAL;
 
 	cell->exclusive_level = new_lock_level;
-	return cell->shared_count > 0;
+	return !__none_shared_below(prison, new_lock_level, cell);
 }
 
 int dm_cell_lock_promote_v2(struct dm_bio_prison_v2 *prison,
@@ -327,13 +343,13 @@ static bool __unlock(struct dm_bio_prison_v2 *prison,
 	bio_list_merge(bios, &cell->bios);
 	bio_list_init(&cell->bios);
 
-	if (cell->shared_count) {
-		cell->exclusive_lock = 0;
-		return false;
+	if (__none_shared_below(prison, MAX_CELL_LEVELS - 1, cell)) {
+		rb_erase(&cell->node, &prison->cells);
+		return true;
 	}
 
-	rb_erase(&cell->node, &prison->cells);
-	return true;
+	cell->exclusive_lock = false;
+	return false;
 }
 
 bool dm_cell_unlock_v2(struct dm_bio_prison_v2 *prison,
@@ -350,6 +366,30 @@ bool dm_cell_unlock_v2(struct dm_bio_prison_v2 *prison,
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_cell_unlock_v2);
+
+static bool __excl_to_shared(struct dm_bio_prison_v2 *prison,
+			     struct dm_bio_prison_cell_v2 *cell,
+			     struct bio_list *bios)
+{
+	memcpy(cell->shared_counts, cell->imprisoned_counts,
+	       sizeof(*cell->shared_counts) * cell->exclusive_level);
+	return __unlock(prison, cell, bios);
+}
+
+bool dm_cell_exclusive_to_shared(struct dm_bio_prison_v2 *prison,
+				 struct dm_bio_prison_cell_v2 *cell,
+				 struct bio_list *bios)
+{
+	bool r;
+	unsigned long flags;
+
+	spin_lock_irqsave(&prison->lock, flags);
+	r = __excl_to_shared(prison, cell, bios);
+	spin_unlock_irqrestore(&prison->lock, flags);
+
+	return r;
+}
+EXPORT_SYMBOL_GPL(dm_cell_exclusive_to_shared);
 
 /*----------------------------------------------------------------*/
 

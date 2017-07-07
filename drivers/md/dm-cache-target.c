@@ -1081,7 +1081,7 @@ static void bio_drop_shared_lock(struct cache *cache, struct bio *bio)
 	size_t pb_data_size = get_per_bio_data_size(cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
-	if (pb->cell && dm_cell_put_v2(cache->prison, pb->cell))
+	if (pb->cell && dm_cell_put_v2(cache->prison, lock_level(bio), pb->cell))
 		free_prison_cell(cache, pb->cell);
 	pb->cell = NULL;
 }

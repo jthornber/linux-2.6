@@ -33,8 +33,6 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
  * Tunable constants
  */
 #define ENDIO_HOOK_POOL_SIZE 1024
-#define MAPPING_POOL_SIZE 1024
-#define COMMIT_PERIOD HZ
 #define NO_SPACE_TIMEOUT_SECS 60
 
 /*
@@ -126,7 +124,6 @@ static void __pool_destroy(struct pool *pool)
 {
 	__pool_table_remove(pool);
 
-	vfree(pool->cell_sort_array);
 	if (dm_pool_metadata_close(pool->pmd) < 0)
 		DMWARN("%s: dm_pool_metadata_close() failed.", __func__);
 
@@ -136,9 +133,7 @@ static void __pool_destroy(struct pool *pool)
 	if (pool->wq)
 		destroy_workqueue(pool->wq);
 
-	if (pool->next_mapping)
-		mempool_free(pool->next_mapping, pool->mapping_pool);
-	mempool_destroy(pool->mapping_pool);
+	mempool_destroy(pool->program_pool);
 	kfree(pool);
 }
 
@@ -155,7 +150,7 @@ static void do_no_space_timeout(struct work_struct *ws)
 	if (get_pool_mode(pool) == PM_OUT_OF_DATA_SPACE && !pool->pf.error_if_no_space) {
 		pool->pf.error_if_no_space = true;
 		notify_of_pool_mode_change_to_oods(pool);
-		error_retry_list_with_code(pool, -ENOSPC);
+		//error_retry_list_with_code(pool, -ENOSPC);
 	}
 }
 
@@ -230,13 +225,11 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->suspended = true;
 	pool->out_of_data_space = false;
 
-	pool->next_mapping = NULL;
-	pool->mapping_pool = mempool_create_slab_pool(MAPPING_POOL_SIZE,
-						      _program_cache);
-	if (!pool->mapping_pool) {
+	pool->program_pool = mempool_create_slab_pool(1024, _program_cache);
+	if (!pool->program_pool) {
 		*error = "Error creating pool's mapping mempool";
 		err_p = ERR_PTR(-ENOMEM);
-		goto bad_mapping_pool;
+		goto bad_program_pool;
 	}
 
 	pool->ref_count = 1;
@@ -248,8 +241,8 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	return pool;
 
 	// FIXME: rewrite
-	mempool_destroy(pool->mapping_pool);
-bad_mapping_pool:
+	mempool_destroy(pool->program_pool);
+bad_program_pool:
 	destroy_workqueue(pool->wq);
 bad_wq:
 	dm_kcopyd_client_destroy(pool->copier);
@@ -868,7 +861,7 @@ static void pool_resume(struct dm_target *ti)
 	 * Must requeue active_thins' bios and then resume
 	 * active_thins _before_ clearing 'suspend' flag.
 	 */
-	requeue_bios(pool);
+	//requeue_bios(pool);
 	pool_resume_active_thins(pool);
 
 	spin_lock_irqsave(&pool->lock, flags);
