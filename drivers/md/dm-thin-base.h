@@ -164,7 +164,7 @@ struct instruction {
 	union value arg;
 };
 
-#define PRG_STACK_SIZE 16
+#define VALUE_STACK_SIZE 16
 
 struct dm_thin_program {
 	struct pool *pool;
@@ -174,7 +174,7 @@ struct dm_thin_program {
 	struct instruction *pc;
 
 	unsigned stack_size;
-	union value stack[PRG_STACK_SIZE];
+	union value stack[VALUE_STACK_SIZE];
 
 	/*
 	 * A few instructions take an argument, eg, the jump offset

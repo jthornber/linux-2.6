@@ -209,8 +209,7 @@ static void next_instr(struct dm_thin_program *prg)
 
 static void push_v(struct dm_thin_program *prg, union value v)
 {
-	BUG_ON(prg->stack_size >= PRG_STACK_SIZE);
-
+	BUG_ON(prg->stack_size >= VALUE_STACK_SIZE);
 	prg->stack[prg->stack_size] = v;
 	prg->stack_size++;
 }
@@ -234,6 +233,12 @@ static void pop_v(struct dm_thin_program *prg, union value *v)
 {
 	BUG_ON(!prg->stack_size);
 	*v = prg->stack[--prg->stack_size];
+}
+
+static void *peek_ptr(struct dm_thin_program *prg)
+{
+	BUG_ON(!prg->stack_size);
+	return prg->stack[prg->stack_size - 1].ptr;
 }
 
 static void *pop_ptr(struct dm_thin_program *prg)
@@ -391,7 +396,7 @@ static bool is_write(struct bio *bio)
 	return bio_data_dir(bio) == WRITE;
 }
 
-static unsigned lock_level(struct bio *bio)
+static unsigned bio_lock_level(struct bio *bio)
 {
 	return is_write(bio) ? 0 : 1;
 }
@@ -407,7 +412,7 @@ static int bio_detain(struct pool *pool, struct dm_cell_key_v2 *key,
 	 * can't fail.
 	 */
 	cell_prealloc = dm_bio_prison_alloc_cell_v2(pool->prison, GFP_NOIO);
-	r = dm_cell_get_v2(pool->prison, key, lock_level(bio),
+	r = dm_cell_get_v2(pool->prison, key, bio_lock_level(bio),
 			   bio, cell_prealloc, cell_result);
 	if (r)
 		/*
@@ -446,18 +451,9 @@ static bool i_branch(struct dm_thin_program *prg)
 }
 
 /* (bool -- ) */
-static bool i_branch_if_true(struct dm_thin_program *prg)
+static bool i_branch_if(struct dm_thin_program *prg)
 {
 	if (pop_u(prg))
-		prg->pc = prg->arg.ptr;
-
-	return true;
-}
-
-/* ( bool -- ) */
-static bool i_branch_if_false(struct dm_thin_program *prg)
-{
-	if (!pop_u(prg))
 		prg->pc = prg->arg.ptr;
 
 	return true;
@@ -473,13 +469,6 @@ static bool i_halt(struct dm_thin_program *prg)
 /*
  * Stack manipulation
  */
-/* ( -- ) */
-static bool i_check(struct dm_thin_program *prg)
-{
-	BUG_ON(prg->stack_size != prg->arg.u);
-	return true;
-}
-
 /* (X -- ) */
 static bool i_drop(struct dm_thin_program *prg)
 {
@@ -497,7 +486,7 @@ static bool i_drop(struct dm_thin_program *prg)
 static bool i_dup(struct dm_thin_program *prg)
 {
 	BUG_ON(prg->stack_size < prg->arg.u);
-	BUG_ON(prg->stack_size + prg->arg.u > PRG_STACK_SIZE);
+	BUG_ON(prg->stack_size + prg->arg.u > VALUE_STACK_SIZE);
 	memcpy(prg->stack + prg->stack_size,
 	       prg->stack + prg->stack_size - prg->arg.u,
 	       sizeof(union value) * prg->arg.u);
@@ -570,10 +559,14 @@ static bool lock__(struct dm_thin_program *prg,
 	return false;
 }
 
-/* (cell --) */
+/*
+ * (cell -- cell)
+ * There's no point popping the cell since it'll still be needed.
+ */
 static bool i_quiesce(struct dm_thin_program *prg)
 {
-	dm_cell_quiesce_v2(pool->prison, cell, &prg->k.ws);
+	struct dm_bio_prison_cell_v2 *cell = peek_ptr(prg);
+	dm_cell_quiesce_v2(prg->pool->prison, cell, &prg->k.ws);
 	return false;
 }
 
@@ -608,10 +601,24 @@ static bool i_unlock(struct dm_thin_program *prg)
 
 	bio_list_init(&prg->bios);
 	if (dm_cell_unlock_v2(prg->pool->prison, cell, &prg->bios))
-		push_ptr(prg, &prg->bios);
-	else
-		push_ptr(prg, NULL);
+		free_prison_cell(prg->pool, cell);
 
+	push_ptr(prg, &prg->bios);
+	return true;
+}
+
+/*
+ * (cell -- bios)
+ */
+static bool i_unlock_to_shared(struct dm_thin_program *prg)
+{
+	struct dm_bio_prison_cell_v2 *cell = pop_ptr(prg);
+
+	bio_list_init(&prg->bios);
+	if (dm_cell_exclusive_to_shared(prg->pool->prison, cell, &prg->bios))
+		free_prison_cell(prg->pool, cell);
+
+	push_ptr(prg, &prg->bios);
 	return true;
 }
 
@@ -699,7 +706,7 @@ static void zero_complete(int read_err, unsigned long write_err, void *context)
 }
 
 /* (pblock -- success) */
-static bool i_zero(struct dm_thin_program *prg)
+static bool i_zero_block(struct dm_thin_program *prg)
 {
 	int r;
 	struct dm_io_region to;
@@ -912,7 +919,7 @@ static bool i_fail_mode(struct dm_thin_program *prg)
  */
 
 /* (thin pblock bios -- ) */
-static bool i_remap_and_issue(struct dm_thin_program *prg)
+static bool i_remap_and_issue_bios(struct dm_thin_program *prg)
 {
 	struct bio *bio;
 	struct bio_list *bios = pop_ptr(prg);
@@ -939,6 +946,8 @@ static bool i_error_bios(struct dm_thin_program *prg)
 
 /*----------------------------------------------------------------*/
 
+#include "dm-thin-code.c"
+
 /*
  * It's possible that many concurrent bios will trigger provisioning of the
  * same block.  We want to avoid a stampeding herd issue, so the cell is
@@ -962,16 +971,17 @@ static int promote_cell(struct pool *pool, struct dm_bio_prison_cell_v2 *cell,
 	 * We know this cell is present, so it's safe to pass in a NULL
 	 * prealloc ptr.
 	 */
-	r = dm_cell_lock_v2(pool->prison, &key, lock_level, prealloc, &cell_result);
+	r = dm_cell_lock_v2(pool->prison, &cell->key, lock_level,
+			    prealloc_cell, &cell_result);
+	BUG_ON(cell_result != cell);
 
 	/*
 	 * A sneaky zwischenzug.  Drop our shared reference.  This has to
 	 * be done after the cell_lock call.
 	 */
-	if (dm_cell_put_v2(&pool->prison, bio_lock_level(bio), cell)) {
-		// FIXME: remove
-		BUG("Unexpected ownership passed back.");
-	}
+	if (dm_cell_put_v2(pool->prison, bio_lock_level(bio), cell))
+		// Unexpected ownership passed back
+		BUG();
 
 	if (r == -EBUSY) {
 		/*
@@ -990,7 +1000,7 @@ static int promote_cell(struct pool *pool, struct dm_bio_prison_cell_v2 *cell,
 		 * Locked, but no quiescing needed.  This can't happen since we
 		 * haven't dropped the shared lock yet.
 		 */
-		BUG("No quiesce needed for some reason");
+		BUG();
 	}
 
 	BUG_ON(cell_result != cell);
@@ -1000,96 +1010,24 @@ static int promote_cell(struct pool *pool, struct dm_bio_prison_cell_v2 *cell,
 static void provision(struct thin_c *tc, struct dm_bio_prison_cell_v2 *cell,
 		      struct bio *bio, dm_block_t vblock)
 {
-#if 0
-	static struct instruction alloc_fail[] = {
-		// cell, thin, vblock, pblock, alloc_code
-		{i_check, {.u = 5}},
-		{i_drop, (union value) {.u = 4}},
-		{i_unlock},
-		{i_requeue_bios},
-		{i_halt}
-	};
-
-	static struct instruction zero_and_insert[] = {
-		{i_dup, {.u = 1}},
-		{i_zero},
-		{i_branch_on_false, {.ptr = zero_fail}},
-		// cell, thin, vblock, pblock
-
-		{i_dup, {.u = 1}},
-		{i_tuck, {.u = 4}},
-		{i_insert_mapping},
-		{i_branch_on_false, {.ptr = insert_fail}},
-		// pblock, cell
-
-		{i_unlock},
-		// pblock, bios
-
-		// FIXME: discards need to be filtered out
-		{i_remap_and_issue},
-		{i_halt},
-	};
-
-	static struct instruction no_space[] = {
-		// cell, thin, vblock, pblock
-		{i_check, {.u = 4}},
-		{i_commit},
-		{i_alloc_block},
-		{i_dup, {.u = 1}},
-		{i_branch_on_false, {.ptr = alloc_fail}},
-		{i_cmp, {.u = 2}},
-		{i_branch_on_true, {.ptr = zero_and_insert}},
-
-		// cell, thin, vblock, pblock
-		{i_set_no_space_mode},
-		{i_drop, {.u = 3}},
-		{i_unlock},
-		{i_requeue_bios}
-	};
-
-	static struct instruction insert_fail[] = {
-		// pblock, cell
-		{i_unlock},
-		{i_requeue_bios},
-		{i_halt}
-	};
-
-	static struct instruction provision_code[] = {
-		// thin, vblock
-		{i_dup, {.u = 2}},
-		{i_lock_io_v},
-		{i_tuck, {.u = 2}},
-		// cell, thin, vblock
-
-		{i_alloc_block},
-		{i_dup, {.u = 1}},
-		{i_branch_on_false, {.ptr = alloc_fail}},
-		{i_cmp, {.u = 1}},
-		{i_branch_on_true, {.ptr = no_space}},
-		// cell, thin, vblock, pblock
-
-		{i_branch, {.ptr = zero_and_insert}},
-	};
-#endif
-
-	static struct instruction provision_code[] = {
-	};
-
 	struct dm_thin_program *prg;
-	int r = promote_cell(pool, cell, bio, LOCK_IO);
+
+	int r = promote_cell(prg->pool, cell, bio, LOCK_IO);
 	if (r < 0) {
-		bio_error(bio);
+		bio_io_error(bio);
 		return;
 
 	} else if (!r) {
 		/* nothing to do here */
 		return;
-
 	}
 
 	prg = alloc_program(tc->pool, provision_code);
+
+	// (:thin :vblock :cell)
 	push_ptr(prg, tc);
-	push_u(prg, block);
+	push_u(prg, vblock);
+	push_ptr(prg, cell);
 	schedule_program(prg);
 }
 
@@ -1235,7 +1173,7 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	struct dm_thin_device *td = tc->td;
 	struct dm_thin_lookup_result result;
 	dm_block_t vblock = get_bio_block(tc, bio);
-	struct dm_bio_prison_cell_v2 *virt_cell;
+	struct dm_bio_prison_cell_v2 *cell;
 
 	thin_hook_bio(tc, bio);
 
@@ -1264,9 +1202,9 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	 * there's a race with discard.
 	 */
 	build_virtual_key(tc->td, vblock, &key);
-	if (bio_detain(tc->pool, &key, bio, &virt_cell))
+	if (bio_detain(tc->pool, &key, bio, &cell))
 		return DM_MAPIO_SUBMITTED;
-	set_cell(bio, virt_cell);
+	set_cell(bio, cell);
 
 	// FIXME: use a look aside within the cell to avoid this call.
 	r = dm_thin_find_block(td, vblock, 0, &result);
@@ -1287,7 +1225,6 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
 			 */
 			break_sharing(tc, bio, vblock);
 			return DM_MAPIO_SUBMITTED;
-
 		}
 
 		/*
@@ -1297,7 +1234,7 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
 		return DM_MAPIO_REMAPPED;
 
 	case -ENODATA:
-		provision(tc, bio, vblock);
+		provision(tc, cell, bio, vblock);
 		return DM_MAPIO_SUBMITTED;
 
 	case -EWOULDBLOCK:
