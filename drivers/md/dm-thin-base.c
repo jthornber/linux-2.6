@@ -284,6 +284,7 @@ static void ws_step_program(struct work_struct *ws)
 
 static void schedule_program(struct dm_thin_program *prg)
 {
+	pr_alert("scheduling program\n");
 	queue_continuation(prg->pool->wq, &prg->k);
 }
 
@@ -314,12 +315,14 @@ static bool block_size_is_power_of_two(struct pool *pool)
 	return pool->sectors_per_block_shift >= 0;
 }
 
+#if 0
 static sector_t block_to_sectors(struct pool *pool, dm_block_t b)
 {
 	return block_size_is_power_of_two(pool) ?
 		(b << pool->sectors_per_block_shift) :
 		(b * pool->sectors_per_block);
 }
+#endif
 
 /*----------------------------------------------------------------*/
 
@@ -401,6 +404,11 @@ static unsigned bio_lock_level(struct bio *bio)
 	return is_write(bio) ? 0 : 1;
 }
 
+static void free_prison_cell(struct pool *pool, struct dm_bio_prison_cell_v2 *cell)
+{
+	dm_bio_prison_free_cell_v2(pool->prison, cell);
+}
+
 static int bio_detain(struct pool *pool, struct dm_cell_key_v2 *key,
 		      struct bio *bio, struct dm_bio_prison_cell_v2 **cell_result)
 {
@@ -414,12 +422,8 @@ static int bio_detain(struct pool *pool, struct dm_cell_key_v2 *key,
 	cell_prealloc = dm_bio_prison_alloc_cell_v2(pool->prison, GFP_NOIO);
 	r = dm_cell_get_v2(pool->prison, key, bio_lock_level(bio),
 			   bio, cell_prealloc, cell_result);
-	if (r)
-		/*
-		 * We reused an old cell; we can get rid of
-		 * the new one.
-		 */
-		dm_bio_prison_free_cell_v2(pool->prison, cell_prealloc);
+	if (!r || (*cell_result != cell_prealloc))
+		free_prison_cell(pool, cell_prealloc);
 
 	return r;
 }
@@ -431,11 +435,23 @@ enum pool_mode get_pool_mode(struct pool *pool)
 
 /*----------------------------------------------------------------*/
 
+#define INSTRUCTION(name) \
+static bool inner_ ## name(struct dm_thin_program *prg); \
+static bool name(struct dm_thin_program *prg) \
+{ \
+	bool r; \
+	pr_alert(">>> " #name "\n"); \
+	r = inner_ ## name(prg); \
+	pr_alert("<<< " #name ": %d\n", r); \
+	return r; \
+} \
+static bool inner_ ## name(struct dm_thin_program *prg)
+
 /*
  * Program control
  */
 /* ( n1 n2 -- bool ) */
-static bool i_cmp(struct dm_thin_program *prg)
+INSTRUCTION(i_cmp)
 {
 	unsigned n1 = pop_u(prg);
 	unsigned n2 = pop_u(prg);
@@ -444,14 +460,14 @@ static bool i_cmp(struct dm_thin_program *prg)
 }
 
 /* ( -- ) */
-static bool i_branch(struct dm_thin_program *prg)
+INSTRUCTION(i_branch)
 {
 	prg->pc = prg->arg.ptr;
 	return true;
 }
 
 /* (bool -- ) */
-static bool i_branch_if(struct dm_thin_program *prg)
+INSTRUCTION(i_branch_if)
 {
 	if (pop_u(prg))
 		prg->pc = prg->arg.ptr;
@@ -460,7 +476,7 @@ static bool i_branch_if(struct dm_thin_program *prg)
 }
 
 /* ( -- ) */
-static bool i_halt(struct dm_thin_program *prg)
+INSTRUCTION(i_halt)
 {
 	free_program(prg);
 	return false;
@@ -470,7 +486,7 @@ static bool i_halt(struct dm_thin_program *prg)
  * Stack manipulation
  */
 /* (X -- ) */
-static bool i_drop(struct dm_thin_program *prg)
+INSTRUCTION(i_drop)
 {
 	unsigned i;
 	union value v;
@@ -483,7 +499,7 @@ static bool i_drop(struct dm_thin_program *prg)
 
 /* (X -- X X) */
 // FIXME: double check
-static bool i_dup(struct dm_thin_program *prg)
+INSTRUCTION(i_dup)
 {
 	BUG_ON(prg->stack_size < prg->arg.u);
 	BUG_ON(prg->stack_size + prg->arg.u > VALUE_STACK_SIZE);
@@ -495,7 +511,7 @@ static bool i_dup(struct dm_thin_program *prg)
 
 /* (X1 X2 ... Xn -- Xn X1 X2 .. Xn-1) */
 // FIXME: double check
-static bool i_tuck(struct dm_thin_program *prg)
+INSTRUCTION(i_tuck)
 {
 	union value v;
 
@@ -510,12 +526,7 @@ static bool i_tuck(struct dm_thin_program *prg)
 /*
  * Locking
  */
-// FIXME: move somewhere
-static void free_prison_cell(struct pool *pool, struct dm_bio_prison_cell_v2 *cell)
-{
-	dm_bio_prison_free_cell_v2(pool->prison, cell);
-}
-
+#if 0
 /* (thin prealloc_cell vblock -- cell success) */
 static bool lock__(struct dm_thin_program *prg,
 		   enum lock_space ls, unsigned lock_level)
@@ -558,18 +569,20 @@ static bool lock__(struct dm_thin_program *prg,
 	dm_cell_quiesce_v2(pool->prison, cell, &prg->k.ws);
 	return false;
 }
+#endif
 
 /*
  * (cell -- cell)
  * There's no point popping the cell since it'll still be needed.
  */
-static bool i_quiesce(struct dm_thin_program *prg)
+INSTRUCTION(i_quiesce)
 {
 	struct dm_bio_prison_cell_v2 *cell = peek_ptr(prg);
 	dm_cell_quiesce_v2(prg->pool->prison, cell, &prg->k.ws);
 	return false;
 }
 
+#if 0
 /* (prealloc_cell vblock -- cell success) */
 static bool i_lock_writes_v(struct dm_thin_program *prg)
 {
@@ -593,9 +606,10 @@ static bool i_lock_io_p(struct dm_thin_program *prg)
 {
 	return lock__(prg, PHYSICAL, LOCK_IO);
 }
+#endif
 
 /* (cell -- bios) */
-static bool i_unlock(struct dm_thin_program *prg)
+INSTRUCTION(i_unlock)
 {
 	struct dm_bio_prison_cell_v2 *cell = pop_ptr(prg);
 
@@ -610,7 +624,7 @@ static bool i_unlock(struct dm_thin_program *prg)
 /*
  * (cell -- bios)
  */
-static bool i_unlock_to_shared(struct dm_thin_program *prg)
+INSTRUCTION(i_unlock_to_shared)
 {
 	struct dm_bio_prison_cell_v2 *cell = pop_ptr(prg);
 
@@ -644,7 +658,7 @@ static void check_low_water_mark(struct pool *pool, dm_block_t free_blocks)
  * 1 - no space
  * 2 - success
  */
-static bool i_alloc_block(struct dm_thin_program *prg)
+INSTRUCTION(i_alloc_block)
 {
 	int r;
 	dm_block_t free_blocks;
@@ -683,7 +697,7 @@ static bool i_alloc_block(struct dm_thin_program *prg)
 }
 
 /* ( -- ) */
-static bool i_set_no_space_mode(struct dm_thin_program *prg)
+INSTRUCTION(i_set_no_space_mode)
 {
 	set_pool_mode(prg->pool, PM_OUT_OF_DATA_SPACE);
 	return true;
@@ -706,7 +720,7 @@ static void zero_complete(int read_err, unsigned long write_err, void *context)
 }
 
 /* (pblock -- success) */
-static bool i_zero_block(struct dm_thin_program *prg)
+INSTRUCTION(i_zero_block)
 {
 	int r;
 	struct dm_io_region to;
@@ -726,6 +740,7 @@ static bool i_zero_block(struct dm_thin_program *prg)
 	return false;
 }
 
+#if 0
 /*
  * Some functions for manipulating a ref_count on top of the program stack.
  */
@@ -860,13 +875,14 @@ static bool i_overwrite(struct dm_thin_program *prg)
 
 	return false;
 }
+#endif
 
 /*
  * Updating metadata
  */
 
 /* (thin vblock pblock -- success) */
-static bool i_insert_mapping(struct dm_thin_program *prg)
+INSTRUCTION(i_insert_mapping)
 {
 	dm_block_t pblock = pop_u(prg);
 	dm_block_t vblock = pop_u(prg);
@@ -882,6 +898,7 @@ static bool i_insert_mapping(struct dm_thin_program *prg)
 	return true;
 }
 
+#if 0
 /* (vbegin vend -- success) */
 static bool i_delete_mappings(struct dm_thin_program *prg)
 {
@@ -898,28 +915,31 @@ static bool i_delete_mappings(struct dm_thin_program *prg)
 
 	return true;
 }
+#endif
 
 /* ( -- bool) */
-static bool i_commit(struct dm_thin_program *prg)
+INSTRUCTION(i_commit)
 {
 	continue_after_commit(&prg->pool->committer, &prg->k);
 	async_commit(&prg->pool->committer);
 	return false;
 }
 
+#if 0
 /* ( -- ) */
-static bool i_fail_mode(struct dm_thin_program *prg)
+INSTRUCTION(i_fail_mode)
 {
 	set_pool_mode(prg->pool, PM_FAIL);
 	return true;
 }
+#endif
 
 /*
  * Bio handling
  */
 
 /* (thin pblock bios -- ) */
-static bool i_remap_and_issue_bios(struct dm_thin_program *prg)
+INSTRUCTION(i_remap_and_issue_bios)
 {
 	struct bio *bio;
 	struct bio_list *bios = pop_ptr(prg);
@@ -933,13 +953,13 @@ static bool i_remap_and_issue_bios(struct dm_thin_program *prg)
 }
 
 /* (bios -- ) */
-static bool i_requeue_bios(struct dm_thin_program *prg)
+INSTRUCTION(i_requeue_bios)
 {
 	return error_bios(prg, DM_ENDIO_REQUEUE);
 }
 
 /* (bios -- ) */
-static bool i_error_bios(struct dm_thin_program *prg)
+INSTRUCTION(i_error_bios)
 {
 	return error_bios(prg, -EIO);
 }
@@ -1010,15 +1030,19 @@ static int promote_cell(struct pool *pool, struct dm_bio_prison_cell_v2 *cell,
 static void provision(struct thin_c *tc, struct dm_bio_prison_cell_v2 *cell,
 		      struct bio *bio, dm_block_t vblock)
 {
+	int r;
 	struct dm_thin_program *prg;
 
-	int r = promote_cell(prg->pool, cell, bio, LOCK_IO);
+	pr_alert("provision\n");
+	r = promote_cell(tc->pool, cell, bio, LOCK_IO);
 	if (r < 0) {
 		bio_io_error(bio);
+		pr_alert("promote_cell failed\n");
 		return;
 
 	} else if (!r) {
 		/* nothing to do here */
+		pr_alert("lost race in promote_cell\n");
 		return;
 	}
 
@@ -1153,6 +1177,7 @@ static void thin_defer_bio(struct thin_c *tc, struct bio *bio)
 	process_deferred_bios(pool);
 }
 
+#if 0
 static void thin_defer_bio_with_throttle(struct thin_c *tc, struct bio *bio)
 {
 	//struct pool *pool = tc->pool;
@@ -1161,6 +1186,7 @@ static void thin_defer_bio_with_throttle(struct thin_c *tc, struct bio *bio)
 	thin_defer_bio(tc, bio);
 	//throttle_unlock(&pool->throttle);
 }
+#endif
 
 /*
  * Non-blocking function called from the thin target's map function.
@@ -1175,15 +1201,18 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	dm_block_t vblock = get_bio_block(tc, bio);
 	struct dm_bio_prison_cell_v2 *cell;
 
+	pr_alert("<<< thin_bio_map\n");
 	thin_hook_bio(tc, bio);
 
 	if (tc->requeue_mode) {
+		pr_alert("requeue mode\n");
 		bio->bi_error = DM_ENDIO_REQUEUE;
 		bio_endio(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
 	if (get_pool_mode(tc->pool) == PM_FAIL) {
+		pr_alert("fail mode\n");
 		bio_io_error(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
@@ -1202,11 +1231,14 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	 * there's a race with discard.
 	 */
 	build_virtual_key(tc->td, vblock, &key);
-	if (bio_detain(tc->pool, &key, bio, &cell))
+	if (bio_detain(tc->pool, &key, bio, &cell)) {
+		pr_alert("detain failed\n");
 		return DM_MAPIO_SUBMITTED;
+	}
 	set_cell(bio, cell);
 
 	// FIXME: use a look aside within the cell to avoid this call.
+	pr_alert("calling dm_thin_find_block\n");
 	r = dm_thin_find_block(td, vblock, 0, &result);
 	switch (r) {
 	case 0:
@@ -1266,7 +1298,7 @@ int thin_bio_map(struct dm_target *ti, struct bio *bio)
  */
 struct sync_commit {
 	struct continuation k;
-	struct mutex lock;
+	wait_queue_head_t wait_head;
 };
 
 static void commit_complete(struct work_struct *ws)
@@ -1276,19 +1308,31 @@ static void commit_complete(struct work_struct *ws)
 			struct sync_commit,
 			k);
 
-	mutex_unlock(&sc->lock);
+	pr_alert("in commit_complete\n");
+	wake_up(&sc->wait_head);
 }
 
+/*
+ * Synchronous commit.
+ */
 int commit(struct pool *pool)
 {
 	struct sync_commit sc;
+	DECLARE_WAITQUEUE(wait, current);
+
+	pr_alert(">>> commit\n");
 	init_continuation(&sc.k, commit_complete);
-	mutex_init(&sc.lock);
+	init_waitqueue_head(&sc.wait_head);
 
-	mutex_lock(&sc.lock);
 	continue_after_commit(&pool->committer, &sc.k);
-	mutex_lock(&sc.lock);
+	schedule_commit(&pool->committer);
 
+	add_wait_queue(&sc.wait_head, &wait);
+	set_task_state(current, TASK_UNINTERRUPTIBLE);
+	schedule();
+	remove_wait_queue(&sc.wait_head, &wait);
+
+	pr_alert("<<< commit: %d\n", sc.k.input);
 	return sc.k.input;
 }
 

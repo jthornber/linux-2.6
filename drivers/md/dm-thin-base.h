@@ -81,7 +81,6 @@ struct pool {
 	struct dm_kcopyd_client *copier;
 
 	struct workqueue_struct *wq;
-	struct work_struct worker;
 	struct delayed_work waker;
 	struct delayed_work no_space_timeout;
 
@@ -89,19 +88,10 @@ struct pool {
 	unsigned ref_count;
 
 	spinlock_t lock;
-	struct bio_list deferred_flush_bios;
-	struct list_head prepared_mappings;
-	struct list_head prepared_discards;
-	struct list_head prepared_discards_pt2;
 	struct list_head active_thins;
 
-	struct dm_deferred_set *shared_read_ds;
-	struct dm_deferred_set *all_io_ds;
-
 	mempool_t *program_pool;
-
 	struct batcher committer;
-	struct throttle throttle;
 };
 
 enum pool_mode get_pool_mode(struct pool *pool);

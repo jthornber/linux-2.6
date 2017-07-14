@@ -154,6 +154,47 @@ static void do_no_space_timeout(struct work_struct *ws)
 	}
 }
 
+static void check_for_space(struct pool *pool)
+{
+	int r;
+	dm_block_t nr_free;
+
+	if (get_pool_mode(pool) != PM_OUT_OF_DATA_SPACE)
+		return;
+
+	r = dm_pool_get_free_block_count(pool->pmd, &nr_free);
+	if (r)
+		return;
+
+	if (nr_free)
+		set_pool_mode(pool, PM_WRITE);
+}
+
+/*
+ * Used by the batcher.
+ */
+static int commit_op(void *context)
+{
+	int r;
+	struct pool *pool = context;
+
+	if (get_pool_mode(pool) >= PM_READ_ONLY)
+		return -EINVAL;
+
+	r = dm_pool_commit_metadata(pool->pmd);
+	if (r)
+		metadata_operation_failed(pool, "dm_pool_commit_metadata", r);
+	else
+		check_for_space(pool);
+
+	return r;
+}
+
+static void issue_op(struct bio *bio, void *context)
+{
+	generic_make_request(bio);
+}
+
 static struct kmem_cache *_program_cache;
 
 static struct pool *pool_create(struct mapped_device *pool_md,
@@ -188,15 +229,9 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		pool->sectors_per_block_shift = __ffs(block_size);
 	pool->low_water_blocks = 0;
 	pool_features_init(&pool->pf);
-
-#if 0
-	pool->prison = dm_bio_prison_create_v2();
-	if (!pool->prison) {
-		*error = "Error creating pool's bio prison";
-		err_p = ERR_PTR(-ENOMEM);
-		goto bad_prison;
-	}
-#endif
+	pool->low_water_triggered = false;
+	pool->suspended = true;
+	pool->out_of_data_space = false;
 
 	pool->copier = dm_kcopyd_client_create(&dm_kcopyd_throttle);
 	if (IS_ERR(pool->copier)) {
@@ -207,6 +242,7 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 
 	/*
+	 * FIXME: make multithreaded.
 	 * Create singlethreaded workqueue that will service all devices
 	 * that use this metadata.
 	 */
@@ -217,13 +253,19 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		goto bad_wq;
 	}
 
-	//throttle_init(&pool->throttle);
+	INIT_DELAYED_WORK(&pool->waker, do_waker);
 	INIT_DELAYED_WORK(&pool->no_space_timeout, do_no_space_timeout);
+	pool->last_commit_jiffies = jiffies;
+	pool->ref_count = 1;
 	spin_lock_init(&pool->lock);
 	INIT_LIST_HEAD(&pool->active_thins);
-	pool->low_water_triggered = false;
-	pool->suspended = true;
-	pool->out_of_data_space = false;
+
+	pool->prison = dm_bio_prison_create_v2(pool->wq);
+	if (!pool->prison) {
+		*error = "Error creating pool's bio prison";
+		err_p = ERR_PTR(-ENOMEM);
+		goto bad_prison;
+	}
 
 	pool->program_pool = mempool_create_slab_pool(1024, _program_cache);
 	if (!pool->program_pool) {
@@ -232,22 +274,21 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 		goto bad_program_pool;
 	}
 
-	pool->ref_count = 1;
-	pool->last_commit_jiffies = jiffies;
+	batcher_init(&pool->committer, commit_op, pool, issue_op, pool, pool->wq);
+
 	pool->pool_md = pool_md;
 	pool->md_dev = metadata_dev;
 	__pool_table_insert(pool);
 
 	return pool;
 
-	// FIXME: rewrite
-	mempool_destroy(pool->program_pool);
 bad_program_pool:
+	dm_bio_prison_destroy_v2(pool->prison);
+bad_prison:
 	destroy_workqueue(pool->wq);
 bad_wq:
 	dm_kcopyd_client_destroy(pool->copier);
 bad_kcopyd_client:
-	dm_bio_prison_destroy_v2(pool->prison);
 	kfree(pool);
 bad_pool:
 	if (dm_pool_metadata_close(pmd))
